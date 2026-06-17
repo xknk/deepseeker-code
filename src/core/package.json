@@ -1,0 +1,24 @@
+{
+  "name": "core",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/serve/index.ts",
+  "types": "./src/serve/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx ./src/serve/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "openai": "^6.42.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  }
+}

@@ -1,0 +1,112 @@
+/*
+ * @Author: fanqianliang 2438756801@qq.com
+ * @Date: 2026-06-16 14:07:39
+ * @LastEditors: fanqianliang 2438756801@qq.com
+ * @LastEditTime: 2026-06-16 15:35:45
+ * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\contextCore.ts
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
+import OpenAI from "openai";
+export type Msg = OpenAI.Chat.ChatCompletionMessageParam
+
+/**
+ * @description: 计算当前token
+ * @param {string} text // 上下文内容
+ * @return {*}
+ */
+const estimateTextTokens = (text: string): number => {
+    if (!text) return 0;
+    let cjk = 0;
+    let rest = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if (c >= 0x4e00 && c <= 0x9fff) {
+            cjk++;
+        } else {
+            rest++;
+        }
+    }
+    // 【核心微调】：针对 DeepSeek V4 优化的代码重构场景折算
+    // 1. 中文字符依然保持 1:1（DeepSeek 的中文压缩率基本在这个范围）
+    // 2. 考虑到多文件代码中海量的缩进空格、换行、连写关键字，
+    //    将非中文折算比率从 4:1 放宽到 4.8:1（即除以 4.8），防止高估代码 Token
+    return cjk + Math.ceil(rest / 4.8);
+}
+
+/**
+ * @description: 获取当前token数量
+ * @param {Msg} messagesArr // 上下文
+ * @return {*}
+ */
+export const estimateTokens = (messagesArr: Msg[]): number => {
+    return messagesArr.reduce((total, m) => {
+        let pureText = '';
+        // 1. 核心防御：显式捕获并还原最重的两个代码吞吐大户
+        // A. 捕获基础文本内容
+        if (m.content) {
+            pureText += typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        }
+        // B. 捕获大模型发出的工具调用参数（Search/Replace 块等巨型 JSON 字符串）
+        if ((m as any).tool_calls && Array.isArray((m as any).tool_calls)) {
+            for (const call of (m as any).tool_calls) {
+                if (call.function) {
+                    pureText += ` ${call.function.name} ${call.function.arguments || ''}`;
+                }
+            }
+        }
+        // 2. 边缘防御：动态扫描那些被遗漏的隐藏字符串（如 role, name, tool_call_id 甚至未来新增的字段）
+        // 通过 Object.keys 遍历，只要值是字符串，且刚才没算过，统统薅进来算一遍
+        const knownKeys = ['content', 'tool_calls'];
+        for (const key of Object.keys(m)) {
+            if (!knownKeys.includes(key) && typeof (m as any)[key] === 'string') {
+                pureText += ` ${(m as any)[key]}`;
+            }
+        }
+        const tokens = estimateTextTokens(pureText) + 4; // 4 为消息结构开销
+        return total + (isNaN(tokens) ? 0 : tokens);
+    }, 0);
+}
+
+/**
+ * @description: 剥离 transcript 的 id/sessionId 等非 OpenAI 字段
+ * @return {*}
+ */
+export const cleanMsg = (m: any): Msg => {
+    const { id, sessionId, ...rest } = m;
+    return rest as Msg;
+}
+/**
+ * @description: 配对感知分组-assistant(tool_calls) + 紧跟的 tool 消息 = 不可分割单元
+ * @param {Msg} messagesArr
+ * @return {*} 
+ */
+export const groupUnits = (messagesArr: Msg[]): Msg[][] => {
+    const units: Msg[][] = [];
+    let i = 0;
+    while (i < messagesArr.length) {
+        const m: any = messagesArr[i];
+        if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+            const unit = [m]; i++;
+            while (i < messagesArr.length && (messagesArr[i] as any).role === 'tool') { unit.push(messagesArr[i]); i++; }
+            units.push(unit);
+        } else {
+            units.push([m]); i++;
+        }
+    }
+    return units
+}
+
+export const splitUntils = (messagesArr: Msg[], keepUnits: number) => {
+    const units = groupUnits(messagesArr);
+    // 如果当前上下文小于需要保留的单元，则全量返回
+    if (units.length <= keepUnits) {
+        return {
+            toCompact: [] as Msg[],
+            keepRecent: messagesArr
+        }
+    }
+    return {
+        toCompact: units.splice(0, units.length - keepUnits).flat(), // 截取需要提取成摘要的上下文并扁平化上下文信息
+        keepRecent: units.slice(units.length - keepUnits).flat(), // 截取需要保留的上下文
+    }
+}

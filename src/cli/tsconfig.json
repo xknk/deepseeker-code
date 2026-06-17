@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.json",          /* 继承根目录的全局配置 */
+  "include": ["**/*.ts"]                     /* 仅包含当前 core 目录下的 ts 文件 */
+}

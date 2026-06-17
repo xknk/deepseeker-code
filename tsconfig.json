@@ -1,0 +1,37 @@
+{
+    "compilerOptions": {
+        /* 基础设置 */
+        "target": "ES2020", // 编译出的代码遵循 ES2020 标准（支持可选链、空值合并等）
+        "module": "NodeNext", // 产物使用最新的 ES 模块化标准 (import/export)
+        "moduleResolution": "NodeNext", // 模块解析方式，适用于 ES 模块
+        "rootDir": ".", // 源代码的根目录
+        "outDir": "dist", // 编译后的代码输出到该目录
+        "esModuleInterop": true, // 允许以简洁方式导入 CommonJS 模块（如：import express from 'express'）
+        "skipLibCheck": true, // 跳过对第三方库声明文件 (*.d.ts) 的检查，加快编译速度
+        /* 类型安全检查 */
+        "strict": true, // 开启所有严格的类型检查，代码更健壮，是 TS 开发的标准做法
+        "isolatedModules": true, // 极速运行工具 tsx 所必需的设置
+        /* 路径别名配置 */
+        "paths": {
+            "core": [
+                "./src/core"
+            ], /* 让编辑器更聪明地识别本地的 core 包 */
+            "cli": [
+                "./src/cli"
+            ]
+        },
+        "typeRoots": [
+            "./node_modules/@types" // 告诉 TS 去最外层根目录的这个位置加载全局类型
+        ],
+        "types": ["node"],              // 显式让 TS 加载 node 相关的全局变量（如 process、Buffer）
+    },
+    "include": [
+        "src",
+        "tests",
+        "scripts"
+    ], // 包含的文件
+    "exclude": [
+        "dist",
+        "node_modules"
+    ], // 排除的文件
+}

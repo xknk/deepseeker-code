@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json", /* 继承根目录的全局配置 */
+  "include": [
+    "**/*.ts"
+  ],
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true,    
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+    }
+  }
+}
