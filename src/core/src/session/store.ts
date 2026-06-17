@@ -44,9 +44,9 @@ export const getStorePath = (sessionId: string): string => {
 
 
 /** 确保 sessions 文件夹存在（在数据目录下创建） */
-export const ensureSessionsDir = async (): Promise<void> => {
+export const ensureSessionsDir = async (name="sessions"): Promise<void> => {
     // 💡 修复：确保是在 appConfig.dataDir 下创建 sessions 文件夹
-    await fs.mkdir(getSessionsDirPath(), { recursive: true });
+    await fs.mkdir(getSessionsDirPath(name), { recursive: true });
 }
 
 export const writeStore = async (sessionId: string, store: any) => {
