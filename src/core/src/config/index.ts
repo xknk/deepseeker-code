@@ -2,13 +2,13 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-11 15:18:03
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 17:07:33
+ * @LastEditTime: 2026-06-18 11:19:52
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\config\index.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 import path from "path";
 import os from "os";
-import fs from "fs";
+import { createUUID } from "@/common/index.ts";
 const _DataDir = path.join(os.homedir(), ".deepSeekCode");
 export const appConfig = {
     dataDir: _DataDir,
@@ -25,7 +25,14 @@ export const appConfig = {
         if (/^[a-z]:/i.test(cwd)) {
             cwd = cwd.charAt(0).toUpperCase() + cwd.slice(1); // 强行将盘符首字母顶格大写（如 C:/）
         }
-        return cwd;
+        // 1. 拿到当前目录名（例如: core）
+        const currentFolder = path.basename(cwd);
+        // 2. 拿到上一级目录的路径（例如: D:/projectA/src）
+        const parentPath = path.dirname(cwd);
+        // 3. 提取上一级目录的名字（例如: src）
+        const parentFolder = path.basename(parentPath);
+        // 4. 拼接返回（例如: "src-core"）
+        return `${parentFolder}-${currentFolder}`;
     })(),
-    traceRetentionDays:7,
+    traceRetentionDays: 7,
 }

@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-11 15:41:07
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 08:51:53
+ * @LastEditTime: 2026-06-18 11:15:20
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\serve\chatPorcessing.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -10,11 +10,12 @@ import { UnifiedInboundMessage, UnifiedOutboundMessage } from "@/channels/unifie
 import { runAgent } from "@/agent/runAgent.ts";
 import { agentTools } from "@/tool/index.ts";
 import { appConfig } from "@/config/index.ts";
-import { createUUID, getOrCreateSessionId, getRollingState, setRollingState } from "@/session/store.ts"
+import { getOrCreateSessionId, getRollingState, setRollingState } from "@/session/store.ts"
 import { appendMessage, readMessages } from "@/session/transcript.ts";
 import OpenAI from "openai";
 import { buildContextMessages } from "@/session/content.ts";
 import { Msg } from "@/session/contextCore.ts";
+import { createUUID } from "@/common/index.ts";
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
 
 /**

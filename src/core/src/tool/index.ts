@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 17:39:04
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 08:50:52
+ * @LastEditTime: 2026-06-18 11:15:48
  * @FilePath: \deepSeekCode\src\core\src\tool\index.ts
  * @Description: 工具注册表 + spawn_agent（动态子 agent）
  */
@@ -11,7 +11,7 @@ import { runAgent } from "@/agent/runAgent.ts";
 import { buildContextMessages } from "@/session/content.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { appConfig } from "@/config/index.ts";
-import { createUUID } from "@/session/store.ts";
+import { createUUID } from "@/common/index.ts";
 
 /** 工具执行上下文：runAgent 调用 execute 时传入，让工具能拿到会话信息 */
 export interface ToolContext {

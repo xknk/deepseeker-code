@@ -1,57 +1,44 @@
+/*
+ * @Author: fanqianliang 2438756801@qq.com
+ * @Date: 2026-06-12 09:16:30
+ * @LastEditors: fanqianliang 2438756801@qq.com
+ * @LastEditTime: 2026-06-18 11:15:31
+ * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\store.ts
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ */
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
+import { createUUID, getFileName } from "@/common/index.ts"
 
-export const createUUID = (): string => {
-    return crypto.randomUUID();
-}
 /** 获取全局 sessions 文件夹的绝对/相对路径 */
-export const getSessionsDirPath = (name: string = 'sessions'): string => {
-    return path.join(appConfig.dataDir, name);
+export const getSessionsDirPath = (mainSessionId: string): string => {
+    const fileName = getFileName(mainSessionId)
+    return path.join(appConfig.dataDir, 'sessions', appConfig.userWorkspaceDir, fileName);
 }
+
 
 /** 获取单个 JSON 文件的完整路径：[数据目录]/sessions/[sessionId].json */
 /**
  * @description: 动态路径分拣器：将主、子、摘要数据统一收拢在以主会话 ID 命名的专属文件夹下
  */
 export const getStorePath = (sessionId: string): string => {
-    let mainSessionId = sessionId;
-    let fileName = `${sessionId}.json`;
-
-    // 1. 特征判定一：如果是子 Agent 的会话 ID
-    if (sessionId.includes('__sub__')) {
-        // 强行溯源捞出它亲爹（主 Agent）的 ID 作为文件夹名字
-        mainSessionId = sessionId.split('__sub__')[0];
-        // 文件名保持为各自独立的子 agent 名字（例如 session123__sub__uuid456.json）
-        fileName = `${sessionId}.json`;
-    }
-    // 2. 特征判定二：如果是你故意传入的摘要专属标识
-    else if (sessionId.endsWith('_rollingSummary')) {
-        // 剥离出主 ID 寻找文件夹
-        mainSessionId = sessionId.replace('_rollingSummary', '');
-        // 文件名固定为统一的滚动摘要文件（例如 session123_rollingSummary.json）
-        fileName = `${sessionId}.json`;
-    }
-
     // 3. 终极物理落盘对齐：所有文件，无论主、子、摘要，统统关进主 ID 文件夹这个“大庙”里
     return path.join(
-        getSessionsDirPath(),
-        appConfig.userWorkspaceDir,
-        mainSessionId, // 👈 核心：文件夹名字永远是主会话 ID
-        fileName       // 👈 核心：在这个文件夹下长出不同的 json 文件
+        getSessionsDirPath(sessionId),
+        `${sessionId}.json`       // 👈 核心：在这个文件夹下长出不同的 json 文件
     );
 }
 
-
 /** 确保 sessions 文件夹存在（在数据目录下创建） */
-export const ensureSessionsDir = async (name="sessions"): Promise<void> => {
+export const ensureSessionsDir = async (sessionId: string): Promise<void> => {
     // 💡 修复：确保是在 appConfig.dataDir 下创建 sessions 文件夹
-    await fs.mkdir(getSessionsDirPath(name), { recursive: true });
+    await fs.mkdir(getSessionsDirPath(sessionId), { recursive: true });
 }
 
 export const writeStore = async (sessionId: string, store: any) => {
     // 1. 先确保存放文件的文件夹已经存在
-    await ensureSessionsDir();
+    await ensureSessionsDir(sessionId);
     // 2. 安全地写入文件
     await fs.writeFile(getStorePath(sessionId), JSON.stringify(store, null, 2), "utf-8");
 }
@@ -73,7 +60,7 @@ export const getOrCreateSessionId = async (sessionId: string | undefined): Promi
 
 /** 从硬盘读取整个会话数据库 */
 export const readStore = async (sessionId: string): Promise<any> => {
-    await ensureSessionsDir();
+    await ensureSessionsDir(sessionId);
     const p = getStorePath(sessionId);
     try {
         const raw = (await fs.readFile(p, "utf-8")).trim();

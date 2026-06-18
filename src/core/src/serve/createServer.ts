@@ -14,7 +14,8 @@ import OpenAI from "openai";
 import { UnifiedInboundMessage } from "@/channels/unifiedMessage.ts"
 import { handleUnifiedChat } from "./chatPorcessing.ts"
 import { sendOutbound } from "@/channels/chatChannelAdapter.ts";
-import { createUUID, writeStore, readStore } from "@/session/store.ts"
+import { writeStore, readStore } from "@/session/store.ts"
+import { createUUID } from "@/common/index.ts";
 export function createServer() {
     const app = express();
     // 解析 JSON 请求体，并限制大小为 5MB 以处理复杂 Payload
