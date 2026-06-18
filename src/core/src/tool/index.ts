@@ -12,6 +12,7 @@ import { buildContextMessages } from "@/session/content.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { appConfig } from "@/config/index.ts";
 import { createUUID } from "@/common/index.ts";
+import { RunAgentEvents } from "@/agent/type.ts";
 
 /** 工具执行上下文：runAgent 调用 execute 时传入，让工具能拿到会话信息 */
 export interface ToolContext {
@@ -22,6 +23,7 @@ export interface ToolContext {
     compactRatio: number,
     modelWindow: number,
     parentSystemPrompt: string,
+    events: RunAgentEvents
 }
 
 // 扩展原生定义，允许包含自定义的 execute 函数（第二参数为运行上下文）
@@ -99,6 +101,7 @@ export const agentTools: CustomTool[] = [
                     keepRecentUnits: ctx.keepRecentUnits,
                     compactRatio: ctx.compactRatio,
                     parentSystemPrompt: parentSystemPrompt,
+                    events: ctx.events,
                 });
                 return [
                     `子 agent（${role || '通用'}）执行结果：\n${subResult}`,

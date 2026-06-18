@@ -2,16 +2,16 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-16 15:09:46
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 15:02:32
- * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\agent\truncate.ts
+ * @LastEditTime: 2026-06-18 17:06:16
+ * @FilePath: \lims-frontd:\code\自研\roundSeekCode\src\core\src\agent\truncate.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 import { appConfig } from "@/config/index.ts";
 import chatWithModelWithSummary from "@/llm/model.ts";
 import { estimateTokens, Msg, splitUntils } from "@/session/contextCore.ts";
-import { RunAgentEvents } from "./type.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
+import { ensureOptions, RunAgentEvents } from "./type.ts";
 
 /** ANSI / OSC 转义序列（终端着色等） */
 const ANSI_ESCAPE = /\u001b\[[\d;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
@@ -153,35 +153,56 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
 /**
  * @description: 压缩全量上下文
  * @param {Msg} messageArr // 全量上下文
- * @param {number} COMPACT_RATIO // 当token占用为最大token百分之COMPACT_RATIO时触发一次性压缩上下文
- * @param {number} KEEP_RECENT_UNITS // 最大保留条数信息
+ * @param {number} compactRatio // 当token占用为最大token百分之compactRatio时触发一次性压缩上下文
+ * @param {number} keepRecentUnits // 最大保留条数信息
  * @param {number} modelWindow // 最大token
  * @param {RunAgentEvents} events // 触发回调方法组
  * @param {AbortSignal} signal // 主动停止
  * @return {*}
  */
-export const ensureFitsWindow = async (sessionId: string, messageArr: Msg[], COMPACT_RATIO: number, KEEP_RECENT_UNITS: number, modelWindow: number, events?: RunAgentEvents, signal?: AbortSignal): Promise<void> => {
-    if (estimateTokens(messageArr) <= modelWindow * COMPACT_RATIO) return;
-    const systemMsg = messageArr[0]; // 获取系统提示词
-    const summaryMsg: any = messageArr[1]; // 获取摘要信息
-    let keep = KEEP_RECENT_UNITS;
-    let lastSize = estimateTokens(messageArr); // 获取当前上下文token总量
-    while (estimateTokens(messageArr) > modelWindow * COMPACT_RATIO) {
-        if (signal?.aborted) return; // 是否停止
-        const active = messageArr.slice(2); // 截取系统提示词和摘要
+export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
+    if (estimateTokens(event.messageArr) <= event.modelWindow * event.compactRatio) return;
+    const systemMsg = event.messageArr[0]; // 获取系统提示词
+    const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
+    let keep = event.keepRecentUnits;
+    let lastSize = estimateTokens(event.messageArr); // 获取当前上下文token总量
+    const startTime = performance.now();
+    let round = 0
+    while (estimateTokens(event.messageArr) > event.modelWindow * event.compactRatio) {
+        if (event.signal?.aborted) {
+            return
+        }; // 是否停止
+        const active = event.messageArr.slice(2); // 截取系统提示词和摘要
         const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
         try {
             if (toCompact.length > 0) {
-                const line = await compactToLine(toCompact, modelWindow, signal); // 获取全量的摘要
+                const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 获取全量的摘要
                 const old: string = summaryMsg?.content || ''; // 旧的消息摘要
                 summaryMsg.content = old ? `${old}\n${line}` : line; // 拼接新的消息摘要
-                messageArr.length = 0;
-                messageArr.push(systemMsg, summaryMsg, ...keepRecent); // 重构整个上下文
+                const endTime = performance.now();
+
+                event.messageArr.length = 0;
+                event.messageArr.push(systemMsg, summaryMsg, ...keepRecent); // 重构整个上下文
+                event.events({
+                    sessionId: event.sessionId,
+                    eventType: 'session.summary',
+                    meteData: {
+                        depth: event.depth,
+                        decisionSource: 'summary',
+                        ok: true,
+                        durationMs: endTime - startTime,
+                        round: round++
+                    },
+                    usage: {
+                        prompt_tokens: lastSize,
+                        compress_tokens: estimateTokens(event.messageArr),
+                    }
+                })
                 // 【核心大厂级落盘动作】：强行把这个最新滚好的快照，作为一个新节点，写入本地数据库/JSONL中
                 // 注意：此时我们要捕获这批被压缩的废料中，最后一条消息的真实持久化唯一 ID (如 uuid)
-                const store = await getRollingState(`${sessionId}__rollingSummary`);
+                const store = await getRollingState(`${event.sessionId}__rollingSummary`);
                 store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                await setRollingState(`${sessionId}__rollingSummary`, {
+                await setRollingState(`${event.sessionId}__rollingSummary`, {
                     archivedMessageCount: store.archivedMessageCount,
                     rollingSummary: summaryMsg.content,
                     consecutiveFailures: 0,
@@ -191,12 +212,12 @@ export const ensureFitsWindow = async (sessionId: string, messageArr: Msg[], COM
                 keep--;
                 continue;
             } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
-                summaryMsg.content = await compactToLine([summaryMsg], modelWindow, signal);
-                messageArr.length = 0;
-                messageArr.push(systemMsg, summaryMsg, ...keepRecent);
-                const store = await getRollingState(`${sessionId}__rollingSummary`);
+                summaryMsg.content = await compactToLine([summaryMsg], event.modelWindow, event.signal);
+                event.messageArr.length = 0;
+                event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
+                const store = await getRollingState(`${event.sessionId}__rollingSummary`);
                 store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                await setRollingState(`${sessionId}__rollingSummary`, {
+                await setRollingState(`${event.sessionId}__rollingSummary`, {
                     archivedMessageCount: store.archivedMessageCount,
                     rollingSummary: summaryMsg.content,
                     consecutiveFailures: 0,
@@ -206,21 +227,42 @@ export const ensureFitsWindow = async (sessionId: string, messageArr: Msg[], COM
                 break
             }
 
-        } catch (e) {
-            if (signal?.aborted) return;
-            console.warn('⚠️ 本轮压缩失败，跳过:', e);
+        } catch (error) {
+            if (event.signal?.aborted) return;
+            const err = error instanceof Error ? error : new Error(String(error));
+            console.warn('⚠️ 本轮压缩失败，跳过:', err.message);
             // ==================== 🛠️ 核心熔断安全升级区 ====================
             // 1. 去硬盘里捞出上一次的状态
-            const store = await getRollingState(`${sessionId}__rollingSummary`);
+            const store = await getRollingState(`${event.sessionId}__rollingSummary`);
             // 2. 失败计数默默加 1
             const nextFailures = (store.consecutiveFailures || 0) + 1;
             // 3. 一脚强行回写落盘，锁死连续失败的物理记忆
-            await setRollingState(`${sessionId}__rollingSummary`, {
+            await setRollingState(`${event.sessionId}__rollingSummary`, {
                 archivedMessageCount: store.archivedMessageCount || 0,
                 rollingSummary: summaryMsg?.content || "",
                 consecutiveFailures: nextFailures // 👈 同步落盘
             });
-
+            const endTime = performance.now();
+            event.events({
+                sessionId: event.sessionId,
+                parentId: event.depth > 0 ? event.sessionId : '',
+                eventType: 'session.summary',
+                meteData: {
+                    depth: event.depth,
+                    messageId: summaryMsg.id,
+                    decisionSource: 'summary',
+                    ok: false,
+                    durationMs: endTime - startTime,
+                    attempt: nextFailures
+                },
+                usage: {
+                    prompt_tokens: lastSize,
+                    compress_tokens: estimateTokens(event.messageArr),
+                },
+                payload: {
+                    output: err.message,
+                }
+            })
             // 4. 【终极物理断流闸门】：触线报警，保护钱包！
             if (nextFailures >= 3) {
                 throw new Error(`❌ [物理熔断] 上下文压缩已连续遭遇 ${nextFailures} 次失败。为防止天价账单死循环，系统已强行拦截。请排查网络或大模型提供商是否崩溃。`);
@@ -228,11 +270,12 @@ export const ensureFitsWindow = async (sessionId: string, messageArr: Msg[], COM
             // =============================================================
             break;
         }
-        const newSize = estimateTokens(messageArr);
+        const newSize = estimateTokens(event.messageArr);
         if (newSize >= lastSize) break;
         lastSize = newSize;
     }
-    if (estimateTokens(messageArr) > modelWindow * 0.9) {
-        throw new Error(`上下文超出模型窗口上限（估算约 ${estimateTokens(messageArr)} / ${modelWindow} token），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
+
+    if (estimateTokens(event.messageArr) > event.modelWindow * 0.9) {
+        throw new Error(`上下文超出模型窗口上限（估算约 ${estimateTokens(event.messageArr)} / ${event.modelWindow} token），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
     }
 }

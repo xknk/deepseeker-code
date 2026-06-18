@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-17 15:38:50
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 10:51:03
+ * @LastEditTime: 2026-06-18 17:20:26
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\observability\trace.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -26,11 +26,18 @@ import { getDirBytes } from "./traceCalculate.ts";
  * 限制物理磁盘扫描频次，在 99.9% 的交互中保护磁盘寿命
  */
 const CLEANUP_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
+/** 活跃宽限窗口：近期(1天)仍被写入的文件视为存活会话，保护性放过 */
+const ACTIVE_GRACE_MS = 24 * 60 * 60 * 1000;
+
 /** 
  * 50MB 专属工作区容量大闸
  * 超过它即使时间没满也立刻后台爆破老日志，防止磁盘塞爆
  */
 const MAX_TRACE_FOLDER_BYTES = 50 * 1024 * 1024;
+/** 容量硬回收目标：清到 50MB 的 80% 再停手，给阈值留缓冲，避免在边缘反复抖动 */
+const SIZE_RECLAIM_TARGET_RATIO = 0.8;
+/** 容量闸冷却：刚做过一次容量回收后短期内不再重复全量扫描，防止 50MB+ 区间每个事件都空转 IO */
+const SIZE_CLEANUP_COOLDOWN_MS = 60 * 1000;
 // ==================== ⚡ 进程级内存水位缓存（热路径零 IO 的灵魂） ====================
 /**
  * 当前工作区 trace 目录的实时字节水位：-1 表示尚未初始化
@@ -45,6 +52,11 @@ let workspaceTraceBytes = -1;
  */
 let diskLastCleanupAt = 0;
 let clockLoaded = false;
+/**
+ * 内存态最近一次"容量闸"回收时间戳：配合 SIZE_CLEANUP_COOLDOWN_MS 做冷却，
+ * 防止软规则清不动时、每个 append 都重复触发全量 readdir+stat 扫描
+ */
+let lastSizeCleanupAt = 0;
 /**
  * 清理互斥锁：单线程下的原子 flag（检查与赋值之间无 await，天然原子）
  * 防止高频并发 append 在触发条件下，同时起多个清理协程导致重复全量扫描
@@ -85,8 +97,7 @@ export async function emitTrace(
         usage: base.usage,
         payload: base.payload,
         meteData: {
-            ...base.meteData,
-            eventType: base.eventType // 👈 完美实现内层状态联动，方便前端一秒解构整个字典
+            ...base.meteData || {},
         }
     };
     // 可观测性日志是「旁路资产」，绝不允许自身的落盘异常把主业务链路拖崩
@@ -113,7 +124,7 @@ export async function appendTraceEvent(event: TraceBase): Promise<void> {
 
     // 4. 实时累加工作区字节水位：首次写入顺手初始化基准值，之后永不 readdir/stat [INDEX]
     if (workspaceTraceBytes < 0) {
-        workspaceTraceBytes = await getDirBytes(getTraceDirPath(event.sessionId));
+        workspaceTraceBytes = await getDirBytes(getTracePath());
     }
     workspaceTraceBytes += Buffer.byteLength(line, "utf-8");
 
@@ -138,23 +149,43 @@ async function maybeCleanupAfterAppend(sessionId: string): Promise<void> {
         // 轨道二：容量线自适应体检（当前工作区水位是否撑爆了 50MB）——直接读内存水位，不再全量 stat！
         const isSizeOverflow = workspaceTraceBytes > MAX_TRACE_FOLDER_BYTES;
 
-        // 完美拦截线：平时两线均未触发，纯内存数字比较，真正 0 毫秒秒级退出，大模型写代码享有最高吞吐！
+        // 第一道拦截：平时两线均未触发，纯内存数字比较，真正零 IO 秒退
         if (!isTimeExpired && !isSizeOverflow) return;
 
-        console.log(`🧹 [Trace运维] 触发自适应清理（原因: ${isSizeOverflow ? '容量越过50MB大闸' : '3天冷却周期已满'}）`);
-        const deletedCount = await cleanupOldTraceFiles();
+        // 容量闸冷却：软规则可能清不动（文件全在活跃宽限内），若不冷却，50MB+ 区间每个事件都会重复全量扫描
+        // 仅容量触发、且非时间触发时，刚做过回收就先退一步等冷却期过；时间闸(3天)不受冷却限制，到点必跑
+        if (isSizeOverflow && !isTimeExpired && (now - lastSizeCleanupAt < SIZE_CLEANUP_COOLDOWN_MS)) {
+            return;
+        }
 
-        // 清理完成：重算当前工作区真实水位（删了若干文件，内存计数需重新对齐物理真相）
-        workspaceTraceBytes = await getDirBytes(getTraceDirPath(sessionId));
+        const reason = (isTimeExpired && isSizeOverflow) ? '容量+时间双闸' : isSizeOverflow ? '容量越过50MB大闸' : '3天冷却周期已满';
+        console.log(`🧹 [Trace运维] 触发自适应清理（原因: ${reason}）`);
 
-        // 成功后只更新自己的冷时钟文件（内存 + 磁盘双写），不碰任何 Session 会话的时间线，各模块完美解耦！
+        let deletedCount = 0;
+        // ① 软规则：按"出生日期过线 + 已不活跃"清掉过期老旧会话日志
+        deletedCount += await cleanupOldTraceFiles();
+        // 重算当前工作区真实水位（删了若干文件，内存计数需重新对齐物理真相）
+        workspaceTraceBytes = await getDirBytes(getTracePath());
+
+        // ② 硬驱逐兜底（仅容量闸）：软规则清不动、水位仍超 50MB 时，按 mtime 从老到新强删到目标水位(40MB)
+        //    这是"保磁盘"的最后手段，会越过活跃宽限保护；正常情况下软规则或硬驱逐后水位即回落，不会反复触发
+        if (workspaceTraceBytes > MAX_TRACE_FOLDER_BYTES) {
+            const targetBytes = Math.floor(MAX_TRACE_FOLDER_BYTES * SIZE_RECLAIM_TARGET_RATIO);
+            deletedCount += await evictOldestForSize(targetBytes);
+            workspaceTraceBytes = await getDirBytes(getTracePath());
+        }
+
+        // 记录本次回收时间，供容量闸冷却判断（无论软硬、是否真删动，做过一次即进入冷却）
+        lastSizeCleanupAt = now;
+
+        // 更新自己的冷时钟文件（内存 + 磁盘双写），不碰任何 Session 会话的时间线，各模块解耦
         diskLastCleanupAt = now;
         const clockPath = getGlobalClockPath();
         await fs.mkdir(path.dirname(clockPath), { recursive: true });
         await fs.writeFile(clockPath, JSON.stringify({ lastCleanupAt: now, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
 
         if (deletedCount > 0) {
-            console.log(`✨ [Trace运维] 自动销毁了 ${deletedCount} 个过期的老旧长跑会话日志，磁盘重获活水新生。`);
+            console.log(`✨ [Trace运维] 共销毁 ${deletedCount} 个会话日志（软规则过期清理 + 容量硬驱逐），磁盘水位回落。`);
         }
     } catch (error) {
         console.warn("⚠️ [Trace运维] 自动清理发生轻微异常，已防御性跳过:", error);
@@ -173,7 +204,7 @@ export async function cleanupOldTraceFiles(): Promise<number> {
     const cutoff = new Date();
     cutoff.setHours(0, 0, 0, 0);
     cutoff.setDate(cutoff.getDate() - retentionDays); // 算出过期红线
-
+    const now = Date.now();
     let deleted = 0;
     let relativePaths: string[];
     try {
@@ -191,13 +222,57 @@ export async function cleanupOldTraceFiles(): Promise<number> {
 
         // ⚠️ 关键修复：必须取捕获组 m[1]（纯日期），绝不能用整个 match 数组 ${m}，否则恒为 Invalid Date 导致清理永远失效
         const fileBornDay = new Date(`${m[1]}T00:00:00`);
-        if (fileBornDay < cutoff) {
-            try {
-                const fullPath = path.join(dir, relativePath);
-                await fs.unlink(fullPath); // 一键整块无损销毁，实现磁盘永续活水循环 [INDEX]
-                deleted += 1;
-            } catch { /* ignore context dynamic file lock */ }
-        }
+        if (fileBornDay >= cutoff) continue; // ① 出生日还没过线 → 放过
+        // ② 出生日过线了，再看是否近期仍在被写（活跃会话保护）
+        const fullPath = path.join(dir, relativePath);
+        try {
+            const st = await fs.stat(fullPath);
+            if (now - st.mtimeMs < ACTIVE_GRACE_MS) continue; // 还活着 → 放过
+            await fs.unlink(fullPath);
+            deleted += 1;
+        } catch { /* 文件被并发动过等，忽略 */ }
+    }
+    return deleted;
+}
+
+/**
+ * @description: 容量硬驱逐兜底——当软规则(过期+活跃保护)清不动、磁盘仍超 50MB 时，
+ * 按 mtime 从老到新强制删除 trace 文件，直到总字节降到 targetBytes 以下。
+ * 这是"保磁盘"的最后手段，会越过活跃宽限保护，仅在容量闸已触发且软规则无效时由 maybeCleanupAfterAppend 调用。
+ */
+async function evictOldestForSize(targetBytes: number): Promise<number> {
+    const dir = getTracePath();
+    let relativePaths: string[];
+    try {
+        relativePaths = await fs.readdir(dir, { recursive: true });
+    } catch { return 0; }
+
+    const re = /^trace-(\d{4}-\d{2}-\d{2})__([\w-]+)\.jsonl$/;
+    // 收集候选文件 (mtime/全路径/字节数)，随后按 mtime 升序——最久没写的最先牺牲
+    const candidates: { mtime: number; fullPath: string; size: number }[] = [];
+    for (const relativePath of relativePaths) {
+        const fileName = path.basename(relativePath);
+        if (!re.test(fileName)) continue; // 只动 trace 自己的文件，绝不误伤 clock 等其它资产
+        try {
+            const st = await fs.stat(path.join(dir, relativePath));
+            candidates.push({ mtime: st.mtimeMs, fullPath: path.join(dir, relativePath), size: st.size });
+        } catch { /* 并发动过等，跳过 */ }
+    }
+    candidates.sort((a, b) => a.mtime - b.mtime);
+
+    // 用现场 stat 出的总字节数做判定（比内存水位更准），逐个牺牲直到降到目标水位
+    let totalBytes = candidates.reduce((sum, c) => sum + c.size, 0);
+    let deleted = 0;
+    for (const c of candidates) {
+        if (totalBytes <= targetBytes) break;
+        try {
+            await fs.unlink(c.fullPath);
+            totalBytes -= c.size;
+            deleted += 1;
+        } catch { /* ignore */ }
+    }
+    if (deleted > 0) {
+        console.warn(`⚠️ [Trace运维] 容量硬驱逐：越过活跃保护强删 ${deleted} 个最旧 trace 文件（磁盘压力兜底）。`);
     }
     return deleted;
 }

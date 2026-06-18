@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-12 15:47:18
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 09:53:50
+ * @LastEditTime: 2026-06-18 14:20:28
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\transcript.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -43,14 +43,18 @@ type MessageWithId = OpenAI.Chat.ChatCompletionMessageParam & {
     // tool_calls / tool_call_id 由 ChatCompletionMessageParam 自带，无需在此重列
 };
 export const appendMessage = async (entry: MessageWithId): Promise<void> => {
-    await ensureSessionsDir(entry.sessionId);
+    try {
+        await ensureSessionsDir(entry.sessionId);
 
-    // 用展开保留全部字段（含 tool_calls / tool_call_id），不要手动列举字段以免遗漏配对键
-    const { sessionId, ...rest } = entry;
-    const line = { id: createUUID(), ...rest };
+        // 用展开保留全部字段（含 tool_calls / tool_call_id），不要手动列举字段以免遗漏配对键
+        const { sessionId, ...rest } = entry;
+        const line = { id: createUUID(), ...rest };
 
-    const p = getStorePath(sessionId);
-    // 使用 appendFile 直接在文件末尾追加，效率极高
-    await fs.appendFile(p, JSON.stringify(line) + "\n", "utf-8");
+        const p = getStorePath(sessionId);
+        // 使用 appendFile 直接在文件末尾追加，效率极高
+        await fs.appendFile(p, JSON.stringify(line) + "\n", "utf-8");
+    } catch (e) {
+        console.warn('⚠️ 消息落盘失败（不影响当前推理）:', e);
+    }
 }
 

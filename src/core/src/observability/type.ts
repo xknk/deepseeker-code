@@ -5,14 +5,17 @@ export type TraceDecisionSource =
     | "rule"
     | "spawn_agent"
     | "user"
-    | "default";
+    | "default"
+    | 'llm'
+    | 'llm_spawn_agent'
+    | 'summary';
 
 /**
  * 追踪事件类型：定义了 AI Agent 生命周期中的关键观测点
  */
 export type TraceEventType =
     | "session.start"           // 会话开始：用户发起请求，系统初始化
-    | "session.tools.summary"   // 会话提取摘要（完美对接你的 compactToLine 机制）
+    | "session.summary"   // 会话提取摘要（完美对接你的 compactToLine 机制）
     | "session.end"             // 会话结束：响应完全结束或连接断开
     | "llm.request"             // LLM 请求：准备向大模型发送 Prompt
     | "llm.response"            // LLM 响应：收到大模型的回复（含 Token 消耗等）
@@ -22,7 +25,8 @@ export type TraceEventType =
     | "tool.execute.end"        // 工具执行结束：拿到工具返回的结果
     | "tool.denied"             // 工具拒绝：可能触发了安全策略或用户手动拒绝执行
     | "tool.validation.failed"  // 校验失败：工具入参不符合定义（Schema 校验失败）
-    | "tool.failed";            // 工具执行失败：工具执行过程中发生错误
+    | "tool.failed"            // 工具执行失败：工具执行过程中发生错误
+    | "user.aborted"           // 会话开始：用户发起请求，系统初始化
 
 /**
  * 👈 【对齐你的精美结构】：完全尊重并将资产打包进 meteData 的追踪事件对象接口
@@ -32,25 +36,25 @@ export interface TraceBase {
     sessionId: string;  // 当前主/子会话的 ID
     parentId?: string;  // 选填：派生出当前动作的父级唯一 traceId（锁定子 Agent 因果链树状拓扑）
     eventType: TraceEventType; // 一级核心事件标记，代表当前事件的物理动作
-    timestamp: string;  // 物理执行时间戳（由 emitTrace 在第一层自动焊死，便于全局时间线检索）
+    timestamp?: string;  // 物理执行时间戳（由 emitTrace 在第一层自动焊死，便于全局时间线检索）
     meteData: {
         messageId?: string; // 选填：关联的落盘消息 ID
         tools_id?: string;  // 选填：关联的工具调用唯一 ID
         depth: number;      // 强力穿透主子宇宙，标记当前的嵌套深度层级（主Agent为0，子Agent为1）
         decisionSource?: TraceDecisionSource; // 路由/编排决策来源
-        eventType: TraceEventType; // 👈 内部状态联动，方便后端通过单条字典秒级渲染
         toolName?: string;  // 调用工具的名称
         toolSource?: "builtin" | "skill" | "mcp" | "policy" | "registry" | "guard"; // 工具来源
         ok?: boolean;       // 执行是否成功
         durationMs?: number; // 该步骤消耗的时长（毫秒）
-        errorCode?: string; // 错误码（ok 为 false 时必填）
         attempt?: number;   // 重试次数
+        round?:number; // 运行次数
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {
-        prompt_tokens: number;
-        completion_tokens: number;
-        total_tokens: number;
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        compress_tokens?: number; // 压缩后tokens
         prompt_cache_hit_tokens?: number;  // 让你一眼看清 DeepSeek V4 缓存命中了多少
         prompt_cache_miss_tokens?: number; // 让你看清每一次 Miss 付出了多少 Pre-fill 费用
     };
