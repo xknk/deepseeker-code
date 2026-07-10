@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-16 15:09:46
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 17:06:16
+ * @LastEditTime: 2026-07-10 11:38:59
  * @FilePath: \lims-frontd:\code\自研\roundSeekCode\src\core\src\agent\truncate.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -278,4 +278,21 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     if (estimateTokens(event.messageArr) > event.modelWindow * 0.9) {
         throw new Error(`上下文超出模型窗口上限（估算约 ${estimateTokens(event.messageArr)} / ${event.modelWindow} token），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
     }
+}
+
+function isAsyncGenerator(x: any): x is AsyncGenerator<string> {
+    return x != null && typeof x[Symbol.asyncIterator] === 'function';
+}
+
+export const collectToolResult = async (
+    ret: Promise<string> | AsyncGenerator<string>,
+    onChunk?: (s: string) => void,
+): Promise<string> => {
+    if (isAsyncGenerator(ret)) {
+        let full = '';
+        for await (const chunk of ret) { full += chunk; onChunk?.(chunk); }
+        return full;
+    }
+    const v = await ret;
+    return typeof v === 'string' ? v : JSON.stringify(v);
 }

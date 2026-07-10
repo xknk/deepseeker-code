@@ -1,1 +1,4 @@
 node_modules
+
+# AI 相关设计文档，不进 git（本地保留）
+.ai-docs/

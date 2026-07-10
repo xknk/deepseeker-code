@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-11 15:41:07
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 17:08:26
+ * @LastEditTime: 2026-07-10 11:35:59
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\serve\chatPorcessing.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -18,6 +18,7 @@ import { Msg } from "@/session/contextCore.ts";
 import { createUUID } from "@/common/index.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase } from "@/observability/type.ts";
+import { RunAgentOptions } from "@/agent/type.ts";
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
 
 /**
@@ -47,8 +48,8 @@ export const handleUnifiedChat = async (
             decisionSource: 'user',
             durationMs: performance.now() - startTime,
         },
-        payload:{
-            input:inbound.content
+        payload: {
+            input: inbound.content
         }
     })
     await appendMessage(
@@ -58,9 +59,8 @@ export const handleUnifiedChat = async (
             content: inbound.content,
         }
     ) // 添加本次对话消息
-
-    const replyText = await runAgent(
-        fullMessages, {
+    let replyText = "";
+    const options: RunAgentOptions = {
         sessionId,
         toolSchemas: agentTools,
         modelWindow: appConfig.MAX_HISTORY_TOKENS,
@@ -68,7 +68,12 @@ export const handleUnifiedChat = async (
         compactRatio: appConfig.COMPACT_RATIO,
         parentSystemPrompt: SYSTEM_PROMPT,
         events: async (base: TraceBase) => await emitTrace(base),
-    }) // 调用agent
+    }
+    for await (const event of runAgent(fullMessages, options)) {
+        if (event.type === 'final') replyText = event.text;
+        // TODO 阶段1b：sseWrite(event) 推前端
+    }
+
     await emitTrace({
         sessionId,
         eventType: 'session.end',
@@ -77,8 +82,8 @@ export const handleUnifiedChat = async (
             decisionSource: 'user',
             durationMs: performance.now() - startTime,
         },
-        payload:{
-            output:replyText
+        payload: {
+            output: replyText
         }
     })
     const outboundMeta = {

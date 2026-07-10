@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 17:39:04
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 11:15:48
+ * @LastEditTime: 2026-07-10 11:47:31
  * @FilePath: \deepSeekCode\src\core\src\tool\index.ts
  * @Description: 工具注册表 + spawn_agent（动态子 agent）
  */
@@ -12,7 +12,7 @@ import { buildContextMessages } from "@/session/content.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { appConfig } from "@/config/index.ts";
 import { createUUID } from "@/common/index.ts";
-import { RunAgentEvents } from "@/agent/type.ts";
+import { RunAgentEvents, RunAgentOptions } from "@/agent/type.ts";
 
 /** 工具执行上下文：runAgent 调用 execute 时传入，让工具能拿到会话信息 */
 export interface ToolContext {
@@ -29,7 +29,7 @@ export interface ToolContext {
 // 扩展原生定义，允许包含自定义的 execute 函数（第二参数为运行上下文）
 type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
     function: {
-        execute: (args: any, ctx?: ToolContext) => Promise<any>;
+        execute: (args: any, ctx?: ToolContext) => Promise<string> | AsyncGenerator<string>;
     };
 };
 
@@ -92,7 +92,8 @@ export const agentTools: CustomTool[] = [
                 await appendMessage({ sessionId: subSessionId, role: 'user', content: task });
 
                 // 运行子 agent（透传 abortSignal、深度 +1、继承工具集使其也能 spawn）
-                const subResult = await runAgent(subMessages, {
+                let subResult = "";
+                const subOptions: RunAgentOptions = {
                     sessionId: subSessionId,
                     toolSchemas: agentTools,
                     abortSignal: ctx.abortSignal,
@@ -102,7 +103,10 @@ export const agentTools: CustomTool[] = [
                     compactRatio: ctx.compactRatio,
                     parentSystemPrompt: parentSystemPrompt,
                     events: ctx.events,
-                });
+                }
+                for await (const e of runAgent(subMessages, subOptions)) {
+                    if (e.type === 'final') subResult = e.text;
+                }
                 return [
                     `子 agent（${role || '通用'}）执行结果：\n${subResult}`,
                     `\n\n⚠️ [系统重要提示]：子 agent 刚才可能已经调用工具直接修改了本地磁盘中的部分源代码文件。`,

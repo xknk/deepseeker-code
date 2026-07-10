@@ -27,3 +27,10 @@ export interface ensureOptions  {
     events: RunAgentEvents, 
     depth: number, signal?: AbortSignal
 }
+
+export type AgentEvent =
+    | { type: 'round.start'; round: number }
+    | { type: 'text.delta'; text: string }            // 流式文本，替代 onAssistantTextDelta
+    | { type: 'tool.start'; toolCallId: string; toolName: string; args: any }
+    | { type: 'tool.end'; toolCallId: string; toolName: string; result: string; ok: boolean }
+    | { type: 'final'; text: string };
