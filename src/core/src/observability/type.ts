@@ -27,7 +27,8 @@ export type TraceEventType =
     | "tool.validation.failed"  // 校验失败：工具入参不符合定义（Schema 校验失败）
     | "tool.failed"            // 工具执行失败：工具执行过程中发生错误
     | "user.aborted"           // 会话开始：用户发起请求，系统初始化
-
+    | "approval_request"        // 审批请求：需要用户手动审批的操作
+    | "tool_guard_block"        //工具
 /**
  * 👈 【对齐你的精美结构】：完全尊重并将资产打包进 meteData 的追踪事件对象接口
  * 用于结构化日志存储、性能分析及费用审计
