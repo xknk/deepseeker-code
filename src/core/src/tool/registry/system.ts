@@ -2,12 +2,17 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-07-10 16:14:32
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-07-10 16:14:39
- * @FilePath: \deepSeekCode\src\core\src\tool\registry\getTime.ts
- * @Description: 测试工具，测试工具注册表是否正常工作
+ * @LastEditTime: 2026-07-15 16:38:27
+ * @FilePath: \deepSeekCode\src\core\src\tool\registry\system.ts
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
-import { CustomTool } from "../type.ts";
+/**
+ * @file tool/registry/system.ts
+ * @description 系统类工具集。getTime：返回服务器当前日期时间（本地时区）。
+ */
+import { CustomTool, ToolSafetyLevel } from "../type.ts";
 
+/** 系统类工具集（getTime，详见上方 @file 说明）。 */
 export const systemTools: CustomTool[] = [
     {
         type: "function",
@@ -21,6 +26,8 @@ export const systemTools: CustomTool[] = [
                 },
                 required: ["location"],
             },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
             async execute() {
                 return new Date().toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "medium" });
             },

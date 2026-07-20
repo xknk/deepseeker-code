@@ -1,19 +1,20 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-07-10 20:30:00
- * @FilePath: \deepSeekCode\src\tool\registry\fs.ts
- * @Description: 原子层文件系统工具集成包 (read_file, list_dir, edit_file, create_file, delete_path)
+/**
+ * @file tool/registry/fs.ts
+ * @description 文件系统类工具集，覆盖读写删查全流程：
+ *  read_file（分片读，带行号）、list_dir（带 gitignore 过滤的目录树）、
+ *  edit_file（唯一性局部替换）、create_file（新建，拒覆盖）、
+ *  delete_path（DANGER 递归删除）、write_file（全量覆盖写）。
+ *  所有路径经 resolveSafePath 校验，防止工作区越界 / 软链接逃逸。
  */
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { CustomTool } from "../type.ts";
-import { 
-    WORKSPACE_ROOT, 
-    resolveSafePath, 
-    initializeWorkspaceIgnore, 
-    checkIsPathIgnored, 
-    requireUserApproval 
+import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import {
+    WORKSPACE_ROOT,
+    resolveSafePath,
+    initializeWorkspaceIgnore,
+    checkIsPathIgnored
 } from "../guard.ts";
 
 export const fsTools: CustomTool[] = [
@@ -31,20 +32,19 @@ export const fsTools: CustomTool[] = [
                 },
                 required: ["path"],
             },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
             async execute(args: { path: string; start_line?: number; end_line?: number }) {
                 try {
                     const absPath = resolveSafePath(args.path);
                     const raw = await fs.readFile(absPath, "utf-8");
                     const lines = raw.split(/\r?\n/);
-                    
                     const totalLines = lines.length;
                     const start = args.start_line ? Math.max(1, args.start_line) : 1;
                     const end = args.end_line ? Math.min(totalLines, Math.max(start, args.end_line)) : Math.min(totalLines, start + 150 - 1);
-
                     const formattedCode = lines.slice(start - 1, end).map((line, index) => {
                         return `${String(start + index).padStart(5)}: ${line}`;
                     }).join("\n");
-
                     return `[File: ${args.path} | Lines ${start}-${end} of ${totalLines}]\n${formattedCode}${end < totalLines ? `\n\n[... 后面还有 ${totalLines - end} 行已被隐藏。]` : ""}`;
                 } catch (error: any) {
                     return `读取文件失败 [${args.path}]: ${error.message}`;
@@ -63,22 +63,20 @@ export const fsTools: CustomTool[] = [
                     max_depth: { type: "number", description: "最大嵌套扫描深度（默认值为 3）" }
                 }
             },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
             async execute(args: { max_depth?: number }) {
                 try {
                     const maxDepth = args.max_depth ? Math.max(1, args.max_depth) : 3;
-                    await initializeWorkspaceIgnore(); // 从内存单例秒级加载
-
+                    await initializeWorkspaceIgnore();
                     const scanDirLocal = async (currentPath: string, currentDepth: number): Promise<string[]> => {
                         if (currentDepth > maxDepth) return [];
                         const entries = await fs.readdir(currentPath, { withFileTypes: true });
                         let files: string[] = [];
-
                         for (const entry of entries) {
                             const fullPath = path.join(currentPath, entry.name);
                             const relPath = path.relative(WORKSPACE_ROOT, fullPath).replace(/\\/g, "/");
-                            
                             if (checkIsPathIgnored(entry.isDirectory() ? `${relPath}/` : relPath)) continue;
-
                             if (entry.isDirectory()) {
                                 files.push(`${relPath}/`);
                                 files.push(...(await scanDirLocal(fullPath, currentDepth + 1)));
@@ -88,7 +86,6 @@ export const fsTools: CustomTool[] = [
                         }
                         return files;
                     };
-
                     const allFiles = await scanDirLocal(WORKSPACE_ROOT, 1);
                     if (allFiles.length === 0) return `工作区扫描完成，未发现可用文件。`;
                     return `[Workspace Universal Tree | Total Items: ${allFiles.length}]\n` + allFiles.map(f => ` - ${f}`).join("\n");
@@ -112,38 +109,30 @@ export const fsTools: CustomTool[] = [
                 },
                 required: ["path", "old_str", "new_str"]
             },
-            async execute(args: { path: string; old_str: string; new_str: string }, ctx?) {
+            safetyLevel: ToolSafetyLevel.MUTATION,
+            isSync: true,
+            requireApproval: (args: { path: string; old_str: string; new_str: string }) =>
+                `申请修改文件 [${args.path}]\n【减少】:\n${args.old_str}\n【增加】:\n${args.new_str}`,
+            async execute(args: { path: string; old_str: string; new_str: string }) {
                 try {
                     const absPath = resolveSafePath(args.path);
-                    await requireUserApproval(
-                        "edit_file", 
-                        args.path, 
-                        `【减少】:\n${args.old_str}\n【增加】:\n${args.new_str}`, 
-                        ctx
-                    );
-
                     const rawContent = await fs.readFile(absPath, "utf-8");
                     const isCRLF = rawContent.includes("\r\n");
-
                     const normalizedContent = rawContent.replace(/\r\n/g, "\n");
                     const normalizedOld = args.old_str.replace(/\r\n/g, "\n");
                     const normalizedNew = args.new_str.replace(/\r\n/g, "\n");
-
                     if (!normalizedContent.includes(normalizedOld)) {
                         return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块，请用 read_file 重新核对。`;
                     }
-
                     const matchCount = normalizedContent.split(normalizedOld).length - 1;
                     if (matchCount > 1) {
                         return `❌ [代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改。`;
                     }
-
                     const updatedContent = normalizedContent.replace(normalizedOld, normalizedNew);
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
-
                     return `✅ [代码修补成功]：文件 [${args.path}] 已成功完成唯一性局部重构。`;
                 } catch (error: any) {
-                    return `操作被安全拦截或失败: ${error.message}`;
+                    return `操作失败: ${error.message}`;
                 }
             }
         }
@@ -161,21 +150,21 @@ export const fsTools: CustomTool[] = [
                 },
                 required: ["path"]
             },
-            async execute(args: { path: string; content?: string }, ctx?) {
+            safetyLevel: ToolSafetyLevel.MUTATION,
+            isSync: true,
+            requireApproval: (args: { path: string; content?: string }) =>
+                `申请新建文件 [${args.path}]，初始长度: ${(args.content || "").length} 字符`,
+            async execute(args: { path: string; content?: string }) {
                 try {
                     const absPath = resolveSafePath(args.path);
                     const isExist = await fs.access(absPath).then(() => true).catch(() => false);
                     if (isExist) return `❌ [创建文件失败]：文件 [${args.path}] 已经存在。请改用 edit_file 工具！`;
-
                     const initialContent = args.content || "";
-                    await requireUserApproval("create_file", args.path, `申请新建文件，初始长度: ${initialContent.length} 字符`, ctx);
-
                     await fs.mkdir(path.dirname(absPath), { recursive: true });
                     await fs.writeFile(absPath, initialContent, "utf-8");
-
                     return `✅ [文件创建成功]：已成功新建文件 [${args.path}]。`;
                 } catch (error: any) {
-                    return `操作被安全拦截或失败: ${error.message}`;
+                    return `操作失败: ${error.message}`;
                 }
             }
         }
@@ -192,38 +181,66 @@ export const fsTools: CustomTool[] = [
                 },
                 required: ["path"]
             },
-            async execute(args: { path: string }, ctx?) {
+            safetyLevel: ToolSafetyLevel.DANGER,
+            isSync: true,
+            requireApproval: async (args: { path: string }) => {
+                let label = "文件或目录";
+                try {
+                    const stat = await fs.stat(resolveSafePath(args.path));
+                    label = stat.isDirectory() ? "一整个文件夹目录" : "纯物理文件";
+                } catch { /* 目标不存在时用通用标签，execute 内会再校验 */ }
+                return `⚠️【最高安全警报】申请永久销毁 [${args.path}]（目标物理属性为：${label}）。该操作完全不可逆！`;
+            },
+            async execute(args: { path: string }) {
                 try {
                     const absPath = resolveSafePath(args.path);
-
                     let stat: fsSync.Stats;
                     try {
                         stat = await fs.stat(absPath);
                     } catch {
                         return `❌ [销毁失败]：在工作区内未找到指定的路径 [${args.path}]。`;
                     }
-
                     const isDirectory = stat.isDirectory();
-                    const targetTypeLabel = isDirectory ? "一整个文件夹目录" : "纯物理文件";
-
-                    await requireUserApproval(
-                        "delete_path",
-                        args.path,
-                        `⚠️【最高安全警报】申请永久销毁 [${args.path}]。目标物理属性为：${targetTypeLabel}。该操作完全不可逆！`,
-                        ctx
-                    );
-
                     if (isDirectory) {
                         await fs.rm(absPath, { recursive: true, force: true });
                     } else {
                         await fs.unlink(absPath);
                     }
-
+                    const targetTypeLabel = isDirectory ? "一整个文件夹目录" : "纯物理文件";
                     return `✅ [路径销毁成功]：已成功永久销毁${targetTypeLabel} [${args.path}]。`;
                 } catch (error: any) {
-                    return `操作被安全拦截或失败: ${error.message}`;
+                    return `操作失败: ${error.message}`;
                 }
             }
         }
+    },
+    {
+        type: "function",
+        function: {
+            name: "write_file",
+            description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。适合从零生成文件或大段重写；局部修改请改用 edit_file。",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "目标文件相对路径" },
+                    content: { type: "string", description: "要写入的完整文件内容" },
+                },
+                required: ["path", "content"],
+            },
+            safetyLevel: ToolSafetyLevel.MUTATION,
+            isSync: true,
+            requireApproval: (args: { path: string; content: string }) =>
+                `申请全量写入文件 [${args.path}]（${args.content.length} 字符，若已存在将被整体覆盖）`,
+            async execute(args: { path: string; content: string }) {
+                try {
+                    const absPath = resolveSafePath(args.path);
+                    await fs.mkdir(path.dirname(absPath), { recursive: true });
+                    await fs.writeFile(absPath, args.content, "utf-8");
+                    return `✅ [文件写入成功]：已全量写入 [${args.path}]（${args.content.length} 字符）。`;
+                } catch (error: any) {
+                    return `操作失败: ${error.message}`;
+                }
+            },
+        },
     }
 ];

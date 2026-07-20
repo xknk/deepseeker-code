@@ -1,4 +1,9 @@
 /**
+ * @file llm/sanitizeModelOutput.ts
+ * @description 模型输出净化：剥离各种「思考 / 思维链」标记块，避免其泄漏到 TUI / Web / 会话转录。
+ */
+
+/**
  * 去掉模型侧「思维链 / 思考」标记，避免喷到 TUI/Web/转录。
  * 覆盖 DeepSeek 反斜杠 think 块、尖括号 think / reasoning 块及孤立片段。
  */

@@ -2,39 +2,69 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 17:01:17
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 15:01:40
- * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\llm\providers\index.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+ * @LastEditTime: 2026-07-16 10:00:00
+ * @FilePath: \deepSeekCode\src\core\src\llm\model.ts
+ * @Description: 流式对话 —— yield 每个 ChatCompletionChunk，由 runAgent 消费
  */
+import OpenAI from "openai";
 import { Msg } from "@/session/contextCore.ts";
 import { model } from "./createModel.ts"
 import { MsgParams, outMsg, toolMsg } from "./type.ts";
 
-async function chatWithModelWithTools(messages: Msg[], tools?: toolMsg[], callOpts?: { signal?: AbortSignal, onAssistantTextDelta?: (delta: string) => void }): Promise<outMsg> {
+/**
+ * 流式对话：yield 每个 ChatCompletionChunk，调用方(runAgent)负责消费。
+ * - 文本增量 delta.content 由 runAgent yield 为 text.delta 推前端
+ * - tool_calls 分片 delta.tool_calls[index] 由 runAgent 按 index 累积，流完整体 JSON.parse
+ * - usage 在最后一个 chunk（已开 stream_options.include_usage）
+ * 协议限制：tool_call.arguments 是增量分片，必须流完拼整才能执行（"边吐字边调工具"做不到）。
+ */
+async function* chatWithModelWithTools(
+    messages: Msg[],
+    tools?: toolMsg[],
+    callOpts?: { signal?: AbortSignal },
+): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+    const requestBody = {
+        messages: messages,
+        model: "deepseek-v4-flash",
+        tool_choice: "auto", // 让模型自动选择工具
+        tools: tools,
+        thinking: { "type": "enabled" },
+        reasoning_effort: "high",
+        stream: true,
+        stream_options: { include_usage: true }, // 流式下 usage 在末包 chunk
+    } as MsgParams;
+
+    // stream:true 时 SDK 返回 Stream<ChatCompletionChunk>（AsyncIterable），按可迭代消费
+    const stream = await model.chat.completions.create(requestBody) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+    for await (const chunk of stream) {
+        if (callOpts?.signal?.aborted) break;   // 调用方中止则停止拉取
+        yield chunk;
+    }
+}
+
+/**
+ * 非流式对话：用于摘要等不需要流式输出的场景（一次拿完整 completion）。
+ */
+export async function chatWithModelWithSummary(
+    messages: Msg[],
+    tools?: toolMsg[],
+    callOpts?: { signal?: AbortSignal },
+): Promise<outMsg> {
     try {
         const requestBody = {
             messages: messages,
             model: "deepseek-v4-flash",
-            tool_choice: "auto", // 让模型自动选择工具
+            tool_choice: "auto",
             tools: tools,
-            thinking: { "type": "enabled" },
-            reasoning_effort: "high",
             stream: false,
         } as MsgParams;
         const completion = await model.chat.completions.create(requestBody);
-        if (completion && 'choices' in completion) {
-            return completion as outMsg;
-        }
-
+        if (completion && 'choices' in completion) return completion as outMsg;
         throw new Error("API 响应异常，未包含 choices 结构");
     } catch (error) {
         console.error("❌ 接口调用失败:", error);
-        // 4. 必须将错误抛出，或者返回一个保底的错误对象。
-        // 如果这里保持空着，函数在报错时会隐式返回 undefined，从而引发 ts(2322) 报错
         throw error;
     }
 }
-
-
 
 export default chatWithModelWithTools;

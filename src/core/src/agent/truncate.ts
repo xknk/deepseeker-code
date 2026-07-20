@@ -6,8 +6,22 @@
  * @FilePath: \lims-frontd:\code\自研\roundSeekCode\src\core\src\agent\truncate.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file agent/truncate.ts
+ * @description 上下文（窗口）治理模块：负责把过长的工具返回与对话历史“削”进模型窗口。
+ *
+ *  三类能力：
+ *  1) 文本微压缩 —— stripAnsi / microcompactTextContent / relativizeWorkspacePathsInText：
+ *     去掉 ANSI 转义、HTML 注释、把绝对路径相对化为 ./...，缩短 system/tool 消息 token；
+ *  2) 文本头尾截断 —— truncateToolResult（工具返回，回灌模型窗口）/ truncateApprovalDetail（审批详情，推前端 UI）：超过上限时去中间、留头尾；
+ *  3) 滚动摘要 —— ensureFitsWindow / compactToLine / compactBatch：
+ *     当上下文 token 超过阈值时，把旧消息分批压缩成摘要，写入 messageArr[1] 的“滚动摘要槽”，
+ *     并把快照落盘（含连续失败熔断，防止天价账单死循环）。
+ *
+ *  与 runAgent 的约定：messageArr[0] 为系统提示词、messageArr[1] 为滚动摘要槽、其余为活动消息。
+ */
 import { appConfig } from "@/config/index.ts";
-import chatWithModelWithSummary from "@/llm/model.ts";
+import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, Msg, splitUntils } from "@/session/contextCore.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
@@ -17,6 +31,7 @@ import { ensureOptions, RunAgentEvents } from "./type.ts";
 const ANSI_ESCAPE = /\u001b\[[\d;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
 /**
  * @description: 获取除主目录外，所有允许/可能被访问的代码库根目录（自愈整形版）
+ * @return {string[]} 根目录列表（当前为空数组，预留扩展位）
  */
 export const getFileAccessRoots = (): string[] => {
     const roots: string[] = [];
@@ -32,6 +47,8 @@ export const getFileAccessRoots = (): string[] => {
 
 /**
  * 将常见绝对路径替换为相对 workspace 的写法，缩短 system/tool 消息 token（optimize §3）
+ * @param text 原始文本
+ * @return 路径相对化后的文本；若 workspace 根解析失败则仅做 ANSI 剥离
  */
 export const relativizeWorkspacePathsInText = (text: string): string => {
     if (!text) return text;
@@ -61,11 +78,14 @@ export const relativizeWorkspacePathsInText = (text: string): string => {
     return out;
 }
 
+/** 剥离文本中的 ANSI / OSC 转义序列。 */
 export function stripAnsi(text: string): string {
     return text.replace(ANSI_ESCAPE, "");
 }
 /**
  * 单条消息内容微压缩：ANSI、多余空白、HTML 注释；路径相对化
+ * @param raw 原始内容
+ * @return 压缩后的干净文本
  */
 export function microcompactTextContent(raw: string): string {
     let s = stripAnsi(raw || "");
@@ -77,7 +97,7 @@ export function microcompactTextContent(raw: string): string {
 /**
  * @description: 工具返回消息超过最大值时，去除中间留头尾信息（自适应预算分配版）
  * @param {string} result 原始工具返回内容
- * @param {number} maxChars 最大允许字符数（选填）
+ * @param {number} maxChars 最大允许字符数（选填，缺省时按 MAX_HISTORY_TOKENS 动态推算）
  * @return {string} 整形后的文本内容
  */
 export const truncateToolResult = (result: string, maxChars?: number): string => {
@@ -93,6 +113,26 @@ export const truncateToolResult = (result: string, maxChars?: number): string =>
     const omitted = Math.max(0, totalLines - head.split("\n").length - tail.split("\n").length);
 
     return [head, "", `…(已省略中间约 ${omitted} 行，共 ${totalLines} 行)…`, "", tail].join("\n");
+}
+
+
+/**
+ * @description: 审批详情（requireApproval 返回的 detail）超长时去中间、留头尾，
+ *  防止上千行 old_str/new_str 全量经 SSE 推给前端导致单帧过大、渲染卡顿。
+ *  与 truncateToolResult 的差异：不做 ANSI/路径微压缩（detail 是给人看的 diff，
+ *  微压缩会篡改原文、干扰用户判断），仅按字符阈值头尾截断并标注折叠信息。
+ * @param {string} detail 工具 requireApproval 生成的审批说明原文
+ * @param {number} maxChars 最大允许字符数（默认 2000）
+ * @return {string} 截断后的 detail；未超长则原样返回
+ */
+export const truncateApprovalDetail = (detail: string, maxChars = 2000): string => {
+    if (!detail || detail.length <= maxChars) return detail;
+
+    const half = Math.floor(maxChars / 2);
+    const head = detail.slice(0, half);
+    const tail = detail.slice(-half);
+    const omitted = detail.length - maxChars;
+    return `${head}\n\n[… 已折叠 ${omitted} 字符，完整改动请用 read_file 或核对工具参数 …]\n\n${tail}`;
 }
 
 
@@ -138,6 +178,8 @@ export const compactToLine = async (toCompact: Msg[], modelWindow: number, signa
 }
 /**
  * @description: 预留系统提示词和摘要区域
+ *  约定：messageArr[0] = 系统提示词、messageArr[1] = 滚动摘要槽。
+ *  若对应位置不是 system 消息，则原地插入占位，保证后续压缩逻辑的下标稳定。
  * @param {Msg} messageArr
  * @return {*}
  */
@@ -152,12 +194,10 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
 
 /**
  * @description: 压缩全量上下文
- * @param {Msg} messageArr // 全量上下文
- * @param {number} compactRatio // 当token占用为最大token百分之compactRatio时触发一次性压缩上下文
- * @param {number} keepRecentUnits // 最大保留条数信息
- * @param {number} modelWindow // 最大token
- * @param {RunAgentEvents} events // 触发回调方法组
- * @param {AbortSignal} signal // 主动停止
+ *  当 token 超过 modelWindow * compactRatio 时，循环把“可压缩区”分批压成摘要，
+ *  写入 messageArr[1] 的滚动摘要槽，仅保留最近 keepRecentUnits 条活动消息。
+ *  每轮压缩后落盘（rollingSummary 快照）；连续失败 3 次触发物理熔断，保护账单。
+ * @param {ensureOptions} event // 含全量上下文、阈值与回调的压缩入参（messageArr 原地修改）
  * @return {*}
  */
 export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
@@ -280,10 +320,18 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     }
 }
 
+/** 类型守卫：判断工具返回值是否为异步生成器（流式工具）。 */
 function isAsyncGenerator(x: any): x is AsyncGenerator<string> {
     return x != null && typeof x[Symbol.asyncIterator] === 'function';
 }
 
+/**
+ * 归一化工具执行结果：工具可返回 Promise<string> 或 AsyncGenerator<string>（流式）。
+ *  对流式结果逐块拼接（可选回调 onChunk 实时透出），对非字符串结果 JSON.stringify。
+ * @param ret 工具返回值
+ * @param onChunk 流式分块回调（可选）
+ * @return 归一化后的字符串结果
+ */
 export const collectToolResult = async (
     ret: Promise<string> | AsyncGenerator<string>,
     onChunk?: (s: string) => void,

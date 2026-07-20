@@ -1,3 +1,8 @@
+/**
+ * @file observability/traceCalculate.ts
+ * @description Trace 运维的纯计算辅助：getDirBytes（目录总字节，仅冷启动 / 清理后调用）、
+ *  getTodayDateString（当天日期串，用于 trace 文件名的日期前缀）。
+ */
 import fs from "fs/promises";
 import path from "path";
 

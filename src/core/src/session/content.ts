@@ -6,6 +6,12 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\content.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file session/content.ts
+ * @description 跨会话构建发给模型的上下文视图 buildContextMessages：
+ *  从转录读取历史 → 跳过已归档条数 → 拼接 [system, 摘要槽, ...active, 本次user]。
+ *  布局与 runAgent.ensureSummarySlot 保持一致；须在 appendMessage(本次user) 之前调用。
+ */
 import { cleanMsg, estimateTokens, groupUnits, Msg } from "./contextCore.ts";
 import { appConfig } from "@/config/index.ts"
 import { readMessages } from "./transcript.ts";

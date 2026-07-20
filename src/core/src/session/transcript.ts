@@ -6,6 +6,11 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\transcript.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file session/transcript.ts
+ * @description 会话转录（JSONL 追加日志）：readMessages 读取全部历史消息，
+ *  appendMessage 以 append 方式高效追加单条消息（含 tool_calls / tool_call_id 等配对字段）。
+ */
 import fs from "fs/promises";
 import OpenAI from "openai";
 import { ensureSessionsDir, getStorePath } from "./store.ts";

@@ -12,10 +12,19 @@ const pendingLocks = new Map<string, ApprovalResolver>();
 /**
  * 工具层调用：原地制造一个阻塞栅栏，挂起当前大模型工具执行协程
  * @param toolsId 对应 TraceBase 的唯一埋点凭证
+ * @param signal 用户主动中断信号（cc 风格：不靠定时器超时判拒绝，改为监听中断）；
+ *   signal abort 时立即判拒绝并清理门锁，杜绝失联导致协程永久挂起。
  */
-export const waitForUserApproval = async (toolsId: string): Promise<boolean> => {
+export const waitForUserApproval = async (toolsId: string, signal?: AbortSignal): Promise<boolean> => {
     return new Promise<boolean>((resolve) => {
+        // 已中断：直接判拒绝，不挂起
+        if (signal?.aborted) { resolve(false); return; }
         pendingLocks.set(toolsId, resolve);
+        // 用户主动中断（断开/停止）唤醒挂起的审批，取代旧的超时自动熔断
+        if (signal) {
+            const onAbort = (): void => { resolve(false); pendingLocks.delete(toolsId); };
+            signal.addEventListener("abort", onAbort, { once: true });
+        }
     });
 };
 

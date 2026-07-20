@@ -1,4 +1,11 @@
 /**
+ * @file observability/type.ts
+ * @description 可观测性的核心类型：
+ *  TraceDecisionSource（决策来源）、TraceEventType（生命周期事件枚举）、
+ *  TraceBase（结构化埋点对象，含 meteData / usage / payload）、UIEvent（面向前端的交互事件）。
+ */
+
+/**
  * 编排/路由决策来源追踪分类
  */
 export type TraceDecisionSource =
@@ -48,7 +55,7 @@ export interface TraceBase {
         ok?: boolean;       // 执行是否成功
         durationMs?: number; // 该步骤消耗的时长（毫秒）
         attempt?: number;   // 重试次数
-        round?:number; // 运行次数
+        round?: number; // 运行次数
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {
@@ -65,3 +72,12 @@ export interface TraceBase {
         output?: string;
     };
 }
+
+/**
+ * 面向前端/UI 的交互事件（与 trace 解耦的独立通道）
+ * - 只承载“需要用户感知或交互”的事件，不含任何运维/计费数据
+ * - 工具进度（tool.start/end）不在此处，由 AgentEvent 负责，避免重复
+ */
+export type UIEvent =
+    | { type: 'approval_request'; toolsId: string; toolName: string; detail: string }
+    | { type: 'tool.denied'; toolsId: string; toolName: string };

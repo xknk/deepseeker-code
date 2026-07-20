@@ -7,6 +7,12 @@
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 /**
+ * @file channels/unifiedMessage.ts
+ * @description 统一消息协议：定义跨渠道的入站（UnifiedInboundMessage）/ 出站（UnifiedOutboundMessage）
+ *  消息结构，以及从 WebChat 请求体构造入站消息的适配器 createInboundFromWebChatBody。
+ */
+
+/**
  * 用户发送/接受消息
 **/
 export interface UnifiedInboundMessage {
@@ -31,6 +37,10 @@ export interface UnifiedOutboundMessage {
      */
     metadata?: Record<string, unknown>;
 }
+/**
+ * 从 WebChat 的请求体构造入站消息：校验 message 为非空字符串后，
+ * 规范化 sessionId / model 并补上时间戳；校验失败返回 null。
+ */
 export function createInboundFromWebChatBody(body: unknown): UnifiedInboundMessage | null {
     if (!body || typeof body !== "object") return null;
     const anyBody = body as {

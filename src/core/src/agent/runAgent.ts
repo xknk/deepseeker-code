@@ -2,20 +2,47 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 15:25:11
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-07-10 11:51:22
+ * @LastEditTime: 2026-07-20 09:40:14
  * @FilePath: \deepSeekCode\src\core\src\agent\runAgent.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+
+/**
+ * @file agent/runAgent.ts
+ * @description Agent 主循环：驱动「模型推理 ↔ 工具调用」的多轮循环，是整个 agent 的核心。
+ *
+ *  每轮 while(true) 的职责：
+ *  1) 窗口治理 —— ensureFitsWindow 判断并触发上下文压缩 / 滚动摘要；
+ *  2) 流式推理 —— chatWithModelWithTools 流式拉取，边收边 yield text.delta / thinking.delta，
+ *     按 index 拼接 tool_calls 分片，末包收 usage；
+ *  3) 工具执行 —— 解析 tool_calls，按 safetyLevel 做审批熔断，执行（含超时 / verifyResult 校验），
+ *     截断结果后回写上下文与本地会话；
+ *  4) 退出判定 —— 无工具调用则结束；连续 3 次相同调用则熔断；用户中止则立即结束。
+ *
+ *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
+ */
 import chatWithModelWithTools from "@/llm/model.ts";
-import { ToolContext } from "@/tool/index.ts";
 import OpenAI from "openai";
 import { appendMessage } from "@/session/transcript.ts";
 import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolResult } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
+import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
+import { requestApproval } from "@/tool/guard.ts";
 
 
 // ============ 主流程 ============
+/**
+ * 运行 Agent 主循环（流式）。
+ *
+ * 持续进行「模型推理 → 工具调用」的多轮循环，直到模型不再请求工具、检测到重复调用熔断、
+ * 或调用方中止（abortSignal）。过程中通过 yield 向外推送阶段事件（AgentEvent），
+ * 通过 options.events 回传可观测性埋点。
+ *
+ * @param message  对话上下文（原地修改：追加 assistant / tool 消息）。约定 [0]=系统提示词、[1]=滚动摘要槽
+ * @param options  运行配置，见 {@link RunAgentOptions}
+ * @yields AgentEvent  round.start / text.delta / thinking.delta / tool.start / tool.end / final
+ */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
     const rawTools = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
     const sessionId = options.sessionId; // 本次会话id
@@ -31,7 +58,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         type: t.type,
         function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters }
     }));
-    const callOpts = { signal: signal, onAssistantTextDelta: options?.onAssistantTextDelta };
     // 预留系统提示词和摘要存放区域
     ensureSummarySlot(message);
     let round = 0;
@@ -87,7 +113,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return
             }
 
-            let response: OpenAI.Chat.ChatCompletion;
+            let assistantMessage: OpenAI.Chat.ChatCompletionMessage = { role: 'assistant', content: null } as OpenAI.Chat.ChatCompletionMessage;
             try {
                 events({
                     sessionId: sessionId,
@@ -106,9 +132,53 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         input: message[message.length - 1].content as string,
                     }
                 })
-                // 获取大模型消息
-                console.log(`🔄 代理推理第 ${round} 轮...`);
-                response = await chatWithModelWithTools(message, cleanedToolSchemas, callOpts);
+                console.log(`🔄 代理推理第 ${round} 轮（流式）...`);
+
+                // ★ 流式消费：累积 content（边收边 yield text.delta）+ 按 index 拼接 tool_calls 分片 + 收 usage
+                let contentBuf = "";
+                const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
+                let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
+                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal })) {
+                    if (signal?.aborted) break;
+                    const delta = chunk.choices?.[0]?.delta;
+                    if (delta) {
+                        if (delta.content) {
+                            contentBuf += delta.content;
+                            yield { type: 'text.delta', text: delta.content };
+                        }
+                        // DeepSeek reasoning 流式（扩展字段，OpenAI 标准类型未定义，用 as any 读取）
+                        const reasoning = (delta as any).reasoning_content;
+                        if (reasoning) yield { type: 'thinking.delta', text: reasoning };
+                        if (delta.tool_calls) {
+                            for (const tc of delta.tool_calls) {
+                                const idx = tc.index ?? 0;
+                                let buf = toolCallsBuf.get(idx);
+                                if (!buf) { buf = { function: { name: "", arguments: "" } }; toolCallsBuf.set(idx, buf); }
+                                if (tc.id) buf.id = tc.id;
+                                if (tc.type) buf.type = tc.type;
+                                if (tc.function?.name) buf.function.name += tc.function.name;
+                                if (tc.function?.arguments) buf.function.arguments += tc.function.arguments;
+                            }
+                        }
+                    }
+                    if (chunk.usage) lastUsage = chunk.usage;
+                }
+                if (signal?.aborted) {
+                    yield { type: 'final', text: contentBuf || lastContent || "（已中止）" };
+                    return;
+                }
+
+                // 流式拼接出 assistantMessage
+                assistantMessage = {
+                    role: 'assistant',
+                    content: contentBuf || null,
+                    ...(toolCallsBuf.size > 0 ? {
+                        tool_calls: Array.from(toolCallsBuf.entries())
+                            .sort((a, b) => a[0] - b[0])
+                            .map(([, tc]) => ({ id: tc.id, type: tc.type || 'function', function: tc.function }))
+                    } : {}),
+                } as unknown as OpenAI.Chat.ChatCompletionMessage;
+
                 events({
                     sessionId: sessionId,
                     eventType: 'llm.response',
@@ -120,12 +190,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         round
                     },
                     usage: {
-                        prompt_tokens: response.usage?.prompt_tokens,
-                        completion_tokens: response.usage?.completion_tokens,
-                        total_tokens: response.usage?.total_tokens,
-                        compress_tokens: response.usage?.total_tokens,
-                        prompt_cache_hit_tokens: response.usage?.prompt_tokens_details?.cached_tokens,
-                        prompt_cache_miss_tokens: (response.usage?.prompt_tokens || 0) - (response.usage?.prompt_tokens_details?.cached_tokens || 0)
+                        prompt_tokens: lastUsage?.prompt_tokens,
+                        completion_tokens: lastUsage?.completion_tokens,
+                        total_tokens: lastUsage?.total_tokens,
+                        compress_tokens: lastUsage?.total_tokens,
+                        prompt_cache_hit_tokens: lastUsage?.prompt_tokens_details?.cached_tokens,
+                        prompt_cache_miss_tokens: (lastUsage?.prompt_tokens || 0) - (lastUsage?.prompt_tokens_details?.cached_tokens || 0)
                     },
                     payload: {
                         input: message[message.length - 1].content as string,
@@ -156,8 +226,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
 
-            // 获取本次对话结果
-            const assistantMessage = response.choices[0].message;
+            // assistantMessage 已在上方流式消费中拼接完成
             // 存入本次对话上下文中
             message.push({
                 role: 'assistant',
@@ -228,7 +297,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             for (const toolCall of assistantMessage.tool_calls) {
                 let calledName = "";
                 let calledArgs: any = {};
-                let parseFailed = false;
+                let parseFailed = false; // 判读是否解析失败
                 if (toolCall.type === 'function') {
                     calledName = toolCall.function.name;
                     try { calledArgs = JSON.parse(toolCall.function.arguments || "{}"); }
@@ -243,10 +312,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: placeholder });
                     continue;
                 }
-                const t0 = Date.now(); // 记录工具执行时间
                 const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
                 // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
-                const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events };
+                const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent };
                 let result = "";
                 yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
                 if (parseFailed) {
@@ -270,66 +338,93 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         }
                     })
                 } else if (matchedTool && typeof matchedTool.function.execute === 'function') {
-                    try {
-                        events({
-                            sessionId: sessionId,
-                            eventType: 'tool.execute.start',
-                            meteData: {
-                                depth: depth,
-                                decisionSource: llmDecisionSource,
-                                durationMs: performance.now() - startTime,
-                                round,
-                                tools_id: toolCall.id,
-                                toolName: calledName,
-                                toolSource: 'builtin',
-                            },
-                            payload: {
-                                output: matchedTool.function.arguments,
+                    // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前由执行层统一请求用户审批
+                    //   （MUTATION 将来接入 --yes / 免审目录配置后可自动放行，此处先默认需审）
+                    const level = matchedTool.function.safetyLevel;
+                    const needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
+                    let denied = false;
+                    if (needApproval) {
+                        const ra = matchedTool.function.requireApproval;
+                        const detail = ra
+                            ? (typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra)
+                            : `申请执行高危工具 [${calledName}]`;
+                        const approved = await requestApproval(calledName, toolCall.id, detail, toolCtx);
+                        if (!approved) {
+                            denied = true;
+                            result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`;
+                        }
+                    }
+                    if (!denied) {
+                        try {
+                            events({
+                                sessionId: sessionId,
+                                eventType: 'tool.execute.start',
+                                meteData: {
+                                    depth: depth,
+                                    decisionSource: llmDecisionSource,
+                                    durationMs: performance.now() - startTime,
+                                    round,
+                                    tools_id: toolCall.id,
+                                    toolName: calledName,
+                                    toolSource: 'builtin',
+                                },
+                                payload: {
+                                    output: matchedTool.function.arguments,
+                                }
+                            })
+                            // 执行工具（cc 风格：不设定时器超时；取消由用户主动中断 ctx.abortSignal 驱动，
+                            //   command 等工具已把 abortSignal 接到 spawn，中断即真正终止底层任务）
+                            result = await collectToolResult(matchedTool.function.execute(calledArgs, toolCtx));
+                            // verifyResult 判定：工具自报成败，FAILED 时前置警告（防模型对报错产生“成功”幻觉）
+                            if (matchedTool.function.verifyResult) {
+                                const verdict = matchedTool.function.verifyResult(result, toolCtx);
+                                if (verdict.status === ToolExecutionResultStatus.FAILED) {
+                                    result = `【系统判定：执行失败】${verdict.summary ?? ''}\n请正视下方输出，不要乐观假设成功。\n\n${result}`;
+                                }
                             }
-                        })
-                        // 执行工具
-                        result = await collectToolResult(matchedTool.function.execute(calledArgs, toolCtx));
-                        events({
-                            sessionId: sessionId,
-                            eventType: 'tool.execute.end',
-                            meteData: {
-                                depth: depth,
-                                decisionSource: llmDecisionSource,
-                                durationMs: performance.now() - startTime,
-                                round,
-                                tools_id: toolCall.id,
-                                toolName: calledName,
-                                toolSource: 'builtin',
-                                ok: true,
-                            },
-                            payload: {
-                                output: result,
-                            }
-                        })
-                    } catch (err) {
-                        console.error(`❌ 执行工具 ${calledName} 时发生错误:`, err);
-                        result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
-                        events({
-                            sessionId: sessionId,
-                            eventType: 'tool.failed',
-                            meteData: {
-                                depth: depth,
-                                decisionSource: llmDecisionSource,
-                                durationMs: performance.now() - startTime,
-                                round,
-                                tools_id: toolCall.id,
-                                toolName: calledName,
-                                toolSource: 'builtin',
-                                ok: false,
-                                attempt: round
-                            },
-                            payload: {
-                                output: result,
-                            }
-                        })
+                            events({
+                                sessionId: sessionId,
+                                eventType: 'tool.execute.end',
+                                meteData: {
+                                    depth: depth,
+                                    decisionSource: llmDecisionSource,
+                                    durationMs: performance.now() - startTime,
+                                    round,
+                                    tools_id: toolCall.id,
+                                    toolName: calledName,
+                                    toolSource: 'builtin',
+                                    ok: true,
+                                },
+                                payload: {
+                                    output: result,
+                                }
+                            })
+                        } catch (err) {
+                            console.error(`❌ 执行工具 ${calledName} 时发生错误:`, err);
+                            result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
+                            events({
+                                sessionId: sessionId,
+                                eventType: 'tool.failed',
+                                meteData: {
+                                    depth: depth,
+                                    decisionSource: llmDecisionSource,
+                                    durationMs: performance.now() - startTime,
+                                    round,
+                                    tools_id: toolCall.id,
+                                    toolName: calledName,
+                                    toolSource: 'builtin',
+                                    ok: false,
+                                    attempt: round
+                                },
+                                payload: {
+                                    output: result,
+                                }
+                            })
+                        }
                     }
                 } else {
                     result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
+                    const ok = !result.startsWith("工具执行失败");
                     events({
                         sessionId: sessionId,
                         eventType: 'tool.validation.failed',
@@ -341,7 +436,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             tools_id: toolCall.id,
                             toolName: calledName,
                             toolSource: 'builtin',
-                            ok: false,
+                            ok: ok,
                             attempt: round
                         },
                         payload: {
@@ -350,7 +445,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     })
                 }
                 // 获取工具返回的信息，如果超过最大值，则截取中间，留头尾
-                result = truncateToolResult(result);
+                result = truncateToolResult(result, matchedTool.function.maxOutputCharacters);
                 const ok = !result.startsWith("工具执行失败");
                 yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result, ok };
                 // 存储本次工具结果的消息到上下文中
@@ -365,6 +460,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             }
         }
     } finally {
-        
+
     }
 }

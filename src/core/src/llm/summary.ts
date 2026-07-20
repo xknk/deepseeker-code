@@ -9,6 +9,14 @@
 import { Msg } from "@/session/contextCore.ts";
 import { outMsg, MsgParams } from "./type.ts"
 import { model } from "./createModel.ts"
+
+/**
+ * 非流式摘要对话：一次性返回完整 completion，供上下文压缩（滚动摘要）使用。
+ * 注意：llm/model.ts 亦导出同名函数 chatWithModelWithSummary，本项目以 model.ts 版本为准；
+ *       本文件为早期实现，保留以兼容历史引用。
+ * @param messages 需要概括的对话上下文
+ * @returns 模型的完整非流式响应
+ */
 export const chatWithModelWithSummary = async (messages: Msg[]): Promise<outMsg> => {
     try {
         const requestBody = {

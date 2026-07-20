@@ -6,9 +6,15 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\channels\chatChannelAdapter.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AEs
  */
+/**
+ * @file channels/chatChannelAdapter.ts
+ * @description WebChat 渠道适配器：sendOutbound 把统一出站消息转成 HTTP JSON 响应回给前端。
+ *  作为非 SSE 渠道的后备发送通道（SSE 主通道由 chatProcessing 的 sseWrite 直接推送）。
+ */
 import type { Response } from "express";
 import { UnifiedOutboundMessage } from "./unifiedMessage.ts";
 
+/** 把出站消息以 JSON 形式回送给 express Response（丢失 res 时安全丢弃，防止崩溃）。 */
 export const sendOutbound = async (target: unknown, message: UnifiedOutboundMessage) => {
     const res = target as Response | undefined;
     console.log(message, 'message')

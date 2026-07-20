@@ -1,3 +1,8 @@
+/**
+ * @file observability/store.ts
+ * @description Trace 落盘路径计算：按主 traceId 归档到 [dataDir]/trace/[workspace]/[主id]/ 下；
+ *  同一会话跨天也复用同一文件（断流修复），文件名带「初生日期」前缀供过期清理判定。
+ */
 import { appConfig } from "@/config/index.ts";
 import path from "path";
 import fs from "fs/promises";

@@ -4,7 +4,7 @@
  * @Description: 语言服务协议工具集 (lspTools) - 极速精准代码跳转 - 暂时不启用，后续下载lsp相关服务再启用
  */
 import path from "path";
-import { CustomTool } from "../type.ts";
+import { CustomTool, ToolSafetyLevel } from "../type.ts";
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || process.cwd();
 
@@ -17,6 +17,7 @@ async function queryLanguageServer(method: string, params: any): Promise<any> {
     return null; 
 }
 
+/** 语言服务（LSP）类工具集：lsp_goto_definition（精准跳转定义）。注：当前为伪代码占位、未启用，待接入真实 LSP 服务。 */
 export const lspTools: CustomTool[] = [
     {
         type: "function",
@@ -32,6 +33,8 @@ export const lspTools: CustomTool[] = [
                 },
                 required: ["path", "line", "character"],
             },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
             async execute(args: { path: string; line: number; character: number }) {
                 try {
                     const absPath = path.resolve(WORKSPACE_ROOT, args.path);

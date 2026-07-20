@@ -6,19 +6,17 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\observability\trace.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-17 15:38:50
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 10:13:03
- * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\observability\trace.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+/**
+ * @file observability/trace.ts
+ * @description Trace 落盘与自适应运维：emitTrace 统一分发埋点事件 → appendTraceEvent 高效追加 JSONL，
+ *  并附带进程级内存水位 + 双闸（3 天时间闸 / 50MB 容量闸）自动清理（软规则过期清理 + 容量硬驱逐）。
+ *  全程旁路、绝不阻塞主业务；冷时钟跨重启持久化。
  */
 import { TraceBase, TraceEventType } from "./type.ts";
 import fs from "fs/promises";
 import { appConfig } from "@/config/index.ts";
 import path from "path";
-import { getGlobalClockPath, getTraceDirPath, getTracePath, getTraceStorePath } from "./stroe.ts";
+import { getGlobalClockPath, getTraceDirPath, getTracePath, getTraceStorePath } from "./store.ts";
 import { getDirBytes } from "./traceCalculate.ts";
 // ==================== 🛠️ 全局自适应运维大闸控制常数 ====================
 /** 

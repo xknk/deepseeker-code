@@ -6,6 +6,13 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\store.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file session/store.ts
+ * @description 会话级持久化存储：以主会话 ID 归档，落盘为 JSON 文件。
+ *  提供 readStore / writeStore（整库读写）、getOrCreateSessionId（会话身份）、
+ *  getRollingState / setRollingState（滚动摘要与压缩失败熔断计数，供上下文压缩断路器使用）。
+ *  路径分拣见 getStorePath：主 / 子 / 摘要数据统一收拢到主会话文件夹下。
+ */
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
@@ -36,6 +43,7 @@ export const ensureSessionsDir = async (sessionId: string): Promise<void> => {
     await fs.mkdir(getSessionsDirPath(sessionId), { recursive: true });
 }
 
+/** 写入整个会话存储（JSON pretty）。写入前确保目录存在。 */
 export const writeStore = async (sessionId: string, store: any) => {
     // 1. 先确保存放文件的文件夹已经存在
     await ensureSessionsDir(sessionId);
@@ -43,6 +51,7 @@ export const writeStore = async (sessionId: string, store: any) => {
     await fs.writeFile(getStorePath(sessionId), JSON.stringify(store, null, 2), "utf-8");
 }
 
+/** 读取或创建会话身份：若 sessionId 已有记录则复用，否则新建并落盘一个带元信息的空条目。 */
 export const getOrCreateSessionId = async (sessionId: string | undefined): Promise<string> => {
     let entry = sessionId ? await readStore(sessionId) : null
     if (!entry) {

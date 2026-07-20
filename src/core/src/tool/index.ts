@@ -6,12 +6,23 @@
  * @FilePath: \deepSeekCode\src\core\src\tool\index.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file tool/index.ts
+ * @description 工具注册中心：聚合所有分类工具（system / agent / fs / search / command / glob）
+ *  到统一的 agentTools 注册表，供 runAgent 通过 toolSchemas 传入。
+ *
+ *  关键设计：先声明空数组 agentTools，再把「获取自身」的闭包 () => agentTools 传给
+ *  createAgentTools，使 spawn_agent 工具能在运行时拿到【完整】工具列表（含自身），
+ *  从而避免循环依赖（定义时 agentTools 尚未填充）。
+ */
 import { CustomTool } from "./type.ts";
 import { systemTools } from "./registry/system.ts";
 import { createAgentTools } from "./registry/agent.ts";
 // 后续扩展可以继续 import:
 import { fsTools } from "./registry/fs.ts";
 import { searchTools } from "./registry/search.ts";
+import { commandTools } from "./registry/command.ts";
+import { globTools } from "./registry/glob.ts";
 
 export * from "./type.ts";
 
@@ -27,4 +38,6 @@ agentTools.push(
     ...agentSubTools,
     ...fsTools,      // 以后加了文件读写直接解构进来
     ...searchTools,  // 以后加了正则检索直接解构进来
+    ...commandTools, // 命令执行（DANGER，强制审批）
+    ...globTools,    // 文件名 glob 搜索
 );

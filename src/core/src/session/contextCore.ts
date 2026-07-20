@@ -6,6 +6,13 @@
  * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\session\contextCore.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
+/**
+ * @file session/contextCore.ts
+ * @description 上下文（消息）核心工具：
+ *  Msg 类型别名、token 估算（estimateTokens，针对 DeepSeek 代码场景折算）、
+ *  消息清洗（cleanMsg）、配对感知分组（groupUnits：assistant(tool_calls)+tool 不可分割）、
+ *  按单元切分（splitUntils：分离待压缩区与保留区）。
+ */
 import OpenAI from "openai";
 export type Msg = OpenAI.Chat.ChatCompletionMessageParam
 
@@ -96,6 +103,13 @@ export const groupUnits = (messagesArr: Msg[]): Msg[][] => {
     return units
 }
 
+/**
+ * @description 按对话单元切分上下文：尾部保留最近 keepUnits 个单元（keepRecent），
+ *  其余作为待压缩区（toCompact）。单元边界由 groupUnits 决定（工具调用不被截断）。
+ * @param messagesArr 全量上下文
+ * @param keepUnits 需保留的最近单元数
+ * @returns { toCompact, keepRecent }
+ */
 export const splitUntils = (messagesArr: Msg[], keepUnits: number) => {
     const units = groupUnits(messagesArr);
     // 如果当前上下文小于需要保留的单元，则全量返回
