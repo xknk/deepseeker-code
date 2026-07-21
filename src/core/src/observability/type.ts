@@ -74,10 +74,21 @@ export interface TraceBase {
 }
 
 /**
+ * 任务清单条目（由 todo_write 工具维护，经 UIEvent 推前端渲染勾选进度）
+ * 对齐 Claude Code 的 TodoWrite：content 用过去时态描述任务，activeForm 为进行中的现在时态标签。
+ */
+export interface Todo {
+    content: string;                                  // 任务内容（过去时态，如「实现 web_fetch 工具」）
+    status: "pending" | "in_progress" | "completed";  // 任务状态
+    activeForm?: string;                              // 进行中时的现在时态标签（可选，如「正在实现 web_fetch」）
+}
+
+/**
  * 面向前端/UI 的交互事件（与 trace 解耦的独立通道）
  * - 只承载“需要用户感知或交互”的事件，不含任何运维/计费数据
  * - 工具进度（tool.start/end）不在此处，由 AgentEvent 负责，避免重复
  */
 export type UIEvent =
     | { type: 'approval_request'; toolsId: string; toolName: string; detail: string }
-    | { type: 'tool.denied'; toolsId: string; toolName: string };
+    | { type: 'tool.denied'; toolsId: string; toolName: string }
+    | { type: 'todo.update'; todos: Todo[] };

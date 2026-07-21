@@ -29,6 +29,11 @@ import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
 import { requestApproval } from "@/tool/guard.ts";
+import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT } from "./planMode.ts";
+import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
+import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
+import { runBackgroundTool } from "./backgroundTool.ts";
+import { filterByEnvironment } from "./toolFilter.ts";
 
 
 // ============ 主流程 ============
@@ -44,7 +49,9 @@ import { requestApproval } from "@/tool/guard.ts";
  * @yields AgentEvent  round.start / text.delta / thinking.delta / tool.start / tool.end / final
  */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
-    const rawTools = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
+    const rawToolsAll = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
+    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode（见 agent/planMode.ts）
+    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : rawToolsAll;
     const sessionId = options.sessionId; // 本次会话id
     const events = options.events; // 回调方法
     const modelWindow = options.modelWindow; // 最大上下文token
@@ -53,6 +60,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const keepRecentUnits = options.keepRecentUnits
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
+    // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
+    const validationCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent };
+    const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
     // 格式化工具消息
     const cleanedToolSchemas = rawTools.map((t: any) => ({
         type: t.type,
@@ -60,6 +70,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     }));
     // 预留系统提示词和摘要存放区域
     ensureSummarySlot(message);
+    // 计划模式：向系统提示词注入只读约束（带【计划模式】标记防重复追加）
+    if (options.planMode) {
+        const sys = message[0] as any;
+        if (sys && sys.role === 'system' && typeof sys.content === 'string' && !sys.content.includes("【计划模式】")) {
+            sys.content += `\n\n${PLAN_MODE_SYSTEM_HINT}`;
+        }
+    }
     let round = 0;
     let lastContent: string | undefined = "";
     const recentSignatures: string[] = [];
@@ -304,6 +321,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     catch { parseFailed = true; }
                     console.log(`🤖 模型请求调用工具: ${calledName}，参数:`, calledArgs);
                 }
+                // ★ 计划模式终结：模型提交实现方案 → yield plan.proposed 并结束循环（不走常规 execute）
+                //   设计选择：exit_plan_mode 的拦截故意先于 abort 占位检查——模型已主动提交的方案应当呈现给
+                //   用户审批；abort 主要约束后续「实现阶段」的工具执行，而非吞掉已提交的方案。
+                //   （极端 edge case：提交与中止同拍时优先展示方案，符合「计划先于执行」语义。）
+                if (calledName === "exit_plan_mode") {
+                    const plan = typeof calledArgs?.plan === "string" ? calledArgs.plan : "";
+                    const note = "✅ [计划模式] 实现方案已提交，等待用户审批后进入实现阶段。";
+                    message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
+                    await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
+                    yield { type: 'plan.proposed', plan };
+                    yield { type: 'final', text: plan || note };
+                    return;
+                }
                 // abort 占位：为未执行的 tool_call 补 result，保证下次读回配对完整
                 if (signal?.aborted) {
                     abortedDuringTools = true;
@@ -314,6 +344,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 }
                 const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
                 // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
+                // cc 风格：取消统一由用户主动中断（ctx.abortSignal）驱动，不在工具级挂固定定时器超时
+                // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
                 const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent };
                 let result = "";
                 yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
@@ -343,6 +375,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     const level = matchedTool.function.safetyLevel;
                     const needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
                     let denied = false;
+                    // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
+                    const isBgTool = matchedTool.function.isSync === false;
+                    const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;
+                    if (lockKey && isLockHeld(lockKey)) {
+                        denied = true;
+                        result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
+                    }
                     if (needApproval) {
                         const ra = matchedTool.function.requireApproval;
                         const detail = ra
@@ -352,6 +391,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         if (!approved) {
                             denied = true;
                             result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`;
+                        }
+                    }
+                    // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截）
+                    if (!denied) {
+                        const veto = await runPreHooks(calledName, calledArgs, toolCtx);
+                        if (veto.deny) {
+                            denied = true;
+                            result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
                         }
                     }
                     if (!denied) {
@@ -369,12 +416,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                                     toolSource: 'builtin',
                                 },
                                 payload: {
-                                    output: matchedTool.function.arguments,
+                                    output: JSON.stringify(calledArgs),
                                 }
                             })
                             // 执行工具（cc 风格：不设定时器超时；取消由用户主动中断 ctx.abortSignal 驱动，
                             //   command 等工具已把 abortSignal 接到 spawn，中断即真正终止底层任务）
-                            result = await collectToolResult(matchedTool.function.execute(calledArgs, toolCtx));
+                            const execRet = matchedTool.function.execute(calledArgs, toolCtx);
+                            if (isBgTool) {
+                                // ★ isSync:false 后台工具：取首个 yield 为即时结果（不阻塞循环），剩余后台排空，锁在任务结束时释放
+                                result = await runBackgroundTool(execRet as any, lockKey, calledName);
+                            } else {
+                                result = await collectToolResult(execRet);
+                            }
                             // verifyResult 判定：工具自报成败，FAILED 时前置警告（防模型对报错产生“成功”幻觉）
                             if (matchedTool.function.verifyResult) {
                                 const verdict = matchedTool.function.verifyResult(result, toolCtx);
@@ -421,10 +474,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                                 }
                             })
                         }
+                        // ★ post-hooks：执行后观察（成功或异常都触发，不拦截）
+                        await runPostHooks(calledName, calledArgs, result, toolCtx);
                     }
                 } else {
                     result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
-                    const ok = !result.startsWith("工具执行失败");
+                    const ok = false; // 未知工具，显式标记失败（避免被判成功致模型幻觉）
                     events({
                         sessionId: sessionId,
                         eventType: 'tool.validation.failed',
@@ -445,8 +500,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     })
                 }
                 // 获取工具返回的信息，如果超过最大值，则截取中间，留头尾
-                result = truncateToolResult(result, matchedTool.function.maxOutputCharacters);
-                const ok = !result.startsWith("工具执行失败");
+                // ★ 防御：未知工具名时 matchedTool 为 undefined（模型幻觉 / 被环境过滤的工具），
+                //   用可选链避免 TypeError 击垮主循环（truncateToolResult 第二参数支持 undefined）
+                result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters);
+                // ok 判定：result 以任一已知失败前缀开头即判失败（覆盖 runAgent 内部失败 + 各工具 catch/verifyResult 失败），
+                //   避免失败结果被判 ok=true 助长模型"已成功"幻觉。
+                //   注：前缀列表是过渡方案——根本解法是让 execute 返回显式成败标志（后续工具协议演进），届时可移除此列表。
+                const FAILED_PREFIXES = ["工具执行失败", "错误：", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
+                const ok = !FAILED_PREFIXES.some(p => result.startsWith(p));
                 yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result, ok };
                 // 存储本次工具结果的消息到上下文中
                 message.push({ role: 'tool', tool_call_id: toolCall.id, content: result });

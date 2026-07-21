@@ -176,9 +176,10 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         validateEnvironment?: (ctx: ToolContext) => boolean | Promise<boolean>;
 
         /**
-         * 单次工具取消阈值（毫秒，预留）
-         * 当前取消统一由用户主动中断（ctx.abortSignal）驱动，本字段暂未在执行层启用；
-         * 未来若接入 abort 式超时，超时即触发 controller.abort() 真正终止底层任务（而非 Promise.race 假取消）。
+         * 单次工具取消阈值（毫秒）—— 【刻意不消费】
+         * 对标 Claude Code：CC 不在工具级挂固定定时器（会误杀合法的长构建/测试/install），而是用「每调用由模型
+         * 可控的 timeout 参数」+ 后台模式。本框架沿用同一原则：取消统一由用户主动中断（ctx.abortSignal）驱动，
+         * 长任务走 isSync:false 后台。故本字段保留定义但不接入执行层——别被「预留」字眼诱惑而重接（会引入误杀）。
          */
         timeoutMs?: number;
 
@@ -204,11 +205,5 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * - 'inline': 正常的标准输出插入
          */
         displayStrategy?: 'inline' | 'panel' | 'hidden';
-
-        /**
-         * 工具打标与分类（用于多 Agent 路由分发）
-         * 场景：当架构演进为多 Agent 协作时，路由层可以通过 tags 动态把工具分发给不同的专职子 Agent（如 GitAgent / RefactorAgent）。
-         */
-        tags?: string[];
     };
 };

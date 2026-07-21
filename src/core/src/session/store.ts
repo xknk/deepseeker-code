@@ -17,6 +17,7 @@ import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
 import { createUUID, getFileName } from "@/common/index.ts"
+import type { Todo } from "@/observability/type.ts";
 
 /** 获取全局 sessions 文件夹的绝对/相对路径 */
 export const getSessionsDirPath = (mainSessionId: string): string => {
@@ -134,5 +135,22 @@ export async function setRollingState(
     // 关键：将失败计数同步回存储层
     (store as any).consecutiveFailures = state.consecutiveFailures;
 
+    await writeStore(sessionId, store);
+}
+
+/**
+ * 读取当前会话的任务清单（由 todo_write 工具维护，供前端/其他逻辑读取）
+ */
+export async function getTodos(sessionId: string): Promise<Todo[] | undefined> {
+    const store = await readStore(sessionId);
+    return Array.isArray(store?.todos) ? store.todos : undefined;
+}
+
+/**
+ * 覆盖写入当前会话的任务清单（整表替换语义，对齐 Claude Code TodoWrite）
+ */
+export async function setTodos(sessionId: string, todos: Todo[]): Promise<void> {
+    const store = await readStore(sessionId);
+    store.todos = todos;
     await writeStore(sessionId, store);
 }

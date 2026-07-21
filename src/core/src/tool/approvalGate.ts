@@ -16,16 +16,22 @@ const pendingLocks = new Map<string, ApprovalResolver>();
  *   signal abort 时立即判拒绝并清理门锁，杜绝失联导致协程永久挂起。
  */
 export const waitForUserApproval = async (toolsId: string, signal?: AbortSignal): Promise<boolean> => {
-    return new Promise<boolean>((resolve) => {
-        // 已中断：直接判拒绝，不挂起
-        if (signal?.aborted) { resolve(false); return; }
-        pendingLocks.set(toolsId, resolve);
-        // 用户主动中断（断开/停止）唤醒挂起的审批，取代旧的超时自动熔断
-        if (signal) {
-            const onAbort = (): void => { resolve(false); pendingLocks.delete(toolsId); };
-            signal.addEventListener("abort", onAbort, { once: true });
-        }
-    });
+    // 已中断：直接判拒绝，不挂起
+    if (signal?.aborted) return false;
+    let onAbort: (() => void) | undefined;
+    try {
+        return await new Promise<boolean>((resolve) => {
+            pendingLocks.set(toolsId, resolve);
+            // 用户主动中断（断开/停止）唤醒挂起的审批，取代旧的超时自动熔断
+            if (signal) {
+                onAbort = (): void => { resolve(false); pendingLocks.delete(toolsId); };
+                signal.addEventListener("abort", onAbort, { once: true });
+            }
+        });
+    } finally {
+        // ★ 正常 resolve（用户批准/拒绝）后主动移除 abort 监听器，避免残留挂在 signal 上
+        if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+    }
 };
 
 /**

@@ -23,6 +23,11 @@ import { fsTools } from "./registry/fs.ts";
 import { searchTools } from "./registry/search.ts";
 import { commandTools } from "./registry/command.ts";
 import { globTools } from "./registry/glob.ts";
+import { gitTools } from "./registry/git.ts";
+import { dependencyTools } from "./registry/inspect_dependencies.ts";
+import { webTools } from "./registry/web.ts";
+import { todoTools } from "./registry/todo.ts";
+import { backgroundTools } from "./registry/background.ts";
 
 export * from "./type.ts";
 
@@ -40,4 +45,9 @@ agentTools.push(
     ...searchTools,  // 以后加了正则检索直接解构进来
     ...commandTools, // 命令执行（DANGER，强制审批）
     ...globTools,    // 文件名 glob 搜索
+    ...gitTools,         // git 操作集（status/log/diff 纯读 + commit 变更）
+    ...dependencyTools,  // 查看 package.json 依赖清单（SAFE，纯读）
+    ...webTools,         // 联网抓取 URL（DANGER，强制审批 + SSRF 防护）
+    ...todoTools,        // 任务清单管理（SAFE，整表覆盖 + UIEvent 推前端）
+    ...backgroundTools,  // 后台任务（run/get_output/stop，自管理进程注册表）
 );

@@ -11,10 +11,22 @@
  * @description 服务启动入口：创建 express 应用并在端口 3000 监听。
  */
 import { createServer } from "./createServer.ts";
+import { agentTools } from "@/tool/index.ts";
+import { initMcpTools, disposeAllMcpClients } from "@/tool/mcp/loader.ts";
 /** 创建应用并监听 3000 端口。 */
 async function startServer() {
+    // 连接配置的 MCP 服务器，把其工具注入 agentTools（无配置时静默跳过）
+    await initMcpTools(agentTools);
+    // ★ 注册退出钩子：主进程被终止时统一 dispose 所有 MCP 子进程，避免孤儿化
+    const shutdown = (): void => {
+        disposeAllMcpClients();
+        process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
     const app = createServer();
-    const port = 3000;  
+    const port = 3000;
     app.listen(port, () => {
         console.log(`Server is running on http://localhost:${port}`);
     });

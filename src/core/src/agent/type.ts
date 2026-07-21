@@ -52,6 +52,8 @@ export interface RunAgentOptions {
     parentSystemPrompt: string,
     /** 已归档（被压缩）的消息条数，用于统计与展示。 */
     archivedMessageCount?: number,
+    /** 计划模式：仅允许只读/研究类工具 + exit_plan_mode，先调研产出方案、经用户审批后再实现（见 agent/planMode.ts）。 */
+    planMode?: boolean,
 }
 
 /**
@@ -91,5 +93,7 @@ export type AgentEvent =
     | { type: 'tool.start'; toolCallId: string; toolName: string; args: any }
     /** 单个工具调用结束，携带结果与成败标记。 */
     | { type: 'tool.end'; toolCallId: string; toolName: string; result: string; ok: boolean }
+    /** 计划模式：模型调用 exit_plan_mode 提交实现方案（供上层呈现给用户审批，审批通过后退出计划模式进入实现）。 */
+    | { type: 'plan.proposed'; plan: string }
     /** 整个 agent 运行结束的最终文本（正常结束 / 中止 / 出错）。 */
     | { type: 'final'; text: string };

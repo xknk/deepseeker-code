@@ -1,0 +1,54 @@
+/**
+ * @file agent/planMode.ts
+ * @description Plan mode（计划模式）：让 agent 先只读调研、产出实现方案，经用户审批后再进入实现阶段。
+ *  非纯工具——它改变 runAgent 的工具可见性与循环终结条件，故归 agent 层而非 tool/registry。
+ *
+ *  三件套：
+ *  1) PLAN_ALLOWED_TOOLS —— 计划模式允许的只读/研究类工具名集合（排除一切写操作与 spawn_agent）；
+ *  2) exitPlanModeToolSchema —— 暴露给模型的 exit_plan_mode 工具 schema（runAgent 特殊拦截，不走常规 execute）；
+ *  3) filterToolsForPlanMode —— 过滤工具表为允许集合并注入 exit_plan_mode。
+ */
+import { CustomTool } from "@/tool/index.ts";
+
+/** 计划模式允许的工具：只读 / 研究类。排除所有写工具、命令执行、后台任务、spawn_agent、todo_write。 */
+export const PLAN_ALLOWED_TOOLS = new Set<string>([
+    "getTime",
+    "read_file", "list_dir", "view_symbol_outline", "read_project_guide",
+    "search_grep", "glob",
+    "get_git_diff", "git_status", "git_log", "inspect_dependencies",
+    "web_fetch", "web_search", // 只读研究类（虽为 DANGER 但不写本地状态；仍走各自审批）
+]);
+
+/** 计划模式追加到系统提示词的指令（带唯一标记，防重复追加） */
+export const PLAN_MODE_SYSTEM_HINT = "【计划模式】你现在处于计划模式：只能读取与检索（read_file/search_grep/glob/git 只读/web 等），严禁修改任何文件或执行命令。完成调研后，必须调用 exit_plan_mode 提交完整实现方案（要改哪些文件、怎么改、为何这么改、有何风险），方案经用户审批后才会进入实现阶段。";
+
+/**
+ * exit_plan_mode 工具 schema。
+ * 注意：它不是常规 CustomTool（无 execute/safetyLevel），runAgent 在工具执行循环中按名特殊拦截。
+ */
+export const exitPlanModeToolSchema = {
+    type: "function",
+    function: {
+        name: "exit_plan_mode",
+        description: "计划模式专用：完成只读调研、形成明确实现方案后调用本工具提交方案。提交后方案会呈现给用户审批；审批通过后才进入实现阶段（届时才允许修改文件/执行命令）。在计划模式下你只能读取与搜索，不能做任何修改。",
+        parameters: {
+            type: "object",
+            properties: {
+                plan: { type: "string", description: "完整的实现方案：要改哪些文件、具体怎么改、为什么这么做、有什么风险与取舍" }
+            },
+            required: ["plan"]
+        }
+    }
+};
+
+/**
+ * 将完整工具表过滤为计划模式允许的只读/研究子集，并注入 exit_plan_mode。
+ * @param tools 完整工具表（agentTools）
+ * @returns 计划模式工具表（只读工具 + exit_plan_mode）
+ */
+export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
+    // 注：(t.function as any).name —— openai 6.x 下 CustomTool.function 为联合类型，
+    //   直接 .name 在某一分支上不存在（TS2339），用 any 断言绕过联合窄化。
+    const allowed = tools.filter(t => PLAN_ALLOWED_TOOLS.has((t.function as any).name));
+    return [...allowed, exitPlanModeToolSchema as unknown as CustomTool];
+}
