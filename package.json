@@ -6,7 +6,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "cd src/core && node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p src/core/tsconfig.json"
   },
   "keywords": [],
   "author": "",
