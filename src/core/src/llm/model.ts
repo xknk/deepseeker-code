@@ -8,7 +8,7 @@
  */
 import OpenAI from "openai";
 import { Msg } from "@/session/contextCore.ts";
-import { model } from "./createModel.ts"
+import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./createModel.ts"
 import { MsgParams, outMsg, toolMsg } from "./type.ts";
 
 /**
@@ -25,11 +25,11 @@ async function* chatWithModelWithTools(
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
     const requestBody = {
         messages: messages,
-        model: "deepseek-v4-flash",
+        model: MODEL_NAME,
         tool_choice: "auto", // 让模型自动选择工具
         tools: tools,
-        thinking: { "type": "enabled" },
-        reasoning_effort: "high",
+        ...(MODEL_THINKING_ENABLED ? { thinking: { "type": "enabled" } } : {}),
+        reasoning_effort: MODEL_REASONING_EFFORT,
         stream: true,
         stream_options: { include_usage: true }, // 流式下 usage 在末包 chunk
     } as MsgParams;
@@ -56,7 +56,7 @@ export async function chatWithModelWithSummary(
     try {
         const requestBody = {
             messages: messages,
-            model: "deepseek-v4-flash",
+            model: MODEL_NAME,
             tool_choice: "auto",
             tools: tools,
             stream: false,

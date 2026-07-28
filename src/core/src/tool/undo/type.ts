@@ -34,7 +34,8 @@ export interface UndoRecord {
     relativePath: string;
     /** 备份内容形态，决定回退分发逻辑。 */
     backupKind: BackupKind;
-    /** 备份内容本体的绝对路径（backups/<undoId>/{content|tree}）；creation_marker 时为空串。 */
+    /** 备份内容本体的绝对路径（backups/<undoId>/{content|tree}）；creation_marker 时为空串。
+     *  注：仅作审计/溯源用——回退逻辑（restore.ts dispatchRestore）按 undoId 重新拼接路径、不读取此字段。 */
     backupPath: string;
     /** 原内容 SHA-1（hex），覆盖式回退前的脏写检测用；creation_marker 时缺省。 */
     contentHashBefore?: string;

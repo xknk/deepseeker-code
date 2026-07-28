@@ -17,6 +17,10 @@ import { initHooks } from "@/hooks/loader.ts";
 import { initSkills } from "@/skills/loader.ts";
 /** 创建应用并监听 3000 端口。 */
 async function startServer() {
+    // Q-6：web_fetch 依赖 AbortSignal.any/timeout（Node 20.3+）。启动期特性检测，缺失则告警（其余功能不受影响）。
+    if (typeof (AbortSignal as any).any !== "function" || typeof (AbortSignal as any).timeout !== "function") {
+        console.error("❌ 当前 Node 版本缺少 AbortSignal.any/timeout（需 Node 20.3+），web_fetch 相关能力将不可用，建议升级 Node。");
+    }
     // 连接配置的 MCP 服务器，把其工具注入 agentTools（无配置时静默跳过）
     await initMcpTools(agentTools);
     // ★ 加载声明式 hooks（settings.json；无配置时静默跳过）

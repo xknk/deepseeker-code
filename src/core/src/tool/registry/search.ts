@@ -90,41 +90,42 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "read_project_guide",
-            description: "读取项目根目录下的专属 AI 行为指引与开发指南（AGENT.md）。该指南固化了本项目的构建命令、运行测试规范、核心技术栈及代码风格限制。在对陌生项目实施任何构建或测试命令前，必须优先读取此工具。",
+            description: "读取项目根目录下的专属 AI 行为指引与开发指南（依次尝试 CLAUDE.md / AGENTS.md / AGENT.md，命中第一个）。该指南固化了本项目的构建命令、运行测试规范、核心技术栈及代码风格限制。在对陌生项目实施任何构建或测试命令前，必须优先读取此工具。",
             parameters: {
                 type: "object",
-                properties: {} // 无需参数，默认固定读取根目录 AGENT.md
+                properties: {} // 无需参数，自动探测根目录 CLAUDE.md / AGENTS.md / AGENT.md
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
             async execute(): Promise<string> {
-                // 💡 替换点：将文件名一键变更为 AGENT.md
-                const guideFileName = "AGENT.md";
-                const guidePath = path.join(WORKSPACE_ROOT, guideFileName);
-                try {
-                    const content = await fs.readFile(guidePath, "utf-8");
-                    return `[Project Guide Cached via ${guideFileName}]\n\n${content}`;
-                } catch (error: any) {
-                    // 如果项目根目录下不存在该文件，则智能体为其自动推荐一份基础骨架并告知大模型
-                    const baselineTemplate = [
-                        "# Project Development Guide (For AI Agents)",
-                        "",
-                        "## Build and Test Commands",
-                        "- Install dependencies: `npm install` 或 `pnpm install` (请根据项目实际 package.json 锁文件辨别)",
-                        "- Production Build: `npm run build`",
-                        "- Run Unit Tests: `npm test`",
-                        "",
-                        "## Code Architecture Guidelines",
-                        "- Keep methods atomic and safe.",
-                        "- Prefer incremental file refactoring using `edit_file` over whole file rewrites."
-                    ].join("\n");
-
-                    return [
-                        `⚠️ [系统提示]：当前项目根目录下未发现专属的 ${guideFileName} 规范指引文件。`,
-                        `以下是系统为你自动生成的标准认知备忘骨架。如果你已经通过 list_dir 辨明了该技术栈的特异性，你可以自主决定调用 write_file 工具在项目根目录下生成一份正式的 [${guideFileName}] 以为后续推理降低 Token 开销：\n`,
-                        baselineTemplate
-                    ].join("\n");
+                // F-5：事实标准是 CLAUDE.md（Claude Code / 本项目），新多 agent 约定 AGENTS.md（复数），旧占位 AGENT.md。
+                //   逐个尝试命中第一个存在的，避免在大多数项目里因文件名错位永远走兜底骨架。
+                const GUIDE_CANDIDATES = ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
+                for (const name of GUIDE_CANDIDATES) {
+                    try {
+                        const content = await fs.readFile(path.join(WORKSPACE_ROOT, name), "utf-8");
+                        return `[Project Guide via ${name}]\n\n${content}`;
+                    } catch { /* 该候选不存在，继续尝试下一个 */ }
                 }
+                // 全部候选都不存在 → 推荐一份基础骨架并提示模型可自行生成
+                const baselineTemplate = [
+                    "# Project Development Guide (For AI Agents)",
+                    "",
+                    "## Build and Test Commands",
+                    "- Install dependencies: `npm install` 或 `pnpm install` (请根据项目实际 package.json 锁文件辨别)",
+                    "- Production Build: `npm run build`",
+                    "- Run Unit Tests: `npm test`",
+                    "",
+                    "## Code Architecture Guidelines",
+                    "- Keep methods atomic and safe.",
+                    "- Prefer incremental file refactoring using `edit_file` over whole file rewrites."
+                ].join("\n");
+
+                return [
+                    `⚠️ [系统提示]：当前项目根目录下未发现 AI 指引文件（已尝试 ${GUIDE_CANDIDATES.join(" / ")}）。`,
+                    `以下是系统为你自动生成的标准认知备忘骨架。如果你已经通过 list_dir 辨明了该技术栈的特异性，你可以自主决定调用 write_file 工具在项目根目录下生成一份正式的 [CLAUDE.md] 以为后续推理降低 Token 开销：\n`,
+                    baselineTemplate
+                ].join("\n");
             }
         }
     }

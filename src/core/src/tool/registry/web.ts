@@ -375,8 +375,9 @@ async function safeFetchFollow(
 ) {
     const startProtocol = new URL(startUrl).protocol;
     let url = startUrl;
+    // 最多跟随 MAX_REDIRECTS 次重定向（Q-8：旧版 hop > MAX_REDIRECTS 多放一跳，改为 >= 对齐上限）
     for (let hop = 0; ; hop++) {
-        if (hop > MAX_REDIRECTS) throw new Error("重定向次数超出上限（疑似重定向环）");
+        if (hop >= MAX_REDIRECTS) throw new Error("重定向次数超出上限（疑似重定向环）");
         const parsed = new URL(url);
         if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
             throw new Error(`仅允许 http/https 协议，拒绝 ${parsed.protocol}`);

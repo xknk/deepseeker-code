@@ -22,9 +22,9 @@ export const systemTools: CustomTool[] = [
             parameters: {
                 type: "object",
                 properties: {
-                    location: { type: "string", description: "城市名称，如 Beijing" },
+                    // Q-7：location 改为可选——旧版 required 却完全不消费，迫使模型填无意义城市名。
+                    location: { type: "string", description: "城市名称（可选，仅作记录；服务器始终返回其本地时间）" },
                 },
-                required: ["location"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,

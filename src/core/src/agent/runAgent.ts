@@ -118,6 +118,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' = 'normal';
     const recentSignatures: string[] = [];
+    // F-1：agent 循环深度硬上限。重复签名熔断只挡"连续相同调用"，模型换工具/参数仍可无限循环；硬上限兜底防失控烧 token（正常任务远不及此）。
+    const MAX_AGENT_ROUNDS = 50;
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -125,6 +127,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     try {
         while (true) {
             round++;
+            if (round > MAX_AGENT_ROUNDS) {
+                stopReason = 'repeat';
+                yield { type: 'final', text: (lastContent || "") + `\n（已达单会话最大推理轮数 ${MAX_AGENT_ROUNDS}，主动停止以防失控循环烧光 token。）` };
+                return;
+            }
             yield { type: 'round.start', round };
             // 前端用户主动停止运行
             if (signal?.aborted) {
@@ -231,7 +238,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     ...(toolCallsBuf.size > 0 ? {
                         tool_calls: Array.from(toolCallsBuf.entries())
                             .sort((a, b) => a[0] - b[0])
-                            .map(([, tc]) => ({ id: tc.id, type: tc.type || 'function', function: tc.function }))
+                            .map(([idx, tc]) => ({ id: tc.id ?? `call_${round}_${idx}`, type: tc.type || 'function', function: tc.function }))
                     } : {}),
                 } as unknown as OpenAI.Chat.ChatCompletionMessage;
 
@@ -312,6 +319,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const tooName = assistantMessage.tool_calls.map((t: any) => `${t.function.name}`).join("|");
 
             recentSignatures.push(sig);
+            if (recentSignatures.length > 6) recentSignatures.shift(); // F-8：定长裁剪，防长会话无限增长占内存
             const last3 = recentSignatures.slice(-3);
             if (last3.length === 3 && last3.every(s => s === last3[0])) {
                 stopReason = 'repeat';

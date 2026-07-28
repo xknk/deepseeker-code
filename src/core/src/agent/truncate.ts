@@ -289,7 +289,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 eventType: 'session.summary',
                 meteData: {
                     depth: event.depth,
-                    messageId: summaryMsg.id,
+                    messageId: summaryMsg?.id ?? '(rolling-summary-slot)',
                     decisionSource: 'summary',
                     ok: false,
                     durationMs: endTime - startTime,

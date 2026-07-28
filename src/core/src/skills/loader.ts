@@ -36,6 +36,9 @@ const SOURCES: ScanSource[] = [
     { dir: path.join(process.cwd(), ".deepSeekCode", "skills"), source: "project" },
 ];
 
+/** SKILL 正文大小上限：防异常大 SKILL.md 先整文塞进 tool result 再被压缩（Q-12）。 */
+const MAX_SKILL_BODY_BYTES = 64 * 1024;
+
 /** 解析单个 SKILL.md 为 manifest；失败返回 null（warn + 跳过） */
 const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource): Promise<SkillManifest | null> => {
     let raw: string;
@@ -60,12 +63,16 @@ const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource)
         return null;
     }
     const version = Number(parsed.frontmatter.version);
+    // Q-12：正文超限截断（虽有 ensureFitsWindow 兜底，但在加载期即限定，避免超大正文污染 tool result）
+    const body = parsed.body.length > MAX_SKILL_BODY_BYTES
+        ? parsed.body.slice(0, MAX_SKILL_BODY_BYTES) + `\n\n…[SKILL 正文超 ${MAX_SKILL_BODY_BYTES} 字节，已截断]`
+        : parsed.body;
     return {
         name,
         description,
         version: Number.isFinite(version) && version > 0 ? version : 1,
         dir,
-        body: parsed.body,
+        body,
         source,
     };
 };

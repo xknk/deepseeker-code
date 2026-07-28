@@ -16,3 +16,9 @@ export const model = new OpenAI({
     maxRetries: 4,
     timeout: 120_000, // 单次请求 120s 兜底（长上下文 / 长生成场景）
 });
+
+// Q-4：模型参数外置到环境变量（换模型 / 关 reasoning 不必改源码）。
+export const MODEL_NAME = process.env.DEEP_SEEK_MODEL || "deepseek-v4-flash";
+export const MODEL_REASONING_EFFORT = (process.env.DEEP_SEEK_REASONING_EFFORT || "high") as "high" | "medium" | "low";
+/** 深度思考开关：默认开启；设 DEEP_SEEK_THINKING=0 关闭。 */
+export const MODEL_THINKING_ENABLED = process.env.DEEP_SEEK_THINKING !== "0";

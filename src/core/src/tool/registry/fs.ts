@@ -524,5 +524,46 @@ export const fsTools: CustomTool[] = [
                 }
             }
         }
+    },
+    {
+        type: "function",
+        function: {
+            // F-3：补齐 move/rename 能力，模型不再需退回 DANGER 级 run_command（mv/rename）来做重命名。
+            // 语义：源不存在→失败；目标已存在→拒绝（防误覆盖，覆盖请先 delete_path）；同卷 fs.rename 原子。
+            // 注：move 涉及双路径（source+destination），超出当前 Undo 单路径 schema，暂不纳入写前备份（不可回退），
+            //   已在描述中明示；后续若扩展 UndoRecord 双路径字段可再接入。
+            name: "move_file",
+            description: "移动或重命名文件/目录（同卷原子操作）。源不存在则失败；目标已存在则拒绝（防误覆盖，如需覆盖请先 delete_path 再 move_file）。自动创建目标父目录。⚠️ 本操作暂不在 Undo 回退范围内（不可撤销）。",
+            parameters: {
+                type: "object",
+                properties: {
+                    source: { type: "string", description: "源文件/目录的相对路径" },
+                    destination: { type: "string", description: "目标相对路径（新位置或新名称）" },
+                },
+                required: ["source", "destination"],
+            },
+            safetyLevel: ToolSafetyLevel.MUTATION,
+            isSync: true,
+            requireApproval: (args: { source: string; destination: string }) =>
+                `申请移动/重命名 [${args.source}] → [${args.destination}]`,
+            async execute(args: { source: string; destination: string }): Promise<string> {
+                try {
+                    const srcAbs = resolveSafePath(args.source);
+                    const dstAbs = resolveSafePath(args.destination);
+                    // 源必须存在
+                    try { await fs.access(srcAbs); } catch { return `❌ [移动失败]：源路径 [${args.source}] 不存在。`; }
+                    // 目标已存在则拒绝（防误覆盖）
+                    try { await fs.access(dstAbs); return `❌ [移动失败]：目标 [${args.destination}] 已存在。如需覆盖请先 delete_path 再 move_file。`; } catch { /* 不存在，继续 */ }
+                    // TOCTOU 二次围栏复检（与 write/create 对称）+ 建父目录 + 原子 rename
+                    assertWithinWorkspace(srcAbs);
+                    assertWithinWorkspace(dstAbs);
+                    await fs.mkdir(path.dirname(dstAbs), { recursive: true });
+                    await fs.rename(srcAbs, dstAbs);
+                    return `✅ [移动成功]：[${args.source}] → [${args.destination}]。`;
+                } catch (error: any) {
+                    return `操作失败: ${error.message}`;
+                }
+            }
+        }
     }
 ];
