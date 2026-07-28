@@ -30,11 +30,37 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
 import { requestApproval } from "@/tool/guard.ts";
 import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT } from "./planMode.ts";
-import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
+import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
 import { filterByEnvironment } from "./toolFilter.ts";
 import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
+import { injectSkillCatalog } from "@/skills/inject.ts";
+
+/**
+ * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
+ *  - RegExp[]：逐条全局替换为 [MASKED_SECRET]；
+ *  - 函数：交由工具自定义脱敏（可结合 args 动态决策）。
+ * 容错优先：脱敏异常返回原文，绝不阻断工具结果回灌。
+ */
+const applyPrivacyMasking = (
+    rules: RegExp[] | ((args: any, rawOutput: string) => string) | undefined,
+    args: any,
+    output: string,
+): string => {
+    if (!rules) return output;
+    try {
+        if (typeof rules === 'function') return rules(args, output);
+        let masked = output;
+        for (const re of rules) {
+            const flags = re.flags.includes('g') ? re.flags : re.flags + 'g';
+            masked = masked.replace(new RegExp(re.source, flags), '[MASKED_SECRET]');
+        }
+        return masked;
+    } catch {
+        return output;
+    }
+};
 
 
 // ============ 主流程 ============
@@ -58,11 +84,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
     const depth = options.depth ?? 0;
+    // ★ 工作目录：hook 子进程 cwd / 工具相对路径基准；缺省取 process.cwd()，spawn_agent 透传以保持一致
+    const cwd = options.cwd ?? process.cwd();
     const keepRecentUnits = options.keepRecentUnits
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
     // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
-    const validationCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
+    const validationCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
     const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
     // 格式化工具消息
     const cleanedToolSchemas = rawTools.map((t: any) => ({
@@ -78,8 +106,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             sys.content += `\n\n${PLAN_MODE_SYSTEM_HINT}`;
         }
     }
+    // ★ Skills：把【可用技能目录】幂等注入系统提示词（复刻 planMode 追加模式，不动 message 下标）
+    injectSkillCatalog(message);
     let round = 0;
     let lastContent: string | undefined = "";
+    let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' = 'normal';
     const recentSignatures: string[] = [];
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
@@ -127,6 +158,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
                 console.error("❌ " + msg);
+                stopReason = 'error';
                 yield { type: 'final', text: (lastContent || "") + `\n（${msg}）` };
                 return
             }
@@ -225,6 +257,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     return;
                 }
                 const err = error instanceof Error ? error : new Error(String(error));
+                stopReason = 'error';
                 events({
                     sessionId: sessionId,
                     eventType: 'llm.error',
@@ -275,6 +308,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             recentSignatures.push(sig);
             const last3 = recentSignatures.slice(-3);
             if (last3.length === 3 && last3.every(s => s === last3[0])) {
+                stopReason = 'repeat';
                 events({
                     sessionId: sessionId,
                     eventType: 'tool.denied',
@@ -347,7 +381,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
                 // cc 风格：取消统一由用户主动中断（ctx.abortSignal）驱动，不在工具级挂固定定时器超时
                 // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
-                const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
+                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
                 let result = "";
                 yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
                 if (parseFailed) {
@@ -511,6 +545,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         }
                     })
                 }
+                // ★ 敏感数据脱敏（privacyMaskingRules）：在 verifyResult 之后、truncate 之前，
+                //   把工具返回中的密钥/凭证替换为 [MASKED_SECRET]，再回灌模型上下文。
+                //   verifyResult 需原文判定成败，故脱敏只影响「发给云端模型的视图」，不影响本地校验。
+                result = applyPrivacyMasking(matchedTool?.function?.privacyMaskingRules, calledArgs, result);
                 // 获取工具返回的信息，如果超过最大值，则截取中间，留头尾
                 // ★ 防御：未知工具名时 matchedTool 为 undefined（模型幻觉 / 被环境过滤的工具），
                 //   用可选链避免 TypeError 击垮主循环（truncateToolResult 第二参数支持 undefined）
@@ -533,6 +571,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             }
         }
     } finally {
-
+        // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
+        //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
+        try {
+            const reason = signal?.aborted ? 'aborted' : stopReason;
+            // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
+            await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
+        } catch { /* ignore */ }
     }
 }

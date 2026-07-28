@@ -3,7 +3,7 @@
  * @Date: 2026-06-16 15:09:46
  * @LastEditors: fanqianliang 2438756801@qq.com
  * @LastEditTime: 2026-07-10 11:38:59
- * @FilePath: \lims-frontd:\code\自研\roundSeekCode\src\core\src\agent\truncate.ts
+ * @FilePath: d:\code\自研\deepSeekCode\src\core\src\agent\truncate.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 /**

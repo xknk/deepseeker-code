@@ -83,6 +83,7 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
 
                     const subOptions: RunAgentOptions = {
                         sessionId: subSessionId,
+                        cwd: ctx.cwd, // ★ 透传父级工作目录，子 agent 的 hook/工具相对路径与父级一致
                         // ★ 子 agent 收权：任何经 spawn_agent 派生的子 agent（深度 ≥ 1）一律剔除
                         //   run_command / delete_path（SUBAGENT_DENYLIST），仅保留读写类工具，收敛递归派生的爆炸半径。
                         //   主 agent（depth 0）不经此处，仍保留全部工具。

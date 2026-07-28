@@ -25,6 +25,7 @@ import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase } from "@/observability/type.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
+import { dispatch } from "@/hooks/registry.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -45,8 +46,28 @@ export const handleUnifiedChat = async (
     abortSignal?: AbortSignal,
 ) => {
     const sessionId: string = inbound.sessionId || await getOrCreateSessionId(inbound.sessionId);
-    const SYSTEM_PROMPT = `你是一个能调用工具的助手。任务完成后直接用自然语言给出最终答案，不要再调用工具。`
     const startTime = performance.now();
+
+    // ★ UserPromptSubmit hook（serve 层；可拦截整轮）
+    //   必须在 serve 层而非 agent 层——agent 层会被 spawn_agent 子任务误触发（子 task 非用户原始输入）。
+    const promptVeto = await dispatch('UserPromptSubmit', { sessionId, prompt: inbound.content, cwd: process.cwd() });
+    if (promptVeto.deny) {
+        const denyMsg = `🚫 [Hook 拦截] 本次输入被拒绝：${promptVeto.reason ?? '未提供原因'}`;
+        if (sseWrite) {
+            sseWrite({ type: 'final', text: denyMsg });
+        } else {
+            await sendOutbound({ content: denyMsg, metadata: { sessionId } });
+        }
+        await emitTrace({
+            sessionId,
+            eventType: 'session.end',
+            meteData: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
+            payload: { output: denyMsg }
+        });
+        return;
+    }
+
+    const SYSTEM_PROMPT = `你是一个能调用工具的助手。任务完成后直接用自然语言给出最终答案，不要再调用工具。`
     const fullMessages: Msg[] = await buildContextMessages(
         sessionId,
         { role: "user", content: inbound.content },
@@ -58,11 +79,14 @@ export const handleUnifiedChat = async (
         meteData: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
         payload: { input: inbound.content }
     })
+    // ★ SessionStart hook（观察；不可拦截）。dispatch 内部已容错，外层 catch 双保险。
+    await dispatch('SessionStart', { sessionId, cwd: process.cwd() }).catch(() => { });
     await appendMessage({ sessionId, role: 'user', content: inbound.content })
 
     let replyText = "";
     const options: RunAgentOptions = {
         sessionId,
+        cwd: process.cwd(),
         toolSchemas: agentTools,
         abortSignal,                        // ← 透传中止信号
         modelWindow: appConfig.MAX_HISTORY_TOKENS,
@@ -86,6 +110,9 @@ export const handleUnifiedChat = async (
             sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
         }
     }
+
+    // ★ SessionEnd hook（观察）。规避策略：只用 emitTrace，绝不碰 writeStore（store/transcript 共用文件会损坏 JSONL）。
+    await dispatch('SessionEnd', { sessionId, cwd: process.cwd() }).catch(() => { });
 
     await emitTrace({
         sessionId,

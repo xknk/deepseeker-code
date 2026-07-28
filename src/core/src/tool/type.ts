@@ -92,7 +92,8 @@ export interface ToolContext {
     onUIEvent?: (evt: UIEvent) => void;
     /** 宿主审批钩子（前端无关）：MUTATION/DANGER 工具执行前由 guard 调用，宿主决定放行/拒绝。未注入时默认拒绝。 */
     requestApproval?: RequestApprovalFn;
-    /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."） */
+    /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."）。
+     *  注：预留字段——执行层（runAgent）当前未注入 emitProgress，工具内调用将为 undefined。 */
     emitProgress?: (message: string) => void;
 }
 
@@ -168,6 +169,8 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 场景：执行 `npm install` 产生了 2000 行依赖下载进度条。
          * - toUser: 终端用户需要实时看到的酷炫安装动画/流式字符。
          * - toModel: 真正喂给大模型上下文的纯净结论（例如：`"Successfully installed 45 packages."`）。
+         * 注：预留字段——执行层当前未消费，工具结果（含 toModel/toUser）原样回灌上下文。
+         *   完整接线需在 runAgent 区分「面向模型」与「面向终端」两个输出通道。
          */
         outputFilter?: (rawOutput: string) => { toModel: string; toUser: string };
         /* ================= 3.5 环境自适应与引导 (Environment & Tool Hints) ================= */
@@ -206,6 +209,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * - 'hidden': 悄悄执行，不污染人类的终端屏幕（如一些内部状态检测工具）
          * - 'panel': 在终端右侧或独立区块开辟一个动态面板展示（如正在跑的 Web Dev Server 日志）
          * - 'inline': 正常的标准输出插入
+         * 注：预留字段——执行层当前未按此值分流渲染，工具输出统一走 inline。
          */
         displayStrategy?: 'inline' | 'panel' | 'hidden';
     };

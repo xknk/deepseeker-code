@@ -3,7 +3,7 @@
  * @Date: 2026-06-11 15:42:50
  * @LastEditors: fanqianliang 2438756801@qq.com
  * @LastEditTime: 2026-06-15 09:46:49
- * @FilePath: \lims-frontd:\code\自研\deepSeekCode\src\core\src\channels\unifiedMessage.ts
+ * @FilePath: d:\code\自研\deepSeekCode\src\core\src\channels\unifiedMessage.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 /**

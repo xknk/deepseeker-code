@@ -35,6 +35,8 @@ export interface RunAgentOptions {
     onAssistantTextDelta?: (delta: string) => void;
     /** 本次会话唯一 ID，用于持久化、埋点与会话隔离。 */
     sessionId: string;
+    /** 本次会话的工作目录（hook 子进程 cwd / 工具相对路径基准）；缺省取 process.cwd()。spawn_agent 透传以保持父子一致。 */
+    cwd?: string;
     /** 当前 agent 实例 ID。 */
     agentId?: string;
     /** 可观测性事件回调，见 {@link RunAgentEvents}。 */
