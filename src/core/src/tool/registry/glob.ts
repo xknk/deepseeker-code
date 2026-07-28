@@ -68,6 +68,9 @@ export const globTools: CustomTool[] = [
                             scannedCount++;
                             if (scannedCount > MAX_SCAN_LIMIT) break;
 
+                            // ★ M-3 修复：跳过符号链接，防止工作区内指向外部的软链把工作区外文件名带进结果（路径越界/信息泄露）。
+                            if (e.isSymbolicLink()) continue;
+
                             const full = path.join(dir, e.name);
                             const rel = path.relative(WORKSPACE_ROOT, full).replace(/\\/g, "/");
 

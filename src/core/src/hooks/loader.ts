@@ -68,6 +68,11 @@ const readHooksConfig = async (): Promise<RawHooksConfig> => {
         const hooksBlock = parsed?.hooks;
         if (!hooksBlock || typeof hooksBlock !== "object") continue;
         appendValidated(merged, hooksBlock, configPath);
+        // ★ 项目级 hook 信任边界告警：其 command 以 shell 执行（等同 git hooks 信任模型）。
+        //   克隆未知仓库前应核查此文件，避免任意命令执行；完整首跑审批门见 requireApproval 字段（预留，后续接入）。
+        if (configPath === paths[1] && Object.keys(hooksBlock).length > 0) {
+            console.warn(`⚠️【安全提示】已加载项目级 hook 配置 [${configPath}]，其 command 将以 shell 执行。仅在信任该项目时启用；克隆未知仓库前请核查该文件以防任意命令执行。`);
+        }
     }
     return merged;
 };

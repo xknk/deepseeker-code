@@ -112,24 +112,34 @@ const migrateLegacyFiles = async (sessionId: string): Promise<void> => {
 export const writeStore = async (sessionId: string, store: any) => {
     // 1. 先确保存放文件的文件夹已经存在
     await ensureSessionsDir(sessionId);
-    // 2. 安全地写入状态文件
-    await fs.writeFile(getStatePath(sessionId), JSON.stringify(store, null, 2), "utf-8");
+    // 2. ★ 原子写：先落 .tmp 再 rename，避免写中途崩溃留下截断的 state.json
+    //    （readStore 会把截断文件当空 {} → archivedMessageCount 归零 → 已归档旧消息重入上下文，破坏压缩语义）。
+    const finalPath = getStatePath(sessionId);
+    const tmpPath = `${finalPath}.${Date.now()}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(store, null, 2), "utf-8");
+    await fs.rename(tmpPath, finalPath);
 }
 
 /** 读取或创建会话身份：若 sessionId 已有记录则复用，否则新建并落盘一个带元信息的空条目。 */
 export const getOrCreateSessionId = async (sessionId: string | undefined): Promise<string> => {
-    let entry = sessionId ? await readStore(sessionId) : null
-    if (!entry) {
-        entry = {
+    // readStore 对缺失/损坏文件返回 {}（truthy 但无 sessionId）→ 用 sessionId 字段判定是否已持久化，避免旧实现返回 undefined。
+    const existing = sessionId ? await readStore(sessionId) : null;
+    const isPersisted = !!(existing && typeof (existing as any).sessionId === "string");
+    const entry = isPersisted
+        ? existing
+        : {
             sessionId: createUUID(), // 身份id
             updatedAt: new Date().toISOString(), // 更新时间
             createAt: new Date().toISOString(), // 创建时间
             archivedMessageCount: 0, // 总条数消息
             rollingSummary: "", // 滚动总结摘要
             consecutiveFailures: 0, // 失败消息
-        }
+        };
+    // ★ 兑现"创建即落盘"契约：新建身份时持久化带元信息的空条目（旧实现遗漏，导致 createAt 等元信息丢失）。
+    if (!isPersisted) {
+        await writeStore((entry as any).sessionId, entry);
     }
-    return entry.sessionId
+    return (entry as any).sessionId;
 }
 
 /** 从硬盘读取整个会话数据库 */

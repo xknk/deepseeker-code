@@ -40,7 +40,8 @@ const isSensitivePath = (rel: string): boolean => {
     const p = rel.toLowerCase().replace(/\\/g, '/');
     return [
         /\.env(\.|$|\/)/,
-        /\.pem$/, /\.key$/, /^id_rsa/, /^id_ecdsa/, /^id_ed25519/,
+        /\.pem$/, /\.key$/,
+        /(^|\/)id_(rsa|ecdsa|ed25519|dsa)(\.pub)?$/,   // SSH 私钥（含子目录路径，如 deploy_keys/id_rsa）
         /secrets?\.(json|ya?ml|toml|ini|conf)$/i,
         /credentials?\.(json|ya?ml|toml|ini|conf)$/i,
         /\.pfx$/, /\.p12$/, /\.keystore$/, /\.jks$/,
@@ -169,7 +170,27 @@ async function backupFileCreate(common: CommonFields): Promise<UndoRecord> {
     return { ...common, backupKind: 'creation_marker', backupPath: '', fileSizeBefore: 0 };
 }
 
-/** delete_path：文件→拷贝全文；目录→cpSync 整树（带单次体积熔断）。 */
+/** 递归收集目录内命中敏感判定的"相对该目录"路径（用于 delete_path 目录备份的敏感策略过滤）。
+ *  wsRelDir 为该目录相对工作区的路径，用于拼出工作区相对路径后过 isSensitivePath（与单文件 beforeMutationBackup 口径一致）。 */
+const collectSensitiveInDir = async (dir: string, wsRelDir: string): Promise<string[]> => {
+    const found: string[] = [];
+    const walk = async (d: string) => {
+        let entries: fsSync.Dirent[];
+        try { entries = await fs.readdir(d, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+            const full = path.join(d, e.name);
+            if (e.isDirectory()) { await walk(full); }
+            else if (e.isFile()) {
+                const relWithin = path.relative(dir, full).replace(/\\/g, "/");
+                if (isSensitivePath(`${wsRelDir}/${relWithin}`)) found.push(relWithin);
+            }
+        }
+    };
+    await walk(dir);
+    return found;
+};
+
+/** delete_path：文件→拷贝全文；目录→cpSync 整树（带单次体积熔断 + 敏感文件策略过滤）。 */
 async function backupDelete(common: CommonFields, undoDir: string, relativePath: string): Promise<UndoRecord> {
     const absPath = resolveSafePath(relativePath);
     const st = await fs.stat(absPath);
@@ -182,8 +203,28 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
         if (treeBytes > maxPerOp) {
             throw new Error(`目录 [${relativePath}] 体积约 ${treeBytes} 字节超过单次备份上限 ${maxPerOp}，写入已阻断（防磁盘拖垮；可调 undoMaxBytesPerOp 或拆分删除）`);
         }
+
+        // ★ undo H-1 修复：顶层 relativePath 不命中 isSensitivePath，旧实现 cpSync 整树会把目录内 .env/私钥明文落盘，
+        //   绕过 undoBackupSensitive 策略。此处递归扫描后按策略处置（deny 阻断 / skip 剔除 / allow 放行）。
+        const policy = appConfig.undoBackupSensitive ?? 'skip';
+        let sensitiveInTree: string[] = [];
+        if (policy !== 'allow') {
+            sensitiveInTree = await collectSensitiveInDir(absPath, relativePath);
+            if (sensitiveInTree.length > 0 && policy === 'deny') {
+                throw new Error(`目录 [${relativePath}] 内含敏感文件 ${sensitiveInTree.length} 个（如 ${sensitiveInTree[0]}），按策略(undoBackupSensitive=deny)拒绝备份，写入已阻断`);
+            }
+        }
+
         const treeDest = path.join(undoDir, 'tree');
         fsSync.cpSync(absPath, treeDest, { recursive: true, preserveTimestamps: true });
+
+        // skip 策略：从备份副本剔除敏感文件（仍允许删除原目录，仅该部分不可回退）
+        if (policy === 'skip' && sensitiveInTree.length > 0) {
+            for (const relWithin of sensitiveInTree) {
+                await fs.rm(path.join(treeDest, relWithin), { force: true }).catch(() => { /* 剔除失败不阻断 */ });
+            }
+        }
+
         return {
             ...common,
             backupKind: 'directory_tree',

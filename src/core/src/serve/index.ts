@@ -34,6 +34,13 @@ async function startServer() {
     };
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
+    // ★ 进程级兜底：async handler 未 await 的 rejection、流 'error' 等至少记日志，而非静默触发 Node 15+ 默认的 --unhandled-rejections=throw 崩溃。
+    process.on("unhandledRejection", (reason) => {
+        console.error("⚠️ [unhandledRejection]", reason);
+    });
+    process.on("uncaughtException", (err) => {
+        console.error("⚠️ [uncaughtException]", err);
+    });
 
     const app = createServer();
     // ★ 默认仅监听 127.0.0.1（本地回环），杜绝远程/局域网攻击者直连 3000 端口。

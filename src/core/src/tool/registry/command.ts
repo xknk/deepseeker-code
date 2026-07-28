@@ -66,6 +66,7 @@ export const commandTools: CustomTool[] = [
                 // ★ 若进入工具时 signal 已 aborted，spawn 会同步抛 ERR_ABORTED；前置兜底避免击穿 generator
                 if (ctx?.abortSignal?.aborted) {
                     yield `❌ [已中止]：命令 [${args.command}] 未执行（用户已中断）。`;
+                    yield EXIT_SENTINEL(-1); // ★ H-2：中止也追加失败哨兵，避免 verifyResult 无哨兵时默认判 SUCCESS
                     return;
                 }
                 let proc: any;
@@ -78,6 +79,7 @@ export const commandTools: CustomTool[] = [
                     });
                 } catch (e: any) {
                     yield `❌ [启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`;
+                    yield EXIT_SENTINEL(-1); // ★ H-2：启动失败追加失败哨兵，避免 verifyResult 默认判 SUCCESS
                     return;
                 }
 
@@ -110,7 +112,9 @@ export const commandTools: CustomTool[] = [
                     notifyNewData();
                 });
                 proc.on("close", (code: number | null) => {
-                    exitCode = code ?? 0;
+                    // ★ H-1 修复：用 ??= 保留 error 事件已写入的 -1；code=null（被信号杀死/spawn 失败）按 -1 处理。
+                    //   旧实现 exitCode = code ?? 0 无条件覆盖，会把 spawn ENOENT（error 置 -1 → close 置 null）误判为成功退出 0。
+                    exitCode ??= code == null ? -1 : code;
                     settled = true;
                     notifyNewData();
                 });

@@ -14,7 +14,7 @@ import { readUndoIndex, markRestored, appendUndoRecord } from "./index.ts";
 import { hashTreeManifest } from "./backup.ts";
 import { createUUID } from "@/common/index.ts";
 import { getTodayDateString } from "@/observability/traceCalculate.ts";
-import { UndoRecord } from "./type.ts";
+import { UndoRecord, BackupKind } from "./type.ts";
 
 const sha1File = async (absPath: string): Promise<string> => {
     const buf = await fs.readFile(absPath);
@@ -77,20 +77,20 @@ async function doRestore(target: UndoRecord, sessionId: string): Promise<string>
     // 软警告：该文件在本次备份之后是否还有更新的未回退变更（提示回退顺序，不阻断）
     const newerWarning = await checkNewerChange(target, sessionId);
 
-    const reverseId = await ensureReverseBackup(target, sessionId);
+    const reverse = await ensureReverseBackup(target, sessionId);
     let msg: string;
     try {
         msg = await dispatchRestore(target);
     } catch (e: any) {
-        // 还原失败：保持记录未回退（可重试）；reverseId 若已生成则成孤儿，由 gcOrphanBackups 回收
+        // 还原失败：保持记录未回退（可重试）；reverse 若已生成则成孤儿，由 gcOrphanBackups 回收
         throw new Error(`回退执行失败（记录未标记已回退，可重试）: ${e?.message ?? e}`);
     }
-    await markRestored(sessionId, target.undoId, reverseId ?? undefined);
-    if (reverseId) await appendReverseRecord(target, reverseId, sessionId);
+    await markRestored(sessionId, target.undoId, reverse?.reverseId);
+    if (reverse) await appendReverseRecord(target, reverse, sessionId);
     // ★ 反向备份提示：directory_tree 回退时目标必不存在（前置检查已拒），ensureReverseBackup 不生成反向 →
     //   该回退为单向，明确告知模型不可再次 undo_restore 回退此操作，避免信赖"双向可逆"提示误判。
-    const reverseNote = reverseId
-        ? `\n（反向备份 ${reverseId.slice(0, 8)} 已生成，可再次 undo_restore 回退此回退）`
+    const reverseNote = reverse
+        ? `\n（反向备份 ${reverse.reverseId.slice(0, 8)} 已生成，可再次 undo_restore 回退此回退）`
         : (target.backupKind === 'directory_tree' ? `\n（⚠️ 此为目录树回退，未生成反向备份，无法再次 undo_restore 回退此操作）` : '');
     return `✅ [undo 成功]：${msg}${reverseNote}${newerWarning}`;
 }
@@ -108,22 +108,25 @@ async function checkNewerChange(target: UndoRecord, sessionId: string): Promise<
         (r.timestamp || "") > (target.timestamp || "")
     );
     return hasNewer
-        ? `\n⚠️ 注意：[${target.relativePath}] 在此次备份之后还有更新的未回退变更。本次回退会覆盖它们（已生成反向备份，可反向回退恢复）；若要按顺序回退，建议先回退最新的一项（undo_restore restore_last=true）。`
+        ? `\n⚠️ 注意：[${target.relativePath}] 在此次备份之后还有更新的未回退变更。本次回退会覆盖它们（回退结果会注明是否生成反向备份：若已生成可再次 undo_restore 反向回退恢复）。若要按顺序回退，建议先回退最新的一项（undo_restore restore_last=true）。`
         : "";
 }
 
+/** 反向备份产物：reverseId + 实际落盘形态/路径（由实时 stat 决定，可能与 target.backupKind 不同——见 creation_marker）。 */
+type ReverseBackup = { reverseId: string; backupKind: BackupKind; backupPath: string };
+
 /**
- * 反向备份：回退前把当前磁盘态再存一份，支持"撤销撤销"。仅当目标存在且内容与备份前不同时才存。
- * creation_marker 无原内容可存 → 不生成反向。
+ * 反向备份：回退前把当前磁盘态再存一份，支持"撤销撤销"。仅当目标存在且（有基准时）内容与备份前不同才存。
+ * ★ C-1 修复：creation_marker 不再无条件跳过——若被新建的文件当前仍存在（可能已被后续 edit 改写），
+ *   按"当前态"生成 file_content/directory_tree 反向备份，让"回退新建文件"也可逆，避免误删后续编辑且无法恢复。
  */
-async function ensureReverseBackup(target: UndoRecord, sessionId: string): Promise<string | null> {
-    if (target.backupKind === 'creation_marker') return null;
+async function ensureReverseBackup(target: UndoRecord, sessionId: string): Promise<ReverseBackup | null> {
     let absPath: string;
     try { absPath = resolveSafePath(target.relativePath); } catch { return null; }
     let exists = true; try { await fs.access(absPath); } catch { exists = false; }
     if (!exists) return null;
 
-    // 当前内容与备份前一致 → 回退等于无操作，无需反向
+    // 当前内容与备份前一致 → 回退等于无操作，无需反向（creation_marker 无 contentHashBefore，跳过此判断恒走备份）
     if (target.contentHashBefore) {
         try {
             const curHash = target.backupKind === 'directory_tree' ? await hashTreeManifest(absPath) : await sha1File(absPath);
@@ -137,11 +140,13 @@ async function ensureReverseBackup(target: UndoRecord, sessionId: string): Promi
     assertWithinWorkspace(absPath);
     const st = await fs.stat(absPath);
     if (st.isDirectory()) {
-        fsSync.cpSync(absPath, path.join(reverseDir, 'tree'), { recursive: true, preserveTimestamps: true });
-    } else {
-        await fs.writeFile(path.join(reverseDir, 'content'), await fs.readFile(absPath));
+        const dest = path.join(reverseDir, 'tree');
+        fsSync.cpSync(absPath, dest, { recursive: true, preserveTimestamps: true });
+        return { reverseId, backupKind: 'directory_tree', backupPath: dest };
     }
-    return reverseId;
+    const dest = path.join(reverseDir, 'content');
+    await fs.writeFile(dest, await fs.readFile(absPath));
+    return { reverseId, backupKind: 'file_content', backupPath: dest };
 }
 
 /** 实际还原分发（假定前置检查已过）。 */
@@ -171,17 +176,18 @@ async function dispatchRestore(r: UndoRecord): Promise<string> {
     }
 }
 
-/** 追加一条反向 UndoRecord，让用户能沿 reverseUndoId 链"撤销撤销"。 */
-async function appendReverseRecord(target: UndoRecord, reverseId: string, sessionId: string): Promise<void> {
-    const kind = target.backupKind === 'directory_tree' ? 'tree' : 'content';
+/** 追加一条反向 UndoRecord，让用户能沿 reverseUndoId 链"撤销撤销"。
+ *  ★ C-1/M-2 修复：backupKind/backupPath 取反向备份的实际产物（由 ensureReverseBackup 回传），
+ *    而非复制 target.backupKind——否则 creation_marker 的反向记录会再走"删除"分支，回退反向时再次误删。 */
+async function appendReverseRecord(target: UndoRecord, reverse: ReverseBackup, sessionId: string): Promise<void> {
     const reverseRecord: UndoRecord = {
-        undoId: reverseId,
+        undoId: reverse.reverseId,
         toolsId: target.toolsId,
         sessionId,
         operationType: target.operationType,
         relativePath: target.relativePath,
-        backupKind: target.backupKind,
-        backupPath: path.join(getUndoBackupRoot(sessionId), reverseId, kind),
+        backupKind: reverse.backupKind,
+        backupPath: reverse.backupPath,
         contentHashBefore: target.contentHashBefore,
         fileSizeBefore: target.fileSizeBefore,
         timestamp: new Date().toISOString(),

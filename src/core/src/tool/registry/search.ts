@@ -16,6 +16,7 @@ import { promisify } from "util";
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import { WORKSPACE_ROOT } from "../guard.ts";
+import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
 import fs from "fs/promises";
 
@@ -43,6 +44,8 @@ export const searchTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
+            // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
+            privacyMaskingRules: maskSecretsInContent,
             async execute(args: { query: string; is_regex?: boolean }): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();

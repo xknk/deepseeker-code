@@ -33,7 +33,7 @@ const isSensitiveReadTarget = (rel: string): boolean => {
         /\.env(\.|$|\/)/,                                   // .env / .env.local / .env.production
         /\.npmrc$/,                                         // npm 凭证（_authToken）
         /\.pem$/, /\.key$/, /\.pfx$/, /\.p12$/, /\.keystore$/, /\.jks$/,
-        /^id_rsa/, /^id_ecdsa/, /^id_ed25519/, /^id_dsa/,   // SSH 私钥
+        /(^|\/)id_(rsa|ecdsa|ed25519|dsa)(\.pub)?$/,        // SSH 私钥（含子目录路径，如 deploy_keys/id_rsa）
         /(^|\/)secrets?\.(json|ya?ml|toml|ini|conf)$/i,
         /(^|\/)credentials?\.(json|ya?ml|toml|ini|conf)$/i,
     ].some(re => re.test(p));
@@ -44,7 +44,7 @@ const isSensitiveReadTarget = (rel: string): boolean => {
  * 仅替换凭证值，保留键名与行号结构，便于模型理解上下文又不外泄机密。
  * 由 runAgent 的 applyPrivacyMasking 在 verifyResult 之后调用，仅影响"发给云端模型的视图"。
  */
-const maskSecretsInContent = (_args: any, output: string): string => {
+export const maskSecretsInContent = (_args: any, output: string): string => {
     return output
         // 形如 apiKey: "sk-xxxx" / token=xxxx / Authorization: Bearer xxxx
         .replace(/((?:api[_-]?key|secret|password|passwd|token|authorization|auth[_-]?token|access[_-]?key|secret[_-]?key|private[_-]?key)\s*[:=]\s*['"]?)[A-Za-z0-9_\-+/=.]{8,}(['"]?)/gi, '$1[MASKED_SECRET]$2')
