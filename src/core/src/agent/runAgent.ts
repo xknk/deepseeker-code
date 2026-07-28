@@ -138,7 +138,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events({
                     sessionId,
                     eventType: 'user.aborted',
-                    meteData: {
+                    metadata: {
                         depth,
                         decisionSource: 'user',
                         ok: false,
@@ -181,7 +181,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events({
                     sessionId: sessionId,
                     eventType: 'llm.request',
-                    meteData: {
+                    metadata: {
                         depth: depth,
                         decisionSource: userDecisionSource,
                         ok: true,
@@ -209,8 +209,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             contentBuf += delta.content;
                             yield { type: 'text.delta', text: delta.content };
                         }
-                        // DeepSeek reasoning 流式（扩展字段，OpenAI 标准类型未定义，用 as any 读取）
-                        const reasoning = (delta as any).reasoning_content;
+                        // DeepSeek reasoning 流式：reasoning_content 是 DeepSeek 对 OpenAI delta 的扩展（标准类型未定义），用窄化类型读取而非 any
+                        const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
                         if (reasoning) yield { type: 'thinking.delta', text: reasoning };
                         if (delta.tool_calls) {
                             for (const tc of delta.tool_calls) {
@@ -245,7 +245,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events({
                     sessionId: sessionId,
                     eventType: 'llm.response',
-                    meteData: {
+                    metadata: {
                         depth: depth,
                         decisionSource: llmDecisionSource,
                         ok: true,
@@ -274,7 +274,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events({
                     sessionId: sessionId,
                     eventType: 'llm.error',
-                    meteData: {
+                    metadata: {
                         depth: depth,
                         decisionSource: llmDecisionSource,
                         ok: false,
@@ -326,7 +326,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events({
                     sessionId: sessionId,
                     eventType: 'tool.denied',
-                    meteData: {
+                    metadata: {
                         depth: depth,
                         decisionSource: llmDecisionSource,
                         durationMs: performance.now() - startTime,
@@ -346,7 +346,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             events({
                 sessionId: sessionId,
                 eventType: 'tool.resolve',
-                meteData: {
+                metadata: {
                     depth: depth,
                     decisionSource: llmDecisionSource,
                     durationMs: performance.now() - startTime,
@@ -406,7 +406,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     events({
                         sessionId: sessionId,
                         eventType: 'tool.validation.failed',
-                        meteData: {
+                        metadata: {
                             depth: depth,
                             decisionSource: llmDecisionSource,
                             durationMs: performance.now() - startTime,
@@ -489,7 +489,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             events({
                                 sessionId: sessionId,
                                 eventType: 'tool.execute.start',
-                                meteData: {
+                                metadata: {
                                     depth: depth,
                                     decisionSource: llmDecisionSource,
                                     durationMs: performance.now() - startTime,
@@ -522,7 +522,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             events({
                                 sessionId: sessionId,
                                 eventType: 'tool.execute.end',
-                                meteData: {
+                                metadata: {
                                     depth: depth,
                                     decisionSource: llmDecisionSource,
                                     durationMs: performance.now() - startTime,
@@ -542,7 +542,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             events({
                                 sessionId: sessionId,
                                 eventType: 'tool.failed',
-                                meteData: {
+                                metadata: {
                                     depth: depth,
                                     decisionSource: llmDecisionSource,
                                     durationMs: performance.now() - startTime,
@@ -570,7 +570,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     events({
                         sessionId: sessionId,
                         eventType: 'tool.validation.failed',
-                        meteData: {
+                        metadata: {
                             depth: depth,
                             decisionSource: llmDecisionSource,
                             durationMs: performance.now() - startTime,
@@ -605,11 +605,23 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   根本解法（让 execute 返回显式 {status}）是后续工具协议演进，此处保持过渡方案。
                 const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
                 const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
-                yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result, ok };
-                // 存储本次工具结果的消息到上下文中
-                message.push({ role: 'tool', tool_call_id: toolCall.id, content: result });
+                // F-2：outputFilter（可选）——工具可把结果分流为"喂模型的精简版（toModel）"与"给用户看的完整版（toUser）"。
+                //   未声明时两者均为原 result，行为不变（additive，当前无工具声明则零影响）。
+                //   典型场景：长构建日志给用户看全文、给模型只喂摘要，省 token 又保体验。
+                let resultForModel = result;
+                let resultForUser = result;
+                if (matchedTool?.function?.outputFilter) {
+                    try {
+                        const split = matchedTool.function.outputFilter(result);
+                        resultForModel = split.toModel;
+                        resultForUser = split.toUser;
+                    } catch { /* 容错：outputFilter 异常则两者均用原 result，不阻断 */ }
+                }
+                yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result: resultForUser, ok };
+                // 存储本次工具结果的消息到上下文中（模型看 toModel 精简版；transcript 与 context 一致）
+                message.push({ role: 'tool', tool_call_id: toolCall.id, content: resultForModel });
                 // 添加到本地上下文中
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: result });
+                await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: resultForModel });
             }
             // 主动停止返回最终消息
             if (abortedDuringTools) {

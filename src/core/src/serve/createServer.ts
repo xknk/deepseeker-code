@@ -162,8 +162,6 @@ export const createServer = () => {
                     messages: [{ role: 'user', content: raw?.content || '' }] // ★ 移除调试期硬编码占位 '当前北京时间2222'
                 };
                 await writeStore(sessionId, data);
-            } else {
-                console.log(`[IO] 成功命中历史状态文件，直接读取数据: ${sessionId}.state.json`);
             }
             res.status(200).json({ status: "ok", sessionId, data });
         } catch (error) {

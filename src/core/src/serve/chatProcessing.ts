@@ -61,7 +61,7 @@ export const handleUnifiedChat = async (
         await emitTrace({
             sessionId,
             eventType: 'session.end',
-            meteData: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
+            metadata: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
             payload: { output: denyMsg }
         });
         return;
@@ -76,7 +76,7 @@ export const handleUnifiedChat = async (
     await emitTrace({
         sessionId,
         eventType: 'session.start',
-        meteData: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
+        metadata: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
         payload: { input: inbound.content }
     })
     // ★ SessionStart hook（观察；不可拦截）。dispatch 内部已容错，外层 catch 双保险。
@@ -118,7 +118,7 @@ export const handleUnifiedChat = async (
     await emitTrace({
         sessionId,
         eventType: 'session.end',
-        meteData: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
+        metadata: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
         payload: { output: replyText }
     })
 

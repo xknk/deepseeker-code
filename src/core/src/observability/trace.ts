@@ -79,13 +79,13 @@ const ensureClockLoaded = async (): Promise<void> => {
 
 
 /**
- * @description: 统一追踪事件分发器（完美兼容并兼容你的 meteData 嵌套结构，属性全自愈对齐）
- * @param {Partial<TraceBase> & { sessionId: string; eventType: TraceEventType; meteData: TraceBase['meteData'] }} base
+ * @description: 统一追踪事件分发器（完美兼容并兼容你的 metadata 嵌套结构，属性全自愈对齐）
+ * @param {Partial<TraceBase> & { sessionId: string; eventType: TraceEventType; metadata: TraceBase['metadata'] }} base
  */
 export async function emitTrace(
-    base: Partial<TraceBase> & { sessionId: string; eventType: TraceEventType; meteData: TraceBase['meteData'] }
+    base: Partial<TraceBase> & { sessionId: string; eventType: TraceEventType; metadata: TraceBase['metadata'] }
 ): Promise<void> {
-    // 对齐层级结构：顶级放 timestamp/eventType；meteData 透传调用方传入的业务元数据。
+    // 对齐层级结构：顶级放 timestamp/eventType；metadata 透传调用方传入的业务元数据。
     // ★ timestamp 优先用调用方传入值（支持重放/补记），缺省才生成当前时间——旧版无条件覆盖会丢弃 base.timestamp。
     const event: TraceBase = {
         sessionId: base.sessionId,
@@ -94,8 +94,8 @@ export async function emitTrace(
         timestamp: base.timestamp ?? new Date().toISOString(),
         usage: base.usage,
         payload: base.payload,
-        meteData: {
-            ...base.meteData || {},
+        metadata: {
+            ...base.metadata || {},
         }
     };
     // 可观测性日志是「旁路资产」，绝不允许自身的落盘异常把主业务链路拖崩

@@ -2,7 +2,7 @@
  * @file observability/type.ts
  * @description 可观测性的核心类型：
  *  TraceDecisionSource（决策来源）、TraceEventType（生命周期事件枚举）、
- *  TraceBase（结构化埋点对象，含 meteData / usage / payload）、UIEvent（面向前端的交互事件）。
+ *  TraceBase（结构化埋点对象，含 metadata / usage / payload）、UIEvent（面向前端的交互事件）。
  */
 
 /**
@@ -37,7 +37,7 @@ export type TraceEventType =
     | "approval_request"        // 审批请求：需要用户手动审批的操作
     | "tool_guard_block"        //工具
 /**
- * 👈 【对齐你的精美结构】：完全尊重并将资产打包进 meteData 的追踪事件对象接口
+ * 👈 【对齐你的精美结构】：完全尊重并将资产打包进 metadata 的追踪事件对象接口
  * 用于结构化日志存储、性能分析及费用审计
  */
 export interface TraceBase {
@@ -45,7 +45,7 @@ export interface TraceBase {
     parentId?: string;  // 选填：派生出当前动作的父级唯一 traceId（锁定子 Agent 因果链树状拓扑）
     eventType: TraceEventType; // 一级核心事件标记，代表当前事件的物理动作
     timestamp?: string;  // 物理执行时间戳（由 emitTrace 在第一层自动焊死，便于全局时间线检索）
-    meteData: {
+    metadata: {
         messageId?: string; // 选填：关联的落盘消息 ID
         tools_id?: string;  // 选填：关联的工具调用唯一 ID
         depth: number;      // 强力穿透主子宇宙，标记当前的嵌套深度层级（主Agent为0，子Agent为1）

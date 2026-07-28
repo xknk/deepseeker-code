@@ -24,7 +24,7 @@ export type SensitivePolicy = 'skip' | 'deny' | 'allow';
 export interface UndoRecord {
     /** 自造主键（createUUID），回退工具的入参；即使 toolsId 已唯一，仍利于建独立索引与"一调多记录"。 */
     undoId: string;
-    /** = toolCall.id，外键关联 trace(meteData.tools_id)/transcript/审批系统，便于交叉检索。 */
+    /** = toolCall.id，外键关联 trace(metadata.tools_id)/transcript/审批系统，便于交叉检索。 */
     toolsId: string;
     /** 完整 sessionId（含 __sub__ 后缀），便于回溯发起者；归档目录由 getFileName 剥后缀。 */
     sessionId: string;

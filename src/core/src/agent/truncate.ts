@@ -226,7 +226,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 event.events({
                     sessionId: event.sessionId,
                     eventType: 'session.summary',
-                    meteData: {
+                    metadata: {
                         depth: event.depth,
                         decisionSource: 'summary',
                         ok: true,
@@ -287,7 +287,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 sessionId: event.sessionId,
                 parentId: event.depth > 0 ? event.sessionId : '',
                 eventType: 'session.summary',
-                meteData: {
+                metadata: {
                     depth: event.depth,
                     messageId: summaryMsg?.id ?? '(rolling-summary-slot)',
                     decisionSource: 'summary',
