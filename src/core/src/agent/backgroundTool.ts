@@ -24,18 +24,34 @@ function normalizeYield(v: any): string {
  * 启动一个 isSync:false 后台工具：
  * 1. 抢锁（失败则不启动，直接返回锁阻塞信息）；
  * 2. 取首个 yield 作为即时结果；
- * 3. 后台排空剩余 generator，完成时释放锁。
+ * 3. 后台排空剩余 generator，abort/完成/异常时释放锁。
  *
  * @param gen 工具 execute 返回的 AsyncGenerator
  * @param lockKey 互斥锁 key（null 表示无锁）
  * @param toolName 工具名（日志用）
+ * @param signal  中止信号：abort 时立即收尾 generator 并释放锁，避免后台任务脱离中止控制继续占用资源/锁
  * @returns 即时结果字符串（回给模型上下文，不等待后台完成）
  */
 export async function runBackgroundTool(
     gen: AsyncGenerator<any>,
     lockKey: string | null,
     toolName: string,
+    signal?: AbortSignal,
 ): Promise<string> {
+    let aborted = false;
+    let lockReleased = false;
+    // 先声明引用槽再赋值，避免 const 互引的 TDZ（finalize ↔ onAbort 互相引用）
+    let onAbort: () => void = () => { };
+    const releaseLockOnce = () => { if (!lockReleased && lockKey) { releaseLock(lockKey); lockReleased = true; } };
+
+    // 收尾：解绑 abort 监听 + 关闭 generator + 释放锁（幂等，abort/正常结束/异常均可安全调用）
+    const finalize = async () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        try { await gen.return(undefined as any); } catch { /* 并发消费/已结束均忽略 */ }
+        releaseLockOnce();
+    };
+    onAbort = () => { aborted = true; void finalize(); };
+
     // 1. 抢锁（极小概率：early-check 后被并发抢占，则不启动后台）
     if (lockKey && !acquireLock(lockKey)) {
         // generator 未被消费，主动关闭避免资源泄漏
@@ -43,12 +59,19 @@ export async function runBackgroundTool(
         return `🔒 [互斥锁阻塞]：锁 [${lockKey}] 已被占用，[${toolName}] 未启动。`;
     }
 
+    // ★ abort 已发生：直接收尾，不启动后台（避免脱离中止控制的任务继续占用资源/锁）
+    if (signal?.aborted) {
+        await finalize();
+        return `❌ [已中止]：[${toolName}] 后台任务未启动（用户已中断）。`;
+    }
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+
     // 2. 取首个 yield 作为即时结果
     let first;
     try {
         first = await gen.next();
     } catch (e: any) {
-        if (lockKey) releaseLock(lockKey);
+        await finalize();
         return `❌ [后台启动失败]：${e?.message ?? e}`;
     }
 
@@ -56,26 +79,25 @@ export async function runBackgroundTool(
         ? "(后台任务未产出即时结果，已直接结束)"
         : normalizeYield(first.value);
 
-    // 若 generator 已立即结束（无后台部分），直接释放锁
+    // 若 generator 已立即结束（无后台部分），直接收尾
     if (first.done) {
-        if (lockKey) releaseLock(lockKey);
+        await finalize();
         return immediate;
     }
 
-    // 3. 后台排空剩余 generator（fire-and-forget），完成/异常时释放锁
+    // 3. 后台排空剩余 generator（fire-and-forget），abort/完成/异常时均经 finalize 释放锁
     void (async () => {
         try {
-            while (true) {
+            while (!aborted) {
                 const r = await gen.next();
                 if (r.done) break;
                 // 后续 yield 不进入模型上下文（仅作为后台存活期间的产出，如流式日志）
             }
-            console.log(`🔓 [后台任务 ${toolName}] 正常结束，锁 ${lockKey ?? '(无)'} 已释放`);
+            console.log(`🔓 [后台任务 ${toolName}] ${aborted ? "已中止" : "正常结束"}，锁 ${lockKey ?? "(无)"} 已释放`);
         } catch (e: any) {
             console.warn(`⚠️ [后台任务 ${toolName}] 异常退出（锁已释放）: ${e?.message ?? e}`);
         } finally {
-            try { await gen.return(undefined as any); } catch { /* ignore */ }
-            if (lockKey) releaseLock(lockKey);
+            await finalize();
         }
     })();
 

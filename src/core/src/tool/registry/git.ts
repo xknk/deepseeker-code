@@ -10,7 +10,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { WORKSPACE_ROOT } from "../guard.ts";
+import { WORKSPACE_ROOT, resolveSafePath } from "../guard.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,7 +42,7 @@ export const gitTools: CustomTool[] = [
             async execute(args: { path?: string }): Promise<string> {
                 try {
                     const diffArgs = ["diff", "HEAD", "--no-color"];
-                    if (args.path) diffArgs.push("--", args.path);
+                    if (args.path) diffArgs.push("--", resolveSafePath(args.path)); // ★ 统一过 resolveSafePath（拒越界 / ..），与其他 fs 工具口径一致
 
                     const { stdout } = await runGit(diffArgs);
                     if (!stdout.trim()) {

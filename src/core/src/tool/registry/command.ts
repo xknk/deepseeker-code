@@ -10,6 +10,14 @@ import { WORKSPACE_ROOT, resolveSafePath } from "../guard.ts";
 import { killTree } from "./background.ts";
 
 /**
+ * 退出码哨兵：用罕用数学括号 ⟦⟧ 界定 + 私有前缀 DSC_EXIT，避免被 stdout 中的字面量 "[exit: 0]"
+ * 伪造而击穿防幻觉护城河。真正的退出码恒为 execute 在末尾追加的【最后一个】哨兵，
+ * verifyResult 据此取真值；stdout 里即便出现伪造文本也只会排在真值之前。
+ */
+const EXIT_SENTINEL = (code: number) => `\n⟦DSC_EXIT:${code}⟧`;
+const EXIT_SENTINEL_RE = /⟦DSC_EXIT:(-?\d+)⟧/g;
+
+/**
  * @file tool/registry/command.ts
  * @description 命令执行类工具集。run_command：spawn shell 执行命令，
  *  流式返回 stdout/stderr 并附带退出码；属于 DANGER 级高危操作，每次执行都需用户审批。
@@ -36,8 +44,10 @@ export const commandTools: CustomTool[] = [
                 `⚠️【命令执行审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}`,
             maxOutputCharacters: 20000, // 💡 我们将在 execute 内部真正落地这个长度限制
             verifyResult: (rawOutput: string) => {
-                const m = rawOutput.match(/\[exit:\s*(-?\d+)\]/);
-                const code = m ? parseInt(m[1], 10) : 0;
+                // ★ 防伪造：取最后一个哨兵匹配（真正的退出码由 execute 在末尾追加）。
+                //   旧的 [exit: N] 嗅探会被 stdout 里的字面量骗过，已废弃。
+                const matches = [...rawOutput.matchAll(EXIT_SENTINEL_RE)];
+                const code = matches.length ? parseInt(matches[matches.length - 1][1], 10) : 0;
                 return code === 0
                     ? { status: ToolExecutionResultStatus.SUCCESS }
                     : { status: ToolExecutionResultStatus.FAILED, summary: `命令退出码非零：${code}` };
@@ -136,11 +146,11 @@ export const commandTools: CustomTool[] = [
                         }
                     }
                     if (overLimit) {
-                        // ★ 输出被截断视为失败：显式 yield exit:-1，让 verifyResult 判 FAILED，
+                        // ★ 输出被截断视为失败：显式 yield 哨兵 exit:-1，让 verifyResult 判 FAILED，
                         //   避免模型对超长失败构建/测试产生"成功幻觉"（截断场景恰是失败高发区）
-                        yield `\n[exit: -1]`;
+                        yield EXIT_SENTINEL(-1);
                     } else if (exitCode !== null) {
-                        yield `\n[exit: ${exitCode}]`;
+                        yield EXIT_SENTINEL(exitCode);
                     }
                 } finally {
                     ctx?.abortSignal?.removeEventListener("abort", onAbort);

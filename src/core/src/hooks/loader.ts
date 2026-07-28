@@ -35,6 +35,8 @@ interface RawHookRule {
     timeoutMs?: number;
     /** 非零退出码是否拦截；默认 PreToolUse=true，其余=false */
     denyOnNonZero?: boolean;
+    /** handler 抛错（hook 崩溃）时处置；默认 'allow' 放行，安全类 hook 可设 'deny' fail-closed */
+    onError?: 'deny' | 'allow';
     /** 预留：首次执行走审批网关（MVP 暂不接入，仅校验保留） */
     requireApproval?: boolean;
 }
@@ -113,11 +115,20 @@ const validateRule = (raw: any, event: EventType, src: string, idx: number): Raw
         console.warn(`⚠️ [hooks] ${event}[${idx}] 非拦截事件，denyOnNonZero 不生效（仅 PreToolUse/UserPromptSubmit 可拦截），已忽略（${src}）`);
         denyOnNonZero = undefined;
     }
+    // onError：仅可拦截事件消费（观察事件抛错本就忽略）；非法值告警忽略
+    let onError: 'deny' | 'allow' | undefined;
+    if (raw.onError === 'deny' || raw.onError === 'allow') {
+        onError = INTERCEPTABLE_EVENTS.has(event) ? raw.onError : undefined;
+        if (raw.onError && !INTERCEPTABLE_EVENTS.has(event)) {
+            console.warn(`⚠️ [hooks] ${event}[${idx}] 非拦截事件，onError 不生效，已忽略（${src}）`);
+        }
+    }
     return {
         command: command.trim(),
         matcher,
         timeoutMs,
         denyOnNonZero,
+        onError,
         requireApproval: raw.requireApproval === true ? true : undefined,
     };
 };
@@ -132,6 +143,7 @@ const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
         event,
         matcher: raw.matcher,
         source: "config",
+        onError: raw.onError,
         run: async (ctx: any) => {
             const res = await executeHookCommand({
                 command: raw.command,

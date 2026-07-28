@@ -56,6 +56,16 @@ export class McpStdioClient {
             for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); }
             this.pending.clear();
         });
+        // ★ 子进程退出（含被信号杀死——只触发 exit 不触发 error）：立即 reject 所有 pending，
+        //   避免调用方挂满 30s 超时（旧版缺此监听，server 崩溃后调用任意 MCP 工具会卡 30s）。
+        this.proc.on("exit", (code, signal) => {
+            const reason = signal ? `信号 ${signal}` : `退出码 ${code}`;
+            for (const p of this.pending.values()) {
+                clearTimeout(p.timer);
+                p.reject(new Error(`MCP server 已退出（${reason}）`));
+            }
+            this.pending.clear();
+        });
 
         // initialize 握手
         await this.request("initialize", {

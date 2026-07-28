@@ -13,7 +13,6 @@
  *  布局与 runAgent.ensureSummarySlot 保持一致；须在 appendMessage(本次user) 之前调用。
  */
 import { cleanMsg, estimateTokens, groupUnits, Msg } from "./contextCore.ts";
-import { appConfig } from "@/config/index.ts"
 import { readMessages } from "./transcript.ts";
 import { getRollingState } from "./store.ts";
 /**
@@ -21,9 +20,9 @@ import { getRollingState } from "./store.ts";
  * - 输出布局 [system, 摘要槽, ...active, user]，与 runAgent.ensureSummarySlot 一致
  * 必须在 appendMessage(本次user) 之前调用，否则本次 user 被重复读入。
  */
-export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string, maxTokens: number = appConfig.MAX_HISTORY_TOKENS,COMPACT_RATIO = appConfig.COMPACT_RATIO) => {
+export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string) => {
     const all = (await readMessages(sessionId)).map(cleanMsg) //获取当前对话所有消息
-    const store = await getRollingState(`${sessionId}__rollingSummary`);
+    const store = await getRollingState(sessionId);
     const result: Msg[] = [
         { role: 'system', content: systemPrompt }, // 存储系统提示词
         { role: 'system', content: store.rollingSummary }, // 后续存储摘要使用

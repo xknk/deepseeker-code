@@ -2,6 +2,7 @@
  * @file common/index.ts
  * @description 通用工具：会话 ID 到存储文件夹名的映射（getFileName）、UUID 生成（createUUID）。
  */
+import { randomUUID } from "node:crypto";
 /**
  * 将（含后缀的）会话 ID 映射到它所属的主会话文件夹名：
  * - 子 agent ID（含 __sub__）→ 取其父主 ID；
@@ -28,7 +29,7 @@ export const getFileName = (mainSessionId: string) => {
 
 /** 生成 RFC4122 UUID（基于 Node crypto.randomUUID）。 */
 export const createUUID = (): string => {
-    return crypto.randomUUID();
+    return randomUUID();
 }
 
 // ============ 会话 ID 安全校验（防路径穿越）============

@@ -47,23 +47,23 @@ const isSensitivePath = (rel: string): boolean => {
     ].some(re => re.test(p));
 };
 
-/** 目录 manifest 哈希：文件相对路径 + 各文件 sha1 拼接后再 sha1，用于目录的脏写检测。同步实现。 */
-export const hashTreeManifest = (dir: string): string => {
+/** 目录 manifest 哈希：文件相对路径 + 各文件 sha1 拼接后再 sha1，用于目录的脏写检测。异步实现避免大目录阻塞事件循环。 */
+export const hashTreeManifest = async (dir: string): Promise<string> => {
     const h = crypto.createHash('sha1');
-    const walk = (d: string) => {
+    const walk = async (d: string) => {
         let entries: fsSync.Dirent[];
-        try { entries = fsSync.readdirSync(d, { withFileTypes: true }); } catch { return; }
+        try { entries = await fs.readdir(d, { withFileTypes: true }); } catch { return; }
         entries.sort((a, b) => a.name.localeCompare(b.name));
         for (const e of entries) {
             const full = path.join(d, e.name);
             const rel = path.relative(dir, full).replace(/\\/g, '/');
-            if (e.isDirectory()) { h.update(`D ${rel}\n`); walk(full); }
+            if (e.isDirectory()) { h.update(`D ${rel}\n`); await walk(full); }
             else if (e.isFile()) {
-                try { h.update(`F ${rel} ${sha1Buf(fsSync.readFileSync(full))}\n`); } catch { /* ignore */ }
+                try { h.update(`F ${rel} ${sha1Buf(await fs.readFile(full))}\n`); } catch { /* ignore */ }
             }
         }
     };
-    walk(dir);
+    await walk(dir);
     return h.digest('hex');
 };
 
@@ -189,7 +189,7 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
             backupKind: 'directory_tree',
             backupPath: treeDest,
             fileSizeBefore: treeBytes,
-            contentHashBefore: hashTreeManifest(absPath),
+            contentHashBefore: await hashTreeManifest(absPath),
         };
     }
     const content = await fs.readFile(absPath);

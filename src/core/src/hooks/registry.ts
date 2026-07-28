@@ -45,34 +45,47 @@ export const clearHooks = (): void => {
 };
 
 /**
- * 按事件分发：依次执行所有匹配的 handler。
- * @returns 首个返回 deny 的可拦截 handler 即拦截；否则放行。
- *  - matcher 仅对 Pre/PostToolUse 生效（按 ctx.toolName 过滤）。
- *  - handler 抛错：可拦截事件按放行、观察事件静默吞掉。
+ * 按事件分发：
+ *  - 可拦截事件（PreToolUse/UserPromptSubmit）：串行 + 短路（首个 deny 即拦）。handler 抛错按 rule.onError 决策
+ *    （默认 'allow' 放行防误拦；安全类 hook 可设 'deny' fail-closed）。
+ *  - 观察事件（其余）：Promise.all 并发执行（累积延迟不再线性叠加），单个失败仅告警。
+ * matcher 仅对 Pre/PostToolUse 生效（按 ctx.toolName 过滤）。
  */
 export const dispatch = async (event: EventType, ctx: any): Promise<{ deny: boolean; reason?: string }> => {
     const interceptable = INTERCEPTABLE_EVENTS.has(event);
     const isToolEvent = TOOL_EVENTS.has(event);
-    for (const rule of rules) {
-        if (rule.event !== event) continue;
-        // 工具事件按 matcher 过滤
+    const matched = rules.filter(rule => {
+        if (rule.event !== event) return false;
         if (isToolEvent && rule.matcher !== undefined) {
             const tn = ctx?.toolName;
-            if (typeof tn !== 'string' || !matches(rule.matcher, tn)) continue;
+            if (typeof tn !== 'string' || !matches(rule.matcher, tn)) return false;
         }
+        return true;
+    });
+
+    // 观察事件：并发执行，单个异常仅告警（不击垮主流程、不相互阻塞）
+    if (!interceptable) {
+        await Promise.all(matched.map(rule =>
+            Promise.resolve(rule.run(ctx)).catch((e: any) => console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${e?.message ?? e}`))
+        ));
+        return { deny: false };
+    }
+
+    // 可拦截事件：串行 + 短路；handler 抛错时按 rule.onError 决策
+    for (const rule of matched) {
         try {
             const res: HookResult = await rule.run(ctx);
-            if (interceptable && res && res.deny) {
+            if (res && res.deny) {
                 return { deny: true, reason: res.reason };
             }
         } catch (e: any) {
             const msg = e?.message ?? e;
-            if (interceptable) {
-                // 可拦截事件抛错按放行处理（防误拦阻断 agent）
-                console.warn(`⚠️ [hook:${event}] 执行异常，按放行处理: ${msg}`);
-            } else {
-                console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${msg}`);
+            if (rule.onError === 'deny') {
+                // ★ fail-closed 逃生阀：安全类 hook 自身崩溃即拒绝，避免缺陷 hook 放行高危操作
+                console.warn(`⚠️ [hook:${event}] 执行异常，按 onError:'deny' 拒绝（fail-closed）: ${msg}`);
+                return { deny: true, reason: `[hook:${event}] 执行异常（fail-closed）: ${msg}` };
             }
+            console.warn(`⚠️ [hook:${event}] 执行异常，按放行处理: ${msg}`);
         }
     }
     return { deny: false };

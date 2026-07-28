@@ -240,9 +240,9 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 })
                 // 【核心大厂级落盘动作】：强行把这个最新滚好的快照，作为一个新节点，写入本地数据库/JSONL中
                 // 注意：此时我们要捕获这批被压缩的废料中，最后一条消息的真实持久化唯一 ID (如 uuid)
-                const store = await getRollingState(`${event.sessionId}__rollingSummary`);
+                const store = await getRollingState(event.sessionId);
                 store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                await setRollingState(`${event.sessionId}__rollingSummary`, {
+                await setRollingState(event.sessionId, {
                     archivedMessageCount: store.archivedMessageCount,
                     rollingSummary: summaryMsg.content,
                     consecutiveFailures: 0,
@@ -255,9 +255,9 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 summaryMsg.content = await compactToLine([summaryMsg], event.modelWindow, event.signal);
                 event.messageArr.length = 0;
                 event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
-                const store = await getRollingState(`${event.sessionId}__rollingSummary`);
+                const store = await getRollingState(event.sessionId);
                 store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                await setRollingState(`${event.sessionId}__rollingSummary`, {
+                await setRollingState(event.sessionId, {
                     archivedMessageCount: store.archivedMessageCount,
                     rollingSummary: summaryMsg.content,
                     consecutiveFailures: 0,
@@ -273,11 +273,11 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             console.warn('⚠️ 本轮压缩失败，跳过:', err.message);
             // ==================== 🛠️ 核心熔断安全升级区 ====================
             // 1. 去硬盘里捞出上一次的状态
-            const store = await getRollingState(`${event.sessionId}__rollingSummary`);
+            const store = await getRollingState(event.sessionId);
             // 2. 失败计数默默加 1
             const nextFailures = (store.consecutiveFailures || 0) + 1;
             // 3. 一脚强行回写落盘，锁死连续失败的物理记忆
-            await setRollingState(`${event.sessionId}__rollingSummary`, {
+            await setRollingState(event.sessionId, {
                 archivedMessageCount: store.archivedMessageCount || 0,
                 rollingSummary: summaryMsg?.content || "",
                 consecutiveFailures: nextFailures // 👈 同步落盘

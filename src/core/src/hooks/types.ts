@@ -84,6 +84,12 @@ export interface HookRule {
     run: HookHandler;
     /** 来源：内置程序化注册 / 声明式配置文件 */
     source: 'builtin' | 'config';
+    /**
+     * 可拦截事件下 handler 抛错（hook 自身崩溃，区别于 denyOnNonZero 的"正常退出非零"）时的处置：
+     *  - 'allow'（默认）：放行，防有缺陷的 hook 误拦阻断 agent；
+     *  - 'deny'：fail-closed，安全类 hook（高危命令检测等）显式声明，自身异常即拒绝。
+     */
+    onError?: 'deny' | 'allow';
 }
 
 /** 可拦截事件集合（deny 语义仅对这些事件生效） */

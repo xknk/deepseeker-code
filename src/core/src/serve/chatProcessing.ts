@@ -111,7 +111,8 @@ export const handleUnifiedChat = async (
         }
     }
 
-    // ★ SessionEnd hook（观察）。规避策略：只用 emitTrace，绝不碰 writeStore（store/transcript 共用文件会损坏 JSONL）。
+    // ★ SessionEnd hook（观察）。store 与 transcript 已物理隔离（<id>.state.json / <id>.jsonl），
+    //   hook 现在可安全持久化到 state.json；transcript 永远只追加、不被覆盖。
     await dispatch('SessionEnd', { sessionId, cwd: process.cwd() }).catch(() => { });
 
     await emitTrace({

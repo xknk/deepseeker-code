@@ -59,13 +59,19 @@ export const createServer = () => {
             res.status(400).json({ error: "invalid sessionId" });
             return;
         }
-        // ★ 安全②：并发上限保护
+        // ★ 统一解析 sessionId：缺省则服务端生成并回填 raw，使路由层 / 业务层 / /api/abort 用同一键。
+        //   否则匿名请求不入 activeControllers → ①并发上限 MAX_CONCURRENT_SESSIONS 形同虚设；
+        //   ②/api/abort 永远找不到控制器（匿名会话无法停止）；③handleUnifiedChat 每次新建会话落盘膨胀。
+        const sessionId = sessionIdRaw ?? createUUID();
+        if (raw) raw.sessionId = sessionId;
+
+        // ★ 安全②：并发上限保护（sessionId 已统一，匿名会话同样计数）
         if (activeControllers.size >= MAX_CONCURRENT_SESSIONS) {
             res.status(429).json({ error: "too many concurrent sessions" });
             return;
         }
         // ★ 安全③：同会话串行——避免第二个请求覆盖前一个的 AbortController 导致前者失控
-        if (sessionIdRaw && activeControllers.has(sessionIdRaw)) {
+        if (activeControllers.has(sessionId)) {
             res.status(409).json({ error: "session already active" });
             return;
         }
@@ -88,9 +94,8 @@ export const createServer = () => {
             if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
         };
 
-        const sessionId = sessionIdRaw;
-        // 注册本次请求的 AbortController，供 /api/abort 按 sessionId 主动中止
-        if (sessionId) activeControllers.set(sessionId, ac);
+        // 注册本次请求的 AbortController（sessionId 恒有值），供 /api/abort 按 sessionId 主动中止
+        activeControllers.set(sessionId, ac);
 
         try {
             // sseWrite 作为主通道；sendOutbound 仅作非 SSE 渠道的后备（此处不会被调用）
@@ -99,7 +104,7 @@ export const createServer = () => {
             sseWrite({ eventType: "error", message: err instanceof Error ? err.message : String(err) });
         } finally {
             req.off("aborted", onAbort);
-            if (sessionId) activeControllers.delete(sessionId);
+            activeControllers.delete(sessionId);
             if (!res.writableEnded) res.end();
         }
     });
@@ -142,16 +147,23 @@ export const createServer = () => {
                 res.status(400).json({ status: "error", message: "invalid sessionId" });
                 return;
             }
+            // ★ content 类型校验（旧版无校验，undefined/非字符串会污染下游）
+            if (raw?.content !== undefined && typeof raw.content !== "string") {
+                res.status(400).json({ status: "error", message: "invalid content" });
+                return;
+            }
             const sessionId = raw?.sessionId || createUUID();
             let data = await readStore(sessionId);
             if (Object.keys(data).length === 0) {
+                // ⚠️ writeStore 现落盘到 <id>.state.json（与转录 <id>.jsonl 物理隔离），不再覆盖 JSONL 日志。
+                //    此处 messages 仅作调试快照，不参与 agent 转录管线（runAgent 走 transcript.jsonl）。
                 data = {
                     createdAt: new Date().toISOString(),
-                    messages: [{ role: 'user', content: raw?.content || '当前北京时间2222' }]
+                    messages: [{ role: 'user', content: raw?.content || '' }] // ★ 移除调试期硬编码占位 '当前北京时间2222'
                 };
                 await writeStore(sessionId, data);
             } else {
-                console.log(`[IO] 成功命中历史文件，直接读取数据: ${sessionId}.json`);
+                console.log(`[IO] 成功命中历史状态文件，直接读取数据: ${sessionId}.state.json`);
             }
             res.status(200).json({ status: "ok", sessionId, data });
         } catch (error) {
@@ -159,5 +171,12 @@ export const createServer = () => {
             res.status(500).json({ status: "error", message: "服务器内部错误" });
         }
     });
+    // ★ 统一错误中间件：Express 4 不会自动捕获 async handler 的 rejected promise，
+    //   兜底防止未处理异常导致请求挂起或进程级 unhandledRejection。须放在所有路由之后、return app 之前。
+    app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+        console.error("[express] 未处理路由异常:", err);
+        if (!res.writableEnded) res.status(500).json({ error: "服务器内部错误" });
+    });
+
     return app;
 }

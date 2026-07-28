@@ -87,7 +87,12 @@ async function doRestore(target: UndoRecord, sessionId: string): Promise<string>
     }
     await markRestored(sessionId, target.undoId, reverseId ?? undefined);
     if (reverseId) await appendReverseRecord(target, reverseId, sessionId);
-    return `✅ [undo 成功]：${msg}${reverseId ? `\n（反向备份 ${reverseId.slice(0, 8)} 已生成，可再次 undo_restore 回退此回退）` : ''}${newerWarning}`;
+    // ★ 反向备份提示：directory_tree 回退时目标必不存在（前置检查已拒），ensureReverseBackup 不生成反向 →
+    //   该回退为单向，明确告知模型不可再次 undo_restore 回退此操作，避免信赖"双向可逆"提示误判。
+    const reverseNote = reverseId
+        ? `\n（反向备份 ${reverseId.slice(0, 8)} 已生成，可再次 undo_restore 回退此回退）`
+        : (target.backupKind === 'directory_tree' ? `\n（⚠️ 此为目录树回退，未生成反向备份，无法再次 undo_restore 回退此操作）` : '');
+    return `✅ [undo 成功]：${msg}${reverseNote}${newerWarning}`;
 }
 
 /**
@@ -121,7 +126,7 @@ async function ensureReverseBackup(target: UndoRecord, sessionId: string): Promi
     // 当前内容与备份前一致 → 回退等于无操作，无需反向
     if (target.contentHashBefore) {
         try {
-            const curHash = target.backupKind === 'directory_tree' ? hashTreeManifest(absPath) : await sha1File(absPath);
+            const curHash = target.backupKind === 'directory_tree' ? await hashTreeManifest(absPath) : await sha1File(absPath);
             if (curHash === target.contentHashBefore) return null;
         } catch { /* 比对失败则照常反向备份 */ }
     }

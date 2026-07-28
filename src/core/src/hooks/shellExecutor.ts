@@ -10,6 +10,7 @@
  *   - 结构化 JSON 经 stdin 传入，关键字段另同步到 HOOK_* 环境变量（兼顾不读 stdin 的简单脚本）。
  */
 import { spawn, type ChildProcess } from "child_process";
+import { killTree } from "@/tool/registry/background.ts";
 
 // 4KB 的输出截断足够了，防止大模型上下文爆掉，这个不需要动
 const MAX_OUTPUT = 4096; 
@@ -51,6 +52,20 @@ const truncate = (s: string): string => {
     return s.slice(0, MAX_OUTPUT) + `\n…[输出截断，共 ${s.length} 字符]`;
 };
 
+// ★ stdin JSON 载荷字段截断：edit_file 的 old_str/new_str、read_file 大内容等 args 可能很大，
+//   无截断直传 stdin 会滞留管道缓冲 + 背压拖慢；按字段截断既限总量又保持合法 JSON（与 HOOK_PROMPT 1024 截断同口径）。
+const MAX_STDIN_FIELD = 4096;
+const capFieldStrings = (v: any): any => {
+    if (typeof v === 'string') return v.length > MAX_STDIN_FIELD ? v.slice(0, MAX_STDIN_FIELD) + `…[截断，共 ${v.length} 字符]` : v;
+    if (Array.isArray(v)) return v.map(capFieldStrings);
+    if (v && typeof v === 'object') {
+        const o: Record<string, any> = {};
+        for (const k of Object.keys(v)) o[k] = capFieldStrings(v[k]);
+        return o;
+    }
+    return v;
+};
+
 /**
  * 执行声明式 hook 命令。
  * spawn 失败 / 超时均不抛错（resolve 带错误信息），由调用方按 denyOnNonZero 决策。
@@ -78,6 +93,9 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
         let stderr = "";
         let timedOut = false;
 
+        // ★ 跨平台进程组隔离：非 Windows 下 detached 让 shell 及其派生命令自成独立进程组，
+        //   超时时才能用 process.kill(-pid) 彻底剿灭整组（否则 child.kill 只杀 sh，实际命令变孤儿继续跑）。
+        const isWin = process.platform === "win32";
         let child: ChildProcess;
         try {
             child = spawn(input.command, {
@@ -86,6 +104,7 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
                 env: childEnv,
                 stdio: ["pipe", "pipe", "pipe"],
                 windowsHide: true,
+                detached: !isWin,
             });
         } catch (e: any) {
             resolve({ exitCode: null, stdout: "", stderr: `[spawn 启动失败] ${e?.message ?? e}`, timedOut: false });
@@ -94,7 +113,9 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
 
         const timer = setTimeout(() => {
             timedOut = true;
-            try { child.kill("SIGKILL"); } catch { /* ignore */ }
+            // ★ 杀整个进程组（Win: taskkill /T /F；非 Win: process.kill(-pid)），而非只杀 shell。
+            //   旧实现 child.kill("SIGKILL") 只杀 sh -c，shell 派生的实际命令脱离控制成为孤儿。
+            void killTree(child);
         }, timeoutMs);
 
         child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
@@ -111,9 +132,9 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
         });
         child.on("close", (code: number | null) => done(code));
 
-        // 经 stdin 传入结构化 JSON
+        // 经 stdin 传入结构化 JSON（字段级截断，限总量且保持合法 JSON）
         try {
-            if (input.stdinPayload !== undefined) child.stdin?.end(JSON.stringify(input.stdinPayload));
+            if (input.stdinPayload !== undefined) child.stdin?.end(JSON.stringify(capFieldStrings(input.stdinPayload)));
             else child.stdin?.end();
         } catch {
             try { child.stdin?.end(); } catch { /* ignore */ }

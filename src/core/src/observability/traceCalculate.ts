@@ -7,20 +7,28 @@ import fs from "fs/promises";
 import path from "path";
 
 /**
- * @description: 单次统计某个目录下所有文件的总字节数
- * 仅在「冷启动初始化」与「清理后重算」时调用，热路径永不触发
+ * @description: 递归统计某个目录下【所有层级】文件的总字节数
+ * 仅在「冷启动初始化」与「清理后重算」时调用，热路径永不触发。
+ * ★ 修复：旧版非递归只统计直接子条目（目录 stat≈0），导致 50MB 容量大闸长期失效。
+ *   现与清理函数（readdir recursive）同口径，正确反映真实占用。
  */
 export const getDirBytes = async (dir: string): Promise<number> => {
-    try {
-        const files = await fs.readdir(dir);
-        let total = 0;
-        for (const file of files) {
-            total += (await fs.stat(path.join(dir, file))).size;
+    let total = 0;
+    const stack: string[] = [dir];
+    while (stack.length) {
+        const cur = stack.pop() as string;
+        let entries;
+        try { entries = await fs.readdir(cur, { withFileTypes: true }); } catch { continue; } // 目录不存在/无权限 → 跳过
+        for (const e of entries) {
+            const p = path.join(cur, e.name);
+            if (e.isDirectory()) {
+                stack.push(p);
+            } else {
+                try { total += (await fs.stat(p)).size; } catch { /* 单文件失败跳过，不影响整体统计 */ }
+            }
         }
-        return total;
-    } catch {
-        return 0; // 容错：文件夹尚未建立，水位算 0
     }
+    return total;
 };
 /**
  * @description: 辅助函数：获取最工整的当天日期字符串（形如 2026-06-17）

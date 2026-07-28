@@ -55,8 +55,11 @@ export const waitForUserApproval = async (sessionId: string, toolsId: string, si
 export const resolveUserApprovalLock = (sessionId: string, toolsId: string, approved: boolean): boolean => {
     const entry = pendingLocks.get(toolsId);
     if (!entry) return false;
-    // ★ 跨会话审批熔断：A 会话的请求不得被以 B 会话身份批准
-    if (entry.sessionId !== sessionId) return false;
+    // ★ 跨会话审批熔断：A 会话的请求不得被以 B 会话身份批准。
+    //   但允许父会话批准其子 agent（subSessionId 形如 `${parent}__sub__${uuid}`）的工具——
+    //   子 agent 派生自同一用户会话，前端若回传父 sessionId（而非 sub）也不应死锁。
+    const isOwner = entry.sessionId === sessionId || entry.sessionId.startsWith(`${sessionId}__sub__`);
+    if (!isOwner) return false;
 
     entry.resolver(approved); // ✨ 激活底层被 Await 挂起的代码块
     pendingLocks.delete(toolsId);

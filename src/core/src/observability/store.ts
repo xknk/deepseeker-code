@@ -27,13 +27,21 @@ export const getTracePath = (): string => {
     return path.join(appConfig.dataDir, 'trace');
 }
 
+// ★ 热路径 IO 缓存：trace 落盘每条事件都调 getTraceStorePath，原实现每次 mkdir+readdir，
+//   与"热路径零 IO"自述矛盾且拖慢主链路。进程内缓存解析结果，同一 rootId 只解析一次。
+const tracePathCache = new Map<string, string>();   // rootId → 已解析 jsonl 路径（进程内稳定）
+const ensuredTraceDirs = new Set<string>();          // 已 mkdir 的目录（避免重复 recursive mkdir）
+
 /** 确保 Trace 文件夹存在（在数据目录下创建） */
 export const ensureTraceDir = async (mainTraceId: string): Promise<void> => {
     // 💡 修复：确保是在 appConfig.dataDir 下创建 Trace 文件夹
-    await fs.mkdir(getTraceDirPath(mainTraceId), { recursive: true });
+    const dir = getTraceDirPath(mainTraceId);
+    if (ensuredTraceDirs.has(dir)) return; // ★ 命中缓存，跳过 mkdir
+    await fs.mkdir(dir, { recursive: true });
+    ensuredTraceDirs.add(dir);
 }
 
-/** 
+/**
  * @description: 【全局物理冷时钟路径】：完全与业务会话隔离，存放在全局 trace 根目录下
  * 100% 保护主摘要文件的 updatedAt 不受任何多余污染
  */
@@ -45,6 +53,10 @@ export const getTraceStorePath = async (mainTraceId: string): Promise<string> =>
     assertSafeSessionId(mainTraceId, "traceId"); // ★ 文件名含 `${rootId}`，单独硬守防穿越
     // 💡 修复级联截断 Bug：只切断最后一段 __sub__，保留完整上级链路前缀，防止多子 Agent 并发写入冲突
     const rootId = getFileName(mainTraceId);
+
+    // ★ 命中缓存：同一 rootId 的 jsonl 路径进程内稳定（首调选定文件名即永久复用，跨天不断流）
+    const cached = tracePathCache.get(rootId);
+    if (cached) return cached;
 
     // 确保大外层的 trace 专属物理根目录存在
     await ensureTraceDir(rootId);
@@ -67,6 +79,8 @@ export const getTraceStorePath = async (mainTraceId: string): Promise<string> =>
         fileName = `trace-${todayStr}__${rootId}.jsonl`;
     }
 
-    return path.join(dir, fileName);
+    const resolved = path.join(dir, fileName);
+    tracePathCache.set(rootId, resolved); // ★ 缓存，后续热路径直接命中
+    return resolved;
 }
 

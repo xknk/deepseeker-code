@@ -80,7 +80,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode（见 agent/planMode.ts）
     const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : rawToolsAll;
     const sessionId = options.sessionId; // 本次会话id
-    const events = options.events; // 回调方法
+    // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
+    //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
+    //   全部 11 处埋点点位自动获得该保护，无需逐个 await/.catch。
+    const rawEvents = options.events; // 原始回调方法
+    const events: typeof rawEvents = async (base) => {
+        try { await rawEvents(base); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
+    };
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
     const depth = options.depth ?? 0;
@@ -383,6 +389,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
                 const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
                 let result = "";
+                // ★ 显式成败标志：校验/工具层可显式声明 ok（如未知工具），优先于下方前缀嗅探。
+                //   null=未显式声明 → 回退前缀嗅探；与"让 execute 返回显式 {status}"的演进方向一致。
+                let explicitOk: boolean | null = null;
                 yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
                 if (parseFailed) {
                     result = `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`;
@@ -419,18 +428,38 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     }
                     if (needApproval) {
                         const ra = matchedTool.function.requireApproval;
-                        const detail = ra
-                            ? (typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra)
-                            : `申请执行高危工具 [${calledName}]`;
-                        const approved = await requestApproval(calledName, toolCall.id, detail, toolCtx);
-                        if (!approved) {
+                        let detail = `申请执行高危工具 [${calledName}]`;
+                        // ★ requireApproval（用户自定义函数）异常一律按拒绝处理，不逃逸出工具循环
+                        try {
+                            if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra;
+                        } catch (e: any) {
                             denied = true;
-                            result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`;
+                            result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;
+                        }
+                        if (!denied) {
+                            let approved = false;
+                            // ★ 审批通道（宿主）异常一律按拒绝处理（fail-closed），不逃逸出工具循环
+                            try {
+                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx);
+                            } catch (e: any) {
+                                denied = true;
+                                result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;
+                            }
+                            if (!approved && !denied) {
+                                denied = true;
+                                result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`;
+                            }
                         }
                     }
                     // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截）
                     if (!denied) {
-                        const veto = await runPreHooks(calledName, calledArgs, toolCtx);
+                        // ★ pre-hook 自身异常按"安全失败"拒绝处理（fail-closed），不逃逸出工具循环
+                        let veto: { deny: boolean; reason?: string };
+                        try {
+                            veto = await runPreHooks(calledName, calledArgs, toolCtx);
+                        } catch (e: any) {
+                            veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` };
+                        }
                         if (veto.deny) {
                             denied = true;
                             result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
@@ -470,7 +499,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             const execRet = matchedTool.function.execute(calledArgs, toolCtx);
                             if (isBgTool) {
                                 // ★ isSync:false 后台工具：取首个 yield 为即时结果（不阻塞循环），剩余后台排空，锁在任务结束时释放
-                                result = await runBackgroundTool(execRet as any, lockKey, calledName);
+                                //   signal 透传：用户停止时后台 generator 立即收尾 + 释放锁，避免孤儿后台任务
+                                result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
                             } else {
                                 result = await collectToolResult(execRet);
                             }
@@ -521,11 +551,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             })
                         }
                         // ★ post-hooks：执行后观察（成功或异常都触发，不拦截）
-                        await runPostHooks(calledName, calledArgs, result, toolCtx);
+                        //   自身异常仅告警，绝不击垮主循环（observe-only，不应影响 result）
+                        await runPostHooks(calledName, calledArgs, result, toolCtx).catch((e: any) => {
+                            console.warn(`⚠️ post-hook [${calledName}] 异常（已忽略）:`, e?.message ?? e);
+                        });
                     }
                 } else {
                     result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
-                    const ok = false; // 未知工具，显式标记失败（避免被判成功致模型幻觉）
+                    explicitOk = false; // ★ 未知工具显式失败：透传到公共 tool.end，避免前缀嗅探（"错误："已移除）误判为成功
                     events({
                         sessionId: sessionId,
                         eventType: 'tool.validation.failed',
@@ -537,7 +570,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             tools_id: toolCall.id,
                             toolName: calledName,
                             toolSource: 'builtin',
-                            ok: ok,
+                            ok: false,
                             attempt: round
                         },
                         payload: {
@@ -556,8 +589,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ok 判定：result 以任一已知失败前缀开头即判失败（覆盖 runAgent 内部失败 + 各工具 catch/verifyResult 失败），
                 //   避免失败结果被判 ok=true 助长模型"已成功"幻觉。
                 //   注：前缀列表是过渡方案——根本解法是让 execute 返回显式成败标志（后续工具协议演进），届时可移除此列表。
-                const FAILED_PREFIXES = ["工具执行失败", "错误：", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
-                const ok = !FAILED_PREFIXES.some(p => result.startsWith(p));
+                // ★ ok 判定（仅作 UI/trace 提示，不进入模型上下文——模型看到的是完整 result 字符串）。
+                //   优先级：explicitOk（校验/工具层显式声明，如未知工具=false）＞ 前缀嗅探。
+                //   前缀嗅探收窄高碰撞通用词：已移除"错误："（文件内容首行可能是"错误：xxx"日志会误判），
+                //   未知工具改由 explicitOk 兜底；保留项目内部专有失败标记（❌/操作失败:/读取文件失败 等），
+                //   success 输出均以 [File:/[Workspace 等专有前缀开头，不会与失败标记碰撞。
+                //   根本解法（让 execute 返回显式 {status}）是后续工具协议演进，此处保持过渡方案。
+                const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
+                const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
                 yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result, ok };
                 // 存储本次工具结果的消息到上下文中
                 message.push({ role: 'tool', tool_call_id: toolCall.id, content: result });

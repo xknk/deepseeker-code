@@ -13,7 +13,7 @@
  */
 import fs from "fs/promises";
 import OpenAI from "openai";
-import { ensureSessionsDir, getStorePath } from "./store.ts";
+import { ensureSessionsDir, getTranscriptPath } from "./store.ts";
 import { createUUID } from "@/common/index.ts";
 
 /**
@@ -23,16 +23,20 @@ import { createUUID } from "@/common/index.ts";
 export const readMessages = async (sessionId: string): Promise<OpenAI.Chat.ChatCompletionMessageParam[]> => {
     // 确保目录存在
     await ensureSessionsDir(sessionId);
-    const p = getStorePath(sessionId);
+    const p = getTranscriptPath(sessionId);
     try {
         const text = await fs.readFile(p, "utf-8");
-        // 将文件内容按行拆分，每行解析为一个 JSON 对象
-        const lines = text
-            .trim()
-            .split("\n")
-            .filter((s) => s.length > 0) // 过滤掉空行
-            .map((s) => JSON.parse(s) as any);
-
+        // 将文件内容按行拆分，每行解析为一个 JSON 对象；个别坏行跳过并告警，避免单点损坏击垮整段历史
+        const lines: any[] = [];
+        for (const s of text.split("\n")) {
+            const line = s.trim();
+            if (line.length === 0) continue; // 过滤空行
+            try {
+                lines.push(JSON.parse(line));
+            } catch {
+                console.warn(`⚠️ [transcript] 跳过无法解析的损坏行: ${line.slice(0, 120)}`);
+            }
+        }
         return lines;
     } catch (err: unknown) {
         // 如果文件不存在（新会话），返回空数组作为历史记录
@@ -55,11 +59,23 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
         const { sessionId, ...rest } = entry;
         const line = { id: createUUID(), ...rest };
 
-        const p = getStorePath(sessionId);
-        // 使用 appendFile 直接在文件末尾追加，效率极高
-        await fs.appendFile(p, JSON.stringify(line) + "\n", "utf-8");
+        const p = getTranscriptPath(sessionId);
+        const payload = JSON.stringify(line) + "\n";
+        // ★ 短重试：磁盘瞬时忙/锁（尤其 Windows）下 appendFile 偶发失败，
+        //   重试 3 次降低「内存已 push、磁盘未落」导致重启后转录不一致的概率。
+        const MAX_ATTEMPTS = 3;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                await fs.appendFile(p, payload, "utf-8");
+                return;
+            } catch (e) {
+                if (attempt === MAX_ATTEMPTS) throw e; // 交由外层统一告警
+                await new Promise(r => setTimeout(r, 50 * attempt)); // 50ms / 100ms 退避
+            }
+        }
     } catch (e) {
-        console.warn('⚠️ 消息落盘失败（不影响当前推理）:', e);
+        // 容错优先：持续失败仍不阻断推理，但明确告警内存/磁盘可能不一致
+        console.warn(`⚠️ 消息落盘失败（已重试 3 次，内存与磁盘转录可能不一致）:`, e);
     }
 }
 

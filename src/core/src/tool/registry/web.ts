@@ -207,7 +207,12 @@ function decodeEntities(s: string): string {
         "&lrm;": "", "&rlm;": "", "&zwnj;": "", "&zwj;": ""
     };
     return s
-        .replace(/&#(\d+);/g, (_m, n) => String.fromCodePoint(Number(n)))
+        // ★ 数字实体：非法码点（>0x10FFFF）或代理区（0xD800-0xDFFF）会让 fromCodePoint 抛 RangeError，
+        //   恶意/异常页面可借此让 web_fetch 稳定失败；越界码点降级为空字符串。
+        .replace(/&#(\d+);/g, (_m, n) => {
+            const cp = Number(n);
+            return cp > 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF) ? String.fromCodePoint(cp) : "";
+        })
         .replace(/&[a-z#0-9]+;/gi, (e) => named[e.toLowerCase()] ?? e);
 }
 

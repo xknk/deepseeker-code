@@ -11,7 +11,8 @@
  * @description 会话级持久化存储：以主会话 ID 归档，落盘为 JSON 文件。
  *  提供 readStore / writeStore（整库读写）、getOrCreateSessionId（会话身份）、
  *  getRollingState / setRollingState（滚动摘要与压缩失败熔断计数，供上下文压缩断路器使用）。
- *  路径分拣见 getStorePath：主 / 子 / 摘要数据统一收拢到主会话文件夹下。
+ *  路径分拣见 getStatePath / getTranscriptPath：状态(<id>.state.json)与转录(<id>.jsonl)物理隔离，
+ *  统一收拢到主会话文件夹下（主/子/摘要靠文件名内嵌完整 ID 区分）。
  */
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
@@ -27,31 +28,92 @@ export const getSessionsDirPath = (mainSessionId: string): string => {
 }
 
 
-/** 获取单个 JSON 文件的完整路径：[数据目录]/sessions/[sessionId].json */
 /**
- * @description: 动态路径分拣器：将主、子、摘要数据统一收拢在以主会话 ID 命名的专属文件夹下
+ * @description 状态文件路径（JSON 对象，整文件覆盖语义）：rolling 摘要 / todos / 会话元信息。
+ *  文件名内嵌完整 sessionId，使主会话与其子 agent（getFileName 折叠后共享同一文件夹）互不覆盖。
+ *  与 getTranscriptPath 物理隔离——杜绝“JSON 对象覆盖”与“JSONL 追加”抢同一文件而互相破坏。
  */
-export const getStorePath = (sessionId: string): string => {
-    assertSafeSessionId(sessionId); // ★ 文件名 `${sessionId}.json` 直接插值，单独硬守防穿越
-    // 3. 终极物理落盘对齐：所有文件，无论主、子、摘要，统统关进主 ID 文件夹这个“大庙”里
-    return path.join(
-        getSessionsDirPath(sessionId),
-        `${sessionId}.json`       // 👈 核心：在这个文件夹下长出不同的 json 文件
-    );
+export const getStatePath = (sessionId: string): string => {
+    assertSafeSessionId(sessionId); // ★ 文件名直接插值，单独硬守防穿越
+    return path.join(getSessionsDirPath(sessionId), `${sessionId}.state.json`);
 }
 
-/** 确保 sessions 文件夹存在（在数据目录下创建） */
+/**
+ * @description 转录文件路径（JSONL 追加日志，append-only）：每条消息一行。
+ */
+export const getTranscriptPath = (sessionId: string): string => {
+    assertSafeSessionId(sessionId);
+    return path.join(getSessionsDirPath(sessionId), `${sessionId}.jsonl`);
+}
+
+/**
+ * @deprecated 历史别名，等价于 getStatePath（状态文件）。新代码请直接用 getStatePath / getTranscriptPath。
+ */
+export const getStorePath = (sessionId: string): string => getStatePath(sessionId);
+
+/** 确保 sessions 文件夹存在（在数据目录下创建），并顺带做一次性历史文件迁移 */
 export const ensureSessionsDir = async (sessionId: string): Promise<void> => {
     // 💡 修复：确保是在 appConfig.dataDir 下创建 sessions 文件夹
     await fs.mkdir(getSessionsDirPath(sessionId), { recursive: true });
+    // 一次性迁移：旧版 store/transcript 共用 `${sessionId}.json`（格式互斥会互相破坏），
+    // 按“逐行可解析=JSONL 转录 / 整体单对象=状态”判定后分流到 .jsonl / .state.json。失败静默，绝不阻塞会话。
+    await migrateLegacyFiles(sessionId).catch(() => { });
+}
+
+/**
+ * 一次性历史迁移：旧架构把 JSONL 转录与 JSON 状态塞进同一个 `${sessionId}.json`。
+ *  - 无旧文件 → 跳过；
+ *  - 目标转录文件已存在（已迁移过/并发已处理）→ 跳过；
+ *  - 旧文件逐行都能 JSON.parse → 视作转录，rename 为 .jsonl；
+ *  - 旧文件整体是单个 JSON 对象 → 视作状态，rename 为 .state.json；
+ *  - 都不是 → 原地保留并告警，交由人工判断。
+ * 主会话与其子 agent 的旧文件各自独立处理（文件名内嵌完整 ID，共享文件夹不串扰）。
+ */
+const migrateLegacyFiles = async (sessionId: string): Promise<void> => {
+    assertSafeSessionId(sessionId);
+    const dir = getSessionsDirPath(sessionId);
+    const legacy = path.join(dir, `${sessionId}.json`);
+    const transcriptPath = getTranscriptPath(sessionId);
+    const statePath = getStatePath(sessionId);
+
+    let legacyText: string;
+    try {
+        legacyText = await fs.readFile(legacy, "utf-8");
+    } catch {
+        return; // 无旧文件（ENOENT）或读取异常 → 无需迁移
+    }
+    // 目标转录文件已存在 → 已迁移过，跳过（并发去重）
+    try { await fs.access(transcriptPath); return; } catch { /* 未迁移，继续 */ }
+
+    const raw = legacyText.trim();
+    if (raw.length === 0) {
+        await fs.rename(legacy, transcriptPath); // 空旧文件：当作空转录归位
+        return;
+    }
+    // 判定一：逐行均可解析 → JSONL 转录（迁移后 appendMessage 继续追加）
+    const lines = raw.split("\n");
+    const isJsonl = lines.every((s) => { try { JSON.parse(s); return true; } catch { return false; } });
+    if (isJsonl) {
+        await fs.rename(legacy, transcriptPath);
+        return;
+    }
+    // 判定二：整体是单个 JSON 对象 → 状态快照
+    try {
+        const v = JSON.parse(raw);
+        if (typeof v === "object" && v !== null) {
+            await fs.rename(legacy, statePath);
+            return;
+        }
+    } catch { /* 非 JSON，落入下方告警 */ }
+    console.warn(`[session/store] 旧文件既非 JSONL 也非单对象，保留原样待人工确认: ${legacy}`);
 }
 
 /** 写入整个会话存储（JSON pretty）。写入前确保目录存在。 */
 export const writeStore = async (sessionId: string, store: any) => {
     // 1. 先确保存放文件的文件夹已经存在
     await ensureSessionsDir(sessionId);
-    // 2. 安全地写入文件
-    await fs.writeFile(getStorePath(sessionId), JSON.stringify(store, null, 2), "utf-8");
+    // 2. 安全地写入状态文件
+    await fs.writeFile(getStatePath(sessionId), JSON.stringify(store, null, 2), "utf-8");
 }
 
 /** 读取或创建会话身份：若 sessionId 已有记录则复用，否则新建并落盘一个带元信息的空条目。 */
@@ -73,7 +135,7 @@ export const getOrCreateSessionId = async (sessionId: string | undefined): Promi
 /** 从硬盘读取整个会话数据库 */
 export const readStore = async (sessionId: string): Promise<any> => {
     await ensureSessionsDir(sessionId);
-    const p = getStorePath(sessionId);
+    const p = getStatePath(sessionId);
     try {
         const raw = (await fs.readFile(p, "utf-8")).trim();
         if (raw.length === 0) {
@@ -86,7 +148,7 @@ export const readStore = async (sessionId: string): Promise<any> => {
         if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
         // 空文件、写入中断、截断等导致 JSON 不完整：当作空库，避免整站聊天不可用
         if (err instanceof SyntaxError) {
-            console.warn(`[session/store] sessions.json 无效或已截断，已忽略: ${p}`, err.message);
+            console.warn(`[session/store] state.json 无效或已截断，已忽略: ${p}`, err.message);
             return {};
         }
         throw err;

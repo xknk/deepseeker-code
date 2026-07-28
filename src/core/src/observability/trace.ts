@@ -85,13 +85,13 @@ const ensureClockLoaded = async (): Promise<void> => {
 export async function emitTrace(
     base: Partial<TraceBase> & { sessionId: string; eventType: TraceEventType; meteData: TraceBase['meteData'] }
 ): Promise<void> {
-    // 【核心强类型修复】：精准对齐你的层级结构，自动把外层的 eventType 无缝注入内层的 meteData.eventType
-    // 同时生成顶级物理时间戳，彻底剥离原代码中错位的元数据属性冲突
+    // 对齐层级结构：顶级放 timestamp/eventType；meteData 透传调用方传入的业务元数据。
+    // ★ timestamp 优先用调用方传入值（支持重放/补记），缺省才生成当前时间——旧版无条件覆盖会丢弃 base.timestamp。
     const event: TraceBase = {
         sessionId: base.sessionId,
         parentId: base.parentId,
         eventType: base.eventType,
-        timestamp: new Date().toISOString(), // 👈 稳稳焊死在第一层时间戳上
+        timestamp: base.timestamp ?? new Date().toISOString(),
         usage: base.usage,
         payload: base.payload,
         meteData: {

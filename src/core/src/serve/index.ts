@@ -35,7 +35,17 @@ async function startServer() {
     // ★ 默认仅监听 127.0.0.1（本地回环），杜绝远程/局域网攻击者直连 3000 端口。
     //   需远程访问（如独立前端 / 反向代理）时显式设 HOST=0.0.0.0，并依赖 Bearer token 鉴权兜底。
     const host = process.env.HOST ?? "127.0.0.1";
-    const port = Number(process.env.PORT ?? 3000);
+    // ★ PORT 健壮解析：旧版 Number("")=0（监听随机端口，日志打印 0 前端无法对接）、Number("abc")=NaN 会崩。
+    //   现强制整数 + 范围校验，非法值回退 3000 并告警。
+    const portRaw = Number.parseInt(process.env.PORT ?? "3000", 10);
+    const port = Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535 ? portRaw : 3000;
+    if (!(Number.isInteger(portRaw) && portRaw >= 1 && portRaw <= 65535)) {
+        console.error(`❌ 非法 PORT "${process.env.PORT}"（需 1-65535 整数），回退到 ${port}。`);
+    }
+    // ★ 非回环地址安全告警：监听外部网络时务必确保 token 鉴权 + 网络隔离到位
+    if (host !== "127.0.0.1" && host !== "localhost") {
+        console.warn(`⚠️【安全告警】HOST=${host} 非回环地址，服务将监听外部网络！请确保已配置 Bearer token 鉴权与网络隔离。`);
+    }
     app.listen(port, host, () => {
         console.log(`Server is running on http://${host}:${port}（HOST/PORT 环境变量可覆盖）`);
     });

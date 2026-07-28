@@ -20,6 +20,37 @@ import {
 import { createReadStream } from "fs";
 import * as readline from "readline"
 import { Stats } from "fs";
+
+/**
+ * 读保护敏感文件判定：密钥 / 凭证 / 私钥类文件，即便未被 .gitignore 收录也拒绝明文读取。
+ * 原因：read_file 是 SAFE 免审批工具，内容会原样回灌云端模型上下文——
+ *   prompt injection（被 web_fetch 抓取的恶意页面诱导）或模型猜路径即可读走密钥。
+ * 与 undo/backup.ts 的 isSensitivePath 同源，此处聚焦"读取"语义。
+ */
+const isSensitiveReadTarget = (rel: string): boolean => {
+    const p = rel.toLowerCase().replace(/\\/g, "/");
+    return [
+        /\.env(\.|$|\/)/,                                   // .env / .env.local / .env.production
+        /\.npmrc$/,                                         // npm 凭证（_authToken）
+        /\.pem$/, /\.key$/, /\.pfx$/, /\.p12$/, /\.keystore$/, /\.jks$/,
+        /^id_rsa/, /^id_ecdsa/, /^id_ed25519/, /^id_dsa/,   // SSH 私钥
+        /(^|\/)secrets?\.(json|ya?ml|toml|ini|conf)$/i,
+        /(^|\/)credentials?\.(json|ya?ml|toml|ini|conf)$/i,
+    ].some(re => re.test(p));
+};
+
+/**
+ * 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥（如 config.js 里 apiKey: "sk-..."）。
+ * 仅替换凭证值，保留键名与行号结构，便于模型理解上下文又不外泄机密。
+ * 由 runAgent 的 applyPrivacyMasking 在 verifyResult 之后调用，仅影响"发给云端模型的视图"。
+ */
+const maskSecretsInContent = (_args: any, output: string): string => {
+    return output
+        // 形如 apiKey: "sk-xxxx" / token=xxxx / Authorization: Bearer xxxx
+        .replace(/((?:api[_-]?key|secret|password|passwd|token|authorization|auth[_-]?token|access[_-]?key|secret[_-]?key|private[_-]?key)\s*[:=]\s*['"]?)[A-Za-z0-9_\-+/=.]{8,}(['"]?)/gi, '$1[MASKED_SECRET]$2')
+        // 整段 PEM 私钥块
+        .replace(/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[MASKED_SECRET (private key block)]');
+};
 export const fsTools: CustomTool[] = [
     {
         type: "function",
@@ -37,9 +68,24 @@ export const fsTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
+            // ★ 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥，
+            //   在 verifyResult 之后、回灌云端模型之前由 runAgent 调用，仅影响"发给模型的视图"。
+            privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string; start_line?: number; end_line?: number }) {
                 try {
                     const absPath = resolveSafePath(args.path);
+
+                    // ★ 读保护三道闸（防密钥外泄到云端模型）：
+                    //   1) 敏感凭证文件硬黑名单 → 直接拒读；
+                    //   2) .gitignore / 通用忽略规则 → 跳过（与 list_dir 同口径，避免读到 .env 等被忽略产物）。
+                    const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
+                    if (isSensitiveReadTarget(relForCheck)) {
+                        return `🔒 [安全拦截]：[${args.path}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝明文读取以防机密外泄。如确需查看请人工处理。`;
+                    }
+                    await initializeWorkspaceIgnore();
+                    if (checkIsPathIgnored(relForCheck)) {
+                        return `🚫 [忽略规则]：[${args.path}] 命中 .gitignore / 通用忽略规则，已跳过读取。`;
+                    }
 
                     // 1. 先用最轻量的方式获取文件总行数（可选，若不需要显示 totalLines，甚至可以省略这一步以追求极致性能）
                     // 这里提供一个仅针对所需区间的高效单次流读取方案：
@@ -312,6 +358,11 @@ export const fsTools: CustomTool[] = [
                     }
 
                     const isDirectory = stat.isDirectory();
+                    // ★ TOCTOU 二次围栏复检（与 edit_file/create_file/write_file 对称）：
+                    //   resolveSafePath 检查与 fs.rm 之间存在窗口——攻击者/被诱导子进程可把目标替换为
+                    //   指向宿主敏感目录的软链接，fs.rm({recursive,force}) 会顺链路递归销毁。
+                    //   delete_path 爆炸半径最大却唯独缺此复检，现补齐。
+                    assertWithinWorkspace(absPath);
                     if (isDirectory) {
                         await fs.rm(absPath, { recursive: true, force: true });
                     } else {
@@ -390,9 +441,19 @@ export const fsTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
+            privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string }): Promise<string> {
                 try {
                     const absPath = resolveSafePath(args.path);
+                    // ★ 读保护三道闸（与 read_file 对称）：敏感凭证文件拒读 + .gitignore 忽略跳过
+                    const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
+                    if (isSensitiveReadTarget(relForCheck)) {
+                        return `🔒 [安全拦截]：[${args.path}] 属于敏感凭证文件，已拒绝分析以防机密外泄。`;
+                    }
+                    await initializeWorkspaceIgnore();
+                    if (checkIsPathIgnored(relForCheck)) {
+                        return `🚫 [忽略规则]：[${args.path}] 命中 .gitignore / 通用忽略规则，已跳过。`;
+                    }
                     const fileContent = await fs.readFile(absPath, "utf-8");
 
                     // 1. 创建内存中的 TypeScript 虚拟源文件

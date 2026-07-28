@@ -35,9 +35,12 @@ async function* chatWithModelWithTools(
     } as MsgParams;
 
     // stream:true 时 SDK 返回 Stream<ChatCompletionChunk>（AsyncIterable），按可迭代消费
-    const stream = await model.chat.completions.create(requestBody) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+    // signal 透传给 SDK：中止时真正取消底层 fetch + 服务端停止生成，而非仅在 chunk 到达后 break
+    const stream = await model.chat.completions.create(requestBody, {
+        signal: callOpts?.signal,
+    }) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
     for await (const chunk of stream) {
-        if (callOpts?.signal?.aborted) break;   // 调用方中止则停止拉取
+        if (callOpts?.signal?.aborted) break;   // 调用方中止则停止拉取（双保险）
         yield chunk;
     }
 }
@@ -58,7 +61,9 @@ export async function chatWithModelWithSummary(
             tools: tools,
             stream: false,
         } as MsgParams;
-        const completion = await model.chat.completions.create(requestBody);
+        const completion = await model.chat.completions.create(requestBody, {
+            signal: callOpts?.signal,
+        });
         if (completion && 'choices' in completion) return completion as outMsg;
         throw new Error("API 响应异常，未包含 choices 结构");
     } catch (error) {

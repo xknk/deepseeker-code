@@ -17,7 +17,6 @@ import { UnifiedOutboundMessage } from "./unifiedMessage.ts";
 /** 把出站消息以 JSON 形式回送给 express Response（丢失 res 时安全丢弃，防止崩溃）。 */
 export const sendOutbound = async (target: unknown, message: UnifiedOutboundMessage) => {
     const res = target as Response | undefined;
-    console.log(message, 'message')
     if (!res) {
         // 如果因为某些原因（如异步超时已响应）丢失了 res 对象，则终止操作防止崩溃
         console.warn("[WebChatAdapter] Missing response object, message dropped.");
