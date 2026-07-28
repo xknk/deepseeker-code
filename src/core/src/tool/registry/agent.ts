@@ -19,6 +19,13 @@ import { CustomTool, MAX_AGENT_DEPTH, ToolContext, ToolSafetyLevel } from "../ty
  */
 
 /**
+ * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）
+ * 与递归删除（delete_path）能力——这两者是爆炸半径最大的高危原语。
+ * 保留 read/edit/write（委派代码工作合理）；MUTATION/DANGER 仍各自走审批网关作为真正后盾。
+ */
+const SUBAGENT_DENYLIST = new Set(["run_command", "delete_path"]);
+
+/**
  * 创建「子 agent 协同」工具集（当前仅 spawn_agent）。
  * 关键设计：通过 getGlobalTools 闭包在运行时动态获取完整工具列表，使子 agent 能拿到全部工具（含自身），
  * 从而在定义期规避循环依赖（此时全局 agentTools 尚未填充完成）。
@@ -76,7 +83,11 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
 
                     const subOptions: RunAgentOptions = {
                         sessionId: subSessionId,
-                        toolSchemas: getGlobalTools(), // 透传最高形态的 6 大本地原子工具链
+                        // ★ 子 agent 收权：任何经 spawn_agent 派生的子 agent（深度 ≥ 1）一律剔除
+                        //   run_command / delete_path（SUBAGENT_DENYLIST），仅保留读写类工具，收敛递归派生的爆炸半径。
+                        //   主 agent（depth 0）不经此处，仍保留全部工具。
+                        //   （旧实现按 ctx.depth>=1 判定，实为父级深度，导致 depth=1 的常用子层漏网——此处按"被创建子 agent"语义修正。）
+                        toolSchemas: getGlobalTools().filter((t: any) => !SUBAGENT_DENYLIST.has(t.function.name)),
                         abortSignal: ctx.abortSignal,
                         modelWindow: ctx.modelWindow,
                         depth: ctx.depth + 1,
@@ -85,6 +96,7 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
                         parentSystemPrompt: parentSystemPrompt,
                         events: ctx.events,
                         onUIEvent: ctx.onUIEvent, // ★ 必须透传：否则子 agent 调用需审批工具时前端收不到弹窗，waitForUserApproval 永久挂起（死锁）
+                        requestApproval: ctx.requestApproval, // ★ 同步透传宿主审批钩子，子 agent 高危工具仍走同一审批通道
                     };
 
                     // 💡 优化 3：【健壮性防线】对异步生存流进行全方位的异常与熔断监控

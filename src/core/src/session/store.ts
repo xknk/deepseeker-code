@@ -16,11 +16,12 @@
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
-import { createUUID, getFileName } from "@/common/index.ts"
+import { createUUID, getFileName, assertSafeSessionId } from "@/common/index.ts"
 import type { Todo } from "@/observability/type.ts";
 
 /** 获取全局 sessions 文件夹的绝对/相对路径 */
 export const getSessionsDirPath = (mainSessionId: string): string => {
+    assertSafeSessionId(mainSessionId); // ★ 路径穿越硬守：拒绝含 '..'/'/' 等的非法 sessionId
     const fileName = getFileName(mainSessionId)
     return path.join(appConfig.dataDir, 'sessions', appConfig.userWorkspaceDir, fileName);
 }
@@ -31,6 +32,7 @@ export const getSessionsDirPath = (mainSessionId: string): string => {
  * @description: 动态路径分拣器：将主、子、摘要数据统一收拢在以主会话 ID 命名的专属文件夹下
  */
 export const getStorePath = (sessionId: string): string => {
+    assertSafeSessionId(sessionId); // ★ 文件名 `${sessionId}.json` 直接插值，单独硬守防穿越
     // 3. 终极物理落盘对齐：所有文件，无论主、子、摘要，统统关进主 ID 文件夹这个“大庙”里
     return path.join(
         getSessionsDirPath(sessionId),

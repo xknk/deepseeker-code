@@ -7,7 +7,7 @@ import { appConfig } from "@/config/index.ts";
 import path from "path";
 import fs from "fs/promises";
 import { getTodayDateString } from "./traceCalculate.ts";
-import { getFileName } from "@/common/index.ts"
+import { getFileName, assertSafeSessionId } from "@/common/index.ts"
 
 /**
  * @description: 获取绝对路径-用于存储
@@ -15,6 +15,7 @@ import { getFileName } from "@/common/index.ts"
  * @return {*}
  */
 export const getTraceDirPath = (mainTraceId: string): string => {
+    assertSafeSessionId(mainTraceId, "traceId"); // ★ 路径穿越硬守：trace 存储同样以 id 拼路径
     return path.join(appConfig.dataDir, 'trace', appConfig.userWorkspaceDir, getFileName(mainTraceId));
 }
 /**
@@ -41,6 +42,7 @@ export const getGlobalClockPath = (): string => {
 };
 
 export const getTraceStorePath = async (mainTraceId: string): Promise<string> => {
+    assertSafeSessionId(mainTraceId, "traceId"); // ★ 文件名含 `${rootId}`，单独硬守防穿越
     // 💡 修复级联截断 Bug：只切断最后一段 __sub__，保留完整上级链路前缀，防止多子 Agent 并发写入冲突
     const rootId = getFileName(mainTraceId);
 

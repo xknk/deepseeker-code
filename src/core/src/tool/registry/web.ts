@@ -2,10 +2,12 @@
  * @file tool/registry/web.ts
  * @description 联网类工具集：
  *  web_fetch（DANGER，对外抓取 URL → 转 Markdown，带 SSRF 防护 + 强制审批 + 长度熔断）。
- *  设计原则：零运行时依赖——用 Node 原生 fetch + 内建 dns；HTML→Markdown 走自研轻量转换器
+ *  设计原则：对外抓取走 undici fetch（钉 IP 防 DNS rebinding）+ 内建 dns；HTML→Markdown 走自研轻量转换器
  *  （目标是给大模型干净可读文本，不追求像素级还原；如需更强可后续替换为 turndown）。
  */
 import { promises as dns } from "dns";
+import { lookup as dnsLookupCb } from "dns";    // 回调风格，供 undici connect.lookup 钉 IP
+import { Agent, fetch as undiciFetch } from "undici"; // 显式用 undici fetch：钉 IP dispatcher 选项有类型保证、不被静默吞掉
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
 
@@ -18,15 +20,70 @@ const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 
 /**
+ * 把 IPv4 或「IPv4-mapped IPv6」归一为点分十进制 IPv4；其余（原生 IPv6 / 域名）返回 null。
+ *  ★ 必须覆盖 mapped IPv6 的两种记法，否则 ::ffff:169.254.169.254 / ::ffff:a9fe:a9fe
+ *    会绕过内网判定直取云元数据（SSRF）：
+ *    - mixed 记法：::ffff:a.b.c.d、::a.b.c.d（URL 字面量常见）
+ *    - hex 记法 ：::ffff:xxxx:xxxx（getaddrinfo 归一后通常长这样）
+ */
+function extractIPv4(ip: string): string | null {
+    const v = ip.toLowerCase();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return v;                              // 纯点分十进制
+    const mixed = v.match(/^::(?:ffff:)?0?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/); // mixed 记法
+    if (mixed) return mixed[1];
+    const hex = v.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);               // hex 记法
+    if (hex) {
+        const hi = parseInt(hex[1], 16), lo = parseInt(hex[2], 16);
+        return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+    }
+    return null;
+}
+
+/** 判定点分十进制 IPv4 是否属于内网/回环/链路本地/保留段（含云元数据 169.254.0.0/16）。 */
+function isPrivateIpV4(ip: string): boolean {
+    const parts = ip.split(".").map(Number);
+    if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+    const [a, b] = parts;
+    return (
+        a === 0 || // 0.0.0.0/8
+        a === 10 || // 10.0.0.0/8
+        a === 127 || // 127.0.0.0/8 回环
+        (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+        (a === 192 && b === 168) || // 192.168.0.0/16
+        (a === 169 && b === 254) || // 169.254.0.0/16 链路本地（含云元数据 169.254.169.254）
+        (a === 100 && b >= 64 && b <= 127) // 100.64.0.0/10 CGNAT
+    );
+}
+
+/**
+ * 云元数据端点判定：即便 allow_private 放行内网，这些也永远硬拦——
+ * 它们是凭证窃取的 SSRF 经典目标（云实例 IAM 临时凭证）。覆盖域名与 IP 字面量（含 IPv4-mapped IPv6 变体）。
+ */
+function isMetadataEndpoint(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (host === "metadata.google.internal") return true;
+    return extractIPv4(host) === "169.254.169.254";
+}
+
+/**
  * 🛡️ SSRF 防护：解析主机名，拒绝内网/回环/链路本地地址，
  *  防止大模型被诱导访问云元数据（如 169.254.169.254）或内网服务。
  *  返回 true=安全可访问，false=命中内网熔断。
+ *
+ *  @param allowPrivate 本地开发/测试场景显式放行内网（127.0.0.1/localhost/内网段），
+ *    跳过内网判定；但云元数据端点仍硬拦（见 isMetadataEndpoint）。
  */
-async function isPublicHost(hostname: string): Promise<boolean> {
+async function isPublicHost(hostname: string, allowPrivate = false): Promise<boolean> {
     const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
-    // 1. 字面量主机先拦一波（localhost / .local / 云元数据域名）
-    if (host === "localhost" || host.endsWith(".local") || host === "metadata.google.internal") {
+    // 0. 云元数据端点：任何情况下都拦截（凭证窃取风险）
+    if (isMetadataEndpoint(host)) return false;
+
+    // 放行内网模式：本地抓 localhost 服务 / 内网文档等正当需求，由调用方显式开启
+    if (allowPrivate) return true;
+
+    // 1. 字面量主机先拦一波（localhost / .local）
+    if (host === "localhost" || host.endsWith(".local")) {
         return false;
     }
     // 2. 若主机本身就是 IP，直接判定；再挡住非标准 IP 编码（十进制/十六进制/八进制）绕过
@@ -43,9 +100,14 @@ async function isPublicHost(hostname: string): Promise<boolean> {
     }
 }
 
-/** 判定一个 IP 是否属于内网/回环/链路本地/保留段 */
+/**
+ * 判定一个 IP（IPv4 / IPv6 / IPv4-mapped IPv6）是否属于内网/回环/链路本地/保留段。
+ *  ★ mapped IPv6 经 extractIPv4 归一后走 v4 判定，杜绝 ::ffff:127.0.0.1 / ::ffff:a9fe:a9fe 等绕过。
+ */
 function isPrivateIp(ip: string): boolean {
-    // IPv6
+    const v4 = extractIPv4(ip);
+    if (v4) return isPrivateIpV4(v4);
+    // 原生 IPv6
     if (ip.includes(":")) {
         return (
             ip === "::1" || // 回环
@@ -54,19 +116,7 @@ function isPrivateIp(ip: string): boolean {
             ip.startsWith("fc") || ip.startsWith("fd") // 唯一本地地址 ULA fc00::/7
         );
     }
-    // IPv4
-    const parts = ip.split(".").map(Number);
-    if (parts.length !== 4 || parts.some(n => Number.isNaN(n))) return false;
-    const [a, b] = parts;
-    return (
-        a === 0 || // 0.0.0.0/8
-        a === 10 || // 10.0.0.0/8
-        a === 127 || // 127.0.0.0/8 回环
-        (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-        (a === 192 && b === 168) || // 192.168.0.0/16
-        (a === 169 && b === 254) || // 169.254.0.0/16 链路本地（含云元数据 169.254.169.254）
-        (a === 100 && b >= 64 && b <= 127) // 100.64.0.0/10 CGNAT
-    );
+    return false;
 }
 
 /**
@@ -278,27 +328,106 @@ function formatSearchResults(query: string, provider: string, resp: SearchRespon
     return `[web_search | "${query}" | ${provider}]\n${body}`;
 }
 
+// ============ SSRF 加固：手动跟随重定向 + undici 钉 IP ============
+const MAX_REDIRECTS = 5;
+
+/**
+ * 🛡️ 钉 IP 的 undici dispatcher：自定义 connect.lookup ——
+ *  本地解析 hostname，任一地址命中 isPrivateIp 即拒绝；把首个已校验 IP 直接交给 fetch，
+ *  使其不再二次解析 DNS，彻底掐断 DNS rebinding（检查时公网、请求时内网）。
+ */
+const pinnedSsrfDispatcher = new Agent({
+    connect: {
+        lookup: ((hostname: string, opts: any, cb: any) => {
+            dnsLookupCb(hostname, { all: true, ...(opts || {}) }, (err: any, addrs: any) => {
+                if (err) return cb(err);
+                const list: Array<{ address: string; family: number }> = Array.isArray(addrs) ? addrs : [addrs];
+                if (list.length === 0) return cb(new Error("DNS 无解析结果"));
+                for (const a of list) {
+                    if (isPrivateIp(a.address)) {
+                        return cb(new Error(`DNS 解析到内网/保留地址 ${a.address}，已阻断 SSRF`));
+                    }
+                }
+                cb(null, list[0].address, list[0].family);
+            });
+        }) as any,
+    },
+});
+
+/**
+ * 安全抓取：手动跟随重定向（不自动 follow），每一跳都重做：
+ *  ① 协议白名单（仅 http/https，挡 file:/gopher: 等）；
+ *  ② 拒绝 https→http 降级（防 SSL 剥离）；
+ *  ③ isPublicHost 复检（默认挡内网；allowPrivate 时放行内网，但云元数据端点仍拦）。
+ *  默认由 pinnedSsrfDispatcher 钉 IP 防 DNS rebinding；allowPrivate 时不钉（本地已知服务无需防 rebinding）。
+ *  任一不合规即抛错，由调用方 catch 转友好提示。
+ */
+async function safeFetchFollow(
+    startUrl: string,
+    baseHeaders: Record<string, string>,
+    signals: AbortSignal[],
+    allowPrivate = false,
+) {
+    const startProtocol = new URL(startUrl).protocol;
+    let url = startUrl;
+    for (let hop = 0; ; hop++) {
+        if (hop > MAX_REDIRECTS) throw new Error("重定向次数超出上限（疑似重定向环）");
+        const parsed = new URL(url);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            throw new Error(`仅允许 http/https 协议，拒绝 ${parsed.protocol}`);
+        }
+        if (startProtocol === "https:" && parsed.protocol === "http:") {
+            throw new Error("拒绝 https→http 降级重定向");
+        }
+        if (!(await isPublicHost(parsed.hostname, allowPrivate))) {
+            const reason = isMetadataEndpoint(parsed.hostname)
+                ? "目标为云元数据端点，即便 allow_private 也拦截（防凭证窃取）"
+                : "目标主机解析为内网/回环/链路本地地址，已阻断 SSRF（可用 allow_private 或环境变量 WEB_FETCH_ALLOW_PRIVATE=1 放行本地地址）";
+            throw new Error(`目标主机 [${parsed.hostname}] ${reason}`);
+        }
+        // ★ 用 undici fetch：dispatcher 选项有类型保证、不会被运行时静默吞掉（防 DNS rebinding 钉 IP 失效）
+        const res = await undiciFetch(url, {
+            method: "GET",
+            signal: AbortSignal.any(signals),
+            redirect: "manual",          // ★ 永不自动跟随，逐跳手判
+            headers: baseHeaders,
+            // allowPrivate 时不钉 IP（本地已知服务无需防 rebinding）；默认走钉 IP 的 dispatcher 防 DNS rebinding
+            ...(allowPrivate ? {} : { dispatcher: pinnedSsrfDispatcher }),
+        });
+        if (res.status >= 300 && res.status < 400) {
+            const loc = res.headers.get("location");
+            if (!loc) throw new Error(`重定向 ${res.status} 缺少 Location 头`);
+            url = new URL(loc, url).href; // 相对 Location 据当前 URL 解析
+            continue;
+        }
+        return res;
+    }
+}
+
 export const webTools: CustomTool[] = [
     {
         type: "function",
         function: {
             name: "web_fetch",
-            description: "抓取指定公开 URL 的网页内容并转为干净的 Markdown 文本，用于查阅 API 文档、报错说明、官方 changelog 等外部资料。仅支持 http/https，自动拦截内网/回环/链路本地地址（防 SSRF），结果按长度熔断保护上下文。",
+            description: "抓取指定公开 URL 的网页内容并转为干净的 Markdown 文本，用于查阅 API 文档、报错说明、官方 changelog 等外部资料。仅支持 http/https，默认拦截内网/回环/链路本地地址（防 SSRF）；本地开发/自动化测试需抓 localhost 服务或内网页面时，传 allow_private=true 放行（云元数据端点仍拦）。",
             parameters: {
                 type: "object",
                 properties: {
                     url: { type: "string", description: "要抓取的完整 http(s) URL" },
-                    max_length: { type: "number", description: `返回内容的最大字符数（默认 ${DEFAULT_MAX_CHARS}，超出自动截断）` }
+                    max_length: { type: "number", description: `返回内容的最大字符数（默认 ${DEFAULT_MAX_CHARS}，超出自动截断）` },
+                    allow_private: { type: "boolean", description: "是否允许访问内网/回环地址（如 localhost:5173 本地服务、内网文档）。默认 false。也可用环境变量 WEB_FETCH_ALLOW_PRIVATE=1 全局开启。即便开启仍拦截云元数据端点（169.254.169.254 等）。" }
                 },
                 required: ["url"]
             },
             safetyLevel: ToolSafetyLevel.DANGER, // 对外网络请求，强制审批
             isSync: true,
             maxOutputCharacters: DEFAULT_MAX_CHARS,
-            requireApproval: (args: { url: string }) =>
-                `⚠️【联网抓取审批】\n目标 URL: ${args.url}\n（将发起对外网络请求，且抓取到的内容会进入云端模型上下文；请确认 URL 来源可信、不含敏感回传数据）`,
-            async execute(args: { url: string; max_length?: number }, ctx?: ToolContext): Promise<string> {
+            requireApproval: (args: { url: string; allow_private?: boolean }) =>
+                `⚠️【联网抓取审批】\n目标 URL: ${args.url}${args.allow_private ? "\n🔓 allow_private=true：已放行内网/回环地址（云元数据端点仍拦）" : ""}\n（将发起对外网络请求，且抓取到的内容会进入云端模型上下文；请确认 URL 来源可信、不含敏感回传数据）`,
+            async execute(args: { url: string; max_length?: number; allow_private?: boolean }, ctx?: ToolContext): Promise<string> {
                 const maxChars = args.max_length && args.max_length > 0 ? args.max_length : DEFAULT_MAX_CHARS;
+                // allow_private：参数优先，否则取全局 env 默认（WEB_FETCH_ALLOW_PRIVATE=1）
+                const allowPrivate = args.allow_private ?? appConfig.webFetchAllowPrivate;
 
                 // 1. URL 协议与格式校验
                 let parsed: URL;
@@ -311,24 +440,15 @@ export const webTools: CustomTool[] = [
                     return `❌ [安全熔断]：仅允许 http/https 协议，拒绝 ${parsed.protocol}`;
                 }
 
-                // 2. SSRF 防护：拦截内网/回环/链路本地主机
-                const safe = await isPublicHost(parsed.hostname);
-                if (!safe) {
-                    return `🚨 [安全熔断]：目标主机 [${parsed.hostname}] 解析为内网/回环/链路本地地址，已阻断以防 SSRF。仅允许抓取公网地址。`;
-                }
-
-                // 3. 发起请求（超时 + 用户中止信号，任一触发即中止）
+                // 2. SSRF 防护 + 手动跟随重定向：每跳复检 isPublicHost + 协议白名单 + 拒绝降级；
+                //    默认 pinnedSsrfDispatcher 钉住解析 IP 防 DNS rebinding（allowPrivate 时不钉，详见 safeFetchFollow）。
                 const signals: AbortSignal[] = [AbortSignal.timeout(FETCH_TIMEOUT_MS)];
                 if (ctx?.abortSignal) signals.push(ctx.abortSignal);
                 try {
-                    const res = await fetch(parsed.href, {
-                        signal: AbortSignal.any(signals),
-                        redirect: "follow",
-                        headers: {
-                            "User-Agent": USER_AGENT,
-                            "Accept": "text/html,application/xhtml+xml,text/plain,application/json,application/xml;q=0.9,*/*;q=0.8"
-                        }
-                    });
+                    const res = await safeFetchFollow(parsed.href, {
+                        "User-Agent": USER_AGENT,
+                        "Accept": "text/html,application/xhtml+xml,text/plain,application/json,application/xml;q=0.9,*/*;q=0.8"
+                    }, signals, allowPrivate);
 
                     if (!res.ok) {
                         return `❌ [抓取失败]：HTTP ${res.status} ${res.statusText}（${parsed.href}）`;

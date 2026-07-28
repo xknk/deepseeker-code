@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 15:25:11
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-07-20 09:40:14
+ * @LastEditTime: 2026-07-23 16:26:14
  * @FilePath: \deepSeekCode\src\core\src\agent\runAgent.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -34,6 +34,7 @@ import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
 import { filterByEnvironment } from "./toolFilter.ts";
+import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 
 
 // ============ 主流程 ============
@@ -61,7 +62,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
     // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
-    const validationCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent };
+    const validationCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
     const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
     // 格式化工具消息
     const cleanedToolSchemas = rawTools.map((t: any) => ({
@@ -346,7 +347,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
                 // cc 风格：取消统一由用户主动中断（ctx.abortSignal）驱动，不在工具级挂固定定时器超时
                 // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
-                const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent };
+                const toolCtx: ToolContext = { sessionId, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
                 let result = "";
                 yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
                 if (parseFailed) {
@@ -399,6 +400,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         if (veto.deny) {
                             denied = true;
                             result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
+                        }
+                    }
+                    // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前，对 fs 变更工具快照原文件/目录。
+                    //   备份失败一律阻断写入（凡改必可回退）；仅 isSync:true 的四个 fs 工具触发，其余直通。
+                    //   首期不覆盖 isSync:false 后台工具的写操作（其 lockKey 占用前已返回，备份时序复杂）。
+                    if (!denied && isUndoTrigger(calledName)) {
+                        try {
+                            await beforeMutationBackup(calledName, calledArgs, toolCall.id, sessionId);
+                        } catch (e: any) {
+                            denied = true;
+                            result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`;
                         }
                     }
                     if (!denied) {

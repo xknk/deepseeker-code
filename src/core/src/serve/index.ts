@@ -26,9 +26,12 @@ async function startServer() {
     process.on("SIGTERM", shutdown);
 
     const app = createServer();
-    const port = 3000;
-    app.listen(port, () => {
-        console.log(`Server is running on http://localhost:${port}`);
+    // ★ 默认仅监听 127.0.0.1（本地回环），杜绝远程/局域网攻击者直连 3000 端口。
+    //   需远程访问（如独立前端 / 反向代理）时显式设 HOST=0.0.0.0，并依赖 Bearer token 鉴权兜底。
+    const host = process.env.HOST ?? "127.0.0.1";
+    const port = Number(process.env.PORT ?? 3000);
+    app.listen(port, host, () => {
+        console.log(`Server is running on http://${host}:${port}（HOST/PORT 环境变量可覆盖）`);
     });
 }
 startServer().catch((err) => {

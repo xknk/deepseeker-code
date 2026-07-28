@@ -9,6 +9,7 @@
  */
 import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { Msg } from "@/session/contextCore.ts";
+import { RequestApprovalFn } from "@/host/type.ts";
 
 /**
  * 可观测性事件回调：runAgent 在推理、工具、压缩等各阶段，
@@ -40,6 +41,9 @@ export interface RunAgentOptions {
     events: RunAgentEvents;
     /** 面向前端的 UI 交互事件通道（审批请求等），与 events(trace) 解耦。 */
     onUIEvent?: (evt: UIEvent) => void;
+    /** 宿主审批钩子（前端无关，见 host/type.ts）：决定 MUTATION/DANGER 工具是否放行。未注入时默认拒绝。
+     *  Web 注入 HTTP/SSE 审批；CLI/VSCode（预留）注入终端/IDE 交互。 */
+    requestApproval?: RequestApprovalFn;
     /** 模型上下文窗口大小（token），超出 modelWindow * compactRatio 时触发压缩。 */
     modelWindow: number;
     /** agent 嵌套深度，主 agent 为 0，spawn_agent 子 agent 递增。 */

@@ -43,14 +43,9 @@ export const commandTools: CustomTool[] = [
                     : { status: ToolExecutionResultStatus.FAILED, summary: `命令退出码非零：${code}` };
             },
             async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
-                // 💡 优化 1：提醒性高危词拦截（非安全边界——shell 可被空格/大小写/变量/管道变形绕过，
-                //   真正的防线是 DANGER 级强制用户审批）。先归一化再做包含匹配，挡住最直白的形式。
-                const forbiddenWords = ["rm -rf /", "mkfs", "shutdown", "format "];
-                const normalizedCmd = (args.command || "").toLowerCase().replace(/\s+/g, " ");
-                if (forbiddenWords.some(word => normalizedCmd.includes(word.toLowerCase().replace(/\s+/g, " ")))) {
-                    yield `❌ [提醒性拦截]：检测到该命令疑似包含系统级高危操作词，已被阻断（最终防线为用户审批）。`;
-                    return;
-                }
+                // ★ 已移除「高危词黑名单」：它可被空格/大小写/变量/管道轻易变形绕过，反而制造「已拦截」的
+                //   虚假安全感，还会误杀合法命令（如 git commit -m "remove unused format"）。
+                //   唯一可靠防线是 DANGER 级强制用户审批（现叠加 token 鉴权 + 审批绑定 sessionId + 127.0.0.1 监听）。
 
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
                 const maxChars = 20000; // 对应配置的 maxOutputCharacters

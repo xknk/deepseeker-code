@@ -58,6 +58,34 @@ export const resolveSafePath = (rel: string): string => {
 };
 
 /**
+ * 🛡️ 写操作前夕二次围栏复检（TOCTOU 收紧）：
+ *  resolveSafePath 入口已 realpath + 围栏判定，但「检查」与「写」之间存在竞争窗口——
+ *  软链接可在两步间被替换为指向工作区外的目标（如 rm foo; ln -s /etc/passwd foo）。
+ *  本函数在 destructive fs 操作前再次 realpath 并复检围栏，把窗口收窄到「检查后立即操作」。
+ *  注：完全闭环需 O_NOFOLLOW 打开（Node 无直接 API），作为残留风险；工作区根围栏已兜底最严重后果。
+ */
+export const assertWithinWorkspace = (absPath: string): void => {
+    let truePhysicalPath = absPath;
+    try {
+        if (fsSync.existsSync(absPath)) {
+            truePhysicalPath = fsSync.realpathSync(absPath);
+        } else {
+            const parentDir = path.dirname(absPath);
+            if (fsSync.existsSync(parentDir)) {
+                truePhysicalPath = path.join(fsSync.realpathSync(parentDir), path.basename(absPath));
+            }
+        }
+    } catch (e: any) {
+        throw new Error(`路径二次解析失败（疑似软链接逃逸）: ${e.message}`);
+    }
+    const trueWorkspaceRoot = fsSync.realpathSync(WORKSPACE_ROOT);
+    const relativePart = path.relative(trueWorkspaceRoot, truePhysicalPath);
+    if (relativePart.startsWith("..") || path.isAbsolute(relativePart)) {
+        throw new Error(`🛑 [SECURITY ALERT] 二次围栏复检发现越界（疑似 TOCTOU 软链接逃逸）：${absPath}`);
+    }
+};
+
+/**
  * 递归扫描全盘内部私有闭包函数，支持 Monorepo 级多层子目录 ignore 动态联动
  */
 const scanIgnoreFilesRecursive = async (dirPath: string): Promise<void> => {
@@ -131,16 +159,18 @@ export const requestApproval = async (
     // 🔒 审批详情瘦身闸：大 diff（如上千行 edit_file 的 old_str/new_str）仅保留头尾，
     //   防止单条 SSE 帧过大与前端渲染卡顿；完整改动可经工具参数或 read_file 核对。
     const safeDetail = truncateApprovalDetail(detail);
-    // UI 通道：通知前端弹窗审批（与 trace 解耦，不再污染可观测性事件流）
-    ctx.onUIEvent?.({ type: "approval_request", toolsId: toolCallId, toolName, detail: safeDetail });
 
-    console.log(`⏳ [审批挂起] ${toolName} | 凭证=${toolCallId}（等待用户在界面批准/拒绝，无超时）`);
+    // ★ 宿主注入审批（前端无关）：核心不再硬编码 HTTP approvalGate，改由各宿主决定审批通道：
+    //   Web→SSE+/api/approve；CLI（预留）→终端 y/n；VSCode（预留）→IDE 弹窗。
+    //   未注入钩子时安全默认拒绝，防核心被裸调时高危工具无审批直放行。
+    if (!ctx.requestApproval) {
+        ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
+        return false;
+    }
 
-    const { waitForUserApproval } = await import("./approvalGate.ts");
+    console.log(`⏳ [审批挂起] ${toolName} | 会话=${ctx.sessionId} | 凭证=${toolCallId}（交由宿主审批）`);
 
-    // cc 风格：不设超时判拒绝，审批一直等用户；唯一的中止来源是用户主动中断（ctx.abortSignal），
-    //   由 waitForUserApproval 内部监听 signal 唤醒，杜绝失联导致协程永久挂起。
-    const approved = await waitForUserApproval(toolCallId, ctx.abortSignal);
+    const approved = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId });
 
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });

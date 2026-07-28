@@ -89,6 +89,6 @@ export interface Todo {
  * - 工具进度（tool.start/end）不在此处，由 AgentEvent 负责，避免重复
  */
 export type UIEvent =
-    | { type: 'approval_request'; toolsId: string; toolName: string; detail: string }
+    | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string }
     | { type: 'tool.denied'; toolsId: string; toolName: string }
     | { type: 'todo.update'; todos: Todo[] };

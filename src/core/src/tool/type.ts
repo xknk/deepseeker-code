@@ -9,6 +9,7 @@
 import OpenAI from "openai";
 import { RunAgentEvents } from "@/agent/type.ts";
 import { UIEvent } from "@/observability/type.ts";
+import { RequestApprovalFn } from "@/host/type.ts";
 
 export const MAX_AGENT_DEPTH = 3;
 
@@ -89,6 +90,8 @@ export interface ToolContext {
     events: RunAgentEvents;
     /** 面向前端的 UI 交互事件通道（审批请求等），供审批网关/工具通知前端 */
     onUIEvent?: (evt: UIEvent) => void;
+    /** 宿主审批钩子（前端无关）：MUTATION/DANGER 工具执行前由 guard 调用，宿主决定放行/拒绝。未注入时默认拒绝。 */
+    requestApproval?: RequestApprovalFn;
     /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."） */
     emitProgress?: (message: string) => void;
 }

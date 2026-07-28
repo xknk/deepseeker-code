@@ -13,6 +13,7 @@ import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import {
     WORKSPACE_ROOT,
     resolveSafePath,
+    assertWithinWorkspace,
     initializeWorkspaceIgnore,
     checkIsPathIgnored
 } from "../guard.ts";
@@ -186,6 +187,7 @@ export const fsTools: CustomTool[] = [
                     const updatedContent = args.replace_all
                         ? normalizedContent.split(normalizedOld).join(normalizedNew) // 字面量全量替换（不受正则元字符影响）
                         : normalizedContent.replace(normalizedOld, normalizedNew);   // 仅首个
+                    assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
                     return args.replace_all
                         ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${matchCount} 处匹配。`
@@ -231,6 +233,7 @@ export const fsTools: CustomTool[] = [
 
                     // 💡 原子写入防御（Atomic Write）：先写同目录 .tmp 再 rename 瞬间落地，
                     //   避免写中途被中断/熔断导致文件变空或受损
+                    assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（rename 前夕再 realpath）
                     tmpPath = `${absPath}.${Date.now()}.tmp`;
                     await fs.writeFile(tmpPath, content, "utf-8");
                     await fs.rename(tmpPath, absPath); // 操作系统层面的原子覆盖
@@ -345,6 +348,7 @@ export const fsTools: CustomTool[] = [
                 let tmpPath: string | null = null;
                 try {
                     const absPath = resolveSafePath(args.path);
+                    assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
 
                     // 自动创建多层父目录
                     await fs.mkdir(path.dirname(absPath), { recursive: true });

@@ -24,6 +24,7 @@ import { Msg } from "@/session/contextCore.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase } from "@/observability/type.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
+import { createWebRequestApproval } from "@/host/webHost.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -72,6 +73,8 @@ export const handleUnifiedChat = async (
             await emitTrace(base);          // 纯 trace 落盘，不再推前端
         },
         onUIEvent: (evt) => sseWrite?.(evt),   // UI 交互事件（审批）直推前端
+        // ★ Web 宿主审批：推 approval_request 到 SSE + 经 /api/approve 回传（核心已与 HTTP 解耦）
+        requestApproval: createWebRequestApproval((evt) => sseWrite?.(evt), abortSignal),
     }
 
     for await (const event of runAgent(fullMessages, options)) {

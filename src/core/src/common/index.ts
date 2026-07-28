@@ -30,3 +30,29 @@ export const getFileName = (mainSessionId: string) => {
 export const createUUID = (): string => {
     return crypto.randomUUID();
 }
+
+// ============ 会话 ID 安全校验（防路径穿越）============
+/**
+ * 合法 sessionId 字符白名单：仅允许字母、数字、下划线、连字符。
+ *  - UUID（hex + '-'）✅、`${parent}__sub__${uuid}` ✅、`${id}__rollingSummary` ✅ 均通过；
+ *  - 拒绝 '.', '/', '\\', ':', 空格, '%' 等所有路径元字符（拒掉 '.' 即杀掉 '..'）。
+ */
+const SAFE_SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * 布尔判定（HTTP 边界用，不抛错）：返回 true 表示可安全用作文件系统路径段。
+ * 非字符串 / 空 / 超 200 字符 / 含非法字符 → false。
+ */
+export const isSafeSessionId = (id: unknown): id is string =>
+    typeof id === "string" && id.length > 0 && id.length <= 200 && SAFE_SESSION_ID_RE.test(id);
+
+/**
+ * 存储层硬守（纵深防御，违例抛错）：在任何把 sessionId 转成磁盘路径段的函数首行调用。
+ * 即便上游漏校验，这里也能兜住内部派生 ID / 未来新调用路径。
+ * 注：此处不复用 isSafeSessionId 守卫——对已是 string 的形参取反会把类型收窄成 never，故直接内联判定。
+ */
+export const assertSafeSessionId = (sessionId: string, label = "sessionId"): void => {
+    if (sessionId.length === 0 || sessionId.length > 200 || !SAFE_SESSION_ID_RE.test(sessionId)) {
+        throw new Error(`🛑 [SECURITY] 非法 ${label}: ${JSON.stringify(sessionId.slice(0, 48))}（仅允许字母/数字/下划线/连字符）`);
+    }
+};
