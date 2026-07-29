@@ -52,6 +52,20 @@ export const commandTools: CustomTool[] = [
                     ? { status: ToolExecutionResultStatus.SUCCESS }
                     : { status: ToolExecutionResultStatus.FAILED, summary: `命令退出码非零：${code}` };
             },
+            // ★ outputFilter：长构建/测试日志分流——用户看全文，模型只看头尾摘要（省 token，保留 EXIT 哨兵与首尾报错）。
+            //   verifyResult 在此之前执行（用完整 raw），退出码判定不受影响；写入 message 后不变，不破坏 DeepSeek 前缀缓存。
+            outputFilter: (rawOutput: string) => {
+                const lines = rawOutput.split("\n");
+                const HEAD = 20, TAIL = 40;
+                if (lines.length <= HEAD + TAIL) return { toModel: rawOutput, toUser: rawOutput };
+                const head = lines.slice(0, HEAD).join("\n");
+                const tail = lines.slice(-TAIL).join("\n");
+                const omitted = lines.length - HEAD - TAIL;
+                return {
+                    toModel: `${head}\n\n…(为模型精简：已省略中间约 ${omitted} 行，保留首 ${HEAD} 行 + 末 ${TAIL} 行含退出码与报错)…\n\n${tail}`,
+                    toUser: rawOutput,
+                };
+            },
             async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
                 // ★ 已移除「高危词黑名单」：它可被空格/大小写/变量/管道轻易变形绕过，反而制造「已拦截」的
                 //   虚假安全感，还会误杀合法命令（如 git commit -m "remove unused format"）。
@@ -90,7 +104,9 @@ export const commandTools: CustomTool[] = [
                 
                 // 专门负责唤醒 await 的控制器
                 let resolveWaiter: (() => void) | null = null;
+                let idleTimer: NodeJS.Timeout | null = null; // 空闲看门狗计时器：有新数据/退出时清理
                 const notifyNewData = () => {
+                    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
                     if (resolveWaiter) {
                         resolveWaiter();
                         resolveWaiter = null;
@@ -130,8 +146,20 @@ export const commandTools: CustomTool[] = [
                     // 基于条件唤醒的高级流式循环（overLimit 命中后彻底退出两层循环，避免逐 chunk 重复吐警告 / 反复 onAbort）
                     while ((!settled || queue.length > 0) && !overLimit) {
                         if (queue.length === 0) {
-                            // 当没有新日志时，让生成器彻底陷入沉睡，不消耗任何 CPU
-                            await new Promise<void>((r) => { resolveWaiter = r; });
+                            // 空闲看门狗：60s 内既无新输出也未退出 → 判定常驻命令（应改用 run_in_background），主动终止释放主循环
+                            const IDLE_TIMEOUT_MS = 60_000;
+                            let timedOut = false;
+                            await new Promise<void>((r) => {
+                                resolveWaiter = r;
+                                idleTimer = setTimeout(() => { timedOut = true; r(); }, IDLE_TIMEOUT_MS);
+                            });
+                            if (timedOut && !settled && queue.length === 0) {
+                                yield `\n\n⏱️ [看门狗]：命令连续 ${IDLE_TIMEOUT_MS / 1000}s 无输出且未退出，判定为常驻进程（如 dev server / tail -f）。已主动终止以释放主循环——常驻命令请改用 run_in_background。\n`;
+                                onAbort();
+                                settled = true;
+                                overLimit = true;
+                                break;
+                            }
                         }
 
                         while (queue.length > 0) {
@@ -157,6 +185,7 @@ export const commandTools: CustomTool[] = [
                         yield EXIT_SENTINEL(exitCode);
                     }
                 } finally {
+                    if (idleTimer) clearTimeout(idleTimer);
                     ctx?.abortSignal?.removeEventListener("abort", onAbort);
                 }
             },

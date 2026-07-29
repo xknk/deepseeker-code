@@ -91,4 +91,5 @@ export interface Todo {
 export type UIEvent =
     | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string }
     | { type: 'tool.denied'; toolsId: string; toolName: string }
+    | { type: 'tool.progress'; toolsId?: string; toolName?: string; message: string }
     | { type: 'todo.update'; todos: Todo[] };

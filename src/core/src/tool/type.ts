@@ -93,7 +93,7 @@ export interface ToolContext {
     /** 宿主审批钩子（前端无关）：MUTATION/DANGER 工具执行前由 guard 调用，宿主决定放行/拒绝。未注入时默认拒绝。 */
     requestApproval?: RequestApprovalFn;
     /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."）。
-     *  注：预留字段——执行层（runAgent）当前未注入 emitProgress，工具内调用将为 undefined。 */
+     *  已注入默认实现：runAgent 构造 toolCtx 时将其转发为 tool.progress UIEvent 推前端（onUIEvent）。 */
     emitProgress?: (message: string) => void;
 }
 
@@ -160,7 +160,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
 
         /**
          * 结果裁剪与压缩阈值（防范 DeepSeek 长上下文下被巨量日志或大文件撑爆）
-         * 规定该工具返回结果的最大体积（字符数）。超过此限制执行层会自动激活截断、提取摘要或转存。
+         * 规定该工具返回结果的最大体积（字符数）。超过此限制执行层自动去中间留头尾截断（见 truncateToolResult）。
          */
         maxOutputCharacters?: number;
 
@@ -169,8 +169,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 场景：执行 `npm install` 产生了 2000 行依赖下载进度条。
          * - toUser: 终端用户需要实时看到的酷炫安装动画/流式字符。
          * - toModel: 真正喂给大模型上下文的纯净结论（例如：`"Successfully installed 45 packages."`）。
-         * 注：预留字段——执行层当前未消费，工具结果（含 toModel/toUser）原样回灌上下文。
-         *   完整接线需在 runAgent 区分「面向模型」与「面向终端」两个输出通道。
+         * 已接线：runAgent 据此把结果分为 toModel（写回 message 与 transcript）与 toUser（yield 给前端），见 runAgent.ts:608-624。
          */
         outputFilter?: (rawOutput: string) => { toModel: string; toUser: string };
         /* ================= 3.5 环境自适应与引导 (Environment & Tool Hints) ================= */
@@ -209,7 +208,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * - 'hidden': 悄悄执行，不污染人类的终端屏幕（如一些内部状态检测工具）
          * - 'panel': 在终端右侧或独立区块开辟一个动态面板展示（如正在跑的 Web Dev Server 日志）
          * - 'inline': 正常的标准输出插入
-         * 注：预留字段——执行层当前未按此值分流渲染，工具输出统一走 inline。
+         * 保留字段：当前 web 宿主的面板渲染未就绪，执行层统一走 inline；待前端支持 panel/hidden 分流后再接线。
          */
         displayStrategy?: 'inline' | 'panel' | 'hidden';
     };

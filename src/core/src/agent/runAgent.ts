@@ -395,7 +395,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
                 // cc 风格：取消统一由用户主动中断（ctx.abortSignal）驱动，不在工具级挂固定定时器超时
                 // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
-                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
+                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, emitProgress: (message: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message }) };
                 let result = "";
                 // ★ 显式成败标志：校验/工具层可显式声明 ok（如未知工具），优先于下方前缀嗅探。
                 //   null=未显式声明 → 回退前缀嗅探；与"让 execute 返回显式 {status}"的演进方向一致。
