@@ -22,16 +22,30 @@ import { appendMessage } from "@/session/transcript.ts";
 import { buildContextMessages } from "@/session/content.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { emitTrace } from "@/observability/trace.ts";
-import { TraceBase } from "@/observability/type.ts";
+import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
+import { RequestApprovalFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
 import { expandSlashCommand } from "@/commands/expand.ts";
+import { SYSTEM_PROMPT } from "@/agent/systemPrompt.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
 /** SSE 写入函数：把事件对象序列化为 SSE data 帧推给前端。 */
 type SseWriter = (obj: Record<string, unknown>) => void;
+
+/** 宿主注入项：CLI/VSCode 等可传自己的审批钩子与 UI 事件通道；缺省回退 Web 宿主（SSE + approvalGate）。 */
+export interface HostOptions {
+    /** 宿主审批钩子（决定 MUTATION/DANGER 工具放行）。缺省用 Web 宿主 createWebRequestApproval。 */
+    requestApproval?: RequestApprovalFn;
+    /** 面向前端的 UI 交互事件通道（approval_request / todo.update 等）。缺省走 sseWrite。 */
+    onUIEvent?: (evt: UIEvent) => void;
+    /** 计划模式（CLI 两阶段用）：true=只读调研，模型 exit_plan_mode 后 yield plan.proposed 并结束本轮。缺省 false。 */
+    planMode?: boolean;
+    /** per-agent 模型覆盖（CLI /model 用）。缺省回退全局 MODEL_NAME。 */
+    model?: string;
+}
 
 /**
  * 处理一次统一对话请求：构建上下文 → 发起 runAgent → 分流事件（trace / SSE / outbound）。
@@ -39,12 +53,14 @@ type SseWriter = (obj: Record<string, unknown>) => void;
  * @param sendOutbound  非 SSE 渠道的最终回复回送函数（SSE 模式下不调用）
  * @param sseWrite      SSE 写入函数；存在时走流式（text.delta 等实时推），否则走 sendOutbound
  * @param abortSignal   中止信号，透传给 runAgent
+ * @param opts          宿主注入项（CLI 等传自己的 requestApproval/onUIEvent；serve 不传=Web 宿主，行为不变）
  */
 export const handleUnifiedChat = async (
     inbound: UnifiedInboundMessage,
     sendOutbound: OutboundSender,
     sseWrite?: SseWriter,
     abortSignal?: AbortSignal,
+    opts?: HostOptions,
 ) => {
     const sessionId: string = inbound.sessionId || await getOrCreateSessionId(inbound.sessionId);
     // ★ G4 斜杠命令展开：在 hook 派发与 buildContextMessages 之前，把 /<name> rest 展开为命令正文。
@@ -72,11 +88,7 @@ export const handleUnifiedChat = async (
         return;
     }
 
-    const SYSTEM_PROMPT = `你是一个能调用工具的助手。任务完成后直接用自然语言给出最终答案，不要再调用工具。
-
-【操作确认约定】
-- 遇到会改变状态或具风险的工具（写文件、编辑、删除、移动、执行命令、对外网络请求等），直接调用该工具即可，不要先用自然语言征求确认（如"我可以执行吗？""是否继续？"）。这类工具由系统统一拦截并弹出审批界面，用户会一键同意或拒绝——你无需代替系统发问，更不要停下等用户打字确认。
-- 仅当存在多种明显不同的实现方案、需要用户在方向上拍板时，才用文字简述选项请用户选择；对"某个具体操作是否执行"一律直接调用工具走审批。`
+    // ★ SYSTEM_PROMPT 已抽取为共享模块（@/agent/systemPrompt.ts），Web/CLI 宿主复用，避免双处维护。
     const fullMessages: Msg[] = await buildContextMessages(
         sessionId,
         { role: "user", content: inbound.content },
@@ -93,6 +105,11 @@ export const handleUnifiedChat = async (
     await appendMessage({ sessionId, role: 'user', content: inbound.content })
 
     let replyText = "";
+    // ★ 宿主注入：CLI 等可传自己的 requestApproval/onUIEvent；缺省回退 Web 宿主（SSE + approvalGate）。
+    //   serve 调用点不传 opts → 走 Web 宿主，行为与重构前完全一致。
+    const onUIEvent = opts?.onUIEvent ?? ((evt: UIEvent) => sseWrite?.(evt));
+    const requestApproval = opts?.requestApproval
+        ?? createWebRequestApproval((evt: UIEvent) => sseWrite?.(evt), abortSignal);
     const options: RunAgentOptions = {
         sessionId,
         cwd: process.cwd(),
@@ -105,9 +122,11 @@ export const handleUnifiedChat = async (
         events: async (base: TraceBase) => {
             await emitTrace(base);          // 纯 trace 落盘，不再推前端
         },
-        onUIEvent: (evt) => sseWrite?.(evt),   // UI 交互事件（审批）直推前端
-        // ★ Web 宿主审批：推 approval_request 到 SSE + 经 /api/approve 回传（核心已与 HTTP 解耦）
-        requestApproval: createWebRequestApproval((evt) => sseWrite?.(evt), abortSignal),
+        onUIEvent,
+        requestApproval,
+        // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖。serve 不传 → 均为 undefined，行为不变。
+        planMode: opts?.planMode,
+        model: opts?.model,
     }
 
     for await (const event of runAgent(fullMessages, options)) {

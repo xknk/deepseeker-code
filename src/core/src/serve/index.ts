@@ -12,36 +12,15 @@
  */
 import { createServer } from "./createServer.ts";
 import { agentTools } from "@/tool/index.ts";
-import { initMcpTools, disposeAllMcpClients } from "@/tool/mcp/loader.ts";
-import { initHooks } from "@/hooks/loader.ts";
-import { initPermissions } from "@/tool/permissions.ts";
-import { initSkills } from "@/skills/loader.ts";
-import { initAgents } from "@/agents/loader.ts";
-import { initProjectGuide } from "@/projectGuide/loader.ts";
-import { initCommands } from "@/commands/loader.ts";
+import { initEngine } from "@/bootstrap.ts";
 /** 创建应用并监听 3000 端口。 */
 async function startServer() {
-    // Q-6：web_fetch 依赖 AbortSignal.any/timeout（Node 20.3+）。启动期特性检测，缺失则告警（其余功能不受影响）。
-    if (typeof (AbortSignal as any).any !== "function" || typeof (AbortSignal as any).timeout !== "function") {
-        console.error("❌ 当前 Node 版本缺少 AbortSignal.any/timeout（需 Node 20.3+），web_fetch 相关能力将不可用，建议升级 Node。");
-    }
-    // 连接配置的 MCP 服务器，把其工具注入 agentTools（无配置时静默跳过）
-    await initMcpTools(agentTools);
-    // ★ 加载声明式 hooks（settings.json；无配置时静默跳过）
-    await initHooks();
-    // ★ 加载细粒度权限规则（settings.json permissions.{allow,deny,ask}；无配置时静默跳过）
-    await initPermissions();
-    // ★ 加载 skills（builtin/global/project；有 skill 才注入 load_skill 工具）
-    await initSkills(agentTools);
-    // ★ 加载声明式子 Agent（builtin/global/project；复用 spawn_agent，仅注册 manifest + 白名单校验）
-    await initAgents(agentTools);
-    // ★ 缓存项目指引（CLAUDE.md/AGENTS.md/AGENT.md）到内存，供每轮自动注入 system prompt
-    await initProjectGuide();
-    // ★ 加载斜杠命令（builtin/global/project；用户输入 /<name> 时前置展开）
-    await initCommands();
+    // ★ 初始化引擎（Node 特性检测 + MCP/hooks/permissions/skills/agents/projectGuide/commands）。
+    //   抽取自 @/bootstrap.ts，Web/CLI 宿主共用；返回 dispose 供退出钩子调用。
+    const dispose = await initEngine(agentTools);
     // ★ 注册退出钩子：主进程被终止时统一 dispose 所有 MCP 子进程，避免孤儿化
     const shutdown = (): void => {
-        disposeAllMcpClients();
+        dispose();
         process.exit(0);
     };
     process.on("SIGINT", shutdown);

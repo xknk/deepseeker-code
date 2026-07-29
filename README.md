@@ -10,6 +10,28 @@ npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
 
 默认监听 `127.0.0.1:3000`；鉴权 token 见启动日志（设 `DEEPSEEK_CODE_TOKEN` 可跨重启固定）。运行/调试细节见 [CLAUDE.md](./CLAUDE.md)。
 
+## 终端 CLI（React Ink，对标 Claude Code）
+
+除 HTTP server 外，另有一个 **in-process 终端客户端**（`src/cli/`）：直接驱动 `runAgent`，不走 HTTP/端口/token，工具审批走 Ink 原生模态。需先设 `DEEP_SEEK_API_KEY`，并在真实终端运行（Ink 依赖 TTY）。
+
+```bash
+# 开发态：从源码用 tsx 跑
+pnpm --filter cli dev
+
+# 打包成单文件 bin（esbuild，内联 cli+core 源码，外部化 node_modules 依赖）
+pnpm --filter cli build          # 产出 src/cli/dist/cli.mjs
+pnpm --filter cli start          # 运行打包产物
+
+# 全局安装（本地仓库）→ 得到 deepseek-code 命令
+pnpm --filter cli build && npm i -g ./src/cli
+deepseek-code [--resume <会话id>] [--plan]
+```
+
+快捷键：`Ctrl+C` 退出 · `Esc` 中止/清输入 · `Ctrl+G` 中止当前轮 · `Ctrl+T` 展开/收起思考 · 模态/菜单 `↑↓ Enter`。本地命令：`/help /plan /model /clear /status /exit`。能力对标 Claude Code：流式逐字 / 思考折叠 / 工具卡 / 任务面板 / 审批模态 / 计划模式两阶段 / 模型切换 / 会话恢复。
+
+> `cli` 包当前为 `private: true`，支持本地全局安装；如需发布到 npm，去掉该字段即可。
+
+
 ## 文档导航
 
 | 文档 | 内容 |

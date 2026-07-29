@@ -7,7 +7,10 @@
   "private": true,
   "scripts": {
     "test": "cd src/core && node --import tsx --test tests/*.test.ts",
-    "typecheck": "tsc -p src/core/tsconfig.json"
+    "typecheck": "tsc -p src/core/tsconfig.json",
+    "cli:dev": "pnpm --filter cli dev",
+    "cli:build": "pnpm --filter cli build",
+    "cli:start": "pnpm --filter cli start"
   },
   "keywords": [],
   "author": "",
