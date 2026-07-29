@@ -97,12 +97,14 @@ export function microcompactTextContent(raw: string): string {
 /**
  * @description: 工具返回消息超过最大值时，去除中间留头尾信息（自适应预算分配版）
  * @param {string} result 原始工具返回内容
- * @param {number} maxChars 最大允许字符数（选填，缺省时按 MAX_HISTORY_TOKENS 动态推算）
+ * @param {number} maxChars 最大允许字符数（选填，缺省时取 appConfig.MAX_TOOL_RESULT_CHARS）
  * @return {string} 整形后的文本内容
  */
 export const truncateToolResult = (result: string, maxChars?: number): string => {
-    // 👈 核心安全修改：在函数内部动态读取总配置，如果调用者没传 maxChars，再在运行时现场推算
-    const finalMaxChars = maxChars ?? Math.floor((appConfig.MAX_HISTORY_TOKENS * 0.06) * 4.5);
+    // 默认上限取 appConfig.MAX_TOOL_RESULT_CHARS。此前用 (MAX_HISTORY_TOKENS*0.06)*4.5 反推字符，
+    // 既绕过了该配置项（使其沦为死配置、与 web 等工具的 16000 口径不一致），
+    // 又依赖“1 token≈4.5 字符”的英文经验——对中文（≈1 字符/token）严重失真，已废弃。
+    const finalMaxChars = maxChars ?? appConfig.MAX_TOOL_RESULT_CHARS;
     const newResult = microcompactTextContent(result)
     if (!newResult || newResult.length <= finalMaxChars) return newResult;
 

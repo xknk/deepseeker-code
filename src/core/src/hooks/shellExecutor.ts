@@ -54,7 +54,8 @@ const truncate = (s: string): string => {
 
 // ★ stdin JSON 载荷字段截断：edit_file 的 old_str/new_str、read_file 大内容等 args 可能很大，
 //   无截断直传 stdin 会滞留管道缓冲 + 背压拖慢；按字段截断既限总量又保持合法 JSON（与 HOOK_PROMPT 1024 截断同口径）。
-const MAX_STDIN_FIELD = 4096;
+//   被 registry.ts 的 HOOK_RESULT_MAX 复用为同口径，故 export 共享单一真相源。
+export const MAX_STDIN_FIELD = 4096;
 const capFieldStrings = (v: any): any => {
     if (typeof v === 'string') return v.length > MAX_STDIN_FIELD ? v.slice(0, MAX_STDIN_FIELD) + `…[截断，共 ${v.length} 字符]` : v;
     if (Array.isArray(v)) return v.map(capFieldStrings);

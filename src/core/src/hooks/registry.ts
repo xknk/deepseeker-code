@@ -18,6 +18,7 @@ import {
     INTERCEPTABLE_EVENTS,
     TOOL_EVENTS,
 } from "./types.ts";
+import { MAX_STDIN_FIELD } from "./shellExecutor.ts";
 
 /** 全局规则表（程序化注册 + 声明式配置共同写入） */
 const rules: HookRule[] = [];
@@ -112,8 +113,11 @@ export const runPreHooks = async (
     });
 };
 
-/** PostToolUse 透传给 hook 的 result 截断上限（保护声明式 hook 的 stdin/上下文；模型侧完整结果不受影响） */
-const HOOK_RESULT_MAX = 8192;
+/** PostToolUse 透传给 hook 的 result 截断上限。
+ *  声明式 hook 经 dispatch→shellExecutor，stdin 每个字段还会被 MAX_STDIN_FIELD 二次约束，
+ *  故此处取与之同口径的值——此前独立设 8192，会被传输层 4096 静默覆盖，造成“名义 8K 实际到脚本只有 4K”的误导。
+ *  （仅裁 hook 观察视图；模型侧完整工具结果不受影响。） */
+const HOOK_RESULT_MAX = MAX_STDIN_FIELD;
 const truncateForHook = (s: string): string =>
     s.length <= HOOK_RESULT_MAX ? s : s.slice(0, HOOK_RESULT_MAX) + `\n…[hook 视图截断，共 ${s.length} 字符]`;
 

@@ -49,15 +49,19 @@ export const gitTools: CustomTool[] = [
                         return `[Git Diff]：当前工作区代码极其纯净，未发现任何相比于最新 Commit 的物理改动。`;
                     }
 
-                    // 拦截机制：防止 Diff 文本过长撑爆大模型上下文
-                    const maxDiffLines = 120;
+                    // 拦截机制：防止 Diff 文本过长撑爆大模型上下文（去中间留头尾，与 truncateToolResult 同口径）。
+                    // 旧实现只留头部 120 行，多文件改动时排在后面的文件 diff 会被整段丢失；改为头尾各留一半。
+                    const HEAD = 60, TAIL = 60;
+                    const maxDiffLines = HEAD + TAIL; // 120
                     const lines = stdout.split("\n");
                     if (lines.length > maxDiffLines) {
+                        const omitted = lines.length - maxDiffLines;
                         return [
-                            `[Git Diff Summary | 变更行数较多，已自动截断前 ${maxDiffLines} 行进行视觉保护]`,
-                            lines.slice(0, maxDiffLines).join("\n"),
-                            `\n\n[... ⚠️ 提示：Diff 改动过长，已自动隐藏剩余的 ${lines.length - maxDiffLines} 行改动 ...]`,
-                            `建议使用具体的文件路径参数 [path] 分文件精准核对差异。`
+                            `[Git Diff Summary | 变更行数较多，已省略中间约 ${omitted} 行，保留首 ${HEAD} 行 + 末 ${TAIL} 行]`,
+                            lines.slice(0, HEAD).join("\n"),
+                            `\n\n[... ⚠️ 提示：Diff 改动过长，已自动隐藏中间 ${omitted} 行改动 ...]`,
+                            lines.slice(-TAIL).join("\n"),
+                            `\n建议使用具体的文件路径参数 [path] 分文件精准核对差异。`
                         ].join("\n");
                     }
                     return `[Current Code Changes (Git Diff)]\n${stdout}`;

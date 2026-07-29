@@ -44,6 +44,8 @@ export const searchTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
+            // ★ 200 行结果约 30K 字符，配独立预算脱离通用 16K 兜底，避免被二次截回 ~100 行
+            maxOutputCharacters: 32000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { query: string; is_regex?: boolean }): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
@@ -71,14 +73,16 @@ export const searchTools: CustomTool[] = [
 
                     const { stdout } = await execFileAsync(rgPath, rgArgs, {
                         cwd: WORKSPACE_ROOT,
-                        maxBuffer: 1024 * 1024 * 5 // 5MB 缓冲区防御
+                        // 已用 --max-count 10（每文件≤10 匹配）+ 结果行截断，stdout 实际很小，1MB 足够
+                        maxBuffer: 1024 * 1024
                     });
 
                     if (!stdout.trim()) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
 
                     const resultLines = stdout.split("\n").filter(Boolean);
-                    if (resultLines.length > 80) {
-                        return resultLines.slice(0, 80).join("\n") + `\n\n[... 匹配项过多，已隐藏剩余的 ${resultLines.length - 80} 条结果，建议更换更精准的关键词重新检索 ...]`;
+                    const MAX_GREP_LINES = 200; // 对标 Claude Code 宽松检索（head_limit ~250），由 80 上调
+                    if (resultLines.length > MAX_GREP_LINES) {
+                        return resultLines.slice(0, MAX_GREP_LINES).join("\n") + `\n\n[... 匹配项过多，已隐藏剩余的 ${resultLines.length - MAX_GREP_LINES} 条结果，建议更换更精准的关键词重新检索 ...]`;
                     }
                     return resultLines.join("\n");
                 } catch (error: any) {

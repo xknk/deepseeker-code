@@ -19,6 +19,9 @@ const _DataDir = path.join(os.homedir(), ".deepSeekCode");
 export const appConfig = {
     dataDir: _DataDir,
     maxReasoningRounds: 3,
+    // DeepSeek-V4 标称上下文窗口 1M，但实测编码甜点区在 150K–250K（300K+ 精度明显衰减）。
+    // 取 250K 作为历史 token 上限：压缩阈值 0.85×250K≈212K 恰好在衰减前触发，宁早压缩不贪长文。
+    // 切勿贪心调到 1M——那会越过甜点区，精度与延迟双劣化。
     MAX_HISTORY_TOKENS: 250000,
     COMPACT_RATIO: 0.85,
     KEEP_RECENT_UNITS: 5,
