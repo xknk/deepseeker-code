@@ -21,11 +21,11 @@ import { MsgParams, outMsg, toolMsg } from "./type.ts";
 async function* chatWithModelWithTools(
     messages: Msg[],
     tools?: toolMsg[],
-    callOpts?: { signal?: AbortSignal },
+    callOpts?: { signal?: AbortSignal; model?: string },
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
     const requestBody = {
         messages: messages,
-        model: MODEL_NAME,
+        model: callOpts?.model ?? MODEL_NAME, // per-agent 覆盖（声明式子 Agent）；缺省回退全局
         tool_choice: "auto", // 让模型自动选择工具
         tools: tools,
         ...(MODEL_THINKING_ENABLED ? { thinking: { "type": "enabled" } } : {}),

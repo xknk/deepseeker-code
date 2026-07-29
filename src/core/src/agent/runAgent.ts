@@ -36,6 +36,7 @@ import { runBackgroundTool } from "./backgroundTool.ts";
 import { filterByEnvironment } from "./toolFilter.ts";
 import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { injectSkillCatalog } from "@/skills/inject.ts";
+import { injectAgentCatalog } from "@/agents/inject.ts";
 
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
@@ -114,6 +115,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     }
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（复刻 planMode 追加模式，不动 message 下标）
     injectSkillCatalog(message);
+    injectAgentCatalog(message);
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' = 'normal';
@@ -201,7 +203,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 let contentBuf = "";
                 const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
                 let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
-                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal })) {
+                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal, model: options.model })) {
                     if (signal?.aborted) break;
                     const delta = chunk.choices?.[0]?.delta;
                     if (delta) {

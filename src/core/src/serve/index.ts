@@ -15,6 +15,7 @@ import { agentTools } from "@/tool/index.ts";
 import { initMcpTools, disposeAllMcpClients } from "@/tool/mcp/loader.ts";
 import { initHooks } from "@/hooks/loader.ts";
 import { initSkills } from "@/skills/loader.ts";
+import { initAgents } from "@/agents/loader.ts";
 /** 创建应用并监听 3000 端口。 */
 async function startServer() {
     // Q-6：web_fetch 依赖 AbortSignal.any/timeout（Node 20.3+）。启动期特性检测，缺失则告警（其余功能不受影响）。
@@ -27,6 +28,8 @@ async function startServer() {
     await initHooks();
     // ★ 加载 skills（builtin/global/project；有 skill 才注入 load_skill 工具）
     await initSkills(agentTools);
+    // ★ 加载声明式子 Agent（builtin/global/project；复用 spawn_agent，仅注册 manifest + 白名单校验）
+    await initAgents(agentTools);
     // ★ 注册退出钩子：主进程被终止时统一 dispose 所有 MCP 子进程，避免孤儿化
     const shutdown = (): void => {
         disposeAllMcpClients();

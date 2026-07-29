@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { commandTools } from "@/tool/registry/command.ts";
 
-const runCommand = commandTools.find(t => t.function.name === "run_command");
+const runCommand = commandTools.find((t: any) => t.function.name === "run_command");
 const outputFilter = runCommand?.function.outputFilter;
 
 describe("run_command outputFilter（toModel/toUser 分流）", () => {

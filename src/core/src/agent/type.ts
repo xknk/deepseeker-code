@@ -56,6 +56,8 @@ export interface RunAgentOptions {
     compactRatio: number,
     /** 父级系统提示词，spawn_agent 时透传给子 agent，保持一致的人设 / 约束。 */
     parentSystemPrompt: string,
+    /** per-agent 模型覆盖（声明式子 Agent 的 frontmatter.model）。缺省回退全局 MODEL_NAME。 */
+    model?: string,
     /** 已归档（被压缩）的消息条数，用于统计与展示。 */
     archivedMessageCount?: number,
     /** 计划模式：仅允许只读/研究类工具 + exit_plan_mode，先调研产出方案、经用户审批后再实现（见 agent/planMode.ts）。 */
