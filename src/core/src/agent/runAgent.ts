@@ -29,6 +29,7 @@ import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
 import { requestApproval } from "@/tool/guard.ts";
+import { checkPermission } from "@/tool/permissions.ts";
 import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT } from "./planMode.ts";
 import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
@@ -37,6 +38,7 @@ import { filterByEnvironment } from "./toolFilter.ts";
 import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { injectSkillCatalog } from "@/skills/inject.ts";
 import { injectAgentCatalog } from "@/agents/inject.ts";
+import { injectProjectGuide } from "@/projectGuide/inject.ts";
 
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
@@ -116,6 +118,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（复刻 planMode 追加模式，不动 message 下标）
     injectSkillCatalog(message);
     injectAgentCatalog(message);
+    injectProjectGuide(message);
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' = 'normal';
@@ -427,8 +430,21 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前由执行层统一请求用户审批
                     //   （MUTATION 将来接入 --yes / 免审目录配置后可自动放行，此处先默认需审）
                     const level = matchedTool.function.safetyLevel;
-                    const needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
+                    let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
                     let denied = false;
+                    // ★ G1 细粒度权限规则（deny>ask>allow）：命中 allow 免审批；deny 直接拒（作用于所有工具含 SAFE）；
+                    //   ask 强制审批（即使 SAFE）；未匹配走默认 safetyLevel。异常一律降级默认（fail-safe）。
+                    try {
+                        const perm = checkPermission(calledName, calledArgs);
+                        if (perm === 'deny') {
+                            denied = true;
+                            result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`;
+                        } else if (perm === 'allow') {
+                            needApproval = false;   // 跳过整个审批块，免审批直放行
+                        } else if (perm === 'ask') {
+                            needApproval = true;    // 即使 SAFE 也强制审批
+                        }
+                    } catch { /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
                     // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
                     const isBgTool = matchedTool.function.isSync === false;
                     const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;
@@ -436,7 +452,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         denied = true;
                         result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
                     }
-                    if (needApproval) {
+                    if (needApproval && !denied) {
                         const ra = matchedTool.function.requireApproval;
                         let detail = `申请执行高危工具 [${calledName}]`;
                         // ★ requireApproval（用户自定义函数）异常一律按拒绝处理，不逃逸出工具循环

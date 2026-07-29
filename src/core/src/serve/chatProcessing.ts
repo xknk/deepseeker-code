@@ -26,6 +26,7 @@ import { TraceBase } from "@/observability/type.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { dispatch } from "@/hooks/registry.ts";
+import { expandSlashCommand } from "@/commands/expand.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -46,6 +47,10 @@ export const handleUnifiedChat = async (
     abortSignal?: AbortSignal,
 ) => {
     const sessionId: string = inbound.sessionId || await getOrCreateSessionId(inbound.sessionId);
+    // ★ G4 斜杠命令展开：在 hook 派发与 buildContextMessages 之前，把 /<name> rest 展开为命令正文。
+    //   展开在 dispatch 前 → hook / buildContextMessages / appendMessage 全部看到展开后文本，transcript 忠实记录模型所见。
+    //   未注册的 /x（含文件路径）原样透传；异常一律原样（fail-safe）。
+    try { inbound.content = expandSlashCommand(inbound.content); } catch { /* fail-safe：原样 */ }
     const startTime = performance.now();
 
     // ★ UserPromptSubmit hook（serve 层；可拦截整轮）
@@ -67,7 +72,11 @@ export const handleUnifiedChat = async (
         return;
     }
 
-    const SYSTEM_PROMPT = `你是一个能调用工具的助手。任务完成后直接用自然语言给出最终答案，不要再调用工具。`
+    const SYSTEM_PROMPT = `你是一个能调用工具的助手。任务完成后直接用自然语言给出最终答案，不要再调用工具。
+
+【操作确认约定】
+- 遇到会改变状态或具风险的工具（写文件、编辑、删除、移动、执行命令、对外网络请求等），直接调用该工具即可，不要先用自然语言征求确认（如"我可以执行吗？""是否继续？"）。这类工具由系统统一拦截并弹出审批界面，用户会一键同意或拒绝——你无需代替系统发问，更不要停下等用户打字确认。
+- 仅当存在多种明显不同的实现方案、需要用户在方向上拍板时，才用文字简述选项请用户选择；对"某个具体操作是否执行"一律直接调用工具走审批。`
     const fullMessages: Msg[] = await buildContextMessages(
         sessionId,
         { role: "user", content: inbound.content },

@@ -1,14 +1,17 @@
 /**
  * @file tool/mcp/loader.ts
- * @description MCP 工具加载器：读取配置 → 逐个连接 server → 把每个 server 的工具包装为
- *  命名空间化的 CustomTool（mcp__<server>__<tool>）→ 返回供注入 agentTools。
+ * @description MCP 工具加载器：读取配置 → 按 transport 创建 client → 连接 server → 把每个 server
+ *  的工具包装为命名空间化的 CustomTool（mcp__<server>__<tool>）→ 返回供注入 agentTools。
  *
- *  配置格式（兼容 Claude Code）：
+ *  配置格式（兼容 Claude Code，扩展 type/url/headers 支持远程 transport）：
  *  {
  *    "mcpServers": {
- *      "serverName": { "command": "npx", "args": ["-y", "@xxx/server"], "env": { "KEY": "..." } }
+ *      "local":  { "command": "npx", "args": ["-y", "@xxx/server"], "env": { "KEY": "..." } },
+ *      "remote": { "type": "http", "url": "https://.../mcp", "headers": { "Authorization": "Bearer ..." } },
+ *      "stream": { "type": "sse",  "url": "https://.../sse" }
  *    }
  *  }
+ *  type 缺省：有 url→http，否则 stdio。
  *  配置路径：环境变量 MCP_CONFIG 指定，否则默认 ~/.deepSeekCode/mcp.json。无配置/无文件 → 返回空数组（静默跳过）。
  *
  *  安全：MCP server 可执行任意逻辑，包装工具默认 DANGER（每次调用需审批）。
@@ -18,10 +21,16 @@ import fs from "fs/promises";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
-import { McpStdioClient, McpServerConfig } from "./client.ts";
+import {
+    McpClient,
+    McpServerConfig,
+    McpStdioClient,
+    McpStreamableHttpClient,
+    McpSSEClient,
+} from "./client.ts";
 
 /** 持有所有已连接 client，供关闭时统一 dispose */
-const clients: McpStdioClient[] = [];
+const clients: McpClient[] = [];
 
 /** 工具名/服务名净化：非 [a-zA-Z0-9_] 字符替换为 _，保证 OpenAI 工具名合法 */
 function sanitize(s: string): string {
@@ -47,8 +56,20 @@ async function readMcpConfig(): Promise<Record<string, McpServerConfig>> {
     }
 }
 
-/** 把单个 MCP 工具包装为 CustomTool */
-function wrapTool(serverName: string, rawTool: any, client: McpStdioClient): CustomTool | null {
+/**
+ * 按 config 的 type/url/command 选择 transport 创建 client。
+ * type 缺省：有 url→http，否则 stdio；stdio 缺 command 抛错（被调用方 try/catch 捕获→跳过该 server）。
+ */
+function createMcpClient(name: string, cfg: McpServerConfig): McpClient {
+    const type = cfg.type ?? (cfg.url ? "http" : "stdio");
+    if (type === "http") return new McpStreamableHttpClient(name, cfg);
+    if (type === "sse") return new McpSSEClient(name, cfg);
+    if (!cfg.command) throw new Error(`MCP server "${name}" 为 stdio 但缺少 command`);
+    return new McpStdioClient(name, cfg);
+}
+
+/** 把单个 MCP 工具包装为 CustomTool（仅依赖 McpClient.callTool，transport 无关） */
+function wrapTool(serverName: string, rawTool: any, client: McpClient): CustomTool | null {
     if (!rawTool?.name) return null;
     const toolName = sanitize(rawTool.name);
     const namespaced = `mcp__${sanitize(serverName)}__${toolName}`;
@@ -85,7 +106,7 @@ export async function loadMcpTools(): Promise<CustomTool[]> {
 
     const tools: CustomTool[] = [];
     for (const [name, cfg] of entries) {
-        const client = new McpStdioClient(name, cfg);
+        const client = createMcpClient(name, cfg);
         try {
             await client.start();
             const rawTools = await client.listTools();
@@ -94,10 +115,11 @@ export async function loadMcpTools(): Promise<CustomTool[]> {
                 if (wrapped) tools.push(wrapped);
             }
             clients.push(client);
-            console.log(`🔌 [MCP] 已连接 "${name}"：${rawTools.length} 个工具`);
+            const type = cfg.type ?? (cfg.url ? "http" : "stdio");
+            console.log(`🔌 [MCP] 已连接 "${name}"（${type}）：${rawTools.length} 个工具`);
         } catch (e: any) {
             console.warn(`⚠️ [MCP] 连接 "${name}" 失败（已跳过）: ${e.message}`);
-            client.dispose();
+            try { client.dispose(); } catch { /* ignore */ }
         }
     }
     return tools;
@@ -115,8 +137,8 @@ export async function initMcpTools(into: CustomTool[]): Promise<void> {
     }
 }
 
-/** 关闭所有 MCP server 子进程（服务退出时调用） */
+/** 关闭所有 MCP server（含远程 fetch abort / 本地子进程 kill），服务退出时调用 */
 export function disposeAllMcpClients(): void {
-    clients.forEach(c => c.dispose());
+    clients.forEach(c => { try { c.dispose(); } catch { /* ignore */ } });
     clients.length = 0;
 }
