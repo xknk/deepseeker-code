@@ -168,7 +168,7 @@ rollingSummary  压成 1~2 段自然语言（放 L0 末尾，低频更新）
 #### 边界值建议（V4 1M，工作区 ~200K）
 | 动作 | 触发条件 | 建议值 |
 |---|---|---|
-| 单轮源头截断 | 单条 result > singleToolMax | 8K |
+| 单轮源头截断 | 单条 result > singleToolMax | 兜底 16K（`MAX_TOOL_RESULT_CHARS`）；read_file / search_grep 各配 32K 独立预算（2026-07-29 调优）|
 | L2→L1 折叠 | tokens(L2) > activeMax | 64K |
 | L2 最少保留 | activeUnits.length ≤ keepAtLeast | 5 |
 | L1→summary | tokens(L1) > frozenMax | 128K |
@@ -223,10 +223,10 @@ rollingSummary  压成 1~2 段自然语言（放 L0 末尾，低频更新）
 
 ```
 [✅] 第0步  修复两个阻塞 bug
-[ ] 第1步  transcript 扩展支持 tool（注意用展开保留 tool_call_id）
-[ ] 第2步  runAgent 两点实时落盘（assistant + tool result）
-[ ] 第3步  传 sessionId + abort 占位
-[ ] 第4步  （后续）接上折叠管理 L0/L1/L2
+[✅] 第1步  transcript 扩展支持 tool（展开保留 tool_call_id）—— 已落地，见 `session/transcript.ts`
+[✅] 第2步  runAgent 两点实时落盘（assistant + tool result）—— 已落地
+[✅] 第3步  传 sessionId + abort 占位 —— 已落地
+[✅] 第4步  折叠管理 —— 已落地为滚动摘要（`agent/truncate.ts` 的 `ensureFitsWindow`：分批压缩 + 连续失败熔断 + 快照落盘）；L0/L1/L2 三段式简化为 `[system, 摘要槽, ...active]` 布局
 ```
 
 ### 每步验证点
