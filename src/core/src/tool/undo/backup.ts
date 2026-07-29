@@ -147,6 +147,12 @@ async function backupFileOverwrite(common: CommonFields, undoDir: string, args: 
         return { ...common, backupKind: 'creation_marker', backupPath: '', fileSizeBefore: 0 };
     }
     assertWithinWorkspace(absPath); // 读备份也走围栏（TOCTOU 收紧）
+    // 体积熔断（防单文件 OOM）：与目录分支口径一致，超限阻断写入（凡改必可回退原则下宁可拒绝）
+    const fileStat = await fs.stat(absPath);
+    const maxPerOp = appConfig.undoMaxBytesPerOp ?? (100 * 1024 * 1024);
+    if (fileStat.size > maxPerOp) {
+        throw new Error(`文件 [${common.relativePath}] 体积约 ${fileStat.size} 字节超过单次备份上限 ${maxPerOp}，写入已阻断（防内存拖垮；可调 undoMaxBytesPerOp）`);
+    }
     const content = await fs.readFile(absPath);
     await fs.mkdir(undoDir, { recursive: true, mode: 0o700 }); // 同机用户隔离
     const contentPath = path.join(undoDir, 'content');
@@ -216,7 +222,7 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
         }
 
         const treeDest = path.join(undoDir, 'tree');
-        fsSync.cpSync(absPath, treeDest, { recursive: true, preserveTimestamps: true });
+        await fs.cp(absPath, treeDest, { recursive: true, force: true, preserveTimestamps: true }); // 异步拷贝，避免 cpSync 阻塞事件循环
 
         // skip 策略：从备份副本剔除敏感文件（仍允许删除原目录，仅该部分不可回退）
         if (policy === 'skip' && sensitiveInTree.length > 0) {
@@ -232,6 +238,11 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
             fileSizeBefore: treeBytes,
             contentHashBefore: await hashTreeManifest(absPath),
         };
+    }
+    // 体积熔断（防单文件 OOM）：文件分支与目录分支口径一致，超限阻断写入
+    const maxPerOp = appConfig.undoMaxBytesPerOp ?? (100 * 1024 * 1024);
+    if (st.size > maxPerOp) {
+        throw new Error(`文件 [${relativePath}] 体积约 ${st.size} 字节超过单次备份上限 ${maxPerOp}，写入已阻断（防内存拖垮；可调 undoMaxBytesPerOp）`);
     }
     const content = await fs.readFile(absPath);
     const contentPath = path.join(undoDir, 'content');

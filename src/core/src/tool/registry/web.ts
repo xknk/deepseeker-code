@@ -360,6 +360,31 @@ const pinnedSsrfDispatcher = new Agent({
 });
 
 /**
+ * 🛡️ allow_private 模式专用钉 IP dispatcher：放行内网，但硬拦云元数据 IP。
+ *  allow_private 下 isPublicHost 不做 DNS 解析（短路放行内网）；若无钉 IP 兜底，攻击者域名可在
+ *  请求时 DNS rebinding 到 169.254.169.254 窃取云凭证（isPublicHost 仅按主机名字面量判 metadata，挡不住域名 rebinding）。
+ *  此 dispatcher 解析一次、用解析 IP 直连（掐断 rebinding），并对解析结果中的云元数据 IP 硬拒。
+ */
+const pinnedMetadataGuardDispatcher = new Agent({
+    connect: {
+        lookup: ((hostname: string, opts: any, cb: any) => {
+            dnsLookupCb(hostname, { all: true, ...(opts || {}) }, (err: any, addrs: any) => {
+                if (err) return cb(err);
+                const list: Array<{ address: string; family: number }> = Array.isArray(addrs) ? addrs : [addrs];
+                if (list.length === 0) return cb(new Error("DNS 无解析结果"));
+                for (const a of list) {
+                    // 云元数据端点（含 IPv4-mapped IPv6 变体，经 extractIPv4 归一）即便 allow_private 也硬拦
+                    if (extractIPv4(a.address) === "169.254.169.254") {
+                        return cb(new Error(`DNS 解析到云元数据端点 ${a.address}，allow_private 下仍拦截（防凭证窃取）`));
+                    }
+                }
+                cb(null, list[0].address, list[0].family);
+            });
+        }) as any,
+    },
+});
+
+/**
  * 安全抓取：手动跟随重定向（不自动 follow），每一跳都重做：
  *  ① 协议白名单（仅 http/https，挡 file:/gopher: 等）；
  *  ② 拒绝 https→http 降级（防 SSL 剥离）；
@@ -397,8 +422,9 @@ async function safeFetchFollow(
             signal: AbortSignal.any(signals),
             redirect: "manual",          // ★ 永不自动跟随，逐跳手判
             headers: baseHeaders,
-            // allowPrivate 时不钉 IP（本地已知服务无需防 rebinding）；默认走钉 IP 的 dispatcher 防 DNS rebinding
-            ...(allowPrivate ? {} : { dispatcher: pinnedSsrfDispatcher }),
+            // ★ 始终钉 IP 防 DNS rebinding：默认拦全部内网；allow_private 改用「只拦云元数据」的 dispatcher
+            //   （放行内网本地服务，但解析到 169.254.169.254 仍硬拒，掐断 rebinding 窃取云凭证）
+            dispatcher: allowPrivate ? pinnedMetadataGuardDispatcher : pinnedSsrfDispatcher,
         });
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get("location");
@@ -409,6 +435,59 @@ async function safeFetchFollow(
         return res;
     }
 }
+
+/** 流式读取响应体所需的最小接口（兼容 undici / 全局 Response）。
+ *  body 放宽为 any：undici 的 ReadableStream<any> 与 lib.dom 的 ReadableStream<Uint8Array> 泛型互不兼容
+ *  （TS 5.x 类型化数组变革使 pipeThrough/getReader 签名冲突），收紧会触发结构性不兼容报错。 */
+type FetchLikeResponse = {
+    body: any;
+    headers: { get(name: string): string | null };
+    text(): Promise<string>;
+};
+
+/**
+ * 🛡️ OOM 防护：流式读取响应体到字节上限即停。
+ *  undici/node fetch 默认无 body 上限，res.text() 会把整页（可能数 GB）一次性读入内存；
+ *  在多并发会话的服务进程里，单次抓取即可 OOM 拖垮全部会话。这里逐块累计、超上限即 cancel()，
+ *  把单次抓取内存钉死在 maxBytes 以内。content-type 已由调用方在调用前判定（非文本不进来）。
+ */
+const readBodyCapped = async (
+    res: FetchLikeResponse,
+    maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> => {
+    const body = res.body;
+    // 无流式句柄（罕见）回退 text()，并按字节上限截断（此前 content-type 已判定为文本，风险可控）
+    if (!body || typeof body.getReader !== "function") {
+        const t = await res.text();
+        return { text: t.length > maxBytes ? t.slice(0, maxBytes) : t, truncated: t.length > maxBytes };
+    }
+    const reader = body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: false });
+    let received = 0;
+    let out = "";
+    let truncated = false;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            const remain = maxBytes - received;
+            if (value.byteLength <= remain) {
+                out += decoder.decode(value, { stream: true });
+                received += value.byteLength;
+            } else {
+                // 最后一块超出剩余预算：截断到上限后停读
+                out += decoder.decode(value.subarray(0, remain), { stream: true });
+                truncated = true;
+                break;
+            }
+        }
+        out += decoder.decode(); // flush 残留字节
+    } finally {
+        try { await reader.cancel(); } catch { /* ignore */ }
+    }
+    return { text: out, truncated };
+};
 
 export const webTools: CustomTool[] = [
     {
@@ -461,26 +540,34 @@ export const webTools: CustomTool[] = [
                     }
 
                     const contentType = res.headers.get("content-type") || "";
-                    const raw = await res.text();
-
-                    // 4. 二进制/非文本内容兜底
+                    // 4. 二进制/非文本：按 header 前置判定，避免把整份二进制读入内存（OOM 防护）
                     if (!/(text|html|json|xml|plain|markdown)/i.test(contentType)) {
+                        try { await (res.body as any)?.cancel?.(); } catch { /* ignore */ }
                         return `⚠️ [内容类型不支持]：目标返回 ${contentType || "未知类型"}（非文本），web_fetch 仅处理文本/HTML/JSON，已跳过。`;
                     }
 
-                    // 5. HTML → Markdown；纯文本/JSON 原样返回
+                    // 5. 流式读取 + 字节熔断（OOM 防护）：原始响应逐块累计、超 MAX_RAW_BYTES 即 cancel，
+                    //    把单次抓取内存钉死在上限内（防多并发会话下单页 OOM 拖垮全进程）；再转 Markdown + 字符截断。
+                    const MAX_RAW_BYTES = Math.min(maxChars * 8, 2 * 1024 * 1024); // 留足 HTML→MD 膨胀余量，硬顶 2MB
+                    const { text: raw, truncated: rawTruncated } = await readBodyCapped(res, MAX_RAW_BYTES);
+                    const truncNote = rawTruncated
+                        ? `\n[... ⚠️ 原始响应超过 ${MAX_RAW_BYTES} 字节，已在抓取阶段截断，转换后内容可能不完整 ...]`
+                        : "";
+
+                    // 6. HTML → Markdown；纯文本/JSON 原样返回
                     const isHtml = /html/i.test(contentType) || /^\s*<(html|!doctype|head|body)/i.test(raw);
                     const body = isHtml ? htmlToMarkdown(raw) : raw;
 
-                    // 6. 长度熔断
+                    // 7. 长度熔断（字符级，针对最终 Markdown）
                     if (body.length > maxChars) {
                         return [
                             `[web_fetch | ${parsed.href} | 已截断前 ${maxChars} 字符，原文共 ${body.length} 字符]`,
                             body.slice(0, maxChars),
-                            `\n[... ⚠️ 内容过长，已隐藏剩余 ${body.length - maxChars} 字符，可调大 max_length 或改用更精确的 URL ...]`
+                            `\n[... ⚠️ 内容过长，已隐藏剩余 ${body.length - maxChars} 字符，可调大 max_length 或改用更精确的 URL ...]`,
+                            truncNote,
                         ].join("\n");
                     }
-                    return `[web_fetch | ${parsed.href}]\n${body}`;
+                    return `[web_fetch | ${parsed.href}]\n${body}${truncNote}`;
                 } catch (error: any) {
                     if (error?.name === "TimeoutError") {
                         return `❌ [抓取超时]：${FETCH_TIMEOUT_MS / 1000}s 内未响应：${parsed.href}`;

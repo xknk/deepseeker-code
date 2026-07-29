@@ -5,7 +5,6 @@
  *  所有目标路径一律重走 resolveSafePath（不缓存），防跨工作区越界；写前夕 assertWithinWorkspace。
  */
 import fs from "fs/promises";
-import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
 import { resolveSafePath, assertWithinWorkspace } from "../guard.ts";
@@ -141,7 +140,7 @@ async function ensureReverseBackup(target: UndoRecord, sessionId: string): Promi
     const st = await fs.stat(absPath);
     if (st.isDirectory()) {
         const dest = path.join(reverseDir, 'tree');
-        fsSync.cpSync(absPath, dest, { recursive: true, preserveTimestamps: true });
+        await fs.cp(absPath, dest, { recursive: true, force: true, preserveTimestamps: true }); // 异步拷贝，避免 cpSync 阻塞事件循环
         return { reverseId, backupKind: 'directory_tree', backupPath: dest };
     }
     const dest = path.join(reverseDir, 'content');
@@ -170,7 +169,7 @@ async function dispatchRestore(r: UndoRecord): Promise<string> {
         case 'directory_tree': {
             await fs.mkdir(path.dirname(absPath), { recursive: true });
             const src = path.join(getUndoBackupRoot(r.sessionId), r.undoId, 'tree');
-            fsSync.cpSync(src, absPath, { recursive: true, preserveTimestamps: true });
+            await fs.cp(src, absPath, { recursive: true, force: true, preserveTimestamps: true }); // 异步拷贝，避免 cpSync 阻塞事件循环
             return `已恢复目录树 [${r.relativePath}]（约 ${r.fileSizeBefore ?? 0} 字节）`;
         }
     }

@@ -24,6 +24,7 @@ interface BgTask {
     taskId: string;
     command: string;
     cwd: string;
+    sessionId: string; // ★ 归属会话：跨会话隔离查询/终止，防越权读取其他会话的后台输出
     proc: any;
     startedAt: string;
     status: "running" | "exited" | "killed";
@@ -84,7 +85,7 @@ export const backgroundTools: CustomTool[] = [
             },
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【后台命令审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}\n（将启动常驻后台进程，持续占用资源直至手动停止；同命令互斥）`,
-            async *execute(args: { command: string; cwd?: string }, _ctx?: ToolContext): AsyncGenerator<string> {
+            async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
                 const isWin = process.platform === "win32";
 
@@ -99,7 +100,7 @@ export const backgroundTools: CustomTool[] = [
 
                 const taskId = createUUID();
                 const task: BgTask = {
-                    taskId, command: args.command, cwd, proc,
+                    taskId, command: args.command, cwd, sessionId: ctx?.sessionId ?? "", proc,
                     startedAt: new Date().toISOString(),
                     status: "running", exitCode: null, outputBuffer: ""
                 };
@@ -107,7 +108,7 @@ export const backgroundTools: CustomTool[] = [
 
                 proc.stdout?.on("data", (d: Buffer) => appendOutput(task, d.toString()));
                 proc.stderr?.on("data", (d: Buffer) => appendOutput(task, d.toString()));
-                proc.on("error", (e: Error) => appendOutput(task, `\n[spawn error: ${e.message}]\n`));
+                // ★ spawn error 由下方 Promise 内监听统一处理（删除此处重复监听，防日志双写）
 
                 // ★ 首个 yield：即时返回 task_id（runBackgroundTool 取此为结果，agent 不阻塞、继续下一轮）
                 yield `✅ [后台任务已启动]\ntask_id: ${taskId}\n命令: ${args.command}\n用 get_background_output(task_id="${taskId}") 查日志，stop_background_task(task_id="${taskId}") 终止。`;
@@ -122,7 +123,7 @@ export const backgroundTools: CustomTool[] = [
                         apply();
                         // 退出后延迟清理注册表（留 60s 供查询退出码），避免长期累积死任务
                         setTimeout(() => registry.delete(taskId), 60_000);
-                        _ctx?.abortSignal?.removeEventListener("abort", onAbort);
+                        ctx?.abortSignal?.removeEventListener("abort", onAbort);
                         // 清理 proc 上的 listener，打破 listener→task→proc 循环引用（否则 60s 持有窗口内累积）
                         try { proc?.stdout?.removeAllListeners?.(); } catch { /* */ }
                         try { proc?.stderr?.removeAllListeners?.(); } catch { /* */ }
@@ -139,7 +140,7 @@ export const backgroundTools: CustomTool[] = [
                             });
                         });
                     };
-                    _ctx?.abortSignal?.addEventListener("abort", onAbort, { once: true });
+                    ctx?.abortSignal?.addEventListener("abort", onAbort, { once: true });
                     proc.on("close", (code: number | null) => {
                         finish(() => {
                             task.status = task.status === "killed" ? "killed" : "exited";
@@ -174,10 +175,11 @@ export const backgroundTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { task_id: string; tail_lines?: number }): Promise<string> {
+            async execute(args: { task_id: string; tail_lines?: number }, ctx?: ToolContext): Promise<string> {
                 const task = registry.get(args.task_id);
-                if (!task) {
-                    return `❌ [查询失败]：未找到 task_id=${args.task_id}（可能已随服务重启丢失——后台任务句柄不跨重启持久化）。`;
+                if (!task || task.sessionId !== ctx?.sessionId) {
+                    // 跨会话不可见：统一返回未找到，不泄露 task 是否存在
+                    return `❌ [查询失败]：未找到 task_id=${args.task_id}（可能已随服务重启丢失，或不属于当前会话）。`;
                 }
                 const tail = Math.max(1, args.tail_lines ?? 50);
                 const allLines = task.outputBuffer.split("\n");
@@ -207,14 +209,16 @@ export const backgroundTools: CustomTool[] = [
             safetyLevel: ToolSafetyLevel.MUTATION,
             isSync: true,
             requireApproval: (args: { task_id: string }) => `申请终止后台任务 ${args.task_id}（及其子进程树）`,
-            async execute(args: { task_id: string }): Promise<string> {
+            async execute(args: { task_id: string }, ctx?: ToolContext): Promise<string> {
                 const task = registry.get(args.task_id);
-                if (!task) {
-                    return `❌ [终止失败]：未找到 task_id=${args.task_id}。`;
+                if (!task || task.sessionId !== ctx?.sessionId) {
+                    return `❌ [终止失败]：未找到 task_id=${args.task_id}（或不属于当前会话）。`;
                 }
                 if (task.status !== "running") {
                     return `ℹ️ [stop]：任务 ${args.task_id} 当前状态为 ${task.status}（已不在运行），无需终止。`;
                 }
+                // ★ 与 abort 路径对齐：预置失败码，防 close 的 code??0 把被杀进程误显为成功退出 0
+                task.exitCode = task.exitCode ?? -1;
                 await killTree(task.proc);
                 task.status = "killed";
                 return `✅ [已终止]：后台任务 ${args.task_id}（命令: ${task.command}）及其进程树已停止。`;
