@@ -45,6 +45,8 @@ export interface HostOptions {
     planMode?: boolean;
     /** per-agent 模型覆盖（CLI /model 用）。缺省回退全局 MODEL_NAME。 */
     model?: string;
+    /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
+    onTrace?: (base: TraceBase) => void;
 }
 
 /**
@@ -121,6 +123,7 @@ export const handleUnifiedChat = async (
         parentSystemPrompt: SYSTEM_PROMPT,
         events: async (base: TraceBase) => {
             await emitTrace(base);          // 纯 trace 落盘，不再推前端
+            opts?.onTrace?.(base);          // 透传宿主（CLI 据此读 usage 等真实计量）
         },
         onUIEvent,
         requestApproval,

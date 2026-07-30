@@ -9,10 +9,26 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { THEME } from "../theme.ts";
-import { strWidth, wrapText } from "../util.ts";
+import { formatTokens, strWidth, wrapText } from "../util.ts";
 import { RichText } from "./RichText.tsx";
 import { StreamingCursor } from "./StreamingCursor.tsx";
 import type { ChatRow } from "../useChatState.ts";
+import type { TraceBase } from "@/observability/type.ts";
+
+/** 真实 token 用量行尾：↑ prompt  ↓ completion · cache 命中率。 */
+const UsageFooter = ({ usage }: { usage: NonNullable<TraceBase['usage']> }): React.ReactElement => {
+    const prompt = usage.prompt_tokens ?? 0;
+    const completion = usage.completion_tokens ?? 0;
+    const hit = usage.prompt_cache_hit_tokens ?? 0;
+    const miss = usage.prompt_cache_miss_tokens ?? 0;
+    const cachePct = hit + miss > 0 ? Math.round((hit / (hit + miss)) * 100) : null;
+    return (
+        <Text color={THEME.grayDim}>
+            {"  ↑ "}{formatTokens(prompt)}{"  ↓ "}{formatTokens(completion)}
+            {cachePct != null ? `  · cache ${cachePct}%` : ""}
+        </Text>
+    );
+};
 
 type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" }>; wrapW: number };
 
@@ -117,6 +133,7 @@ export const MessageBlock = ({ row, wrapW }: Props): React.ReactElement => {
                     </Box>
                 );
             })}
+            {row.usage && !row.streaming ? <UsageFooter usage={row.usage} /> : null}
         </Box>
     );
 };

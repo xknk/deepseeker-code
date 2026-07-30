@@ -13,13 +13,13 @@ import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import { getOrCreateSessionId } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
-import type { Todo } from "@/observability/type.ts";
+import type { TraceBase, Todo } from "@/observability/type.ts";
 import { createCliRequestApproval } from "./cliHost.ts";
 
 /** 一行转录（线性消息流）。 */
 export type ChatRow =
     | { id: number; kind: "user"; text: string }
-    | { id: number; kind: "assistant"; text: string; streaming?: boolean }
+    | { id: number; kind: "assistant"; text: string; streaming?: boolean; usage?: TraceBase['usage'] }
     | { id: number; kind: "system"; text: string }
     | { id: number; kind: "info"; text: string }
     | { id: number; kind: "meta"; text: string }
@@ -76,6 +76,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const proposedPlanRef = useRef<string | null>(null);
     const modelRef = useRef<string>("");
     const planModeRef = useRef<boolean>(initialPlanMode ?? false);
+    /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
+    const lastUsageRef = useRef<TraceBase['usage'] | null>(null);
 
     // ★ --resume：挂载时回放历史转录（只读 user/assistant 文本），让用户看到先前对话。
     //   模型上下文由 buildContextMessages 从同一 transcript 读取，二者一致。
@@ -136,7 +138,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         const thId = thinkingStreamingId.current;
         if (aId != null || thId != null) {
             setRows((prev) => prev.map((row) => {
-                if (row.id === aId && row.kind === "assistant") return { ...row, streaming: false };
+                if (row.id === aId && row.kind === "assistant") {
+                    // 附上本轮真实 usage（收尾时 llm.response 已到）；中途收尾无 usage 则保留原值
+                    const usage = lastUsageRef.current ?? row.usage;
+                    return { ...row, streaming: false, usage };
+                }
                 if (row.id === thId && row.kind === "thinking") return finalizeThinkingRow(row);
                 return row;
             }));
@@ -277,6 +283,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setPendingPlan((prev) => { prev?.resolve(v); return null; });
     }, []);
 
+    /** trace 透传：捕获 llm.response 的真实 usage，供 assistant 行收尾时附上。 */
+    const onTrace = useCallback((base: TraceBase) => {
+        if (base.eventType === "llm.response" && base.usage) lastUsageRef.current = base.usage;
+    }, []);
+
     /** 单次 runAgent 驱动（经 handleUnifiedChat）。planMode=true=只读调研。 */
     const runOnce = useCallback(async (sid: string, body: string, planMode: boolean) => {
         const ac = new AbortController();
@@ -286,6 +297,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         const opts: HostOptions = {
             requestApproval: createCliRequestApproval(askApproval),
             onUIEvent: pushEvent,
+            onTrace,
             planMode,
             model: modelRef.current || undefined,
         };
@@ -302,7 +314,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         } finally {
             currentAcRef.current = null;
         }
-    }, [askApproval, pushEvent]);
+    }, [askApproval, onTrace, pushEvent]);
 
     /** 提交一轮对话。计划模式下做两阶段（调研 → 方案审批 → 实现）。 */
     const submit = useCallback(async (content: string) => {

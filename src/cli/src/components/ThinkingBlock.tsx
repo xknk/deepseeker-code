@@ -8,7 +8,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { THEME } from "../theme.ts";
-import { formatTokens } from "../util.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -19,7 +18,7 @@ type Props = {
     tokens?: number;
 };
 
-export const ThinkingBlock = ({ streaming, startedAt, durationMs, tokens }: Props): React.ReactElement => {
+export const ThinkingBlock = ({ streaming, startedAt, durationMs }: Props): React.ReactElement => {
     const [tick, setTick] = useState(0);
     useEffect(() => {
         if (!streaming) return;
@@ -39,11 +38,9 @@ export const ThinkingBlock = ({ streaming, startedAt, durationMs, tokens }: Prop
     }
 
     const sec = durationMs ? Math.max(0, Math.round(durationMs / 1000)) : 0;
-    const tok = tokens ? formatTokens(tokens) : "";
     return (
         <Box marginTop={0.5} marginBottom={0.5}>
-            <Text color={THEME.thinking}>✻ 思考 {sec}s{tok ? "" : ""}</Text>
-            {tok ? <Text color={THEME.grayDim}> · ~{tok} tok</Text> : null}
+            <Text color={THEME.thinking}>✻ Thought for {sec}s</Text>
         </Box>
     );
 };
