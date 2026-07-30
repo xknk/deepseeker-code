@@ -11,9 +11,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { listCommands } from "@/commands/registry.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
+import type { ThinkingLevel } from "@/agent/type.ts";
 import { useChatState, type ChatRow } from "./useChatState.ts";
 import { THEME } from "./theme.ts";
-import { S, LOCAL_COMMANDS } from "./strings.ts";
+import { S, LOCAL_COMMAND_NAMES, getLocale, setLocale } from "./strings.ts";
+import { writeLocale } from "./prefs.ts";
+import type { Locale } from "@/common/index.ts";
 import { dimRule, truncateMiddle } from "./util.ts";
 import { MessageBlock } from "./components/MessageBlock.tsx";
 import { ThinkingBlock } from "./components/ThinkingBlock.tsx";
@@ -22,7 +25,7 @@ import { TodosPanel } from "./components/TodosPanel.tsx";
 import { ApprovalModal } from "./components/ApprovalModal.tsx";
 import { PlanModal } from "./components/PlanModal.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
-import { MultilineInput, defaultPlaceholder } from "./components/MultilineInput.tsx";
+import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
 import { TopPanel } from "./components/TopPanel.tsx";
 
@@ -54,6 +57,8 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     const [cursor, setCursor] = useState(0);
     const [selectIdx, setSelectIdx] = useState(0);
     const [modelDisplay, setModelDisplay] = useState(MODEL_NAME);
+    /** 语言切换计数器：setLocale 后 setTick 触发重渲染，刷新界面文案（S 在 render 期读取）。 */
+    const [tick, setTick] = useState(0);
 
     const inputRef = useRef(input);
     const selectIdxRef = useRef(selectIdx);
@@ -72,11 +77,26 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
 
     // 斜杠菜单条目：本地命令 + 核心注册命令（本地优先去重）
     const menuEntries = useMemo<MenuEntry[]>(() => {
+        const descOf = (name: string): string => {
+            switch (name) {
+                case "help": return S.cmdHelp;
+                case "status": return S.cmdStatus;
+                case "plan": return S.cmdPlan;
+                case "model": return S.cmdModel;
+                case "thinking": return S.cmdThinking;
+                case "lang": return S.cmdLang;
+                case "clear": return S.cmdClear;
+                case "exit": return S.cmdExit;
+                default: return "";
+            }
+        };
         const map = new Map<string, MenuEntry>();
-        for (const e of LOCAL_COMMANDS) map.set(e.name, e);
+        for (const name of LOCAL_COMMAND_NAMES) map.set(name, { name, description: descOf(name) });
         for (const c of listCommands()) if (!map.has(c.name)) map.set(c.name, { name: c.name, description: c.description });
         return [...map.values()];
-    }, []);
+        // tick 用于语言切换后重算描述（S.cmdXxx 随 locale 变）；本身不在体内引用。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [tick]);
     const filteredCommands = useMemo(() => {
         if (!input.startsWith("/")) return [];
         const q = input.slice(1).toLowerCase();
@@ -85,9 +105,11 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
 
     const menuActive = state.pendingApproval != null || state.pendingPlan != null;
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
-    const inputActive = !menuActive && !slashVisible;
+    // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
+    //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
+    const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); }, [state.pendingApproval, state.pendingPlan, slashVisible]);
+    useEffect(() => { setSelectIdx(0); }, [state.pendingApproval, state.pendingPlan, slashVisible, filteredCommands.length]);
 
     // —— 本地斜杠命令 ——
     const runLocalSlash = (text: string): boolean => {
@@ -102,19 +124,10 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 state.clearRows();
                 return true;
             case "/help":
-                state.pushInfo([
-                    "/help · /status · /clear · /exit",
-                    "/plan  — 切换计划模式（只读调研 → 方案审批 → 实现）",
-                    `/model [${KNOWN_MODELS.join("|")}|<任意>] — 切换模型（当前 ${modelDisplay}）`,
-                    "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
-                ].join("\n"));
+                state.pushInfo(S.helpText(modelDisplay, state.getThinkingLevel(), getLocale()));
                 return true;
             case "/status":
-                state.pushInfo([
-                    `模型：${modelDisplay}`,
-                    `计划模式：${state.getPlanMode() ? "开" : "关"}`,
-                    `工作目录：${CWD}`,
-                ].join("\n"));
+                state.pushInfo(S.statusText(modelDisplay, state.getThinkingLevel(), state.getPlanMode(), getLocale(), CWD));
                 return true;
             case "/plan": {
                 const on = !state.getPlanMode();
@@ -131,6 +144,36 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 setModelDisplay(arg);
                 state.pushInfo(`模型已切换：${arg}`);
                 return true;
+            case "/thinking": {
+                const lvl = arg.toLowerCase();
+                if (arg && lvl !== "off" && lvl !== "high" && lvl !== "max") {
+                    state.pushInfo(`无效等级：${arg}（可选：off 关闭 / high 常规 / max 深度）`);
+                    return true;
+                }
+                if (!arg) {
+                    state.pushInfo(`当前思考等级：${state.getThinkingLevel()}（off 关闭 / high 常规 / max 深度）`);
+                    return true;
+                }
+                state.setThinkingLevel(lvl as ThinkingLevel);
+                state.pushInfo(`思考等级：${lvl}${lvl === "off" ? "（关闭，简单任务更快更省）" : lvl === "max" ? "（深度，复杂任务）" : "（常规）"}`);
+                return true;
+            }
+            case "/lang": {
+                const l = arg.toLowerCase();
+                if (arg && l !== "zh" && l !== "en") {
+                    state.pushInfo(S.langInvalid(arg));
+                    return true;
+                }
+                if (!arg) {
+                    state.pushInfo(S.langCurrent());
+                    return true;
+                }
+                setLocale(l as Locale);
+                void writeLocale(l as Locale);   // 持久化（异步，不阻塞）
+                setTick((t) => t + 1);            // 触发重渲染，刷新界面文案
+                state.pushInfo(S.langSet(l));
+                return true;
+            }
             default:
                 return false;
         }
@@ -241,7 +284,8 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                         onChange={(v, c) => { setInput(v); setCursor(c); }}
                         onSubmit={() => { void onSubmit(); }}
                         active={inputActive}
-                        placeholder={defaultPlaceholder}
+                        suppressSubmit={slashVisible}
+                        placeholder={S.placeholder}
                     />
                 </Box>
 

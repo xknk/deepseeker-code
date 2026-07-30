@@ -36,6 +36,10 @@ const SOURCES: ScanSource[] = [
     { dir: path.join(process.cwd(), ".deepSeekCode", "agents"), source: "project" },
 ];
 
+/** 按 includeProject 过滤来源：未信任时排除 project（防项目级声明式 agent 注入高危工具白名单）。 */
+const sourcesFor = (includeProject: boolean): ScanSource[] =>
+    includeProject ? SOURCES : SOURCES.filter(s => s.source !== "project");
+
 /** 解析单个 .agent.md 为 manifest；失败返回 null（warn + 跳过） */
 const parseAgentAt = async (file: string, dir: string, source: AgentSource): Promise<AgentManifest | null> => {
     let raw: string;
@@ -95,10 +99,10 @@ const scanSource = async (s: ScanSource): Promise<{ manifest: AgentManifest; fil
  * @param into 全局工具表，仅用于启动期白名单校验（剔除引用了不存在工具的条目）。
  *   与 initSkills 不同：**不向 into push 任何工具**——声明式 agent 复用现有 spawn_agent，仅扩 name 参数。
  */
-export const initAgents = async (into: CustomTool[]): Promise<void> => {
+export const initAgents = async (into: CustomTool[], includeProject: boolean): Promise<void> => {
     try {
         const known = new Set(into.map((t: any) => t.function.name)); // 含 mcp__* / load_skill（已先于本步注入）
-        for (const s of SOURCES) {
+        for (const s of sourcesFor(includeProject)) {
             for (const { manifest: m, file } of await scanSource(s)) {
                 // 白名单校验：引用了不存在的工具 → warn 剔除（单项失败隔离，不拒绝整个 agent）
                 if (m.tools.length > 0) {

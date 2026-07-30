@@ -4,7 +4,7 @@
  *  dist/cli.mjs（带 node shebang）；外部化所有 node_modules 依赖（运行时从 node_modules 解析，
  *  规避 yoga-wasm / vscode-ripgrep 原生件无法内联的问题）。
  *
- *  产物：dist/cli.mjs —— 用户 `npm i -g .` 后得到全局 `deepseek-code` 命令，无需 tsx/源码/tsconfig。
+ *  产物：dist/cli.mjs —— 用户 `npm i -g .` 后得到全局 `deep-code` 命令，无需 tsx/源码/tsconfig。
  *  运行：node build.mjs
  */
 import { build } from "esbuild";

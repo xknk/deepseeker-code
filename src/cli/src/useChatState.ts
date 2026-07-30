@@ -14,7 +14,10 @@ import { getOrCreateSessionId } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
+import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
+import type { ThinkingLevel } from "@/agent/type.ts";
 import { createCliRequestApproval } from "./cliHost.ts";
+import { getLocale } from "./strings.ts";
 
 /** 一行转录（线性消息流）。 */
 export type ChatRow =
@@ -42,6 +45,9 @@ export type PendingPlan = { plan: string; resolve: (v: boolean) => void };
 
 /** 流式缓冲 flush 间隔：过小易闪屏，过大跟手略迟（约 20fps）。 */
 const FLUSH_MS = 50;
+
+/** 模型自主进入计划模式后，重跑计划阶段发给模型的引导语（用户原文已入 transcript，勿重复）。 */
+const ENTER_PLAN_RESEARCH_PROMPT = "（已进入计划模式。请以只读方式完成调研，然后调用 exit_plan_mode 提交完整实现方案。）";
 
 /** 思考行收尾：冻结耗时 + 估算 token（Static 渲染后不再变动，故必须在收尾时算好）。 */
 const finalizeThinkingRow = (row: Extract<ChatRow, { kind: "thinking" }>): ChatRow => {
@@ -74,8 +80,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
     const currentAcRef = useRef<AbortController | null>(null);
     const proposedPlanRef = useRef<string | null>(null);
+    /** 模型自主请求进入计划模式时的原因（plan.enterRequested 事件存入；submit 据此转入计划阶段）。 */
+    const enterPlanReasonRef = useRef<string | null>(null);
     const modelRef = useRef<string>("");
     const planModeRef = useRef<boolean>(initialPlanMode ?? false);
+    /** 思考等级（off/high/max），初始据全局 env 推导；/thinking 运行时覆盖，runOnce 透传给 model。 */
+    const thinkingLevelRef = useRef<ThinkingLevel>(
+        !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high",
+    );
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
     const lastUsageRef = useRef<TraceBase['usage'] | null>(null);
 
@@ -230,6 +242,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 setRows((prev) => [...prev, { id, kind: "meta", text: `第 ${obj.round} 轮` }]);
                 break;
             }
+            case "plan.enterRequested": {
+                flush();
+                enterPlanReasonRef.current = (obj.reason as string) ?? "";
+                break;
+            }
             case "plan.proposed": {
                 flush();
                 proposedPlanRef.current = (obj.plan as string) ?? "";
@@ -277,6 +294,12 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         proposedPlanRef.current = null;
         return p;
     }, []);
+    /** 取出本轮模型发起的进入计划模式请求（若有），并清空。供 submit 在普通轮结束后判断是否转入计划阶段。 */
+    const takeEnterPlanRequest = useCallback((): string | null => {
+        const r = enterPlanReasonRef.current;
+        enterPlanReasonRef.current = null;
+        return r;
+    }, []);
     const setPlan = useCallback((plan: string): Promise<boolean> =>
         new Promise<boolean>((resolve) => setPendingPlan({ plan, resolve })), []);
     const resolvePlan = useCallback((v: boolean) => {
@@ -300,6 +323,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             onTrace,
             planMode,
             model: modelRef.current || undefined,
+            thinkingLevel: thinkingLevelRef.current,
+            locale: getLocale(),
         };
         try {
             await handleUnifiedChat(
@@ -316,7 +341,19 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
     }, [askApproval, onTrace, pushEvent]);
 
-    /** 提交一轮对话。计划模式下做两阶段（调研 → 方案审批 → 实现）。 */
+    /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。 */
+    const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
+        await runOnce(sid, researchPrompt, true);
+        const plan = takeProposedPlan();
+        if (plan != null) {
+            const accepted = await setPlan(plan);
+            if (accepted) {
+                await runOnce(sid, "（用户已批准上述方案，请开始实现。）", false);
+            }
+        }
+    }, [runOnce, setPlan, takeProposedPlan]);
+
+    /** 提交一轮对话。计划模式下走两阶段（调研 → 方案审批 → 实现）；模型亦可在普通轮主动请求进入计划模式。 */
     const submit = useCallback(async (content: string) => {
         const text = content.trim();
         if (!text || busy) return;
@@ -328,19 +365,21 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         pushUser(text);
 
         if (planModeRef.current) {
-            await runOnce(sid, text, true);
-            const plan = takeProposedPlan();
-            if (plan != null) {
-                const accepted = await setPlan(plan);
-                if (accepted) {
-                    await runOnce(sid, "（用户已批准上述方案，请开始实现。）", false);
-                }
-            }
+            await runPlanStage(sid, text);
         } else {
             await runOnce(sid, text, false);
+            // ★ 模型自主进入计划模式：普通轮内调用 enter_plan_mode → 翻转 planMode 并以只读重跑计划阶段。
+            //   自动进入为「一次性」：计划阶段结束后自动退出，恢复普通模式（手动开启的计划模式不受影响）。
+            const enterReason = takeEnterPlanRequest();
+            if (enterReason != null) {
+                pushInfo(`📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`);
+                planModeRef.current = true;
+                await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
+                planModeRef.current = false;
+            }
         }
         setBusy(false);
-    }, [busy, initialSessionId, pushUser, runOnce, setPlan, takeProposedPlan]);
+    }, [busy, initialSessionId, pushUser, pushInfo, runOnce, runPlanStage, takeEnterPlanRequest]);
 
     /** 中止当前轮（Esc / Ctrl+G）。 */
     const abortCurrent = useCallback(() => {
@@ -367,6 +406,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
     const setPlanMode = useCallback((on: boolean) => { planModeRef.current = on; }, []);
     const getPlanMode = useCallback(() => planModeRef.current, []);
+    /** /thinking 切换思考等级（off/high/max），影响下一次 runOnce 透传给 model 的 thinking/reasoning_effort。 */
+    const setThinkingLevel = useCallback((lvl: ThinkingLevel) => { thinkingLevelRef.current = lvl; }, []);
+    const getThinkingLevel = useCallback((): ThinkingLevel => thinkingLevelRef.current, []);
 
     return {
         // 状态
@@ -376,6 +418,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         submit, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, setPlan, resolvePlan,
         toggleThinking, clearRows, setModelOverride, setPlanMode, getPlanMode,
+        setThinkingLevel, getThinkingLevel,
     };
 };
 

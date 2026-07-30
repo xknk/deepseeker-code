@@ -101,11 +101,11 @@ const compileRule = (raw: string, src: string): CompiledRule | null => {
 };
 
 /** 读取并校验全局 + 项目级配置，合并（叠加）返回 */
-const readPermissionConfig = async (): Promise<PermissionRules> => {
+const readPermissionConfig = async (includeProject: boolean): Promise<PermissionRules> => {
     const merged: PermissionRules = { allow: [], deny: [], ask: [] };
     const paths = [
         path.join(appConfig.dataDir, "settings.json"),                        // 全局用户级
-        path.join(process.cwd(), ".deepSeekCode", "settings.json"),           // 项目级（叠加）
+        ...(includeProject ? [path.join(process.cwd(), ".deepSeekCode", "settings.json")] : []), // 项目级（叠加）；未信任时省略
     ];
     for (const configPath of paths) {
         let raw: string;
@@ -151,9 +151,9 @@ const ruleMatches = (rule: CompiledRule, toolName: string, args: any): boolean =
  * 启动期加载权限规则（供 serve/index.ts 调用）。
  * 无配置 / 加载失败均静默跳过（空规则集 → 所有 checkPermission 返回 null，走默认审批流），绝不阻断启动。
  */
-export const initPermissions = async (): Promise<void> => {
+export const initPermissions = async (includeProject: boolean): Promise<void> => {
     try {
-        rules = await readPermissionConfig();
+        rules = await readPermissionConfig(includeProject);
         const total = rules.allow.length + rules.deny.length + rules.ask.length;
         if (total > 0) {
             console.log(`🛡️ [permissions] 已加载 ${total} 条权限规则（allow ${rules.allow.length} / deny ${rules.deny.length} / ask ${rules.ask.length}）`);

@@ -23,7 +23,8 @@ import { buildContextMessages } from "@/session/content.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase, UIEvent } from "@/observability/type.ts";
-import { RunAgentOptions } from "@/agent/type.ts";
+import { RunAgentOptions, ThinkingLevel } from "@/agent/type.ts";
+import type { Locale } from "@/common/index.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { RequestApprovalFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
@@ -45,6 +46,10 @@ export interface HostOptions {
     planMode?: boolean;
     /** per-agent 模型覆盖（CLI /model 用）。缺省回退全局 MODEL_NAME。 */
     model?: string;
+    /** 思考等级（CLI /thinking 用）：off=关闭 / high=常规 / max=深度。缺省回退全局 env。 */
+    thinkingLevel?: ThinkingLevel;
+    /** 回复语言（CLI /lang 用）：runAgent 据此注入回复语言引导。 */
+    locale?: Locale;
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
 }
@@ -127,9 +132,11 @@ export const handleUnifiedChat = async (
         },
         onUIEvent,
         requestApproval,
-        // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖。serve 不传 → 均为 undefined，行为不变。
+        // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
         planMode: opts?.planMode,
         model: opts?.model,
+        thinkingLevel: opts?.thinkingLevel,
+        locale: opts?.locale,
     }
 
     for await (const event of runAgent(fullMessages, options)) {

@@ -31,7 +31,8 @@ let cached: ProjectGuide | null = null;
  * 启动期加载项目指引（供 serve/index.ts 调用）。
  * 无指引 / 加载失败均静默跳过（缓存为 null → inject 幂等跳过），绝不阻断启动。
  */
-export const initProjectGuide = async (): Promise<void> => {
+export const initProjectGuide = async (includeProject: boolean): Promise<void> => {
+    if (!includeProject) { cached = null; return; } // 未信任：项目指引无全局源，整体跳过（防 CLAUDE.md 注入 system prompt）
     try {
         for (const name of CANDIDATES) {
             try {

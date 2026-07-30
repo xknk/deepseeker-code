@@ -8,9 +8,9 @@
   "scripts": {
     "test": "cd src/core && node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc -p src/core/tsconfig.json",
-    "cli:dev": "pnpm --filter cli dev",
-    "cli:build": "pnpm --filter cli build",
-    "cli:start": "pnpm --filter cli start"
+    "cli:dev": "pnpm --filter ./src/cli dev",
+    "cli:build": "pnpm --filter ./src/cli build",
+    "cli:start": "pnpm --filter ./src/cli start"
   },
   "keywords": [],
   "author": "",

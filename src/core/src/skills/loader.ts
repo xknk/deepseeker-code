@@ -95,9 +95,13 @@ const scanSource = async (s: ScanSource): Promise<SkillManifest[]> => {
     return result;
 };
 
+/** 按 includeProject 过滤来源：未信任时排除 project（防项目级 skill 注入）。 */
+const sourcesFor = (includeProject: boolean): ScanSource[] =>
+    includeProject ? SOURCES : SOURCES.filter(s => s.source !== "project");
+
 /** 扫描并注册全部 skill（按优先级顺序）；返回去重后技能数 */
-export const loadSkills = async (): Promise<number> => {
-    for (const s of SOURCES) {
+export const loadSkills = async (includeProject: boolean): Promise<number> => {
+    for (const s of sourcesFor(includeProject)) {
         const manifests = await scanSource(s);
         for (const m of manifests) registerSkill(m);
     }
@@ -108,9 +112,9 @@ export const loadSkills = async (): Promise<number> => {
  * 启动期加载 skills 并注入 load_skill 工具（供 serve/index.ts 调用）。
  * 仅有 skill 时才注入 load_skill；无 skill / 加载失败均静默跳过。
  */
-export const initSkills = async (into: CustomTool[]): Promise<void> => {
+export const initSkills = async (into: CustomTool[], includeProject: boolean): Promise<void> => {
     try {
-        const n = await loadSkills();
+        const n = await loadSkills(includeProject);
         if (n > 0) {
             // 防御重复注入（热重载场景）
             const hasLoadSkill = into.some(t => (t.function as any).name === "load_skill");

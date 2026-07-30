@@ -45,11 +45,11 @@ interface RawHookRule {
 type RawHooksConfig = Partial<Record<EventType, RawHookRule[]>>;
 
 /** 读取并校验全局 + 项目级配置，合并（叠加）返回 */
-const readHooksConfig = async (): Promise<RawHooksConfig> => {
+const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig> => {
     const merged: RawHooksConfig = {};
     const paths = [
         path.join(appConfig.dataDir, "settings.json"),                        // 全局用户级
-        path.join(process.cwd(), ".deepSeekCode", "settings.json"),           // 项目级（叠加）
+        ...(includeProject ? [path.join(process.cwd(), ".deepSeekCode", "settings.json")] : []), // 项目级（叠加）；未信任时省略
     ];
     for (const configPath of paths) {
         let raw: string;
@@ -172,8 +172,8 @@ const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
 };
 
 /** 加载所有声明式规则并注册；返回注册条数 */
-export const loadHooks = async (): Promise<number> => {
-    const cfg = await readHooksConfig();
+export const loadHooks = async (includeProject: boolean): Promise<number> => {
+    const cfg = await readHooksConfig(includeProject);
     const compiled: HookRule[] = [];
     for (const event of ALL_EVENTS) {
         const list = cfg[event];
@@ -190,9 +190,9 @@ export const loadHooks = async (): Promise<number> => {
  * 启动期加载声明式 hooks（供 serve/index.ts 调用）。
  * 无配置 / 加载失败均静默跳过，绝不阻断启动。
  */
-export const initHooks = async (): Promise<void> => {
+export const initHooks = async (includeProject: boolean): Promise<void> => {
     try {
-        const n = await loadHooks();
+        const n = await loadHooks(includeProject);
         if (n > 0) console.log(`🪝 [hooks] 已加载 ${n} 条声明式规则`);
     } catch (e: any) {
         console.warn(`⚠️ [hooks] 加载失败（已跳过）: ${e?.message ?? e}`);

@@ -96,9 +96,13 @@ const scanSource = async (s: ScanSource): Promise<CommandManifest[]> => {
     return result;
 };
 
+/** 按 includeProject 过滤来源：未信任时排除 project（防项目级命令注入）。 */
+const sourcesFor = (includeProject: boolean): ScanSource[] =>
+    includeProject ? SOURCES : SOURCES.filter(s => s.source !== "project");
+
 /** 扫描并注册全部命令（按优先级顺序）；返回去重后命令数 */
-export const loadCommands = async (): Promise<number> => {
-    for (const s of SOURCES) {
+export const loadCommands = async (includeProject: boolean): Promise<number> => {
+    for (const s of sourcesFor(includeProject)) {
         const manifests = await scanSource(s);
         for (const m of manifests) registerCommand(m);
     }
@@ -109,9 +113,9 @@ export const loadCommands = async (): Promise<number> => {
  * 启动期加载斜杠命令（供 serve/index.ts 调用）。
  * 无命令 / 加载失败均静默跳过，绝不阻断启动。
  */
-export const initCommands = async (): Promise<void> => {
+export const initCommands = async (includeProject: boolean): Promise<void> => {
     try {
-        const n = await loadCommands();
+        const n = await loadCommands(includeProject);
         if (n > 0) console.log(`⌘ [commands] 已加载 ${n} 个斜杠命令`);
     } catch (e: any) {
         console.warn(`⚠️ [commands] 加载失败（已跳过）: ${e?.message ?? e}`);

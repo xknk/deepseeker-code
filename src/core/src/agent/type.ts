@@ -10,6 +10,7 @@
 import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { RequestApprovalFn } from "@/host/type.ts";
+import type { Locale } from "@/common/index.ts";
 
 /**
  * 可观测性事件回调：runAgent 在推理、工具、压缩等各阶段，
@@ -26,6 +27,9 @@ export type RunAgentEvents = (base: TraceBase) => Promise<void>
  * - events(埋点) 与 onUIEvent(面向前端 UI，如审批请求) 分离，职责不同；
  * - depth 表示 agent 嵌套深度，主 agent 为 0，spawn_agent 创建的子 agent 递增。
  */
+/** 思考等级（运行时可切换，缺省回退全局 env 配置）：off=关闭思考 / high=常规 / max=深度。映射见 llm/model.ts。 */
+export type ThinkingLevel = "off" | "high" | "max";
+
 export interface RunAgentOptions {
     /** 工具 schema 列表（必传）。不在 runAgent 内置默认，避免与 tool/index.ts 循环依赖。 */
     toolSchemas?: any[];
@@ -62,6 +66,10 @@ export interface RunAgentOptions {
     archivedMessageCount?: number,
     /** 计划模式：仅允许只读/研究类工具 + exit_plan_mode，先调研产出方案、经用户审批后再实现（见 agent/planMode.ts）。 */
     planMode?: boolean,
+    /** 思考等级（运行时覆盖，缺省回退全局 env）：off=关闭 / high=常规 / max=深度（映射见 llm/model.ts）。 */
+    thinkingLevel?: ThinkingLevel,
+    /** 回复语言（运行时覆盖）：runAgent 据此向 system prompt 注入「用中文/英文回复」引导。 */
+    locale?: Locale,
 }
 
 /**
@@ -101,6 +109,8 @@ export type AgentEvent =
     | { type: 'tool.start'; toolCallId: string; toolName: string; args: any }
     /** 单个工具调用结束，携带结果与成败标记。 */
     | { type: 'tool.end'; toolCallId: string; toolName: string; result: string; ok: boolean }
+    /** 非计划模式下模型主动请求进入计划模式（调用 enter_plan_mode）：上层据此翻转 planMode 并以只读重跑计划阶段。 */
+    | { type: 'plan.enterRequested'; reason: string }
     /** 计划模式：模型调用 exit_plan_mode 提交实现方案（供上层呈现给用户审批，审批通过后退出计划模式进入实现）。 */
     | { type: 'plan.proposed'; plan: string }
     /** 整个 agent 运行结束的最终文本（正常结束 / 中止 / 出错）。 */

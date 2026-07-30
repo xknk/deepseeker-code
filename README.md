@@ -22,14 +22,14 @@ pnpm --filter cli dev
 pnpm --filter cli build          # 产出 src/cli/dist/cli.mjs
 pnpm --filter cli start          # 运行打包产物
 
-# 全局安装（本地仓库）→ 得到 deepseek-code 命令
+# 全局安装（本地仓库）→ 得到 deep-code 命令
 pnpm --filter cli build && npm i -g ./src/cli
-deepseek-code [--resume <会话id>] [--plan]
+deep-code [--resume <会话id>] [--plan]
 ```
 
 快捷键：`Ctrl+C` 退出 · `Esc` 中止/清输入 · `Ctrl+G` 中止当前轮 · `Ctrl+T` 展开/收起思考 · 模态/菜单 `↑↓ Enter`。本地命令：`/help /plan /model /clear /status /exit`。能力对标 Claude Code：流式逐字 / 思考折叠 / 工具卡 / 任务面板 / 审批模态 / 计划模式两阶段 / 模型切换 / 会话恢复。
 
-> `cli` 包当前为 `private: true`，支持本地全局安装；如需发布到 npm，去掉该字段即可。
+> 发布到 npm：在 `src/cli/` 下执行 `npm publish`（`prepublishOnly` 会自动构建产物）。安装方 `npm i -g deep-code` 后即可运行 `deep-code`。
 
 
 ## 文档导航

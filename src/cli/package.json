@@ -1,27 +1,37 @@
 {
-    "name": "cli",
+    "name": "deep-code",
     "version": "1.0.0",
     "description": "deepSeekCode 终端客户端（React Ink，in-process 直驱 runAgent）",
     "type": "module",
-    "private": true,
     "bin": {
-        "deepseek-code": "./dist/cli.mjs"
+        "deep-code": "./dist/cli.mjs"
     },
+    "files": [
+        "dist/cli.mjs"
+    ],
     "scripts": {
         "dev": "tsx --tsconfig ./tsconfig.json ./src/main.tsx",
         "build": "node build.mjs",
         "start": "node dist/cli.mjs",
+        "prepublishOnly": "node build.mjs",
         "typecheck": "tsc --noEmit"
     },
-    "keywords": [],
-    "author": "",
-    "license": "ISC",
+    "keywords": [
+        "cli",
+        "ai",
+        "coding-assistant",
+        "deepseek",
+        "agent",
+        "ink"
+    ],
+    "author": "fanqianliang <2438756801@qq.com>",
+    "license": "MIT",
+    "engines": {
+        "node": ">=20"
+    },
     "dependencies": {
-        "core": "workspace:^",
         "ink": "5",
-        "ink-text-input": "6",
         "react": "18",
-        "express": "^5.2.1",
         "ignore": "^7.0.5",
         "openai": "^6.42.0",
         "undici": "^8.8.0",

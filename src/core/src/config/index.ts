@@ -13,6 +13,7 @@
  */
 import path from "path";
 import os from "os";
+import { createHash } from "crypto";
 import { createUUID } from "@/common/index.ts";
 const _DataDir = path.join(os.homedir(), ".deepSeekCode");
 /** 全局应用配置单例（详见各字段行内注释）。 */
@@ -34,14 +35,14 @@ export const appConfig = {
         if (/^[a-z]:/i.test(cwd)) {
             cwd = cwd.charAt(0).toUpperCase() + cwd.slice(1); // 强行将盘符首字母顶格大写（如 C:/）
         }
-        // 1. 拿到当前目录名（例如: core）
+        // 3. 拿到当前目录名（例如: core）与父目录名（例如: src），作为人类可读前缀
         const currentFolder = path.basename(cwd);
-        // 2. 拿到上一级目录的路径（例如: D:/projectA/src）
-        const parentPath = path.dirname(cwd);
-        // 3. 提取上一级目录的名字（例如: src）
-        const parentFolder = path.basename(parentPath);
-        // 4. 拼接返回（例如: "src-core"）
-        return `${parentFolder}-${currentFolder}`;
+        const parentFolder = path.basename(path.dirname(cwd));
+        // 4. ★ 防碰撞：仅凭「父-子」两层目录名做隔离键会碰撞（D:/a/src/core 与 E:/b/src/core
+        //    都映射成 src-core，session/trace 会串）。追加规范化完整绝对路径的 sha256 短哈希，
+        //    既保留可读前缀，又对不同绝对路径产生不同键，彻底消除跨项目串扰。
+        const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 8);
+        return `${parentFolder}-${currentFolder}-${hash}`;
     })(),
     traceRetentionDays: 7,
     /** Undo（文件回退）总开关：false 时跳过所有写前备份，紧急降级用。 */

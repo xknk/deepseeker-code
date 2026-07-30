@@ -2,12 +2,12 @@
  * @file cli/src/components/MultilineInput.tsx
  * @description 多行输入（完全受控）：Enter 提交、Shift+Enter 换行、←→↑↓ 移动、Backspace/Delete、光标块。
  *  value+cursor 由 App 持有（onChange 回传 newValue/newCursor），便于斜杠 Tab 补全同步光标到末尾。
- *  active=false 时（模态/菜单打开）忽略编辑键，交由 App 统一导航。
+ *  active=false 时（模态打开）忽略编辑键；斜杠菜单时 active=true 配合 suppressSubmit
+ *  （字符/Backspace 仍可输入以过滤命令、补全后输参数，仅 Enter 交 App 执行选中命令）。
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { THEME } from "../theme.ts";
-import { S } from "../strings.ts";
 
 type Props = {
     value: string;
@@ -15,6 +15,8 @@ type Props = {
     onChange: (value: string, cursor: number) => void;
     onSubmit: () => void;
     active: boolean;
+    /** 斜杠菜单激活时置 true：禁用 Enter 提交（交由 App 执行选中命令），但仍接受字符输入以过滤/补全/输参数。 */
+    suppressSubmit?: boolean;
     placeholder?: string;
 };
 
@@ -33,11 +35,11 @@ const offsetOf = (value: string, lineIdx: number, col: number): number => {
     return off + Math.min(col, lines[Math.min(lineIdx, lines.length - 1)]?.length ?? 0);
 };
 
-export const MultilineInput = ({ value, cursor, onChange, onSubmit, active, placeholder }: Props): React.ReactElement => {
+export const MultilineInput = ({ value, cursor, onChange, onSubmit, active, suppressSubmit, placeholder }: Props): React.ReactElement => {
     useInput((ch, key) => {
         if (!active) return;
-        // 提交（无 Shift）
-        if (key.return && !key.shift) {
+        // 提交（无 Shift）。suppressSubmit 时交由 App 处理（斜杠菜单执行选中命令），本组件不提交。
+        if (key.return && !key.shift && !suppressSubmit) {
             onSubmit();
             return;
         }
@@ -118,6 +120,3 @@ export const MultilineInput = ({ value, cursor, onChange, onSubmit, active, plac
         </Box>
     );
 };
-
-/** 便捷默认 placeholder。 */
-export const defaultPlaceholder = S.placeholder;

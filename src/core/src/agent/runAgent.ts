@@ -30,7 +30,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
 import { requestApproval } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
-import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT } from "./planMode.ts";
+import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT, appendEnterPlanModeTool, PLAN_MODE_AUTO_ENTER_HINT } from "./planMode.ts";
 import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
@@ -80,8 +80,8 @@ const applyPrivacyMasking = (
  */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
     const rawToolsAll = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
-    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode（见 agent/planMode.ts）
-    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : rawToolsAll;
+    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode；非计划模式：注入 enter_plan_mode 供模型自主进入（见 agent/planMode.ts）
+    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : appendEnterPlanModeTool(rawToolsAll);
     const sessionId = options.sessionId; // 本次会话id
     // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
     //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
@@ -108,11 +108,25 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     }));
     // 预留系统提示词和摘要存放区域
     ensureSummarySlot(message);
-    // 计划模式：向系统提示词注入只读约束（带【计划模式】标记防重复追加）
-    if (options.planMode) {
+    // 计划模式：向系统提示词注入只读约束；非计划模式：注入自主进入计划模式的引导（均带唯一标记防重复追加）
+    {
         const sys = message[0] as any;
-        if (sys && sys.role === 'system' && typeof sys.content === 'string' && !sys.content.includes("【计划模式】")) {
-            sys.content += `\n\n${PLAN_MODE_SYSTEM_HINT}`;
+        if (sys && sys.role === 'system' && typeof sys.content === 'string') {
+            if (options.planMode) {
+                if (!sys.content.includes("【计划模式】")) {
+                    sys.content += `\n\n${PLAN_MODE_SYSTEM_HINT}`;
+                }
+            } else if (!sys.content.includes("【自主计划模式】")) {
+                sys.content += `\n\n${PLAN_MODE_AUTO_ENTER_HINT}`;
+            }
+        }
+    }
+    // 回复语言：按 locale 注入「用中文/英文回复」引导（带【回复语言】标记防重复追加）
+    if (options.locale) {
+        const sys = message[0] as any;
+        if (sys && sys.role === 'system' && typeof sys.content === 'string' && !sys.content.includes("【回复语言】")) {
+            const hint = options.locale === "zh" ? "【回复语言】请始终用中文回复用户。" : "【回复语言】Always reply to the user in English.";
+            sys.content += `\n\n${hint}`;
         }
     }
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（复刻 planMode 追加模式，不动 message 下标）
@@ -204,9 +218,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
 
                 // ★ 流式消费：累积 content（边收边 yield text.delta）+ 按 index 拼接 tool_calls 分片 + 收 usage
                 let contentBuf = "";
+                let reasoningBuf = ""; // DeepSeek reasoning_content 累积：工具调用轮后续必须回传给 API（见下方 assistantMessage）
                 const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
                 let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
-                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal, model: options.model })) {
+                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
                     if (signal?.aborted) break;
                     const delta = chunk.choices?.[0]?.delta;
                     if (delta) {
@@ -216,7 +231,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         }
                         // DeepSeek reasoning 流式：reasoning_content 是 DeepSeek 对 OpenAI delta 的扩展（标准类型未定义），用窄化类型读取而非 any
                         const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
-                        if (reasoning) yield { type: 'thinking.delta', text: reasoning };
+                        if (reasoning) { reasoningBuf += reasoning; yield { type: 'thinking.delta', text: reasoning }; }
                         if (delta.tool_calls) {
                             for (const tc of delta.tool_calls) {
                                 const idx = tc.index ?? 0;
@@ -237,9 +252,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 }
 
                 // 流式拼接出 assistantMessage
+                // ★ 回传 reasoning_content：DeepSeek 思考模式下，进行了工具调用的轮次在后续所有请求中必须完整回传
+                //   reasoning_content，否则 API 返回 400（官方 thinking_mode 文档）。非工具调用轮传了会被忽略，故一律附上即可。
                 assistantMessage = {
                     role: 'assistant',
                     content: contentBuf || null,
+                    ...(reasoningBuf ? { reasoning_content: reasoningBuf } : {}),
                     ...(toolCallsBuf.size > 0 ? {
                         tool_calls: Array.from(toolCallsBuf.entries())
                             .sort((a, b) => a[0] - b[0])
@@ -386,6 +404,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
                     yield { type: 'plan.proposed', plan };
                     yield { type: 'final', text: plan || note };
+                    return;
+                }
+                // ★ 自主进入计划模式：非计划模式下模型主动请求先规划 → 结束本轮，通知上层翻转 planMode 并以只读重跑。
+                //   与 exit_plan_mode 对称：拦截先于 abort 占位检查，避免吞掉模型已发出的进入请求。
+                //   约定：终结类工具（exit/enter_plan_mode）应单独调用，不与其它工具并行——否则本条 assistant
+                //   消息中排在之后的 tool_call 不会补 result。与 exit_plan_mode 同假设。
+                if (calledName === "enter_plan_mode") {
+                    const reason = typeof calledArgs?.reason === "string" ? calledArgs.reason : "";
+                    const note = "📋 [进入计划模式] 模型请求先以只读方式调研并规划方案，已切换至计划模式。";
+                    message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
+                    await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
+                    yield { type: 'plan.enterRequested', reason };
+                    yield { type: 'final', text: reason ? `📋 模型请求进入计划模式：${reason}` : note };
                     return;
                 }
                 // abort 占位：为未执行的 tool_call 补 result，保证下次读回配对完整

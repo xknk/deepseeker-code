@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import { Msg } from "@/session/contextCore.ts";
 import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./createModel.ts"
 import { MsgParams, outMsg, toolMsg } from "./type.ts";
+import { ThinkingLevel } from "@/agent/type.ts";
 
 /**
  * 流式对话：yield 每个 ChatCompletionChunk，调用方(runAgent)负责消费。
@@ -21,15 +22,24 @@ import { MsgParams, outMsg, toolMsg } from "./type.ts";
 async function* chatWithModelWithTools(
     messages: Msg[],
     tools?: toolMsg[],
-    callOpts?: { signal?: AbortSignal; model?: string },
+    callOpts?: { signal?: AbortSignal; model?: string; thinkingLevel?: ThinkingLevel },
 ): AsyncGenerator<OpenAI.Chat.ChatCompletionChunk> {
+    // ★ 思考等级映射（运行时覆盖，缺省回退全局 env：MODEL_THINKING_ENABLED / MODEL_REASONING_EFFORT）。
+    //   DeepSeek V4 实际档位：reasoning_effort ∈ {high, max}（low/medium 兼容映射为 high）；thinking.type ∈ {enabled, disabled}，默认 enabled。
+    //   故「关闭思考」必须显式传 thinking.type=disabled——原代码关时漏传（依赖默认 enabled）等于仍开，已在此修正。
+    const level = callOpts?.thinkingLevel;
+    const thinkingType = (level === undefined ? MODEL_THINKING_ENABLED : level !== "off") ? "enabled" : "disabled";
+    const effort: "high" | "max" = level === "max" ? "max"
+        : level === "high" ? "high"
+        : level === "off" ? "high"        // 关思考时 effort 无意义，回落默认 high
+        : MODEL_REASONING_EFFORT;          // undefined → 回退全局 env
     const requestBody = {
         messages: messages,
         model: callOpts?.model ?? MODEL_NAME, // per-agent 覆盖（声明式子 Agent）；缺省回退全局
         tool_choice: "auto", // 让模型自动选择工具
         tools: tools,
-        ...(MODEL_THINKING_ENABLED ? { thinking: { "type": "enabled" } } : {}),
-        reasoning_effort: MODEL_REASONING_EFFORT,
+        thinking: { type: thinkingType },   // 始终显式（enabled/disabled），修原「关闭=漏传=仍开」bug
+        reasoning_effort: effort,
         stream: true,
         stream_options: { include_usage: true }, // 流式下 usage 在末包 chunk
     } as MsgParams;

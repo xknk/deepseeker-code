@@ -3,6 +3,7 @@
  * @description 通用工具：会话 ID 到存储文件夹名的映射（getFileName）、UUID 生成（createUUID）。
  */
 import { randomUUID } from "node:crypto";
+import fs from "fs/promises";
 /**
  * 将（含后缀的）会话 ID 映射到它所属的主会话文件夹名：
  * - 子 agent ID（含 __sub__）→ 取其父主 ID；
@@ -55,5 +56,37 @@ export const isSafeSessionId = (id: unknown): id is string =>
 export const assertSafeSessionId = (sessionId: string, label = "sessionId"): void => {
     if (sessionId.length === 0 || sessionId.length > 200 || !SAFE_SESSION_ID_RE.test(sessionId)) {
         throw new Error(`🛑 [SECURITY] 非法 ${label}: ${JSON.stringify(sessionId.slice(0, 48))}（仅允许字母/数字/下划线/连字符）`);
+    }
+};
+
+// ============ 通用 JSON 读写 + Locale 类型 ============
+/** 界面/AI 回复语言（中英文切换，cli/core 共享单一真相）。 */
+export type Locale = "zh" | "en";
+
+/**
+ * 读取 JSON 文件并解析；文件不存在 / 损坏 / 解析失败一律静默返回 fallback（缺省 null），绝不抛错阻断启动。
+ * 容错范式提炼自 hooks/loader.ts 与 tool/permissions.ts 的 readFile→JSON.parse 骨架。
+ */
+export const readJSONFile = async <T>(file: string, fallback: T | null = null): Promise<T | null> => {
+    try {
+        const raw = await fs.readFile(file, "utf-8");
+        return JSON.parse(raw) as T;
+    } catch {
+        return fallback;
+    }
+};
+
+/**
+ * 原子写 JSON（tmp + rename，防写中途崩溃留截断文件）。惯法提炼自 session/store.ts:115-120，
+ * 供 prefs/trust 等用户配置持久化复用。调用方负责确保目标目录已存在（mkdir 兜底）。
+ */
+export const atomicWriteJSON = async (file: string, value: unknown): Promise<void> => {
+    const tmpPath = `${file}.${Date.now()}.tmp`;
+    try {
+        await fs.writeFile(tmpPath, JSON.stringify(value, null, 2), "utf-8");
+        await fs.rename(tmpPath, file);
+    } catch (e) {
+        try { await fs.unlink(tmpPath); } catch { /* tmp 已不在，忽略 */ }
+        throw e;
     }
 };
