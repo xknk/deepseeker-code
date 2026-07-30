@@ -19,6 +19,15 @@ export const model = new OpenAI({
 
 // Q-4：模型参数外置到环境变量（换模型 / 关 reasoning 不必改源码）。
 export const MODEL_NAME = process.env.DEEP_SEEK_MODEL || "deepseek-v4-flash";
-export const MODEL_REASONING_EFFORT = (process.env.DEEP_SEEK_REASONING_EFFORT || "high") as "high" | "max";
+/**
+ * DeepSeek V4 reasoning_effort 合法档位（low/medium 已废弃，兼容映射为 high）。
+ * 用 clamp 校验环境变量，避免「原值 truthy → 未经校验 → 被强转成合法类型」的失真
+ * （如 DEEP_SEEK_REASONING_EFFORT=low 会被原样当成合法值发给 API）。非法/未设一律回落 "high"。
+ */
+const REASONING_EFFORTS = ["high", "max"] as const;
+type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+const clampReasoningEffort = (raw: string | undefined): ReasoningEffort =>
+    raw && (REASONING_EFFORTS as readonly string[]).includes(raw) ? (raw as ReasoningEffort) : "high";
+export const MODEL_REASONING_EFFORT: ReasoningEffort = clampReasoningEffort(process.env.DEEP_SEEK_REASONING_EFFORT);
 /** 深度思考开关：默认开启；设 DEEP_SEEK_THINKING=0 关闭。 */
 export const MODEL_THINKING_ENABLED = process.env.DEEP_SEEK_THINKING !== "0";
