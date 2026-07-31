@@ -206,9 +206,11 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     useInput((ch, key) => {
         if (key.ctrl && ch === "c") { exit(); return; }
         if (state.pendingApproval) {
-            if (key.upArrow || key.downArrow) setSelectIdx((i) => (i === 0 ? 1 : 0));
-            else if (key.return) state.resolveApproval(selectIdxRef.current === 0);
-            else if (key.escape || (key.ctrl && ch === "g")) state.resolveApproval(false);
+            const APPROVAL_DECISIONS = ['allow-once', 'allow-always', 'deny'] as const;
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + APPROVAL_DECISIONS.length) % APPROVAL_DECISIONS.length);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % APPROVAL_DECISIONS.length);
+            else if (key.return) state.resolveApproval(APPROVAL_DECISIONS[selectIdxRef.current] ?? 'deny');
+            else if (key.escape || (key.ctrl && ch === "g")) state.resolveApproval('deny');
             return;
         }
         if (state.pendingPlan) {

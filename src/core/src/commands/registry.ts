@@ -33,11 +33,6 @@ export const registerCommand = (m: CommandManifest): void => {
     commands.set(m.name, m);
 };
 
-/** 清空全部（测试 / 热重载用） */
-export const clearCommands = (): void => {
-    commands.clear();
-};
-
 /** 列出全部命令 */
 export const listCommands = (): CommandManifest[] => {
     return Array.from(commands.values());
@@ -46,14 +41,4 @@ export const listCommands = (): CommandManifest[] => {
 /** 取某命令的 manifest（expandSlashCommand 查询用） */
 export const getCommand = (name: string): CommandManifest | undefined => {
     return commands.get(name);
-};
-
-/**
- * 拼接"命令目录"清单字符串（供注入系统提示词，每个命令一行）。
- * 无命令返回空串。
- */
-export const getCommandCatalog = (): string => {
-    const all = listCommands();
-    if (all.length === 0) return "";
-    return all.map(c => `- /${c.name}：${c.description}`).join("\n");
 };

@@ -16,8 +16,9 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import ignore from "ignore"; // 需要安装: npm install ignore
-import { ToolContext } from "./type.ts";
+import { ToolContext, ToolSafetyLevel } from "./type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
+import { addPermissionRule } from "./permissions.ts";
 
 /** 工作区根目录：优先取环境变量 WORKSPACE_ROOT，否则回退到进程当前目录；所有路径安全校验以此为边界。 */
 export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || process.cwd();
@@ -148,20 +149,26 @@ export const checkIsPathIgnored = (checkPath: string): boolean => {
 /**
  * 🛂 执行层统一审批网关：在调度工具前由 runAgent 调用。
  * 工具自身不再调用此函数，只通过 CustomTool.function.requireApproval 声明风险。
- * 返回 true=放行，false=用户拒绝。
+ * 返回 true=放行，false=用户拒绝（对外仍是 boolean，runAgent 无需感知三态）。
+ *
+ * ★ 三态审批（对标 CC）：宿主回传 'allow-once' | 'allow-always' | 'deny'。
+ *   - allow-always：放行 + 调 addPermissionRule 写持久 allow 规则（按工具名），下次 checkPermission 命中免审；
+ *   - 项目级未信任时 addPermissionRule 内部降级（不落盘，仅本次生效），不产生无效规则。
+ * 旧的 sessionApproved 会话记忆已被持久规则取代（跨会话、更干净）。
  */
 export const requestApproval = async (
     toolName: string,
     toolCallId: string,
     detail: string,
-    ctx: ToolContext
+    ctx: ToolContext,
+    safetyLevel?: ToolSafetyLevel,
 ): Promise<boolean> => {
     // 🔒 审批详情瘦身闸：大 diff（如上千行 edit_file 的 old_str/new_str）仅保留头尾，
     //   防止单条 SSE 帧过大与前端渲染卡顿；完整改动可经工具参数或 read_file 核对。
     const safeDetail = truncateApprovalDetail(detail);
 
     // ★ 宿主注入审批（前端无关）：核心不再硬编码 HTTP approvalGate，改由各宿主决定审批通道：
-    //   Web→SSE+/api/approve；CLI（预留）→终端 y/n；VSCode（预留）→IDE 弹窗。
+    //   Web→SSE+/api/approve；CLI→Ink 模态；VSCode（预留）→IDE 弹窗。
     //   未注入钩子时安全默认拒绝，防核心被裸调时高危工具无审批直放行。
     if (!ctx.requestApproval) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
@@ -170,10 +177,19 @@ export const requestApproval = async (
 
     console.log(`⏳ [审批挂起] ${toolName} | 会话=${ctx.sessionId} | 凭证=${toolCallId}（交由宿主审批）`);
 
-    const approved = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId });
+    // ★ 三态决策：allow-once 仅本次 / allow-always 放行+写持久规则 / deny 拒绝
+    const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId });
+    const approved = decision !== 'deny';
 
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
+    } else if (decision === 'allow-always') {
+        // ★ 持久化 allow 规则（按工具名）：下次 checkPermission 直接命中免审。
+        //   项目级未信任目录时 addPermissionRule 返回 false（不落盘），自然降级为"仅本次放行"。
+        const persisted = await addPermissionRule('project', 'allow', toolName).catch(() => false);
+        console.log(persisted
+            ? `📌 [审批记忆] 已写持久 allow 规则：${toolName}（项目 .deepSeekCode/settings.json），后续免审`
+            : `♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：未信任目录或写入失败）`);
     }
     return approved;
 };

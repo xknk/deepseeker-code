@@ -31,6 +31,7 @@ interface StringDict {
     approvalTitle: string;
     approvalPrompt: string;
     approvalAllow: string;
+    approvalAllowAlways: string;
     approvalDeny: string;
     errAborted: string;
     busyBlockSend: string;
@@ -85,8 +86,9 @@ const STRINGS: Record<Locale, StringDict> = {
         planAccept: "接受方案，开始实现",
         planReject: "拒绝，继续计划",
         approvalTitle: "🔐 操作审批",
-        approvalPrompt: "该操作需要确认。↑↓ 选择后 Enter（Esc 拒绝）。",
-        approvalAllow: "允许",
+        approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
+        approvalAllow: "允许本次",
+        approvalAllowAlways: "总是允许（此项目）",
         approvalDeny: "拒绝",
         errAborted: "已中止当前轮。",
         busyBlockSend: "⏳ 正在生成，请等待或按 Esc 中止后再发送。",
@@ -159,8 +161,9 @@ const STRINGS: Record<Locale, StringDict> = {
         planAccept: "Accept plan, start implementing",
         planReject: "Reject, keep planning",
         approvalTitle: "🔐 Action approval",
-        approvalPrompt: "This action needs confirmation. ↑↓ then Enter (Esc to deny).",
-        approvalAllow: "Allow",
+        approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
+        approvalAllow: "Allow once",
+        approvalAllowAlways: "Always allow (this project)",
         approvalDeny: "Deny",
         errAborted: "Aborted current turn.",
         busyBlockSend: "⏳ Still generating—wait or press Esc to abort before sending.",

@@ -23,15 +23,9 @@
         "typeRoots": [
             "./node_modules/@types" // 告诉 TS 去最外层根目录的这个位置加载全局类型
         ],
-        "types": ["node"],              // 显式让 TS 加载 node 相关的全局变量（如 process、Buffer）
-    },
-    "include": [
-        "src",
-        "tests",
-        "scripts"
-    ], // 包含的文件
-    "exclude": [
-        "dist",
-        "node_modules"
-    ], // 排除的文件
+        "types": ["node"]              // 显式让 TS 加载 node 相关的全局变量（如 process、Buffer）
+    }
+    // ★ 根 tsconfig 仅作 base（供 src/core、src/cli 各自 extends），不设 include/exclude：
+    //   @/ 别名在两个子包指向不同目录（core→./src/*、cli→../core/src/*），根级无法统一，
+    //   故整仓裸 tsc 会因缺 @/ 报数百假错。类型检查走各子包自己的 tsconfig（见根 package.json typecheck）。
 }

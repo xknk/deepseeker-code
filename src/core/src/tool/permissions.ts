@@ -18,6 +18,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
+import { readJSONFile, atomicWriteJSON } from "@/common/index.ts";
 
 export type PermissionVerdict = 'allow' | 'deny' | 'ask' | null;
 
@@ -57,6 +58,9 @@ const PRIMARY_ARG: Record<string, string> = {
 };
 
 let rules: PermissionRules = { allow: [], deny: [], ask: [] };
+// 项目级配置是否受信任（initPermissions 据 bootstrap 信任闸门设置）。
+// 未信任时 addPermissionRule('project', ...) 降级不落盘——重启后信任闸门会挡掉项目级配置，写了也不一致。
+let trustedProject = false;
 
 /**
  * glob→regex 缓存。语义对标 Claude Code 的 Bash 权限规则：
@@ -152,6 +156,7 @@ const ruleMatches = (rule: CompiledRule, toolName: string, args: any): boolean =
  * 无配置 / 加载失败均静默跳过（空规则集 → 所有 checkPermission 返回 null，走默认审批流），绝不阻断启动。
  */
 export const initPermissions = async (includeProject: boolean): Promise<void> => {
+    trustedProject = includeProject;
     try {
         rules = await readPermissionConfig(includeProject);
         const total = rules.allow.length + rules.deny.length + rules.ask.length;
@@ -177,5 +182,45 @@ export const checkPermission = (toolName: string, args: any): PermissionVerdict 
         return null;
     } catch {
         return null;
+    }
+};
+
+/** 解析 settings.json 路径：global=~/.deepSeekCode，project=<cwd>/.deepSeekCode */
+const resolveSettingsPath = (scope: 'global' | 'project'): string =>
+    scope === 'global'
+        ? path.join(appConfig.dataDir, "settings.json")
+        : path.join(process.cwd(), ".deepSeekCode", "settings.json");
+
+/**
+ * 运行期新增一条权限规则并持久化（对标 CC 审批"总是允许"→写 allowlist）。
+ * 读改写 settings.json（保留其它顶层字段 hooks/mcpServers 等）+ 同步 push 进内存 rules（立即生效）。
+ * @param scope   'global' | 'project'；project 在未信任目录下返回 false（不落盘，避免写了不生效的不一致）
+ * @param kind    'allow' | 'deny' | 'ask'
+ * @param ruleStr 规则字符串（裸 ToolName 或 ToolName(argGlob)）
+ * @returns true=已写入（或磁盘已存在）且内存生效；false=非法规则 / 未信任目录 / 写入异常
+ */
+export const addPermissionRule = async (
+    scope: 'global' | 'project',
+    kind: 'allow' | 'deny' | 'ask',
+    ruleStr: string,
+): Promise<boolean> => {
+    if (scope === 'project' && !trustedProject) return false; // 未信任目录：项目级写入降级
+    const compiled = compileRule(ruleStr, `runtime:addPermissionRule(${scope})`);
+    if (!compiled) return false; // 非法格式：不入盘不入内存（compileRule 内部已 warn）
+    try {
+        const file = resolveSettingsPath(scope);
+        const cfg = (await readJSONFile<any>(file, {})) ?? {};
+        cfg.permissions ??= {};
+        const arr = Array.isArray(cfg.permissions[kind]) ? cfg.permissions[kind] : (cfg.permissions[kind] = []);
+        if (!arr.includes(ruleStr)) {           // 精确字符串去重
+            arr.push(ruleStr);
+            await fs.mkdir(path.dirname(file), { recursive: true });
+            await atomicWriteJSON(file, cfg);   // 原子写，保留其它顶层字段
+        }
+        if (!rules[kind].some(r => r.raw === compiled.raw)) rules[kind].push(compiled); // 内存立即生效
+        return true;
+    } catch (e: any) {
+        console.warn(`⚠️ [permissions] addPermissionRule 写入失败（${scope}/${kind} ${ruleStr}）: ${e?.message ?? e}`);
+        return false;
     }
 };

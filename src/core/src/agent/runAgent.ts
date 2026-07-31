@@ -135,10 +135,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     injectProjectGuide(message);
     let round = 0;
     let lastContent: string | undefined = "";
-    let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' = 'normal';
+    let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
     const recentSignatures: string[] = [];
-    // F-1：agent 循环深度硬上限。重复签名熔断只挡"连续相同调用"，模型换工具/参数仍可无限循环；硬上限兜底防失控烧 token（正常任务远不及此）。
-    const MAX_AGENT_ROUNDS = 50;
+    // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
+    //  主机制：每 NUDGE_EVERY 轮向系统提示词注入一次自评提醒，由模型自己决定"收尾给答案"还是"继续推进"
+    //         （对标 Claude Code：不在低轮数硬停，靠模型自收敛 + 用户中止）。
+    //  兜底：MAX_AGENT_ROUNDS 极高（500），仅防失控烧 token 的病理死循环；正常任务不会触及，触及亦 graceful（可"继续"接续）。
+    const NUDGE_EVERY = 40;
+    const NUDGE_MARK = "【轮数自评】";
+    const MAX_AGENT_ROUNDS = 500;
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -147,9 +152,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         while (true) {
             round++;
             if (round > MAX_AGENT_ROUNDS) {
-                stopReason = 'repeat';
-                yield { type: 'final', text: (lastContent || "") + `\n（已达单会话最大推理轮数 ${MAX_AGENT_ROUNDS}，主动停止以防失控循环烧光 token。）` };
+                stopReason = 'limit';
+                yield { type: 'final', text: (lastContent || "") + `\n（已达防失控兜底上限 ${MAX_AGENT_ROUNDS} 轮，非任务错误——任务未完成直接回复"继续"即可接续。）` };
                 return;
+            }
+            // ★ 软提醒（让模型自决）：每 NUDGE_EVERY 轮注入自评提示，由模型决定"收尾给答案"还是"继续推进"。
+            //   不硬停、零用户配置（对标 Claude Code：靠模型自收敛 + 用户中止）。NUDGE_MARK 标记幂等替换，不堆积、不污染。
+            if (round > 1 && round % NUDGE_EVERY === 1) {
+                const sys = message[0] as any;
+                if (sys?.role === 'system' && typeof sys.content === 'string') {
+                    sys.content = sys.content.split(NUDGE_MARK)[0].trimEnd();
+                    sys.content += `\n\n${NUDGE_MARK}你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
+                }
             }
             yield { type: 'round.start', round };
             // 前端用户主动停止运行
@@ -315,18 +329,26 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
 
             // assistantMessage 已在上方流式消费中拼接完成
             // 存入本次对话上下文中
+            // ★ F-1 修复：回传 reasoning_content。DeepSeek 思考模式下，含工具调用的轮次必须在后续请求中
+            //   完整回传 reasoning_content，否则 API 返回 400（见上方 L255 注释）。原 push 重建对象时漏掉了它，
+            //   导致默认思考模式开启时第一次工具调用后即 400 崩溃。reasoning_content 为 DeepSeek 对 OpenAI
+            //   消息的扩展字段，标准类型未定义，用窄化读取（reasoningBuf 作用域仅在内层 try，此处不可达）。
+            const reasoningContent = (assistantMessage as any).reasoning_content as string | undefined;
             message.push({
                 role: 'assistant',
                 content: assistantMessage.content || null,
                 tool_calls: assistantMessage.tool_calls as any,
-            });
-            // 存入本地上下文会话中
+                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+            } as any);
+            // 存入本地上下文会话中（同步携带 reasoning_content：cleanMsg/appendMessage 均 ...rest 透传，
+            //   保证会话恢复后 buildContextMessages 重建的上下文仍带该字段，回传链不中断）
             await appendMessage({
                 sessionId,
                 role: 'assistant',
                 content: assistantMessage.content || null,
-                tool_calls: assistantMessage.tool_calls as any
-            });
+                tool_calls: assistantMessage.tool_calls as any,
+                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+            } as any);
             // 存储最后一条消息，以供后面返回使用
             if (assistantMessage.content) {
                 lastContent = assistantMessage.content;
@@ -497,7 +519,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             let approved = false;
                             // ★ 审批通道（宿主）异常一律按拒绝处理（fail-closed），不逃逸出工具循环
                             try {
-                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx);
+                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level);
                             } catch (e: any) {
                                 denied = true;
                                 result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;

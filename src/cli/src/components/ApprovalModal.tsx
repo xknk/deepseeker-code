@@ -12,8 +12,9 @@ import { wrapText } from "../util.ts";
 type Props = { toolName: string; detail: string; selectedIndex: number; wrapW: number };
 
 const OPTIONS = [
-    { label: S.approvalAllow, value: true, color: THEME.ok },
-    { label: S.approvalDeny, value: false, color: THEME.danger },
+    { label: S.approvalAllow, value: 'allow-once', color: THEME.ok },
+    { label: S.approvalAllowAlways, value: 'allow-always', color: THEME.warn },
+    { label: S.approvalDeny, value: 'deny', color: THEME.danger },
 ];
 
 export const ApprovalModal = ({ toolName, detail, selectedIndex, wrapW }: Props): React.ReactElement => {

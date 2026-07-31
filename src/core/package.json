@@ -22,7 +22,8 @@
     "vscode-ripgrep": "^1.13.2"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6"
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.2"
   },
   "engines": {
     "node": ">=20"

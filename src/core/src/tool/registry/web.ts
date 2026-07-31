@@ -66,39 +66,76 @@ function isMetadataEndpoint(hostname: string): boolean {
 }
 
 /**
+ * 主机安全裁决结果：ok=true 可访问；ok=false 附带拦截原因 kind。
+ * ★ 关键：区分「解析到内网 IP」与「DNS 解析失败」——
+ *   原实现两者都无差别 return false 并套用「内网地址」文案，既误导用户，
+ *   又诱导模型按文案提示重试 allow_private（DNS 失败时徒劳，制造死循环）。
+ */
+type HostVerdict =
+    | { ok: true }
+    | { ok: false; kind: 'metadata' | 'localhost' | 'private-literal' | 'suspicious-literal' | 'private-resolved' | 'dns-empty' | 'dns-failed'; detail?: string };
+
+/**
  * 🛡️ SSRF 防护：解析主机名，拒绝内网/回环/链路本地地址，
  *  防止大模型被诱导访问云元数据（如 169.254.169.254）或内网服务。
- *  返回 true=安全可访问，false=命中内网熔断。
+ *  返回结构化裁决（HostVerdict），使报错能区分「内网熔断」与「DNS 失败」。
  *
  *  @param allowPrivate 本地开发/测试场景显式放行内网（127.0.0.1/localhost/内网段），
  *    跳过内网判定；但云元数据端点仍硬拦（见 isMetadataEndpoint）。
  */
-async function isPublicHost(hostname: string, allowPrivate = false): Promise<boolean> {
+async function checkHost(hostname: string, allowPrivate = false): Promise<HostVerdict> {
     const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
     // 0. 云元数据端点：任何情况下都拦截（凭证窃取风险）
-    if (isMetadataEndpoint(host)) return false;
+    if (isMetadataEndpoint(host)) return { ok: false, kind: 'metadata' };
 
     // 放行内网模式：本地抓 localhost 服务 / 内网文档等正当需求，由调用方显式开启
-    if (allowPrivate) return true;
+    if (allowPrivate) return { ok: true };
 
     // 1. 字面量主机先拦一波（localhost / .local）
     if (host === "localhost" || host.endsWith(".local")) {
-        return false;
+        return { ok: false, kind: 'localhost' };
     }
     // 2. 若主机本身就是 IP，直接判定；再挡住非标准 IP 编码（十进制/十六进制/八进制）绕过
-    if (isPrivateIp(host)) return false;
-    if (isSuspiciousIpLiteral(host)) return false;
+    if (isPrivateIp(host)) return { ok: false, kind: 'private-literal', detail: host };
+    if (isSuspiciousIpLiteral(host)) return { ok: false, kind: 'suspicious-literal', detail: host };
 
     // 3. DNS 解析后逐条判定（IPv4 + IPv6），任一命中内网即熔断
     try {
         const records = await dns.lookup(host, { all: true });
-        if (records.length === 0) return false;
-        return records.every(r => !isPrivateIp(r.address));
-    } catch {
-        return false; // 解析失败视为不可访问
+        if (records.length === 0) return { ok: false, kind: 'dns-empty' };
+        const bad = records.find(r => isPrivateIp(r.address));
+        if (bad) return { ok: false, kind: 'private-resolved', detail: bad.address };
+        return { ok: true };
+    } catch (e: any) {
+        // ★ DNS 解析失败（EAI_AGAIN / EAI_NODATA 等）≠ SSRF 拦截。返回准确原因，指引改用 web_search，
+        //   避免模型把"DNS 失败"当成"内网熔断"而反复重试 web_fetch + allow_private（徒劳死循环）。
+        return { ok: false, kind: 'dns-failed', detail: e?.code || e?.message };
     }
 }
+
+/**
+ * 把主机裁决转成面向用户/模型的准确报错文案。
+ * ★ 仅 private 类（确实与内网有关）才提示 allow_private；DNS 类不提 allow_private（无济于事），改指引 web_search。
+ */
+const formatHostBlockMessage = (hostname: string, v: Extract<HostVerdict, { ok: false }>): string => {
+    const h = `[${hostname}]`;
+    switch (v.kind) {
+        case 'metadata':
+            return `目标主机 ${h} 为云元数据端点，即便 allow_private 也拦截（防凭证窃取）`;
+        case 'localhost':
+            return `目标主机 ${h} 为本地地址（localhost/.local），已阻断；如需抓取本地服务请传 allow_private=true`;
+        case 'private-literal':
+        case 'suspicious-literal':
+            return `目标主机 ${h} 本身是内网/可疑 IP 字面量（${v.detail}），已阻断 SSRF；如为正当需求请传 allow_private=true`;
+        case 'private-resolved':
+            return `目标主机 ${h} DNS 解析到内网/回环/链路本地地址（${v.detail}），已阻断 SSRF；如为正当本地服务请传 allow_private=true（环境变量 WEB_FETCH_ALLOW_PRIVATE=1 可全局开启）`;
+        case 'dns-empty':
+            return `目标主机 ${h} DNS 无解析记录（域名可能不存在或网络异常），非 SSRF 拦截；建议改用 web_search 或核对域名`;
+        case 'dns-failed':
+            return `目标主机 ${h} DNS 解析失败（${v.detail || '未知错误'}），非 SSRF 拦截；建议检查网络/DNS 或改用 web_search`;
+    }
+};
 
 /**
  * 判定一个 IP（IPv4 / IPv6 / IPv4-mapped IPv6）是否属于内网/回环/链路本地/保留段。
@@ -353,7 +390,10 @@ const pinnedSsrfDispatcher = new Agent({
                         return cb(new Error(`DNS 解析到内网/保留地址 ${a.address}，已阻断 SSRF`));
                     }
                 }
-                cb(null, list[0].address, list[0].family);
+                // ★ undici 经 opts 传入 all:true，回调须返回地址数组 [{address,family}]；旧实现返回单值
+                //   (address, family) 被 node:net 误当数组取首字符 → ERR_INVALID_IP_ADDRESS（致全站 fetch 失败）。
+                if (opts?.all) cb(null, list);
+                else cb(null, list[0].address, list[0].family);
             });
         }) as any,
     },
@@ -361,8 +401,8 @@ const pinnedSsrfDispatcher = new Agent({
 
 /**
  * 🛡️ allow_private 模式专用钉 IP dispatcher：放行内网，但硬拦云元数据 IP。
- *  allow_private 下 isPublicHost 不做 DNS 解析（短路放行内网）；若无钉 IP 兜底，攻击者域名可在
- *  请求时 DNS rebinding 到 169.254.169.254 窃取云凭证（isPublicHost 仅按主机名字面量判 metadata，挡不住域名 rebinding）。
+ *  allow_private 下 checkHost 不做 DNS 解析（短路放行内网）；若无钉 IP 兜底，攻击者域名可在
+ *  请求时 DNS rebinding 到 169.254.169.254 窃取云凭证（checkHost 仅按主机名字面量判 metadata，挡不住域名 rebinding）。
  *  此 dispatcher 解析一次、用解析 IP 直连（掐断 rebinding），并对解析结果中的云元数据 IP 硬拒。
  */
 const pinnedMetadataGuardDispatcher = new Agent({
@@ -378,7 +418,10 @@ const pinnedMetadataGuardDispatcher = new Agent({
                         return cb(new Error(`DNS 解析到云元数据端点 ${a.address}，allow_private 下仍拦截（防凭证窃取）`));
                     }
                 }
-                cb(null, list[0].address, list[0].family);
+                // ★ undici 经 opts 传入 all:true，回调须返回地址数组 [{address,family}]；旧实现返回单值
+                //   (address, family) 被 node:net 误当数组取首字符 → ERR_INVALID_IP_ADDRESS（致全站 fetch 失败）。
+                if (opts?.all) cb(null, list);
+                else cb(null, list[0].address, list[0].family);
             });
         }) as any,
     },
@@ -388,7 +431,7 @@ const pinnedMetadataGuardDispatcher = new Agent({
  * 安全抓取：手动跟随重定向（不自动 follow），每一跳都重做：
  *  ① 协议白名单（仅 http/https，挡 file:/gopher: 等）；
  *  ② 拒绝 https→http 降级（防 SSL 剥离）；
- *  ③ isPublicHost 复检（默认挡内网；allowPrivate 时放行内网，但云元数据端点仍拦）。
+ *  ③ checkHost 复检（默认挡内网；allowPrivate 时放行内网，但云元数据端点仍拦）。
  *  默认由 pinnedSsrfDispatcher 钉 IP 防 DNS rebinding；allowPrivate 时不钉（本地已知服务无需防 rebinding）。
  *  任一不合规即抛错，由调用方 catch 转友好提示。
  */
@@ -410,11 +453,9 @@ async function safeFetchFollow(
         if (startProtocol === "https:" && parsed.protocol === "http:") {
             throw new Error("拒绝 https→http 降级重定向");
         }
-        if (!(await isPublicHost(parsed.hostname, allowPrivate))) {
-            const reason = isMetadataEndpoint(parsed.hostname)
-                ? "目标为云元数据端点，即便 allow_private 也拦截（防凭证窃取）"
-                : "目标主机解析为内网/回环/链路本地地址，已阻断 SSRF（可用 allow_private 或环境变量 WEB_FETCH_ALLOW_PRIVATE=1 放行本地地址）";
-            throw new Error(`目标主机 [${parsed.hostname}] ${reason}`);
+        const verdict = await checkHost(parsed.hostname, allowPrivate);
+        if (!verdict.ok) {
+            throw new Error(formatHostBlockMessage(parsed.hostname, verdict));
         }
         // ★ 用 undici fetch：dispatcher 选项有类型保证、不会被运行时静默吞掉（防 DNS rebinding 钉 IP 失效）
         const res = await undiciFetch(url, {
@@ -525,7 +566,7 @@ export const webTools: CustomTool[] = [
                     return `❌ [安全熔断]：仅允许 http/https 协议，拒绝 ${parsed.protocol}`;
                 }
 
-                // 2. SSRF 防护 + 手动跟随重定向：每跳复检 isPublicHost + 协议白名单 + 拒绝降级；
+                // 2. SSRF 防护 + 手动跟随重定向：每跳复检 checkHost + 协议白名单 + 拒绝降级；
                 //    默认 pinnedSsrfDispatcher 钉住解析 IP 防 DNS rebinding（allowPrivate 时不钉，详见 safeFetchFollow）。
                 const signals: AbortSignal[] = [AbortSignal.timeout(FETCH_TIMEOUT_MS)];
                 if (ctx?.abortSignal) signals.push(ctx.abortSignal);

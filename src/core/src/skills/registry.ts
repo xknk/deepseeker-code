@@ -27,11 +27,6 @@ export const registerSkill = (m: SkillManifest): void => {
     skills.set(m.name, m);
 };
 
-/** 清空全部（测试 / 热重载用） */
-export const clearSkills = (): void => {
-    skills.clear();
-};
-
 /** 列出全部 skill */
 export const listSkills = (): SkillManifest[] => {
     return Array.from(skills.values());

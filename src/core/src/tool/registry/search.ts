@@ -57,7 +57,13 @@ export const searchTools: CustomTool[] = [
 
                     // 💡 优化 2：【核心防线】向 ripgrep 注入硬编码的全局黑名单路径过滤 (--glob)
                     // 强制排除外部依赖、编译产物、版本控制等纯垃圾噪音目录，保障大模型只能看到真正的源码
+                    // ★ 搜索根作为【显式 path 参数】（正斜杠），而非 cwd 选项：
+                    //   Windows 下 process.cwd() 返回反斜杠（如 D:\code\自研\...），spawn/execFile 用「反斜杠+中文」
+                    //   作 cwd 派生 rg 会失败（ENOENT 或无限卡死，实测 search_grep 查 import 卡 >90s）。
+                    //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
+                    const searchRoot = WORKSPACE_ROOT.replace(/\\/g, "/");
                     const rgArgs = [
+                        "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",
                         "--column",
                         "--no-heading",
@@ -68,13 +74,16 @@ export const searchTools: CustomTool[] = [
                         "--glob", "!.git/**",
                         "--glob", "!.next/**",
                         "--glob", "!build/**",
-                        "-e", pattern
+                        "-e", pattern,
+                        searchRoot,
                     ];
 
                     const { stdout } = await execFileAsync(rgPath, rgArgs, {
-                        cwd: WORKSPACE_ROOT,
-                        // 已用 --max-count 10（每文件≤10 匹配）+ 结果行截断，stdout 实际很小，1MB 足够
-                        maxBuffer: 1024 * 1024
+                        // 不传 cwd：避免反斜杠+中文路径派生 rg 失败（搜索根已作为显式 path 参数传入）
+                        maxBuffer: 1024 * 1024,
+                        // ★ 兜底硬超时：极端文件卡住 rg 时最多 30s 判失败返回，绝不让 search_grep 挂死 agent
+                        timeout: 30_000,
+                        killSignal: "SIGKILL",
                     });
 
                     if (!stdout.trim()) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
@@ -88,6 +97,8 @@ export const searchTools: CustomTool[] = [
                 } catch (error: any) {
                     // 💡 优化 3：优雅降级，ripgrep 找不到内容时正常退出码是 1，不属于常规报错
                     if (error.code === 1) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
+                    // ★ 超时（30s 兜底触发）：给友好提示而非裸"检索失败"，建议缩小范围
+                    if (error.killed || error.signal) return `⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`;
                     return `检索失败: ${error.message}`;
                 }
             },

@@ -18,7 +18,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
 import { CustomTool } from "@/tool/type.ts";
-import { parseSkillFile } from "./frontmatter.ts";
+import { parseSkillFile } from "@/skills/frontmatter.ts";
 import { registerAgent, listAgents, AgentManifest, AgentSource } from "./registry.ts";
 
 /** 内置 agent 目录：本文件所在目录下的 builtin/ */

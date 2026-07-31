@@ -25,6 +25,7 @@ import { UnifiedInboundMessage } from "@/channels/unifiedMessage.ts"
 import { handleUnifiedChat } from "./chatProcessing.ts"
 import { sendOutbound } from "@/channels/chatChannelAdapter.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
+import type { ApprovalDecision } from "@/host/type.ts";
 import { readStore, writeStore } from "@/session/store.ts"
 import { createUUID, isSafeSessionId } from "@/common/index.ts";
 import { requireAuth } from "./auth.ts";
@@ -112,9 +113,10 @@ export const createServer = () => {
     // ★ 审批回传入站路由：前端用户点批准/拒绝后调用，解锁在 /api/chat 里挂起的工具协程
     //   必须携带 sessionId 且与挂起时一致，门锁据此拦截跨会话越权审批。
     app.post("/api/approve", (req, res) => {
-        const { sessionId, toolsId, approved } = (req.body || {}) as { sessionId?: string; toolsId?: string; approved?: boolean };
-        if (!isSafeSessionId(sessionId) || typeof toolsId !== "string" || typeof approved !== "boolean") {
-            res.status(400).json({ ok: false, error: "需要 { sessionId: string, toolsId: string, approved: boolean }" });
+        const { sessionId, toolsId, approved } = (req.body || {}) as { sessionId?: string; toolsId?: string; approved?: ApprovalDecision };
+        const validDecisions: ApprovalDecision[] = ['allow-once', 'allow-always', 'deny'];
+        if (!isSafeSessionId(sessionId) || typeof toolsId !== "string" || approved == null || !validDecisions.includes(approved)) {
+            res.status(400).json({ ok: false, error: "需要 { sessionId: string, toolsId: string, approved: 'allow-once'|'allow-always'|'deny' }" });
             return;
         }
         const ok = resolveUserApprovalLock(sessionId, toolsId, approved);

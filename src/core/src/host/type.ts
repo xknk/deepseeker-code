@@ -27,15 +27,23 @@ export interface ApprovalMeta {
 }
 
 /**
+ * 审批决策（对标 Claude Code 的三选一）：
+ *  - 'allow-once'：仅本次放行，不记忆；
+ *  - 'allow-always'：放行并把该工具写成持久 allow 规则（见 permissions.addPermissionRule），
+ *    下次 checkPermission 直接命中免审；
+ *  - 'deny'：拒绝。
+ */
+export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+
+/**
  * 宿主审批钩子：核心在执行 MUTATION/DANGER 工具前调用，由宿主决定放行/拒绝。
  * @param detail 工具声明的风险说明（已由核心瘦身，适合直接展示）
  * @param meta   审批元信息
- * @returns true=放行，false=拒绝
+ * @returns 三态审批决策（见 ApprovalDecision）
  *
  * 各宿主实现要点：
- *  - Web：见 host/webHost.ts 的 createWebRequestApproval。
- *  - CLI（预留）：process.stdin/stdout 的 y/n 确认；审批在终端进行，模型无法程序化驱动，
- *    可彻底闭环「自批准」风险。
+ *  - Web：见 host/webHost.ts 的 createWebRequestApproval（/api/approve 回传 ApprovalDecision）。
+ *  - CLI：cliHost.ts → Ink 审批模态（ApprovalModal 三选项），in-process 无 HTTP，模型无法程序化自批准。
  *  - VSCode（预留）：vscode.window 的 InformationMessage/QuickPick。
  */
-export type RequestApprovalFn = (detail: string, meta: ApprovalMeta) => Promise<boolean>;
+export type RequestApprovalFn = (detail: string, meta: ApprovalMeta) => Promise<ApprovalDecision>;

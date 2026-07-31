@@ -38,7 +38,9 @@
         "vscode-ripgrep": "^1.13.2"
     },
     "devDependencies": {
+        "@types/node": "^25.9.2",
         "@types/react": "^18.3.12",
-        "esbuild": "^0.25.0"
+        "esbuild": "^0.25.0",
+        "typescript": "^6.0.3"
     }
 }

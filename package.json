@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "test": "cd src/core && node --import tsx --test tests/*.test.ts",
-    "typecheck": "tsc -p src/core/tsconfig.json",
+    "typecheck": "tsc -p src/core/tsconfig.json && tsc -p src/cli/tsconfig.json",
     "cli:dev": "pnpm --filter ./src/cli dev",
     "cli:build": "pnpm --filter ./src/cli build",
     "cli:start": "pnpm --filter ./src/cli start"
@@ -17,7 +17,6 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^25.9.2",
-    "tsc-alias": "^1.8.17",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }

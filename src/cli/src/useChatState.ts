@@ -14,6 +14,7 @@ import { getOrCreateSessionId } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
+import type { ApprovalDecision } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { createCliRequestApproval } from "./cliHost.ts";
@@ -39,7 +40,7 @@ export type ChatRow =
     };
 
 /** 待审批请求（模态驱动）。 */
-export type PendingApproval = { detail: string; toolName: string; resolve: (v: boolean) => void };
+export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
 /** 待审批方案（计划模式两阶段）。 */
 export type PendingPlan = { plan: string; resolve: (v: boolean) => void };
 
@@ -281,9 +282,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     }, [closeStreaming, flush, scheduleFlush]);
 
     // —— 工具审批（RequestApprovalFn → Ink 模态） ——
-    const askApproval = useCallback((detail: string, toolName: string): Promise<boolean> =>
-        new Promise<boolean>((resolve) => setPendingApproval({ detail, toolName, resolve })), []);
-    const resolveApproval = useCallback((v: boolean) => {
+    const askApproval = useCallback((detail: string, toolName: string): Promise<ApprovalDecision> =>
+        new Promise<ApprovalDecision>((resolve) => setPendingApproval({ detail, toolName, resolve })), []);
+    const resolveApproval = useCallback((v: ApprovalDecision) => {
         setPendingApproval((prev) => { prev?.resolve(v); return null; });
     }, []);
 

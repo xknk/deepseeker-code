@@ -113,12 +113,33 @@ export const commandTools: CustomTool[] = [
                     }
                 };
 
+                // ★ 编码处理（修 Windows stdout 乱码）：命令常以系统 OEM 代码页输出（中文 Windows=cp936/GBK），
+                //   原 d.toString()（默认 utf-8）会对 GBK 字节产生 U+FFFD（菱形替代符）；且逐块 toString 会截断跨块
+                //   的多字节序列。改用 TextDecoder + stream 模式同时解决两点：
+                //   1) 延迟定型：直到出现含高位字节(>=0x80)的块才决定编码（纯 ASCII 在 UTF-8/GBK 下解码一致，先用
+                //      utf-8 占位），避免「首块 ASCII 前缀、后续才 GBK 中文」（如 ping 先英文后中文）被误判为 utf-8；
+                //   2) UTF-8 探测出现 U+FFFD（非合法 UTF-8）即回退 GBK（Node 内置 full-icu 支持；精简构建无 gbk 时
+                //      try/catch 退回 utf-8，至少不崩）。
+                let pendingUtf8 = new TextDecoder("utf-8");
+                let decoder: TextDecoder | null = null; // 编码定型后非空；null=尚未遇到高位字节块
+                const decodeChunk = (buf: Buffer): string => {
+                    if (!decoder) {
+                        const hasHighByte = buf.some((b: number) => b >= 0x80);
+                        if (hasHighByte) {
+                            const isGbk = buf.toString("utf8").includes("�");
+                            try { decoder = new TextDecoder(isGbk ? "gbk" : "utf-8"); }
+                            catch { decoder = pendingUtf8; } // 精简 ICU 无 gbk → 退回 utf-8
+                        }
+                    }
+                    return (decoder ?? pendingUtf8).decode(buf, { stream: true });
+                };
+
                 proc.stdout?.on("data", (d: Buffer) => {
-                    queue.push(d.toString());
+                    queue.push(decodeChunk(d));
                     notifyNewData();
                 });
                 proc.stderr?.on("data", (d: Buffer) => {
-                    queue.push(d.toString());
+                    queue.push(decodeChunk(d));
                     notifyNewData();
                 });
                 proc.on("error", (e: Error) => {
@@ -131,6 +152,9 @@ export const commandTools: CustomTool[] = [
                     // ★ H-1 修复：用 ??= 保留 error 事件已写入的 -1；code=null（被信号杀死/spawn 失败）按 -1 处理。
                     //   旧实现 exitCode = code ?? 0 无条件覆盖，会把 spawn ENOENT（error 置 -1 → close 置 null）误判为成功退出 0。
                     exitCode ??= code == null ? -1 : code;
+                    // flush 编码解码器末尾残留的多字节序列（GBK/UTF-8 stream 模式可能留尾字节，不 flush 会丢最后一个字符）
+                    if (decoder) queue.push(decoder.decode());
+                    queue.push(pendingUtf8.decode());
                     settled = true;
                     notifyNewData();
                 });
