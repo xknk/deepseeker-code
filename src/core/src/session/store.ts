@@ -17,7 +17,7 @@
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
-import { createUUID, getFileName, assertSafeSessionId } from "@/common/index.ts"
+import { createUUID, getFileName, assertSafeSessionId, isSafeSessionId, readJSONFile } from "@/common/index.ts"
 import type { Todo } from "@/observability/type.ts";
 
 /** 获取全局 sessions 文件夹的绝对/相对路径 */
@@ -26,6 +26,13 @@ export const getSessionsDirPath = (mainSessionId: string): string => {
     const fileName = getFileName(mainSessionId)
     return path.join(appConfig.dataDir, 'sessions', appConfig.userWorkspaceDir, fileName);
 }
+
+/**
+ * 本工作区 sessions 根目录：所有主会话文件夹的父目录（不含具体会话段）。
+ * 供 listSessions 枚举历史会话、--continue 取最近会话用。
+ */
+export const getWorkspaceSessionsDir = (): string =>
+    path.join(appConfig.dataDir, 'sessions', appConfig.userWorkspaceDir);
 
 
 /**
@@ -228,3 +235,83 @@ export async function setTodos(sessionId: string, todos: Todo[]): Promise<void> 
     store.todos = todos;
     await writeStore(sessionId, store);
 }
+
+// ============ 历史会话枚举（/sessions 选择器 + --continue） ============
+
+/** 历史会话摘要（供 UI 选择器展示）。 */
+export type SessionSummary = {
+    sessionId: string;
+    createAt?: string;
+    updatedAt?: string;
+    messageCount: number;
+    /** 首条 user 消息预览（已折叠空白、截断）。 */
+    preview: string;
+};
+
+/**
+ * 枚举本工作区的全部主会话：sessions 根目录下每个子文件夹 = 一个主会话
+ * （文件夹名即主 sessionId；子 agent 经 getFileName 折叠进同一文件夹，不会单独成项）。
+ * 单个会话解析失败静默跳过，绝不抛错。按 updatedAt（回退目录 mtime）降序返回（最新在前）。
+ */
+export const listSessions = async (): Promise<SessionSummary[]> => {
+    const root = getWorkspaceSessionsDir();
+    let entries: any[];
+    try {
+        entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+        return []; // 目录不存在（从未建过会话）→ 空
+    }
+    const summaries: SessionSummary[] = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const sessionId = entry.name;
+        // 纵深防御：跳过非法文件夹名（合法 sessionId 仅 [A-Za-z0-9_-]）
+        if (!isSafeSessionId(sessionId)) continue;
+        const dirPath = path.join(root, sessionId);
+
+        // 元信息来自 <id>.state.json（缺失/损坏 → undefined，不阻断）
+        const state: any = await readJSONFile<any>(getStatePath(sessionId));
+
+        // 消息数与首条 user 预览来自 <id>.jsonl
+        let messageCount = 0;
+        let preview = "";
+        try {
+            const raw = await fs.readFile(getTranscriptPath(sessionId), "utf-8");
+            for (const s of raw.split("\n")) {
+                const line = s.trim();
+                if (!line) continue;
+                let msg: any;
+                try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
+                messageCount++;
+                if (!preview && msg?.role === "user" && typeof msg.content === "string") {
+                    preview = msg.content.replace(/\s+/g, " ").trim();
+                }
+            }
+        } catch { /* 无 jsonl（空会话）→ 0 条 */ }
+
+        // updatedAt：优先 state.updatedAt，回退目录 mtime
+        let updatedAt: string | undefined = state?.updatedAt;
+        if (!updatedAt) {
+            try { updatedAt = (await fs.stat(dirPath)).mtime.toISOString(); } catch { /* 忽略 */ }
+        }
+        summaries.push({
+            sessionId,
+            createAt: state?.createAt,
+            updatedAt,
+            messageCount,
+            preview: preview.slice(0, 80),
+        });
+    }
+    // 按 updatedAt 降序（最新在前）；无时间者沉底
+    summaries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return summaries;
+};
+
+/**
+ * 取本工作区最近一次会话的 sessionId（--continue 用）。
+ * 即 listSessions 的首条（已按 updatedAt 降序）；无历史则 null。
+ */
+export const getMostRecentSessionId = async (): Promise<string | null> => {
+    const list = await listSessions();
+    return list.length > 0 ? list[0].sessionId : null;
+};

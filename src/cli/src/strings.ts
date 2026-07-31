@@ -51,6 +51,14 @@ interface StringDict {
     cmdLang: string;
     cmdClear: string;
     cmdExit: string;
+    cmdSessions: string;
+    /** /sessions 选择器与 --continue */
+    sessionsTitle: string;
+    sessionsPrompt: string;
+    noHistory: string;
+    sessionLoaded: (id: string) => string;
+    /** 本地化的相对时间（"3 分钟前" / "3m ago"）；iso 非法/空 → 空串。 */
+    relTime: (iso: string) => string;
     /** /lang 与启动期信任询问 */
     langCurrent: () => string;
     langSet: (l: string) => string;
@@ -92,7 +100,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "拒绝",
         errAborted: "已中止当前轮。",
         busyBlockSend: "⏳ 正在生成，请等待或按 Esc 中止后再发送。",
-        cmdHint: "/help 帮助 · /plan 计划模式 · /model 切换模型 · /thinking 思考等级 · /lang 语言 · /clear 清屏 · /exit 退出",
+        cmdHint: "/help 帮助 · /plan 计划模式 · /model 切换模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /exit 退出",
         statusStreaming: "生成中",
         statusIdle: "就绪",
         statusAborting: "中止中…",
@@ -116,6 +124,24 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdLang: "切换界面语言：/lang <zh|en>",
         cmdClear: "清空当前屏幕",
         cmdExit: "退出 CLI",
+        cmdSessions: "选择并载入历史会话（续接对话）",
+        sessionsTitle: "📪 历史会话（↑↓ 选择 · Enter 载入续接）",
+        sessionsPrompt: "↑↓ 选择 · Enter 载入 · Esc 取消",
+        noHistory: "（暂无历史会话）",
+        sessionLoaded: (id) => `已载入会话 ${id}（继续对话将续接此会话）`,
+        relTime: (iso) => {
+            const t = Date.parse(iso);
+            if (!t) return "";
+            const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+            if (s < 60) return "刚刚";
+            const m = Math.floor(s / 60);
+            if (m < 60) return `${m} 分钟前`;
+            const h = Math.floor(m / 60);
+            if (h < 24) return `${h} 小时前`;
+            const d = Math.floor(h / 24);
+            if (d < 30) return `${d} 天前`;
+            return new Date(t).toLocaleDateString("zh-CN");
+        },
         langCurrent: () => `当前界面语言：中文（/lang en 切换英文）`,
         langSet: (l) => `界面语言已切换：${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `无效语言：${arg}（可选：zh 中文 / en English）`,
@@ -128,6 +154,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/model [deepseek-v4|deepseek-v4-flash|<任意>] — 切换模型（当前 ${model}）`,
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
+            "/sessions  — 选择并载入历史会话（续接对话）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
         ].join("\n"),
         statusText: (model, thinking, planOn, locale, cwd) => [
@@ -167,7 +194,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "Deny",
         errAborted: "Aborted current turn.",
         busyBlockSend: "⏳ Still generating—wait or press Esc to abort before sending.",
-        cmdHint: "/help help · /plan plan mode · /model switch model · /thinking thinking level · /lang language · /clear clear · /exit quit",
+        cmdHint: "/help help · /plan plan mode · /model switch model · /thinking thinking level · /lang language · /sessions history · /clear clear · /exit quit",
         statusStreaming: "streaming",
         statusIdle: "ready",
         statusAborting: "aborting…",
@@ -190,6 +217,24 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdLang: "Switch interface language: /lang <zh|en>",
         cmdClear: "Clear the screen",
         cmdExit: "Quit the CLI",
+        cmdSessions: "Pick a past session to resume",
+        sessionsTitle: "📪 Past sessions (↑↓ to pick · Enter to resume)",
+        sessionsPrompt: "↑↓ pick · Enter resume · Esc cancel",
+        noHistory: "(no past sessions)",
+        sessionLoaded: (id) => `Resumed session ${id} (new messages continue it)`,
+        relTime: (iso) => {
+            const t = Date.parse(iso);
+            if (!t) return "";
+            const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+            if (s < 60) return "just now";
+            const m = Math.floor(s / 60);
+            if (m < 60) return `${m}m ago`;
+            const h = Math.floor(m / 60);
+            if (h < 24) return `${h}h ago`;
+            const d = Math.floor(h / 24);
+            if (d < 30) return `${d}d ago`;
+            return new Date(t).toLocaleDateString("en-US");
+        },
         langCurrent: () => `Interface language: English (/lang zh for 中文)`,
         langSet: (l) => `Interface language: ${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `Invalid language: ${arg} (choose zh / en)`,
@@ -202,6 +247,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/model [deepseek-v4|deepseek-v4-flash|<any>] — Switch model (current ${model})`,
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
+            "/sessions  — Pick a past session to resume",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
         ].join("\n"),
         statusText: (model, thinking, planOn, locale, cwd) => [
@@ -227,4 +273,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "model", "thinking", "lang", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "model", "thinking", "lang", "sessions", "clear", "exit"] as const;

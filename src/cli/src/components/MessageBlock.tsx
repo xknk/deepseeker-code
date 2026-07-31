@@ -30,7 +30,7 @@ const UsageFooter = ({ usage }: { usage: NonNullable<TraceBase['usage']> }): Rea
     );
 };
 
-type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" }>; wrapW: number };
+type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" }>; wrapW: number; streamTail?: number };
 
 /** 列表项前缀检测：`- ` / `* ` / `• ` / `1. ` 等。 */
 const listPrefix = (line: string): { bullet: string; rest: string } | null => {
@@ -53,7 +53,7 @@ const AssistantLine = ({ line }: { line: string }): React.ReactElement => {
     return <RichText text={line} />;
 };
 
-export const MessageBlock = ({ row, wrapW }: Props): React.ReactElement => {
+export const MessageBlock = ({ row, wrapW, streamTail }: Props): React.ReactElement => {
     if (row.kind === "meta") {
         // 轮次 → 全宽暗灰分割线
         if (/^第 \d+ 轮$/.test(row.text)) {
@@ -120,9 +120,20 @@ export const MessageBlock = ({ row, wrapW }: Props): React.ReactElement => {
 
     // assistant
     const contentW = Math.max(8, wrapW - 2);
-    const lines = wrapText(row.text, contentW);
+    const allLines = wrapText(row.text, contentW);
+    // ★ 流式裁剪：动态区只渲染尾部 N 行（N=streamTail），稳定 Ink 重绘区域高度 → 治闪屏/错位。
+    //   仅对 streaming 行生效；收尾后整行进 Static 渲染全文，不丢内容。被裁掉的部分上方给一行折叠提示。
+    let lines = allLines;
+    let folded = 0;
+    if (row.streaming && streamTail && allLines.length > streamTail) {
+        folded = allLines.length - streamTail;
+        lines = allLines.slice(folded);
+    }
     return (
         <Box flexDirection="column" marginTop={0.5} marginBottom={0.5}>
+            {folded > 0 ? (
+                <Text color={THEME.grayDim}>{"  ↑ …已折叠 "}{folded}{" 行…"}</Text>
+            ) : null}
             {lines.map((line, j) => {
                 const isLast = j === lines.length - 1;
                 return (

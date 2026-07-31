@@ -24,6 +24,7 @@ import { ToolCard } from "./components/ToolCard.tsx";
 import { TodosPanel } from "./components/TodosPanel.tsx";
 import { ApprovalModal } from "./components/ApprovalModal.tsx";
 import { PlanModal } from "./components/PlanModal.tsx";
+import { SessionPicker } from "./components/SessionPicker.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
@@ -33,10 +34,10 @@ const KNOWN_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
 const CWD = process.cwd();
 
 /** 单行渲染分发：tool/thinking 走专用组件，其余走 MessageBlock。 */
-const RowView = ({ row, wrapW }: { row: ChatRow; wrapW: number }): React.ReactElement => {
-    if (row.kind === "tool") return <ToolCard toolName={row.toolName} args={row.args} result={row.result} ok={row.ok} status={row.status} wrapW={wrapW} />;
-    if (row.kind === "thinking") return <ThinkingBlock streaming={row.streaming ?? false} startedAt={row.startedAt} durationMs={row.durationMs} tokens={row.tokens} />;
-    return <MessageBlock row={row} wrapW={wrapW} />;
+const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW: number; streamTail?: number; showThinking?: boolean }): React.ReactElement => {
+    if (row.kind === "tool") return <ToolCard toolName={row.toolName} args={row.args} result={row.result} ok={row.ok} status={row.status} progress={row.progress} wrapW={wrapW} />;
+    if (row.kind === "thinking") return <ThinkingBlock streaming={row.streaming ?? false} startedAt={row.startedAt} durationMs={row.durationMs} tokens={row.tokens} text={row.text} expanded={showThinking} wrapW={wrapW} />;
+    return <MessageBlock row={row} wrapW={wrapW} streamTail={streamTail} />;
 };
 
 /** 是否留在动态区：仅流式中的 assistant/thinking 与运行中的 tool。
@@ -52,6 +53,9 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     const { stdout } = useStdout();
     const cols = stdout?.columns ?? 80;
     const wrapW = Math.max(16, cols - 2);
+    /** 流式正文动态区保留的尾部行数：终端高度 - 预留（任务面板/生成指示/输入/状态/留白）。
+     *  稳定动态区高度 → 治闪屏/错位；收尾后整行进 Static 渲染全文，不丢内容。 */
+    const streamTail = Math.max(4, (stdout?.rows ?? 24) - 12);
 
     const [input, setInput] = useState("");
     const [cursor, setCursor] = useState(0);
@@ -85,6 +89,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 case "model": return S.cmdModel;
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
+                case "sessions": return S.cmdSessions;
                 case "clear": return S.cmdClear;
                 case "exit": return S.cmdExit;
                 default: return "";
@@ -103,13 +108,13 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
         return menuEntries.filter((c) => c.name.toLowerCase().startsWith(q));
     }, [input, menuEntries]);
 
-    const menuActive = state.pendingApproval != null || state.pendingPlan != null;
+    const menuActive = state.pendingApproval != null || state.pendingPlan != null || state.pendingSessions != null;
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
     // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); }, [state.pendingApproval, state.pendingPlan, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); }, [state.pendingApproval, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
 
     // —— 本地斜杠命令 ——
     const runLocalSlash = (text: string): boolean => {
@@ -122,6 +127,9 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 return true;
             case "/clear":
                 state.clearRows();
+                return true;
+            case "/sessions":
+                void state.openSessionPicker();
                 return true;
             case "/help":
                 state.pushInfo(S.helpText(modelDisplay, state.getThinkingLevel(), getLocale()));
@@ -219,6 +227,18 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
             else if (key.escape || (key.ctrl && ch === "g")) state.resolvePlan(false);
             return;
         }
+        if (state.pendingSessions) {
+            const list = state.pendingSessions.sessions;
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + list.length) % list.length);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % list.length);
+            else if (key.return) {
+                const sel = list[Math.min(selectIdxRef.current, list.length - 1)];
+                state.resolveSession(sel?.sessionId ?? null);
+            }
+            else if (key.escape || (key.ctrl && ch === "g")) state.resolveSession(null);
+            return;
+        }
+        if (key.ctrl && ch === "t") { state.toggleShowThinking(); return; }
         if (key.ctrl && ch === "g") { state.abortCurrent(); return; }
         if (slashVisible) {
             const list = filteredCommands;
@@ -250,7 +270,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
             <Static items={staticItems}>
                 {(item) => item.kind === "__header"
                     ? <TopPanel key="header" cwd={CWD} cols={cols} />
-                    : <RowView key={item.id} row={item} wrapW={wrapW} />}
+                    : <RowView key={item.id} row={item} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />}
             </Static>
 
             {/* 动态区：流式尾巴 + 任务面板 + 模态 + 输入 + 状态 */}
@@ -260,7 +280,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 </Box>
 
                 <Box flexDirection="column" paddingX={1}>
-                    {dynamicRows.map((row) => <RowView key={row.id} row={row} wrapW={wrapW} />)}
+                    {dynamicRows.map((row) => <RowView key={row.id} row={row} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />)}
                     {state.busy ? (
                         <Box marginTop={0.5}><Text color={THEME.coralBright}>● {S.generating}</Text></Box>
                     ) : null}
@@ -272,6 +292,9 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                     ) : null}
                     {state.pendingPlan ? (
                         <PlanModal plan={state.pendingPlan.plan} selectedIndex={selectIdx} wrapW={wrapW} />
+                    ) : null}
+                    {state.pendingSessions ? (
+                        <SessionPicker sessions={state.pendingSessions.sessions} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {slashVisible ? (
                         <SlashMenu entries={filteredCommands} selectedIndex={selectIdx} cols={cols} />

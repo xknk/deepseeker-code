@@ -18,6 +18,8 @@ export const THEME = {
     divider: "#4B5563",
     /** 分区/工具卡边框 */
     blue: "#38bdf8",
+    /** 工具卡头行淡色背景底（暗蓝灰，truecolor 终端下柔和区分头行与结果行）。 */
+    toolPillBg: "#1c2738",
     /** 状态 */
     ok: "#34d399",
     warn: "#fbbf24",

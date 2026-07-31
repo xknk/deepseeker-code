@@ -75,6 +75,23 @@ export const resultPreview = (result: string | undefined, max = 600): string => 
     return s.length > max ? `${s.slice(0, max)}…` : s;
 };
 
+/** 工具主参数短预览（紧凑头行用）：优先取 path/command/query/url 等键的值，退回紧凑 JSON；单行截断。
+ *  刻意排除 content 等大字段——如 create_file 只展示 path，不把正文糊到头行。 */
+export const argHint = (args: unknown, max = 60): string => {
+    if (args == null || args === "") return "";
+    if (typeof args === "string") return truncateMiddle(args, max);
+    if (typeof args === "object") {
+        const o = args as Record<string, unknown>;
+        const keys = ["path", "file", "filePath", "filename", "command", "cmd", "query", "url", "pattern", "name"];
+        for (const k of keys) {
+            const v = o[k];
+            if (typeof v === "string" && v) return truncateMiddle(v, max);
+        }
+        try { return truncateMiddle(JSON.stringify(args), max); } catch { return ""; }
+    }
+    return "";
+};
+
 /** 按 toolName 查 CustomTool（agentTools 为可变数组，须在 initEngine 后调用）。 */
 export const findTool = (toolName: string) =>
     agentTools.find((t) => (t.function as { name?: string }).name === toolName);

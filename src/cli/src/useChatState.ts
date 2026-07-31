@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
-import { getOrCreateSessionId } from "@/session/store.ts";
+import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
@@ -18,7 +18,8 @@ import type { ApprovalDecision } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { createCliRequestApproval } from "./cliHost.ts";
-import { getLocale } from "./strings.ts";
+import { S, getLocale } from "./strings.ts";
+import { truncateMiddle } from "./util.ts";
 
 /** 一行转录（线性消息流）。 */
 export type ChatRow =
@@ -37,12 +38,79 @@ export type ChatRow =
         result?: string;
         ok?: boolean;
         status: "running" | "done";
+        /** 运行中最新进度片段（tool.progress，如 run_command 的 stdout 末行）；done 后不展示。 */
+        progress?: string;
     };
 
 /** 待审批请求（模态驱动）。 */
 export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
 /** 待审批方案（计划模式两阶段）。 */
 export type PendingPlan = { plan: string; resolve: (v: boolean) => void };
+/** 待选择的历史会话（/sessions 选择器）。resolve(null)=取消。 */
+export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string | null) => void };
+
+/**
+ * 从转录消息重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。
+ * - user → user 行；assistant.reasoning_content → thinking 行（已完成态、无耗时）；
+ *   assistant.content → assistant 行；assistant.tool_calls 先占位 running，待配对 role:"tool" 回填为 done；
+ * - system 等其它角色跳过（不向用户展示）。损坏/缺字段静默降级，不抛错。
+ */
+const buildReplayRows = (msgs: any[], nid: () => number): ChatRow[] => {
+    const rows: ChatRow[] = [];
+    /** tool_call_id → 占位行 id，待 tool 结果回填。 */
+    const pending = new Map<string, number>();
+    for (const m of msgs) {
+        const role = m?.role;
+        if (role === "user") {
+            const text = typeof m.content === "string" ? m.content
+                : Array.isArray(m.content)
+                    ? (m.content as any[]).filter((p) => typeof p?.text === "string").map((p) => p.text).join("")
+                    : "";
+            if (text.trim()) rows.push({ id: nid(), kind: "user", text });
+        } else if (role === "assistant") {
+            if (typeof m.reasoning_content === "string" && m.reasoning_content.trim()) {
+                rows.push({ id: nid(), kind: "thinking", text: m.reasoning_content, expanded: false, streaming: false, startedAt: 0 });
+            }
+            if (typeof m.content === "string" && m.content.trim()) {
+                rows.push({ id: nid(), kind: "assistant", text: m.content });
+            }
+            if (Array.isArray(m.tool_calls)) {
+                for (const tc of m.tool_calls) {
+                    const tcId = typeof tc?.id === "string" ? tc.id : "";
+                    const name = tc?.function?.name ?? "(tool)";
+                    let args: unknown;
+                    try { args = tc?.function?.arguments ? JSON.parse(tc.function.arguments) : undefined; } catch { args = tc?.function?.arguments; }
+                    const rowId = nid();
+                    rows.push({ id: rowId, kind: "tool", toolCallId: tcId, toolName: name, args, status: "running" });
+                    if (tcId) pending.set(tcId, rowId);
+                }
+            }
+        } else if (role === "tool") {
+            const tcId = typeof m?.tool_call_id === "string" ? m.tool_call_id : "";
+            const content = typeof m?.content === "string" ? m.content : "";
+            const rowId = tcId ? pending.get(tcId) : undefined;
+            if (rowId != null) {
+                const idx = rows.findIndex((r) => r.id === rowId);
+                if (idx >= 0) {
+                    const r = rows[idx] as Extract<ChatRow, { kind: "tool" }>;
+                    rows[idx] = { ...r, result: content, ok: true, status: "done" };
+                }
+                pending.delete(tcId);
+            } else {
+                rows.push({ id: nid(), kind: "tool", toolCallId: tcId, toolName: "(tool)", result: content, ok: true, status: "done" });
+            }
+        }
+    }
+    // 收尾：仍有 running 占位（被中断、无 tool 结果）→ 标记 done，避免回放里永挂「运行中」。
+    for (const rowId of pending.values()) {
+        const idx = rows.findIndex((r) => r.id === rowId);
+        if (idx >= 0) {
+            const r = rows[idx] as Extract<ChatRow, { kind: "tool" }>;
+            rows[idx] = { ...r, result: r.result ?? "", ok: false, status: "done" };
+        }
+    }
+    return rows;
+};
 
 /** 流式缓冲 flush 间隔：过小易闪屏，过大跟手略迟（约 20fps）。 */
 const FLUSH_MS = 50;
@@ -67,8 +135,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [todos, setTodos] = useState<Todo[]>([]);
     const [busy, setBusy] = useState(false);
     const [aborting, setAborting] = useState(false);
+    /** 是否展开显示思考全文（Ctrl+T 切换；仅对 streaming 思考生效，已完成思考恒收起）。 */
+    const [showThinkingText, setShowThinkingText] = useState(false);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
     const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
+    const [pendingSessions, setPendingSessions] = useState<PendingSessions | null>(null);
 
     const nextId = useRef(1);
     const assistantStreamingId = useRef<number | null>(null);
@@ -77,6 +148,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const textBuffer = useRef("");
     const thinkingBuffer = useRef("");
     const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** 待 flush 的工具进度（运行中工具的最新片段，节流并入主 flush，避免逐行 stdout 渲染风暴）。 */
+    const progressPending = useRef<{ id: number; msg: string } | null>(null);
 
     const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
     const currentAcRef = useRef<AbortController | null>(null);
@@ -92,21 +165,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
     const lastUsageRef = useRef<TraceBase['usage'] | null>(null);
 
-    // ★ --resume：挂载时回放历史转录（只读 user/assistant 文本），让用户看到先前对话。
+    // ★ --resume：挂载时回放历史转录（user/assistant/tool/thinking），让用户看到先前对话。
     //   模型上下文由 buildContextMessages 从同一 transcript 读取，二者一致。
     useEffect(() => {
         if (!initialSessionId) return;
         void (async () => {
             try {
                 const msgs = await readMessages(initialSessionId);
-                const seeded: ChatRow[] = [];
-                for (const m of msgs) {
-                    const role = (m as { role?: string }).role;
-                    const content = (m as { content?: unknown }).content;
-                    if (typeof content !== "string" || !content.trim()) continue;
-                    if (role === "user") seeded.push({ id: newRowId(), kind: "user", text: content });
-                    else if (role === "assistant") seeded.push({ id: newRowId(), kind: "assistant", text: content });
-                }
+                const seeded = buildReplayRows(msgs, newRowId);
                 if (seeded.length) setRows(seeded);
             } catch { /* 无历史或读取失败 → 空回放，不阻塞 */ }
         })();
@@ -124,14 +190,18 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
         const tBuf = textBuffer.current;
         const thBuf = thinkingBuffer.current;
+        const pp = progressPending.current;
         textBuffer.current = "";
         thinkingBuffer.current = "";
-        if (!tBuf && !thBuf) return;
+        progressPending.current = null;
+        if (!tBuf && !thBuf && !pp) return;
         const aId = assistantStreamingId.current;
         const thId = thinkingStreamingId.current;
         setRows((prev) => prev.map((row) => {
             if (tBuf && row.id === aId && row.kind === "assistant") return { ...row, text: row.text + tBuf };
             if (thBuf && row.id === thId && row.kind === "thinking") return { ...row, text: row.text + thBuf };
+            // 运行中工具进度：覆盖式更新最新片段（ToolCard 只在 running 时展示）
+            if (pp && row.id === pp.id && row.kind === "tool") return { ...row, progress: pp.msg };
             return row;
         }));
     }, []);
@@ -237,10 +307,19 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }
                 break;
             }
+            case "tool.progress": {
+                // 实时 stdout 等：节流并入 flush（覆盖运行中工具的最新片段），避免逐块 setRows 渲染风暴。
+                //   注意字段名是 toolsId（与 tool.start/end 的 toolCallId 同值不同名）。
+                const pid = toolRowByCallId.current.get(obj.toolsId as string);
+                if (pid != null) {
+                    progressPending.current = { id: pid, msg: (obj.message as string) ?? "" };
+                    scheduleFlush();
+                }
+                break;
+            }
             case "round.start": {
+                // 仅收尾当前流式行；不渲染轮次分割线（对齐 Claude Code：连续流，不暴露内部轮次）。
                 closeStreaming();
-                const id = newRowId();
-                setRows((prev) => [...prev, { id, kind: "meta", text: `第 ${obj.round} 轮` }]);
                 break;
             }
             case "plan.enterRequested": {
@@ -338,9 +417,16 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         } catch (e) {
             pushEvent({ type: "error", message: e instanceof Error ? e.message : String(e) });
         } finally {
+            // ★ 中止收尾（问题4）：信号链路已打通（ac.signal → runAgent → SDK），此处补 CLI 侧状态/反馈——
+            //   复位 aborting（原仅在下一次 runOnce 开头复位 → 中止后状态条永远卡"中止中"），并追加可见确认行。
+            if (ac.signal.aborted) {
+                flush();
+                setRows((prev) => [...prev, { id: nextId.current++, kind: "meta", text: "🛑 已中止生成" }]);
+            }
+            setAborting(false);
             currentAcRef.current = null;
         }
-    }, [askApproval, onTrace, pushEvent]);
+    }, [askApproval, flush, onTrace, pushEvent]);
 
     /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。 */
     const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
@@ -390,10 +476,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         ac.abort();
     }, []);
 
-    const toggleThinking = useCallback((id: number) => {
-        setRows((prev) => prev.map((row) =>
-            row.kind === "thinking" && row.id === id ? { ...row, expanded: !row.expanded } : row));
-    }, []);
+    /** Ctrl+T：切换思考全文显示（仅对 streaming 思考生效；已完成思考进 Static 冻结恒收起）。 */
+    const toggleShowThinking = useCallback(() => setShowThinkingText((v) => !v), []);
 
     const clearRows = useCallback(() => {
         flush();
@@ -401,6 +485,30 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setTodos([]);
         toolRowByCallId.current.clear();
     }, [flush]);
+
+    // —— 历史会话载入（/sessions 选择器） ——
+    /** 载入指定会话：切换 sessionId + 清屏 + 回放转录，后续 submit 即续接此会话。 */
+    const loadSession = useCallback(async (id: string) => {
+        sessionIdRef.current = id;
+        clearRows();
+        try {
+            const msgs = await readMessages(id);
+            const seeded = buildReplayRows(msgs, newRowId);
+            if (seeded.length) setRows(seeded);
+        } catch { /* 无历史或读取失败 → 空回放，不阻塞 */ }
+        pushInfo(`📂 ${S.sessionLoaded(truncateMiddle(id, 12))}`);
+    }, [clearRows, pushInfo]);
+    /** 关闭选择器并回传结果（null=取消）。 */
+    const resolveSession = useCallback((id: string | null) => {
+        setPendingSessions((prev) => { prev?.resolve(id); return null; });
+    }, []);
+    /** 唤出 /sessions 选择器：枚举历史 → 模态选择 → 选定即载入。 */
+    const openSessionPicker = useCallback(async () => {
+        const sessions = await listSessions();
+        if (sessions.length === 0) { pushInfo(S.noHistory); return; }
+        const picked = await new Promise<string | null>((resolve) => setPendingSessions({ sessions, resolve }));
+        if (picked) await loadSession(picked);
+    }, [pushInfo, loadSession]);
 
     /** /model 设置模型覆盖（透传 RunAgentOptions.model）。 */
     const setModelOverride = useCallback((m: string) => { modelRef.current = m; }, []);
@@ -413,13 +521,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, todos, busy, aborting, pendingApproval, pendingPlan,
+        rows, todos, busy, aborting, showThinkingText, pendingApproval, pendingPlan, pendingSessions,
         sessionIdRef,
         // 动作
         submit, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, setPlan, resolvePlan,
-        toggleThinking, clearRows, setModelOverride, setPlanMode, getPlanMode,
+        toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode,
         setThinkingLevel, getThinkingLevel,
+        openSessionPicker, resolveSession, loadSession,
     };
 };
 

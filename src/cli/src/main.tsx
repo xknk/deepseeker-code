@@ -1,7 +1,7 @@
 /**
  * @file cli/src/main.tsx
  * @description CLI 入口：argv 解析 → 校验 DEEP_SEEK_API_KEY → 语言/信任启动询问 → initEngine → render(<App/>)。
- *  运行：npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx [--resume <id>] [--plan]
+ *  运行：npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx [--resume <id>] [--continue] [--plan]
  *
  *  ★ 核心/Agent 模块用动态 import：createModel.ts 在模块加载期即构造 OpenAI client，
  *    无 key 时会在静态 import 求值阶段抛错（早于 main 体）。延迟到 key 校验之后再加载，
@@ -19,13 +19,14 @@ import { readLocale, writeLocale } from "./prefs.ts";
 import { isTrustedDir, trustDir } from "@/trust/index.ts";
 import type { Locale } from "@/common/index.ts";
 
-/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p。 */
-const parseArgs = (argv: string[]): { resume?: string; plan?: boolean } => {
-    const out: { resume?: string; plan?: boolean } = {};
+/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c。 */
+const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; continue?: boolean } => {
+    const out: { resume?: string; plan?: boolean; continue?: boolean } = {};
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--resume" || a === "-r") out.resume = argv[++i];
         else if (a === "--plan" || a === "-p") out.plan = true;
+        else if (a === "--continue" || a === "-c") out.continue = true;
     }
     return out;
 };
@@ -92,6 +93,17 @@ const askChoice = async (
 };
 
 const main = async (): Promise<void> => {
+    // ★ 静默 core 层 console.log/warn/info/debug：Ink 靠「自己写到 stdout 的内容」追踪光标行数，决定下一帧
+    //   擦除几行。core（runAgent 的 🤖/🔄、guard 的审批、各 loader 的 warn 等）在渲染期间把 console.* 写进
+    //   stdout → 打乱 Ink 行数追踪 → 工具行叠影、输入框/状态条错位、日志污染画面。
+    //   CLI 模式把它们重定向为 no-op，让 Ink 独占 stdout（启动横幅用 process.stdout.write 不受影响；
+    //   console.error 仍进 stderr，罕见且不致乱）。需要调试时注释掉本段即可恢复日志。
+    const silence = (): void => {};
+    console.log = silence;
+    console.info = silence;
+    console.debug = silence;
+    console.warn = silence;
+
     const args = parseArgs(process.argv.slice(2));
 
     // ★ 模型密钥前置校验（核心 OpenAI client 经 DEEP_SEEK_API_KEY 配置）。
@@ -158,8 +170,16 @@ const main = async (): Promise<void> => {
     };
     process.stdout.write(S.startupBanner(cwd, appConfig.userWorkspaceDir, cwdIsHome()));
 
+    // ★ --continue/-c：无显式 --resume 时，自动续接本工作区最近一次会话（对标 cc -c）。
+    //   取 sessions 目录里 updatedAt 最新的主会话 id；无历史则回落到全新会话（resumeId 留空）。
+    let resumeId = args.resume;
+    if (!resumeId && args.continue) {
+        const { getMostRecentSessionId } = await import("@/session/store.ts");
+        resumeId = (await getMostRecentSessionId()) ?? undefined;
+    }
+
     const { waitUntilExit } = render(
-        <App resumeSessionId={args.resume} initialPlanMode={args.plan} />,
+        <App resumeSessionId={resumeId} initialPlanMode={args.plan} />,
         // exitOnCtrlC:false：Ctrl+C 交由 App useInput 处理（统一退出/中止语义）；
         // patchConsole:false：避免 console 劫持与全屏重绘叠加闪屏。
         { exitOnCtrlC: false, patchConsole: false },

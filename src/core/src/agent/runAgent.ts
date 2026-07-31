@@ -581,7 +581,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                                 //   signal 透传：用户停止时后台 generator 立即收尾 + 释放锁，避免孤儿后台任务
                                 result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
                             } else {
-                                result = await collectToolResult(execRet);
+                                // ★ 实时 stdout：流式工具（run_command 等）逐块 yield → onChunk → toolCtx.emitProgress
+                                //   → tool.progress UIEvent，前端即可在命令运行期间看到逐行输出，而非结束后才整块到达。
+                                result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk));
                             }
                             // verifyResult 判定：工具自报成败，FAILED 时前置警告（防模型对报错产生“成功”幻觉）
                             if (matchedTool.function.verifyResult) {
