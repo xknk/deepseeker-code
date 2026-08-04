@@ -10,7 +10,7 @@
  *  合法字段由 loader 校验（至少需 name + description）。本解析器只负责结构切分。
  */
 
-export interface ParsedSkill {
+export interface ParsedFrontmatter {
     frontmatter: Record<string, string>;
     body: string;
 }
@@ -19,7 +19,7 @@ export interface ParsedSkill {
  * 解析 SKILL.md 原文。
  * @returns 成功返回 { frontmatter, body }；无闭合 frontmatter 块返回 null。
  */
-export const parseSkillFile = (raw: string): ParsedSkill | null => {
+export const parseFrontmatter = (raw: string): ParsedFrontmatter | null => {
     const lines = raw.split(/\r?\n/);
     if (lines.length === 0 || lines[0].trim() !== "---") return null;
 

@@ -7,6 +7,7 @@
  *     （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary槽）；
  *   - 用唯一标记【项目指引】幂等：已含则切除旧块再重接（支持热更新）。
  */
+import { injectMarkedBlock } from "@/common/index.ts";
 import { getProjectGuide } from "./loader.ts";
 
 const PROJECT_GUIDE_MARKER = "【项目指引】";
@@ -21,14 +22,6 @@ const PROJECT_GUIDE_HINT = "以上为项目根目录的 AI 行为指引（自动
 export const injectProjectGuide = (message: any[]): void => {
     const guide = getProjectGuide();
     if (!guide) return; // 无指引不动 system prompt
-
-    const sys = message[0];
-    if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
-
-    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 罕用，不会被正文复述误触发）
-    if (sys.content.includes(PROJECT_GUIDE_FENCE)) {
-        sys.content = sys.content.split(PROJECT_GUIDE_FENCE)[0].trimEnd();
-    }
-
-    sys.content += `\n\n${PROJECT_GUIDE_FENCE}\n${PROJECT_GUIDE_MARKER}\n（via ${guide.name}）\n${guide.body}\n\n${PROJECT_GUIDE_HINT}`;
+    // 追加/切除逻辑统一走 common.injectMarkedBlock（skills/agents/projectGuide 共用）
+    injectMarkedBlock(message, PROJECT_GUIDE_FENCE, `${PROJECT_GUIDE_MARKER}\n（via ${guide.name}）\n${guide.body}\n\n${PROJECT_GUIDE_HINT}`);
 };

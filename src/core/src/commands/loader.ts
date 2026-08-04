@@ -11,14 +11,14 @@
  *   - 项目级（最高）：<cwd>/.deepSeekCode/commands/<name>.md
  *
  *  布局：扁平 <name>.md（命令是单文件 prompt 模板无附属资源，比 <name>/COMMAND.md 更易写）。
- *  frontmatter 复用 skills/frontmatter.ts 的 parseSkillFile（结构通用，key:value + 正文）。
+ *  frontmatter 复用 skills/frontmatter.ts 的 parseFrontmatter（结构通用，key:value + 正文）。
  *  命令不注入工具（与 skills 不同），故 initCommands 无 into 参数。
  */
 import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
-import { parseSkillFile } from "@/skills/frontmatter.ts";
+import { parseFrontmatter } from "@/skills/frontmatter.ts";
 import { registerCommand, listCommands, CommandManifest, CommandSource } from "./registry.ts";
 
 /** 内置命令目录：本文件所在目录下的 builtin/ */
@@ -47,7 +47,7 @@ const parseCommandAt = async (file: string, source: CommandSource): Promise<Comm
     } catch {
         return null;
     }
-    const parsed = parseSkillFile(raw);
+    const parsed = parseFrontmatter(raw);
     if (!parsed) {
         console.warn(`⚠️ [commands] frontmatter 格式无效（${file}），已跳过`);
         return null;

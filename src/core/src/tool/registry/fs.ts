@@ -51,6 +51,26 @@ export const maskSecretsInContent = (_args: any, output: string): string => {
         // 整段 PEM 私钥块
         .replace(/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[MASKED_SECRET (private key block)]');
 };
+
+/** 原子写临时路径：absPath + 时间戳 + 随机段（防同目录同毫秒并发碰撞）。create_file / write_file 共用。 */
+const makeTmpPath = (absPath: string): string =>
+    `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
+
+/**
+ * 读保护闸门：敏感凭证文件拒读 + .gitignore/通用忽略跳过。read_file / view_symbol_outline 共用。
+ * @returns 拦截时返回提示字符串（直接 return 给模型）；放行返回 null。
+ */
+const assertReadable = async (relForCheck: string, displayPath: string): Promise<string | null> => {
+    if (isSensitiveReadTarget(relForCheck)) {
+        return `🔒 [安全拦截]：[${displayPath}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝读取以防机密外泄。如确需查看请人工处理。`;
+    }
+    await initializeWorkspaceIgnore();
+    if (checkIsPathIgnored(relForCheck)) {
+        return `🚫 [忽略规则]：[${displayPath}] 命中 .gitignore / 通用忽略规则，已跳过。`;
+    }
+    return null;
+};
+
 export const fsTools: CustomTool[] = [
     {
         type: "function",
@@ -81,13 +101,8 @@ export const fsTools: CustomTool[] = [
                     //   1) 敏感凭证文件硬黑名单 → 直接拒读；
                     //   2) .gitignore / 通用忽略规则 → 跳过（与 list_dir 同口径，避免读到 .env 等被忽略产物）。
                     const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
-                    if (isSensitiveReadTarget(relForCheck)) {
-                        return `🔒 [安全拦截]：[${args.path}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝明文读取以防机密外泄。如确需查看请人工处理。`;
-                    }
-                    await initializeWorkspaceIgnore();
-                    if (checkIsPathIgnored(relForCheck)) {
-                        return `🚫 [忽略规则]：[${args.path}] 命中 .gitignore / 通用忽略规则，已跳过读取。`;
-                    }
+                    const readBlock = await assertReadable(relForCheck, args.path);
+                    if (readBlock) return readBlock;
 
                     // 1. 先用最轻量的方式获取文件总行数（可选，若不需要显示 totalLines，甚至可以省略这一步以追求极致性能）
                     // 这里提供一个仅针对所需区间的高效单次流读取方案：
@@ -293,7 +308,7 @@ export const fsTools: CustomTool[] = [
                     // 💡 原子写入防御（Atomic Write）：先写同目录 .tmp 再 rename 瞬间落地，
                     //   避免写中途被中断/熔断导致文件变空或受损
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（rename 前夕再 realpath）
-                    tmpPath = `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`; // ★ 与 write_file 对齐：加随机段防同目录同毫秒并发 tmp 碰撞
+                    tmpPath = makeTmpPath(absPath);
                     await fs.writeFile(tmpPath, content, "utf-8");
                     await fs.rename(tmpPath, absPath); // 操作系统层面的原子覆盖
 
@@ -418,7 +433,7 @@ export const fsTools: CustomTool[] = [
                     await fs.mkdir(path.dirname(absPath), { recursive: true });
 
                     // 💡 优化 1：生成一个带有随机时戳或标识的临时文件路径
-                    tmpPath = `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
+                    tmpPath = makeTmpPath(absPath);
 
                     // 💡 优化 2：全量写入临时文件（即使这里断电或被超时强杀，也不会污染和破坏原文件）
                     await fs.writeFile(tmpPath, args.content, "utf-8");
@@ -460,13 +475,8 @@ export const fsTools: CustomTool[] = [
                     const absPath = resolveSafePath(args.path);
                     // ★ 读保护三道闸（与 read_file 对称）：敏感凭证文件拒读 + .gitignore 忽略跳过
                     const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
-                    if (isSensitiveReadTarget(relForCheck)) {
-                        return `🔒 [安全拦截]：[${args.path}] 属于敏感凭证文件，已拒绝分析以防机密外泄。`;
-                    }
-                    await initializeWorkspaceIgnore();
-                    if (checkIsPathIgnored(relForCheck)) {
-                        return `🚫 [忽略规则]：[${args.path}] 命中 .gitignore / 通用忽略规则，已跳过。`;
-                    }
+                    const readBlock = await assertReadable(relForCheck, args.path);
+                    if (readBlock) return readBlock;
                     // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，
                     //   read_file 已分片，本工具补同口径防护（1MB 上限）。
                     const statForSize = await fs.stat(absPath);

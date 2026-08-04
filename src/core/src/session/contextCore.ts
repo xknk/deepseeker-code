@@ -122,8 +122,8 @@ export const splitUntils = (messagesArr: Msg[], keepUnits: number) => {
             keepRecent: messagesArr
         }
     }
-    return {
-        toCompact: units.splice(0, units.length - keepUnits).flat(), // 截取需要提取成摘要的上下文并扁平化上下文信息
-        keepRecent: units.slice(units.length - keepUnits).flat(), // 截取需要保留的上下文
-    }
+    // ★ splice 就地移除前部（toCompact）后，units 仅剩尾部 keepUnits 个单元（即 keepRecent）。
+    //   原 units.slice(units.length - keepUnits) 在 splice 之后等价于 slice(0)，属冗余，已移除。
+    const toCompact = units.splice(0, units.length - keepUnits).flat();
+    return { toCompact, keepRecent: units.flat() };
 }

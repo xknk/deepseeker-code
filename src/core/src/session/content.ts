@@ -12,7 +12,7 @@
  *  从转录读取历史 → 跳过已归档条数 → 拼接 [system, 摘要槽, ...active, 本次user]。
  *  布局与 runAgent.ensureSummarySlot 保持一致；须在 appendMessage(本次user) 之前调用。
  */
-import { cleanMsg, estimateTokens, groupUnits, Msg } from "./contextCore.ts";
+import { cleanMsg, Msg } from "./contextCore.ts";
 import { readMessages } from "./transcript.ts";
 import { getRollingState } from "./store.ts";
 /**

@@ -7,6 +7,7 @@
  *     （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary槽）；
  *   - 用唯一标记【可用技能目录】幂等：已含则切除旧块再重接（支持清单热更新）。
  */
+import { injectMarkedBlock } from "@/common/index.ts";
 import { getSkillCatalog } from "./registry.ts";
 
 const SKILL_CATALOG_MARKER = "【可用技能目录】";
@@ -22,14 +23,6 @@ const SKILL_USAGE_HINT = "当你判断当前任务匹配某个技能时，调用
 export const injectSkillCatalog = (message: any[]): void => {
     const catalog = getSkillCatalog();
     if (!catalog) return; // 无 skill 不动 system prompt
-
-    const sys = message[0];
-    if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
-
-    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 是罕用串，不会被 description 复述误触发），支持清单热更新
-    if (sys.content.includes(SKILL_CATALOG_FENCE)) {
-        sys.content = sys.content.split(SKILL_CATALOG_FENCE)[0].trimEnd();
-    }
-
-    sys.content += `\n\n${SKILL_CATALOG_FENCE}\n${SKILL_CATALOG_MARKER}\n${catalog}\n\n${SKILL_USAGE_HINT}`;
+    // 追加/切除逻辑统一走 common.injectMarkedBlock（skills/agents/projectGuide 共用）
+    injectMarkedBlock(message, SKILL_CATALOG_FENCE, `${SKILL_CATALOG_MARKER}\n${catalog}\n\n${SKILL_USAGE_HINT}`);
 };

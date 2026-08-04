@@ -17,7 +17,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
 import { CustomTool } from "@/tool/type.ts";
-import { parseSkillFile } from "./frontmatter.ts";
+import { parseFrontmatter } from "./frontmatter.ts";
 import { registerSkill, listSkills, SkillManifest, SkillSource } from "./registry.ts";
 import { skillTools } from "@/tool/registry/skill.ts";
 
@@ -47,7 +47,7 @@ const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource)
     } catch {
         return null; // 无 SKILL.md 静默跳过
     }
-    const parsed = parseSkillFile(raw);
+    const parsed = parseFrontmatter(raw);
     if (!parsed) {
         console.warn(`⚠️ [skills] frontmatter 格式无效（${skillFile}），已跳过`);
         return null;

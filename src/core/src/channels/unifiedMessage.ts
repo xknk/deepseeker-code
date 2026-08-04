@@ -9,7 +9,7 @@
 /**
  * @file channels/unifiedMessage.ts
  * @description 统一消息协议：定义跨渠道的入站（UnifiedInboundMessage）/ 出站（UnifiedOutboundMessage）
- *  消息结构，以及从 WebChat 请求体构造入站消息的适配器 createInboundFromWebChatBody。
+ *  消息结构。
  */
 
 /**
@@ -36,29 +36,4 @@ export interface UnifiedOutboundMessage {
      * key-value 结构，方便不同场景自定义。
      */
     metadata?: Record<string, unknown>;
-}
-/**
- * 从 WebChat 的请求体构造入站消息：校验 message 为非空字符串后，
- * 规范化 sessionId / model 并补上时间戳；校验失败返回 null。
- */
-export function createInboundFromWebChatBody(body: unknown): UnifiedInboundMessage | null {
-    if (!body || typeof body !== "object") return null;
-    const anyBody = body as {
-        message?: unknown; // 消息
-        sessionId: string; // 会话键
-        model?: unknown;
-    };
-    // 2. 核心字段校验：消息内容必须是字符串
-    if (typeof anyBody.message !== "string" || anyBody.message.trim() === "") {
-        return null;
-    }
-
-    const sessionId = anyBody.sessionId.trim()
-    const model = typeof anyBody.model === "string" && anyBody.model.trim() !== "" ? anyBody.model.trim() : undefined;
-    return {
-        sessionId,
-        content: anyBody.message,
-        timestamp: new Date().toISOString(),
-        model
-    }
 }

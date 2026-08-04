@@ -7,6 +7,7 @@
  *   - 用唯一标记【可用子 Agent 目录】幂等：已含则切除旧块再重接（支持清单热更新）。
  *  缓存安全：catalog 不变时 split-reappend 产出字节稳定内容，跨轮/跨 turn 命中 DeepSeek 前缀缓存。
  */
+import { injectMarkedBlock } from "@/common/index.ts";
 import { getAgentCatalog } from "./registry.ts";
 
 const AGENT_CATALOG_MARKER = "【可用子 Agent 目录】";
@@ -22,14 +23,6 @@ const AGENT_USAGE_HINT =
 export const injectAgentCatalog = (message: any[]): void => {
     const catalog = getAgentCatalog();
     if (!catalog) return; // 无声明式 agent 不动 system prompt
-
-    const sys = message[0];
-    if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
-
-    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 罕用，不会被复述误触发），支持清单热更新
-    if (sys.content.includes(AGENT_CATALOG_FENCE)) {
-        sys.content = sys.content.split(AGENT_CATALOG_FENCE)[0].trimEnd();
-    }
-
-    sys.content += `\n\n${AGENT_CATALOG_FENCE}\n${AGENT_CATALOG_MARKER}\n${catalog}\n\n${AGENT_USAGE_HINT}`;
+    // 追加/切除逻辑统一走 common.injectMarkedBlock（skills/agents/projectGuide 共用）
+    injectMarkedBlock(message, AGENT_CATALOG_FENCE, `${AGENT_CATALOG_MARKER}\n${catalog}\n\n${AGENT_USAGE_HINT}`);
 };

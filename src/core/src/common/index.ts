@@ -90,3 +90,23 @@ export const atomicWriteJSON = async (file: string, value: unknown): Promise<voi
         throw e;
     }
 };
+
+// ============ 系统提示词幂等注入（skills/agents/projectGuide 共用）============
+/**
+ * 向 message[0].content 幂等追加一个带 fence 锚点的块：
+ *  - 只追加到 system 消息，绝不新增数组元素、绝不改下标 0/1
+ *    （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary 槽）；
+ *  - 用 fence（罕用定长串）作切除锚点：重复注入时先按 fence 切除旧块再重接（支持清单热更新）。
+ *    fence 用罕用串而非人可读标题，避免标题被内容复述导致 split 误切其后全部注入。
+ * @param message 上下文数组（原地修改 message[0].content）
+ * @param fence   切除/重接锚点（罕用串，由调用方定义）
+ * @param body    要注入的块正文（含人可读标题 + 清单）
+ */
+export const injectMarkedBlock = (message: any[], fence: string, body: string): void => {
+    const sys = message[0];
+    if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
+    if (sys.content.includes(fence)) {
+        sys.content = sys.content.split(fence)[0].trimEnd();
+    }
+    sys.content += `\n\n${fence}\n${body}`;
+};

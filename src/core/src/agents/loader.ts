@@ -18,7 +18,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
 import { CustomTool } from "@/tool/type.ts";
-import { parseSkillFile } from "@/skills/frontmatter.ts";
+import { parseFrontmatter } from "@/skills/frontmatter.ts";
 import { registerAgent, listAgents, AgentManifest, AgentSource } from "./registry.ts";
 
 /** 内置 agent 目录：本文件所在目录下的 builtin/ */
@@ -48,7 +48,7 @@ const parseAgentAt = async (file: string, dir: string, source: AgentSource): Pro
     } catch {
         return null; // 读取失败静默跳过
     }
-    const parsed = parseSkillFile(raw);
+    const parsed = parseFrontmatter(raw);
     if (!parsed) {
         console.warn(`⚠️ [agents] frontmatter 格式无效（${file}），已跳过`);
         return null;
@@ -62,7 +62,7 @@ const parseAgentAt = async (file: string, dir: string, source: AgentSource): Pro
         console.warn(`⚠️ [agents] name "${name}" 不合法（仅允许小写字母/数字/连字符，${file}），已跳过`);
         return null;
     }
-    // tools 用逗号分隔字符串（parseSkillFile 不支持 YAML 列表），split + trim，空/缺省为 []
+    // tools 用逗号分隔字符串（parseFrontmatter 不支持 YAML 列表），split + trim，空/缺省为 []
     const toolList = (tools ?? "").split(",").map(t => t.trim()).filter(Boolean);
     return {
         name,

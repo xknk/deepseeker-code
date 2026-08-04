@@ -53,11 +53,6 @@ export const getTranscriptPath = (sessionId: string): string => {
     return path.join(getSessionsDirPath(sessionId), `${sessionId}.jsonl`);
 }
 
-/**
- * @deprecated 历史别名，等价于 getStatePath（状态文件）。新代码请直接用 getStatePath / getTranscriptPath。
- */
-export const getStorePath = (sessionId: string): string => getStatePath(sessionId);
-
 /** 确保 sessions 文件夹存在（在数据目录下创建），并顺带做一次性历史文件迁移 */
 export const ensureSessionsDir = async (sessionId: string): Promise<void> => {
     // 💡 修复：确保是在 appConfig.dataDir 下创建 sessions 文件夹
