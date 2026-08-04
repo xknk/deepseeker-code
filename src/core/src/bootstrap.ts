@@ -14,6 +14,7 @@ import { initSkills } from "@/skills/loader.ts";
 import { initAgents } from "@/agents/loader.ts";
 import { initProjectGuide } from "@/projectGuide/loader.ts";
 import { initCommands } from "@/commands/loader.ts";
+import { sweepOrphanedWorktrees } from "@/tool/worktree/manager.ts";
 
 /**
  * 初始化引擎：Node 版本特性检测 + 7 步声明式加载。
@@ -29,6 +30,9 @@ export const initEngine = async (into: CustomTool[], opts?: { includeProject?: b
     if (typeof (AbortSignal as any).any !== "function" || typeof (AbortSignal as any).timeout !== "function") {
         console.error("❌ 当前 Node 版本缺少 AbortSignal.any/timeout（需 Node 20.3+），web_fetch 相关能力将不可用，建议升级 Node。");
     }
+    // ★ P2-13 worktree 孤儿清扫：进程重启 = 上次 run_workflow 未清理的 worktree 全是孤儿。启动期回收，
+    //   防 .git/worktrees 元数据与仓外工作树泄漏。best-effort，失败不阻断启动（非 git 仓库静默跳过）。
+    await sweepOrphanedWorktrees().catch((e) => console.warn(`⚠️ [worktree] 启动期清扫失败（已忽略）: ${e?.message ?? e}`));
     // 连接配置的 MCP 服务器，把其工具注入 into（无配置时静默跳过）。MCP 仅读全局 mcp.json，无项目级源，不受 includeProject 影响。
     await initMcpTools(into);
     // ★ 加载声明式 hooks（settings.json；无配置时静默跳过）。未信任时跳过项目级（hooks 会 spawn 执行命令，高风险）

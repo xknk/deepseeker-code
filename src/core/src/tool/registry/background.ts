@@ -14,6 +14,7 @@
  */
 import { spawn, execFile } from "child_process";
 import { promisify } from "util";
+import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { createUUID } from "@/common/index.ts";
@@ -249,4 +250,27 @@ export const backgroundTools: CustomTool[] = [
 /** 暴露注册表快照（供可观测/调试/未来 CLI 面板渲染使用，不含 proc 句柄） */
 export function listBackgroundTasks(): Omit<BgTask, "proc">[] {
     return Array.from(registry.values()).map(({ proc, ...rest }) => rest);
+}
+
+/**
+ * 终止所有 cwd 落在 dirPath 之下（含等于）的运行中后台任务（连同进程树）。
+ * worktree 移除前调用：避免 dev server 等常驻进程的 cwd 指向已被 git worktree remove 的目录。
+ * @returns 被终止的任务数
+ */
+export async function killBackgroundTasksUnder(dirPath: string): Promise<number> {
+    const norm = (p: string) => path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const target = norm(dirPath);
+    let killed = 0;
+    for (const task of registry.values()) {
+        if (task.status !== "running") continue;
+        const taskCwd = norm(task.cwd);
+        // taskCwd === target（cwd 正是该 worktree）或 taskCwd 以 target/ 开头（在 worktree 子目录）
+        if (taskCwd === target || taskCwd.startsWith(target + "/")) {
+            task.exitCode = task.exitCode ?? -1;
+            await killTree(task.proc).catch(() => { /* 进程可能已退出 */ });
+            task.status = "killed";
+            killed++;
+        }
+    }
+    return killed;
 }

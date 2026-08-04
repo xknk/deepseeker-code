@@ -22,6 +22,8 @@ export type StepOutcome = {
     ok: boolean;
     output: string;
     label: string;
+    /** worktree 隔离模式下，该子 agent 在其独立 worktree 的改动 diff（供父 agent/用户 apply patch）。 */
+    diff?: string;
 };
 
 /** 参数校验：非法返回错误串，合法返回 null（纯函数，可单测）。 */
@@ -64,18 +66,24 @@ export const buildPipelineTask = (step: WorkflowStep, prior: StepOutcome): strin
 /** 聚合格式化（纯函数，可单测；输入为已截断的 StepOutcome 列表）。 */
 export const formatWorkflowResult = (mode: "parallel" | "pipeline", results: StepOutcome[]): string => {
     if (results.length === 0) return "（工作流无结果）";
+    const hasAnyDiff = results.some(r => r.diff && r.diff.trim() && !r.diff.includes("无改动"));
+    const renderStep = (r: StepOutcome, i: number, prefix: string): string => {
+        const head = `${prefix} ${r.label}${r.ok ? "" : " ❌"}\n${r.output}`;
+        // worktree 模式：附该子 agent 的独立改动 diff（无改动则略）
+        if (r.diff && r.diff.trim() && !r.diff.includes("无改动")) {
+            return `${head}\n\n📦 worktree 改动 diff（${r.label}）：\n----- diff -----\n${r.diff}\n----- end diff -----`;
+        }
+        return head;
+    };
     if (mode === "pipeline") {
-        const parts = results.map((r, i) =>
-            `### 阶段 [${i + 1}] ${r.label}${r.ok ? "" : " ❌"}\n${r.output}`,
-        );
+        const parts = results.map((r, i) => renderStep(r, i, `### 阶段 [${i + 1}]`));
         const last = results[results.length - 1];
         const tail = `\n\n**🔗 流水线最终产出（阶段 ${results.length}）：**\n${last.output}`;
         return [`## 🔗 工作流·流水线结果（${results.length} 阶段）`, ...parts, tail].join("\n\n");
     }
-    const parts = results.map((r, i) =>
-        `### [${i + 1}] ${r.label}${r.ok ? "" : " ❌"}\n${r.output}`,
-    );
+    const parts = results.map((r, i) => renderStep(r, i, `### [${i + 1}]`));
     const failed = results.filter(r => !r.ok).length;
     const summary = failed === 0 ? "全部成功" : `${failed} 个失败`;
-    return [`## 🌐 工作流·并行结果（${results.length} 个子 agent，${summary}）`, ...parts].join("\n\n");
+    const iso = hasAnyDiff ? "·worktree 隔离" : "";
+    return [`## 🌐 工作流·并行结果（${results.length} 个子 agent，${summary}${iso}）`, ...parts].join("\n\n");
 };

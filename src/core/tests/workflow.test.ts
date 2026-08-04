@@ -169,4 +169,14 @@ describe("workflow/formatWorkflowResult（聚合格式化）", () => {
     it("空结果 → 兜底文案", () => {
         assert.match(formatWorkflowResult("parallel", []), /无结果/);
     });
+    it("parallel 含 diff：标题标 worktree 隔离、附 diff 段；无改动 diff 不展示", () => {
+        const out = formatWorkflowResult("parallel", [
+            { ok: true, output: "r1", label: "A", diff: "+ diff content A" },
+            { ok: true, output: "r2", label: "B", diff: "（该 worktree 相对基座无改动）" },
+        ]);
+        assert.match(out, /worktree 隔离/);
+        assert.match(out, /diff content A/);
+        assert.match(out, /📦 worktree 改动 diff（A）/);
+        assert.doesNotMatch(out, /📦 worktree 改动 diff（B）/, "无改动的 diff 段不应展示");
+    });
 });
