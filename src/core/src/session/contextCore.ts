@@ -25,13 +25,16 @@ const estimateTextTokens = (text: string): number => {
     if (!text) return 0;
     let cjk = 0;
     let rest = 0;
-    for (let i = 0; i < text.length; i++) {
-        const c = text.charCodeAt(i);
+    // ★ 用 codePointAt 按 Unicode 码点迭代：原 charCodeAt 把增补平面字符（emoji 等，占 2 个 UTF-16 code unit）
+    //   的代理对算作 2 个 rest，导致 token 估算偏高、过早触发压缩。现每个码点算 1，遇代理对跳过低位代理。
+    for (let i = 0; i < text.length;) {
+        const c = text.codePointAt(i)!;
         if (c >= 0x4e00 && c <= 0x9fff) {
             cjk++;
         } else {
             rest++;
         }
+        i += c > 0xffff ? 2 : 1; // 增补平面字符占 2 个 code unit，跳过低位代理
     }
     // 【核心微调】：针对 DeepSeek V4 优化的代码重构场景折算
     // 1. 中文字符依然保持 1:1（DeepSeek 的中文压缩率基本在这个范围）

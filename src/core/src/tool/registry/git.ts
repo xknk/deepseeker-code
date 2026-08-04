@@ -15,7 +15,7 @@ import { WORKSPACE_ROOT, resolveSafePath } from "../guard.ts";
 const execFileAsync = promisify(execFile);
 
 /** 统一 git 执行入口：锚定工作区根，限制缓冲，返回 { stdout, stderr }。 */
-function runGit(args: string[], maxBuffer = 1024 * 1024 * 3) {
+function runGit(args: string[], maxBuffer = 1024 * 1024 * 15) {
     return execFileAsync("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
 }
 
@@ -44,7 +44,15 @@ export const gitTools: CustomTool[] = [
                     const diffArgs = ["diff", "HEAD", "--no-color"];
                     if (args.path) diffArgs.push("--", resolveSafePath(args.path)); // ★ 统一过 resolveSafePath（拒越界 / ..），与其他 fs 工具口径一致
 
-                    const { stdout } = await runGit(diffArgs);
+                    // ★ maxBuffer 超限降级：大仓库全量 diff 常超 maxBuffer，Node 在 error.stdout 附已读取的
+                    //   截断内容——捕获后走下方的头尾截断，而非整体丢失（catch 只判 isNotARepoError）。
+                    let stdout: string;
+                    try {
+                        ({ stdout } = await runGit(diffArgs));
+                    } catch (e: any) {
+                        if (e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && typeof e.stdout === "string") stdout = e.stdout;
+                        else throw e;
+                    }
                     if (!stdout.trim()) {
                         return `[Git Diff]：当前工作区代码极其纯净，未发现任何相比于最新 Commit 的物理改动。`;
                     }

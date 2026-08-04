@@ -119,8 +119,10 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
             void killTree(child);
         }, timeoutMs);
 
-        child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-        child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+        // ★ 有界累加：超 MAX_OUTPUT 后停止吸收，防 hook 子进程在超时窗口（最长 300s）内
+        //   持续输出大日志把内存吃爆（最终 done() 仍会 truncate，此处仅防无界增长）。
+        child.stdout?.on("data", (d: Buffer) => { if (stdout.length < MAX_OUTPUT) stdout += d.toString(); });
+        child.stderr?.on("data", (d: Buffer) => { if (stderr.length < MAX_OUTPUT) stderr += d.toString(); });
 
         const done = (code: number | null) => {
             clearTimeout(timer);

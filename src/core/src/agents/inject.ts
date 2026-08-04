@@ -10,6 +10,8 @@
 import { getAgentCatalog } from "./registry.ts";
 
 const AGENT_CATALOG_MARKER = "【可用子 Agent 目录】";
+// ★ 切除锚点用罕用数学括号定长串，避免中文 marker 被 agent description 复述导致 split 误切（与 skills/inject 同源修复）
+const AGENT_CATALOG_FENCE = "⟦DSC:AGENT_CATALOG⟧";
 const AGENT_USAGE_HINT =
     "当某子任务匹配下列某个子 Agent 的专长时，调用 spawn_agent 并传入对应 name 参数（如 spawn_agent(name=\"code-reviewer\", task=\"...\"））将其委派给该声明式子 Agent；不传 name 则走默认通用子 agent。";
 
@@ -24,10 +26,10 @@ export const injectAgentCatalog = (message: any[]): void => {
     const sys = message[0];
     if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
 
-    // 幂等：已含标记则切除旧块（取标记之前的全部内容）再重接，支持清单热更新
-    if (sys.content.includes(AGENT_CATALOG_MARKER)) {
-        sys.content = sys.content.split(AGENT_CATALOG_MARKER)[0].trimEnd();
+    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 罕用，不会被复述误触发），支持清单热更新
+    if (sys.content.includes(AGENT_CATALOG_FENCE)) {
+        sys.content = sys.content.split(AGENT_CATALOG_FENCE)[0].trimEnd();
     }
 
-    sys.content += `\n\n${AGENT_CATALOG_MARKER}\n${catalog}\n\n${AGENT_USAGE_HINT}`;
+    sys.content += `\n\n${AGENT_CATALOG_FENCE}\n${AGENT_CATALOG_MARKER}\n${catalog}\n\n${AGENT_USAGE_HINT}`;
 };

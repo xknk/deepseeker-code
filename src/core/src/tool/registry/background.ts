@@ -50,7 +50,9 @@ export async function killTree(proc: any): Promise<void> {
     const isWin = process.platform === "win32";
     try {
         if (isWin) {
-            await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"]);
+            // ★ execFile 加 5s 超时兜底：taskkill 极罕见挂起时不让整个 killTree 永久 pending
+            //   （shellExecutor 的 void killTree 是 fire-and-forget，超时分支不会回头兜底）。
+            await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
         } else {
             process.kill(-pid, "SIGKILL");
         }
@@ -89,6 +91,23 @@ export const backgroundTools: CustomTool[] = [
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
                 const isWin = process.platform === "win32";
 
+                // ★ 编码处理（与 command.ts 对齐）：Windows 下命令常以系统 OEM 代码页（中文=cp936/GBK）输出，
+                //   d.toString() 默认 utf-8 会对 GBK 字节产生 U+FFFD 菱形问号。改用 TextDecoder + stream 模式：
+                //   首个含高位字节块才定型（纯 ASCII 在两编码下一致），UTF-8 解出 U+FFFD 即回退 GBK（无 gbk 时退回 utf-8）。
+                const pendingUtf8 = new TextDecoder("utf-8");
+                let decoder: TextDecoder | null = null;
+                const decodeChunk = (buf: Buffer): string => {
+                    if (!decoder) {
+                        const hasHighByte = buf.some((b: number) => b >= 0x80);
+                        if (hasHighByte) {
+                            const isGbk = buf.toString("utf8").includes("�");
+                            try { decoder = new TextDecoder(isGbk ? "gbk" : "utf-8"); }
+                            catch { decoder = pendingUtf8; } // 精简 ICU 无 gbk → 退回 utf-8
+                        }
+                    }
+                    return (decoder ?? pendingUtf8).decode(buf, { stream: true });
+                };
+
                 let proc: any;
                 try {
                     proc = spawn(args.command, { shell: true, cwd, detached: !isWin });
@@ -106,8 +125,8 @@ export const backgroundTools: CustomTool[] = [
                 };
                 registry.set(taskId, task);
 
-                proc.stdout?.on("data", (d: Buffer) => appendOutput(task, d.toString()));
-                proc.stderr?.on("data", (d: Buffer) => appendOutput(task, d.toString()));
+                proc.stdout?.on("data", (d: Buffer) => appendOutput(task, decodeChunk(d)));
+                proc.stderr?.on("data", (d: Buffer) => appendOutput(task, decodeChunk(d)));
                 // ★ spawn error 由下方 Promise 内监听统一处理（删除此处重复监听，防日志双写）
 
                 // ★ 首个 yield：即时返回 task_id（runBackgroundTool 取此为结果，agent 不阻塞、继续下一轮）

@@ -147,16 +147,21 @@ export const fsTools: CustomTool[] = [
             isSync: true,
             async execute(args: { max_depth?: number }): Promise<string> {
                 try {
-                    const maxDepth = args.max_depth ? Math.max(1, args.max_depth) : 3;
+                    // ★ 上限 10 + 计数熔断：防模型传极大 max_depth 或未被 gitignore 覆盖的深树（如 node_modules）递归扫描失控
+                    const maxDepth = Math.min(args.max_depth ? Math.max(1, args.max_depth) : 3, 10);
+                    const MAX_SCAN_ENTRIES = 10000;
+                    let scannedEntries = 0;
+                    let hitScanLimit = false;
                     await initializeWorkspaceIgnore();
 
                     const buildTreeText = async (currentPath: string, currentDepth: number, prefix = ""): Promise<string> => {
-                        if (currentDepth > maxDepth) return "";
+                        if (currentDepth > maxDepth || hitScanLimit) return "";
 
                         const entries = await fs.readdir(currentPath, { withFileTypes: true });
 
-                        // 过滤掉被忽略的文件/文件夹
+                        // 过滤掉被忽略的文件/文件夹 + 跳过 symlink（与 glob.ts 对齐，防列出指向工作区外的链接）
                         const validEntries = entries.filter(entry => {
+                            if (entry.isSymbolicLink()) return false;
                             const fullPath = path.join(currentPath, entry.name);
                             const relPath = path.relative(WORKSPACE_ROOT, fullPath).replace(/\\/g, "/");
                             return !checkIsPathIgnored(entry.isDirectory() ? `${relPath}/` : relPath);
@@ -166,6 +171,12 @@ export const fsTools: CustomTool[] = [
 
                         // 🚨 注意：这里必须使用 for...of 循环，以便在循环内部正确使用 await 递归
                         for (let index = 0; index < validEntries.length; index++) {
+                            scannedEntries++;
+                            if (scannedEntries > MAX_SCAN_ENTRIES) {
+                                hitScanLimit = true;
+                                output += `${prefix}└── …（已达扫描上限 ${MAX_SCAN_ENTRIES} 条目，已停止扫描更深层）\n`;
+                                break;
+                            }
                             const entry = validEntries[index];
                             const isLast = index === validEntries.length - 1;
                             const pointer = isLast ? "└── " : "├── ";
@@ -234,7 +245,7 @@ export const fsTools: CustomTool[] = [
                     }
                     const updatedContent = args.replace_all
                         ? normalizedContent.split(normalizedOld).join(normalizedNew) // 字面量全量替换（不受正则元字符影响）
-                        : normalizedContent.replace(normalizedOld, normalizedNew);   // 仅首个
+                        : normalizedContent.replace(normalizedOld, () => normalizedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
                     return args.replace_all
@@ -282,7 +293,7 @@ export const fsTools: CustomTool[] = [
                     // 💡 原子写入防御（Atomic Write）：先写同目录 .tmp 再 rename 瞬间落地，
                     //   避免写中途被中断/熔断导致文件变空或受损
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（rename 前夕再 realpath）
-                    tmpPath = `${absPath}.${Date.now()}.tmp`;
+                    tmpPath = `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`; // ★ 与 write_file 对齐：加随机段防同目录同毫秒并发 tmp 碰撞
                     await fs.writeFile(tmpPath, content, "utf-8");
                     await fs.rename(tmpPath, absPath); // 操作系统层面的原子覆盖
 
@@ -455,6 +466,12 @@ export const fsTools: CustomTool[] = [
                     await initializeWorkspaceIgnore();
                     if (checkIsPathIgnored(relForCheck)) {
                         return `🚫 [忽略规则]：[${args.path}] 命中 .gitignore / 通用忽略规则，已跳过。`;
+                    }
+                    // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，
+                    //   read_file 已分片，本工具补同口径防护（1MB 上限）。
+                    const statForSize = await fs.stat(absPath);
+                    if (statForSize.size > 1024 * 1024) {
+                        return `⚠️ [文件过大]：[${args.path}] 约 ${Math.round(statForSize.size / 1024)}KB，超过符号大纲分析的 1MB 上限（防全量 readFile + AST 驻留吃内存）。请改用 read_file 分片查看，或缩小目标文件。`;
                     }
                     const fileContent = await fs.readFile(absPath, "utf-8");
 

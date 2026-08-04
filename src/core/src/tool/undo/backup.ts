@@ -222,14 +222,18 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
         }
 
         const treeDest = path.join(undoDir, 'tree');
-        await fs.cp(absPath, treeDest, { recursive: true, force: true, preserveTimestamps: true }); // 异步拷贝，避免 cpSync 阻塞事件循环
-
-        // skip 策略：从备份副本剔除敏感文件（仍允许删除原目录，仅该部分不可回退）
-        if (policy === 'skip' && sensitiveInTree.length > 0) {
-            for (const relWithin of sensitiveInTree) {
-                await fs.rm(path.join(treeDest, relWithin), { force: true }).catch(() => { /* 剔除失败不阻断 */ });
-            }
-        }
+        // ★ 用 fs.cp 的 filter 在拷贝阶段即跳过敏感文件，避免"先全量拷贝（含 .env/私钥明文）再剔除"
+        //   的窗口期——拷贝期间若进程崩溃，敏感内容会明文残留在备份目录。
+        //   deny 策略已在上方拦截；allow 不过滤；skip 按敏感集合过滤（仍允许删除原目录，仅该部分不可回退）。
+        const sensitiveSet = new Set(sensitiveInTree);
+        await fs.cp(absPath, treeDest, {
+            recursive: true, force: true, preserveTimestamps: true,
+            filter: (src: string) => {
+                if (src === absPath) return true; // 根目录本身必放行
+                const relWithin = path.relative(absPath, src).replace(/\\/g, "/");
+                return !sensitiveSet.has(relWithin);
+            },
+        });
 
         return {
             ...common,

@@ -40,6 +40,10 @@ if (!process.env.DEEPSEEK_CODE_TOKEN) {
         }
     } else {
         // 未显式配置时打印一次性 token，便于本地对接；生产环境应改用环境变量固化或 DEEPSEEK_CODE_TOKEN_FILE 落盘。
+        console.warn(
+            `⚠️ [安全] AUTH TOKEN 将打印到 stdout——若 stdout 被日志采集/重定向/共享会导致 token 泄露。` +
+            `生产环境请设 DEEPSEEK_CODE_TOKEN（跨重启稳定）或 DEEPSEEK_CODE_TOKEN_FILE（落盘权限 0600）。`
+        );
         console.log(
             `\n========================================\n` +
             `  🔑 AUTH TOKEN（本次运行生成，重启即变）:\n   ${RAW_TOKEN}\n` +

@@ -23,7 +23,9 @@ export const expandSlashCommand = (input: string): string => {
     const cmd = getCommand(name);
     if (!cmd) return input; // 未注册命令 → 原样透传（含文件路径如 /usr/bin/x）
     const args = rest.trim();
+    // ★ 用函数替换规避 replacement string 的 $ 特殊模式（$&/`$'`/`$``）：
+    //   args 是用户原始输入，字符串替换会解释这些模式导致命令正文被错误改写。
     return cmd.body
-        .replace(/\$ARGUMENTS\b/g, args)
-        .replace(/\$1\b/g, args);
+        .replace(/\$ARGUMENTS\b/g, () => args)
+        .replace(/\$1\b/g, () => args);
 };

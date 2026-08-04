@@ -69,7 +69,10 @@ export const handleUnifiedChat = async (
     abortSignal?: AbortSignal,
     opts?: HostOptions,
 ) => {
-    const sessionId: string = inbound.sessionId || await getOrCreateSessionId(inbound.sessionId);
+    // ★ 始终经 getOrCreateSessionId：复用已持久化会话；新会话（含 createServer 生成的 uuid）据此"创建即落盘"
+    //   身份记录。旧实现 `inbound.sessionId || ...` 因 createServer 总回填 sessionId 而恒 truthy 短路，
+    //   新会话从不落 createAt 等元信息，listSessions 只能回退目录 mtime 排序。
+    const sessionId: string = await getOrCreateSessionId(inbound.sessionId);
     // ★ G4 斜杠命令展开：在 hook 派发与 buildContextMessages 之前，把 /<name> rest 展开为命令正文。
     //   展开在 dispatch 前 → hook / buildContextMessages / appendMessage 全部看到展开后文本，transcript 忠实记录模型所见。
     //   未注册的 /x（含文件路径）原样透传；异常一律原样（fail-safe）。

@@ -96,11 +96,12 @@ const compileRule = (raw: string, src: string): CompiledRule | null => {
         }
         return { toolName: name, argRegex: globToRegex(argGlob), raw };
     }
-    // 裸工具名（允许含 __ 的 MCP 名：mcp__github__* 这种带通配的归入括号写法；纯名按名匹配）
-    if (/^[a-zA-Z0-9_]+$/.test(trimmed)) {
+    // 裸工具名：支持含 __ 的 MCP 名 + 末尾 * 通配（如 mcp__github__* 匹配该 server 所有工具）。
+    //   末尾 * 作前缀通配（ruleMatches 内 toolNameMatches 处理）；含 * 但非末尾的归入括号写法 ToolName(argGlob)。
+    if (/^[a-zA-Z0-9_]+\*?$/.test(trimmed)) {
         return { toolName: trimmed, argRegex: null, raw };
     }
-    console.warn(`⚠️ [permissions] 规则 "${raw}" 格式非法（应为 ToolName 或 ToolName(argGlob)，${src}），已跳过`);
+    console.warn(`⚠️ [permissions] 规则 "${raw}" 格式非法（应为 ToolName / ToolName* / ToolName(argGlob)，${src}），已跳过`);
     return null;
 };
 
@@ -140,10 +141,17 @@ const readPermissionConfig = async (includeProject: boolean): Promise<Permission
     return merged;
 };
 
+/** 工具名匹配：精确，或末尾 * 前缀通配（mcp__github__* 命中 mcp__github__ 下任意工具） */
+const toolNameMatches = (pattern: string, name: string): boolean => {
+    if (pattern === name) return true;
+    if (pattern.endsWith('*') && name.startsWith(pattern.slice(0, -1))) return true;
+    return false;
+};
+
 /** 判断单条编译规则是否命中当前工具调用 */
 const ruleMatches = (rule: CompiledRule, toolName: string, args: any): boolean => {
-    if (rule.toolName !== toolName) return false;
-    if (rule.argRegex === null) return true; // 裸工具名：任意调用都命中
+    if (!toolNameMatches(rule.toolName, toolName)) return false;
+    if (rule.argRegex === null) return true; // 裸工具名：任意调用都命中（含末尾通配名）
     const argKey = PRIMARY_ARG[toolName];
     if (!argKey) return true; // 工具无主参数映射：带括号的规则退化为按名匹配
     const val = args?.[argKey];

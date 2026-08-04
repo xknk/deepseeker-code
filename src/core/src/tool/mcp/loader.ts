@@ -100,6 +100,12 @@ function wrapTool(serverName: string, rawTool: any, client: McpClient): CustomTo
  * 单个 server 失败不影响其它。返回包装后的 CustomTool[]（不含 client 句柄）。
  */
 export async function loadMcpTools(): Promise<CustomTool[]> {
+    // ★ 幂等：重复加载（热重载/测试反复 init）前先 dispose 旧 client 并清空，
+    //   避免旧 client 句柄残留 + 工具名重复注入。
+    if (clients.length > 0) {
+        clients.forEach(c => { try { c.dispose(); } catch { /* ignore */ } });
+        clients.length = 0;
+    }
     const servers = await readMcpConfig();
     const entries = Object.entries(servers);
     if (entries.length === 0) return [];

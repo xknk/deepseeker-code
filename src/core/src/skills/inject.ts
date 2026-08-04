@@ -10,6 +10,9 @@
 import { getSkillCatalog } from "./registry.ts";
 
 const SKILL_CATALOG_MARKER = "【可用技能目录】";
+// ★ 切除锚点用罕用数学括号定长串（与 command.ts EXIT_SENTINEL 同风格），正文/描述极不可能出现，
+//   避免中文 marker（【可用技能目录】）被 skill description 复述导致 split 误切除其后全部注入。
+const SKILL_CATALOG_FENCE = "⟦DSC:SKILL_CATALOG⟧";
 const SKILL_USAGE_HINT = "当你判断当前任务匹配某个技能时，调用 load_skill 工具加载其完整指令，然后严格遵照执行。";
 
 /**
@@ -23,10 +26,10 @@ export const injectSkillCatalog = (message: any[]): void => {
     const sys = message[0];
     if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
 
-    // 幂等：已含标记则切除旧块（取标记之前的全部内容）再重接，支持清单热更新
-    if (sys.content.includes(SKILL_CATALOG_MARKER)) {
-        sys.content = sys.content.split(SKILL_CATALOG_MARKER)[0].trimEnd();
+    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 是罕用串，不会被 description 复述误触发），支持清单热更新
+    if (sys.content.includes(SKILL_CATALOG_FENCE)) {
+        sys.content = sys.content.split(SKILL_CATALOG_FENCE)[0].trimEnd();
     }
 
-    sys.content += `\n\n${SKILL_CATALOG_MARKER}\n${catalog}\n\n${SKILL_USAGE_HINT}`;
+    sys.content += `\n\n${SKILL_CATALOG_FENCE}\n${SKILL_CATALOG_MARKER}\n${catalog}\n\n${SKILL_USAGE_HINT}`;
 };

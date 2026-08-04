@@ -55,6 +55,13 @@ export const createServer = () => {
         const raw = req.body as UnifiedInboundMessage;
         const sessionIdRaw = raw?.sessionId;
 
+        // ★ content 类型校验：缺失/非字符串会污染下游（expandSlashCommand(undefined) 静默返回 undefined →
+        //   {role:'user', content:undefined} 进入 buildContextMessages + appendMessage → 落盘缺键坏行 + 模型收到非法消息体）
+        if (typeof raw?.content !== "string") {
+            res.status(400).json({ error: "content 必须为字符串" });
+            return;
+        }
+
         // ★ 安全①：sessionId 若由客户端传入，先过白名单（防路径穿越），非法直接 400（尚未进入 SSE）
         if (sessionIdRaw !== undefined && !isSafeSessionId(sessionIdRaw)) {
             res.status(400).json({ error: "invalid sessionId" });
@@ -78,11 +85,14 @@ export const createServer = () => {
         }
 
         const ac = new AbortController();
-        // 勿监听 req「close」：body 读完后常触发，会误杀进行中的 LLM
+        // ★ 断连检测：req.aborted 在 Node 18+ 已弱化（SSE 长连接下客户端关标签页不一定触发），
+        //   补 res.on('close') 作为可靠信号（res.close 在 SSE 连接断开时触发，body 读完不会误触发——
+        //   那是 req.close 的行为）。两者共用 onAbort，幂等（writableEnded 判定 + ac.abort 多次安全）。
         const onAbort = (): void => {
             if (!res.writableEnded) ac.abort();
         };
         req.on("aborted", onAbort);
+        res.on("close", onAbort);
 
         // SSE 响应头
         res.setHeader("Content-Type", "text/event-stream");
@@ -105,6 +115,7 @@ export const createServer = () => {
             sseWrite({ eventType: "error", message: err instanceof Error ? err.message : String(err) });
         } finally {
             req.off("aborted", onAbort);
+            res.off("close", onAbort);
             activeControllers.delete(sessionId);
             if (!res.writableEnded) res.end();
         }

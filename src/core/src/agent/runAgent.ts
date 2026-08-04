@@ -137,6 +137,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
     const recentSignatures: string[] = [];
+    // ★ 工具名序列兜底：完整签名（含 arguments）随参数微变永不重复，补一条"仅工具名"序列，
+    //   连续较多轮相同 → 参数微变死循环熔断（给分页等合理连续同工具调用留 8 轮空间，不误杀）。
+    const recentNameSignatures: string[] = [];
     // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
     //  主机制：每 NUDGE_EVERY 轮向系统提示词注入一次自评提醒，由模型自己决定"收尾给答案"还是"继续推进"
     //         （对标 Claude Code：不在低轮数硬停，靠模型自收敛 + 用户中止）。
@@ -392,6 +395,34 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     }
                 })
                 yield { type: 'final', text: (lastContent || "") + "\n（检测到重复工具调用，已停止）" };
+                return;
+            }
+            // ★ 参数微变死循环兜底：完整签名随时间戳/游标等动态参数变化永不重复，
+            //   补"仅工具名"序列检测——连续 8 轮同一组工具名（参数可能每轮微变）即熔断，
+            //   给分页读取等合理的连续同工具调用留出空间。
+            recentNameSignatures.push(tooName);
+            if (recentNameSignatures.length > 16) recentNameSignatures.shift();
+            const last8 = recentNameSignatures.slice(-8);
+            if (last8.length === 8 && last8.every(s => s === last8[0])) {
+                stopReason = 'repeat';
+                events({
+                    sessionId: sessionId,
+                    eventType: 'tool.repeat_break',
+                    metadata: {
+                        depth: depth,
+                        decisionSource: llmDecisionSource,
+                        durationMs: performance.now() - startTime,
+                        round,
+                        toolName: tooName,
+                        toolSource: 'builtin',
+                        ok: false,
+                        attempt: round
+                    },
+                    payload: {
+                        output: (lastContent || "") + "\n（检测到工具名序列持续重复（参数可能微变），已停止）",
+                    }
+                })
+                yield { type: 'final', text: (lastContent || "") + "\n（检测到工具名序列持续重复（参数可能微变），已停止）" };
                 return;
             }
             events({

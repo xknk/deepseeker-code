@@ -127,26 +127,40 @@ export const writeStore = async (sessionId: string, store: any) => {
     await fs.rename(tmpPath, finalPath);
 }
 
+// ★ 会话级写锁：state.json 的 read-modify-write 在 await 间可能交错（压缩写摘要 vs SessionEnd hook / todo 写 store），
+//   后写覆盖先写会导致滚动摘要 / todo 静默丢失。per-session 互斥锁串行化写操作（读不锁，读到稍旧值可接受）。
+const storeLocks = new Map<string, Promise<unknown>>();
+const withStoreLock = <T>(sessionId: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = storeLocks.get(sessionId) ?? Promise.resolve();
+    const run = prev.then(fn, fn); // 无论前一个 resolve/reject 都继续，防排队链被打断
+    storeLocks.set(sessionId, run.then(() => { }, () => { })); // 链尾兜底 catch，隔离失败不阻塞后续
+    return run;
+};
+
 /** 读取或创建会话身份：若 sessionId 已有记录则复用，否则新建并落盘一个带元信息的空条目。 */
 export const getOrCreateSessionId = async (sessionId: string | undefined): Promise<string> => {
-    // readStore 对缺失/损坏文件返回 {}（truthy 但无 sessionId）→ 用 sessionId 字段判定是否已持久化，避免旧实现返回 undefined。
-    const existing = sessionId ? await readStore(sessionId) : null;
-    const isPersisted = !!(existing && typeof (existing as any).sessionId === "string");
-    const entry = isPersisted
-        ? existing
-        : {
-            sessionId: createUUID(), // 身份id
-            updatedAt: new Date().toISOString(), // 更新时间
-            createAt: new Date().toISOString(), // 创建时间
-            archivedMessageCount: 0, // 总条数消息
-            rollingSummary: "", // 滚动总结摘要
-            consecutiveFailures: 0, // 失败消息
-        };
-    // ★ 兑现"创建即落盘"契约：新建身份时持久化带元信息的空条目（旧实现遗漏，导致 createAt 等元信息丢失）。
-    if (!isPersisted) {
-        await writeStore((entry as any).sessionId, entry);
-    }
-    return (entry as any).sessionId;
+    return withStoreLock(sessionId ?? "<anon>", async () => {
+        // readStore 对缺失/损坏文件返回 {}（truthy 但无 sessionId）→ 用 sessionId 字段判定是否已持久化，避免旧实现返回 undefined。
+        const existing = sessionId ? await readStore(sessionId) : null;
+        const isPersisted = !!(existing && typeof (existing as any).sessionId === "string");
+        const entry = isPersisted
+            ? existing
+            : {
+                // ★ 优先用传入的 sessionId（createServer 已生成的 uuid），仅无传入时才新建——
+                //   保证 createServer 生成的 sessionId 与落盘身份一致，兑现"创建即落盘"契约。
+                sessionId: sessionId || createUUID(),
+                updatedAt: new Date().toISOString(), // 更新时间
+                createAt: new Date().toISOString(), // 创建时间
+                archivedMessageCount: 0, // 总条数消息
+                rollingSummary: "", // 滚动总结摘要
+                consecutiveFailures: 0, // 失败消息
+            };
+        // ★ 兑现"创建即落盘"契约：新建身份时持久化带元信息的空条目（旧实现遗漏，导致 createAt 等元信息丢失）。
+        if (!isPersisted) {
+            await writeStore((entry as any).sessionId, entry);
+        }
+        return (entry as any).sessionId;
+    });
 }
 
 /** 从硬盘读取整个会话数据库 */
@@ -209,14 +223,16 @@ export async function setRollingState(
     sessionId: string,
     state: RollingState
 ): Promise<void> {
-    const store = await readStore(sessionId);
-    if (!store) return;
-    store.rollingSummary = state.rollingSummary;
-    store.archivedMessageCount = state.archivedMessageCount;
-    // 关键：将失败计数同步回存储层
-    (store as any).consecutiveFailures = state.consecutiveFailures;
+    return withStoreLock(sessionId, async () => {
+        const store = await readStore(sessionId);
+        if (!store) return;
+        store.rollingSummary = state.rollingSummary;
+        store.archivedMessageCount = state.archivedMessageCount;
+        // 关键：将失败计数同步回存储层
+        (store as any).consecutiveFailures = state.consecutiveFailures;
 
-    await writeStore(sessionId, store);
+        await writeStore(sessionId, store);
+    });
 }
 
 /**
@@ -231,9 +247,11 @@ export async function getTodos(sessionId: string): Promise<Todo[] | undefined> {
  * 覆盖写入当前会话的任务清单（整表替换语义，对齐 Claude Code TodoWrite）
  */
 export async function setTodos(sessionId: string, todos: Todo[]): Promise<void> {
-    const store = await readStore(sessionId);
-    store.todos = todos;
-    await writeStore(sessionId, store);
+    return withStoreLock(sessionId, async () => {
+        const store = await readStore(sessionId);
+        store.todos = todos;
+        await writeStore(sessionId, store);
+    });
 }
 
 // ============ 历史会话枚举（/sessions 选择器 + --continue） ============

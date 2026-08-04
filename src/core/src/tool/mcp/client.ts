@@ -70,12 +70,33 @@ const joinContentText = (result: any): string => {
 const CLIENT_INFO = { name: "deepSeekCode", version: "1.0.0" };
 
 /**
+ * 构造安全环境变量：仅透传白名单（PATH/HOME 等基础变量），不全量透传 process.env，
+ * 防宿主 DEEPSEEK_CODE_TOKEN / API key 等机密泄露给第三方 MCP server。
+ * 白名单与 hooks/shellExecutor.ts 的 ENV_WHITELIST 保持一致。
+ */
+const MCP_ENV_WHITELIST = [
+    "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "WORKSPACE_ROOT", "LANG", "TERM", "SHELL", "SystemRoot", "ComSpec",
+];
+const buildSafeEnv = (): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const k of MCP_ENV_WHITELIST) {
+        const v = process.env[k];
+        if (v !== undefined) out[k] = v;
+    }
+    return out;
+};
+
+/**
  * 📟 MCP stdio 客户端：spawn 子进程，stdin/stdout 换行分隔 JSON-RPC。
  */
 export class McpStdioClient implements McpClient {
     private proc: ChildProcess | null = null;
     private nextId = 1;
     private pending = new Map<number, Pending>();
+    private rl: ReturnType<typeof createInterface> | null = null;
+    /** server stderr 最近片段（消费管道防死锁 + 崩溃诊断用） */
+    private stderrBuf = "";
 
     constructor(public readonly serverName: string, private config: McpServerConfig) {}
 
@@ -85,7 +106,9 @@ export class McpStdioClient implements McpClient {
         if (!command) throw new Error("MCP stdio 配置缺少 command");
         this.proc = spawn(command, args, {
             stdio: ["pipe", "pipe", "pipe"],
-            env: { ...process.env, ...env },
+            // ★ 环境变量白名单透传（见 buildSafeEnv）：不全量透传 process.env，
+            //   防宿主 DEEPSEEK_CODE_TOKEN / API key 等机密泄露给第三方 MCP server
+            env: { ...buildSafeEnv(), ...env },
             // Windows 下 npx 等常需 shell 才能找到；非 Win 直接执行
             shell: process.platform === "win32",
         });
@@ -94,8 +117,16 @@ export class McpStdioClient implements McpClient {
         }
 
         // 换行分隔的 JSON-RPC 分帧
-        const rl = createInterface({ input: this.proc.stdout });
-        rl.on("line", (line: string) => this.handleLine(line));
+        this.rl = createInterface({ input: this.proc.stdout });
+        this.rl.on("line", (line: string) => this.handleLine(line));
+
+        // ★ 消费 stderr：stdio 三管道但若无人读 stderr，server 写满 ~64KB 管道后会阻塞写 →
+        //   停止读 stdin → 所有 tools/list、tools/call 卡 30s 超时（死锁）。
+        //   此处持续吸收 + 留最近 8KB 片段供 server 崩溃时诊断。
+        this.proc.stderr?.on("data", (d: Buffer) => {
+            this.stderrBuf += d.toString();
+            if (this.stderrBuf.length > 8192) this.stderrBuf = this.stderrBuf.slice(-8192);
+        });
 
         this.proc.on("error", (e) => {
             for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); }
@@ -105,9 +136,10 @@ export class McpStdioClient implements McpClient {
         //   避免调用方挂满 30s 超时（server 崩溃后调用任意 MCP 工具会卡 30s）。
         this.proc.on("exit", (code, signal) => {
             const reason = signal ? `信号 ${signal}` : `退出码 ${code}`;
+            const hint = this.stderrBuf.trim() ? `\n[stderr 尾部] ${this.stderrBuf.trim().slice(-500)}` : "";
             for (const p of this.pending.values()) {
                 clearTimeout(p.timer);
-                p.reject(new Error(`MCP server 已退出（${reason}）`));
+                p.reject(new Error(`MCP server 已退出（${reason}）${hint}`));
             }
             this.pending.clear();
         });
@@ -180,11 +212,13 @@ export class McpStdioClient implements McpClient {
 
     /** 关闭子进程 */
     dispose(): void {
+        try { this.rl?.close(); } catch { /* ignore */ }
         try { this.proc?.stdin?.end(); } catch { /* ignore */ }
         try { this.proc?.kill(); } catch { /* ignore */ }
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("client disposed")); }
         this.pending.clear();
         this.proc = null;
+        this.rl = null;
     }
 }
 
@@ -376,8 +410,16 @@ export class McpSSEClient implements McpClient {
             dataLines = "";
             if (eventName === "endpoint" && payload) {
                 // endpoint 的 data 是 POST 目标（可能是相对 URL，按 baseUrl 解析）
+                // ★ SSRF 防护：server 单方面指定的 POST endpoint 必须与 baseUrl 同 host，
+                //   否则恶意 server 可诱导把带 Authorization 头的 JSON-RPC POST 转发到内网任意端点。
                 try {
-                    this.endpoint = new URL(payload, this.baseUrl).toString();
+                    const u = new URL(payload, this.baseUrl);
+                    const baseHost = new URL(this.baseUrl).host;
+                    if (u.host !== baseHost) {
+                        console.warn(`⚠️ [MCP SSE] server 指定的 endpoint host "${u.host}" 与 baseUrl "${baseHost}" 不一致，已拒绝（防 SSRF/凭据泄露）`);
+                        return;
+                    }
+                    this.endpoint = u.toString();
                     this.resolveEndpoint();
                 } catch { /* 非法 endpoint 忽略 */ }
                 return;

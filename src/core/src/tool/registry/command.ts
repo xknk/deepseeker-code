@@ -17,6 +17,9 @@ import { killTree } from "./background.ts";
 const EXIT_SENTINEL = (code: number) => `\n⟦DSC_EXIT:${code}⟧`;
 const EXIT_SENTINEL_RE = /⟦DSC_EXIT:(-?\d+)⟧/g;
 
+/** run_command 输出字符上限（maxOutputCharacters 字段与 execute 内 maxChars 的单一真相源，避免两处漂移） */
+const RUN_COMMAND_MAX_CHARS = 20000;
+
 /**
  * @file tool/registry/command.ts
  * @description 命令执行类工具集。run_command：spawn shell 执行命令，
@@ -42,7 +45,7 @@ export const commandTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【命令执行审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}`,
-            maxOutputCharacters: 20000, // 💡 我们将在 execute 内部真正落地这个长度限制
+            maxOutputCharacters: RUN_COMMAND_MAX_CHARS, // 💡 我们将在 execute 内部真正落地这个长度限制
             verifyResult: (rawOutput: string) => {
                 // ★ 防伪造：取最后一个哨兵匹配（真正的退出码由 execute 在末尾追加）。
                 //   旧的 [exit: N] 嗅探会被 stdout 里的字面量骗过，已废弃。
@@ -72,7 +75,7 @@ export const commandTools: CustomTool[] = [
                 //   唯一可靠防线是 DANGER 级强制用户审批（现叠加 token 鉴权 + 审批绑定 sessionId + 127.0.0.1 监听）。
 
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
-                const maxChars = 20000; // 对应配置的 maxOutputCharacters
+                const maxChars = RUN_COMMAND_MAX_CHARS; // 对应配置的 maxOutputCharacters（单一来源）
                 let totalYieldedChars = 0;
 
                 // 💡 优化 2：非 Windows 下开启 detached 属性，以便后续能以进程组（Process Group）形式彻底剿灭子进程树

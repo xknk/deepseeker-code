@@ -10,6 +10,8 @@
 import { getProjectGuide } from "./loader.ts";
 
 const PROJECT_GUIDE_MARKER = "【项目指引】";
+// ★ 切除锚点用罕用数学括号定长串，避免中文 marker 被指引正文复述导致 split 误切（与 skills/inject 同源修复）
+const PROJECT_GUIDE_FENCE = "⟦DSC:PROJECT_GUIDE⟧";
 const PROJECT_GUIDE_HINT = "以上为项目根目录的 AI 行为指引（自动注入，可能已截断）。需要完整内容时调用 read_project_guide。";
 
 /**
@@ -23,10 +25,10 @@ export const injectProjectGuide = (message: any[]): void => {
     const sys = message[0];
     if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
 
-    // 幂等：已含标记则切除旧块（取标记之前的全部内容）再重接
-    if (sys.content.includes(PROJECT_GUIDE_MARKER)) {
-        sys.content = sys.content.split(PROJECT_GUIDE_MARKER)[0].trimEnd();
+    // 幂等：按 FENCE 锚点切除旧块再重接（FENCE 罕用，不会被正文复述误触发）
+    if (sys.content.includes(PROJECT_GUIDE_FENCE)) {
+        sys.content = sys.content.split(PROJECT_GUIDE_FENCE)[0].trimEnd();
     }
 
-    sys.content += `\n\n${PROJECT_GUIDE_MARKER}\n（via ${guide.name}）\n${guide.body}\n\n${PROJECT_GUIDE_HINT}`;
+    sys.content += `\n\n${PROJECT_GUIDE_FENCE}\n${PROJECT_GUIDE_MARKER}\n（via ${guide.name}）\n${guide.body}\n\n${PROJECT_GUIDE_HINT}`;
 };

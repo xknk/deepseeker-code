@@ -63,12 +63,17 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
         const payload = JSON.stringify(line) + "\n";
         // ★ 短重试：磁盘瞬时忙/锁（尤其 Windows）下 appendFile 偶发失败，
         //   重试 3 次降低「内存已 push、磁盘未落」导致重启后转录不一致的概率。
+        //   部分写入防御：appendFile 可能写入部分字节后抛错（磁盘满/中断），若直接重试会再追加完整行 →
+        //   JSONL 出现「半行 + 全行」。失败时先截断回写入前大小，再重试，保证从头追加完整行。
         const MAX_ATTEMPTS = 3;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            let beforeSize = 0;
+            try { beforeSize = (await fs.stat(p)).size; } catch { /* 文件不存在 → beforeSize=0 */ }
             try {
                 await fs.appendFile(p, payload, "utf-8");
                 return;
             } catch (e) {
+                try { await fs.truncate(p, beforeSize); } catch { /* 截断失败则放弃重试避免重复追加 */ }
                 if (attempt === MAX_ATTEMPTS) throw e; // 交由外层统一告警
                 await new Promise(r => setTimeout(r, 50 * attempt)); // 50ms / 100ms 退避
             }

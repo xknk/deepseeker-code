@@ -149,7 +149,7 @@ function isPrivateIp(ip: string): boolean {
         return (
             ip === "::1" || // 回环
             ip === "::" ||
-            ip.startsWith("fe80") || // 链路本地
+            /^fe[89ab]/i.test(ip) || // 链路本地 fe80::/10（fe80~febf；原仅判 fe80 漏 fe81~febf）
             ip.startsWith("fc") || ip.startsWith("fd") // 唯一本地地址 ULA fc00::/7
         );
     }
