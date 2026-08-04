@@ -20,17 +20,13 @@ import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
 import { parseFrontmatter } from "@/skills/frontmatter.ts";
 import { registerCommand, listCommands, CommandManifest, CommandSource } from "./registry.ts";
+import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
 
 /** 内置命令目录：本文件所在目录下的 builtin/ */
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "builtin");
 
-interface ScanSource {
-    dir: string;
-    source: CommandSource;
-}
-
 /** 三个来源（顺序即注册顺序，决定覆盖优先级） */
-const SOURCES: ScanSource[] = [
+const SOURCES: LoadSource<CommandSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "commands"), source: "global" },
     { dir: path.join(process.cwd(), ".deepSeekCode", "commands"), source: "project" },
@@ -40,7 +36,7 @@ const SOURCES: ScanSource[] = [
 const MAX_COMMAND_BODY_BYTES = 64 * 1024;
 
 /** 解析单个 <name>.md 为 manifest；失败返回 null（warn + 跳过） */
-const parseCommandAt = async (file: string, source: CommandSource): Promise<CommandManifest | null> => {
+const parseCommandAt = async (file: string, _dir: string, source: CommandSource): Promise<CommandManifest | null> => {
     let raw: string;
     try {
         raw = await fs.readFile(file, "utf-8");
@@ -79,33 +75,15 @@ const parseCommandAt = async (file: string, source: CommandSource): Promise<Comm
     };
 };
 
-/** 扫描一个来源目录下的所有 <name>.md（扁平文件，非目录） */
-const scanSource = async (s: ScanSource): Promise<CommandManifest[]> => {
-    let entries: any[];
-    try {
-        entries = await fs.readdir(s.dir, { withFileTypes: true });
-    } catch {
-        return []; // 目录不存在静默跳过
-    }
-    const result: CommandManifest[] = [];
-    for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-        const m = await parseCommandAt(path.join(s.dir, entry.name), s.source);
-        if (m) result.push(m);
-    }
-    return result;
-};
-
-/** 按 includeProject 过滤来源：未信任时排除 project（防项目级命令注入）。 */
-const sourcesFor = (includeProject: boolean): ScanSource[] =>
-    includeProject ? SOURCES : SOURCES.filter(s => s.source !== "project");
-
-/** 扫描并注册全部命令（按优先级顺序）；返回去重后命令数 */
+/** 扫描并注册全部命令（按优先级顺序）；返回去重后命令数。
+ *  扫描骨架走 common.scanSources（commands 扫描模式 = 扁平 *.md）。 */
 export const loadCommands = async (includeProject: boolean): Promise<number> => {
-    for (const s of sourcesFor(includeProject)) {
-        const manifests = await scanSource(s);
-        for (const m of manifests) registerCommand(m);
-    }
+    const picked = await scanSources(
+        filterSources(SOURCES, includeProject),
+        (e, dir) => (e.isFile() && e.name.endsWith(".md")) ? path.join(dir, e.name) : undefined,
+        parseCommandAt,
+    );
+    for (const { item } of picked) registerCommand(item);
     return listCommands().length;
 };
 

@@ -2,9 +2,12 @@
  * @file commands/registry.ts
  * @description 斜杠命令全局注册表：按 name 去重（覆盖语义）、提供目录清单与正文访问器。
  *
- *  镜像 skills/registry.ts。覆盖语义：registerCommand 后注册的同名命令覆盖先注册者，
+ *  共用的 Map/register/list/get 基座走 common/registry.ts 的 createRegistry。
+ *  覆盖语义：registerCommand 后注册的同名命令覆盖先注册者，
  *  loader 按 builtin → global → project 顺序注册，故优先级 project > global > builtin。
  */
+import { createRegistry } from "@/common/registry.ts";
+
 export type CommandSource = 'builtin' | 'global' | 'project';
 
 export interface CommandManifest {
@@ -26,19 +29,13 @@ export interface CommandManifest {
     source: CommandSource;
 }
 
-const commands = new Map<string, CommandManifest>();
+const commands = createRegistry<CommandManifest>();
 
 /** 注册/覆盖一个命令（同名后者覆盖前者） */
-export const registerCommand = (m: CommandManifest): void => {
-    commands.set(m.name, m);
-};
+export const registerCommand = commands.register;
 
 /** 列出全部命令 */
-export const listCommands = (): CommandManifest[] => {
-    return Array.from(commands.values());
-};
+export const listCommands = commands.list;
 
 /** 取某命令的 manifest（expandSlashCommand 查询用） */
-export const getCommand = (name: string): CommandManifest | undefined => {
-    return commands.get(name);
-};
+export const getCommand = commands.get;

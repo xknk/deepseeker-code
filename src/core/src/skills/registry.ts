@@ -2,9 +2,12 @@
  * @file skills/registry.ts
  * @description Skills 全局注册表：按 name 去重（覆盖语义）、提供目录清单与正文访问器。
  *
+ *  共用的 Map/register/list/get 基座走 common/registry.ts 的 createRegistry；此处仅保留 skill 特化访问器。
  *  覆盖语义：registerSkill 后注册的同名 skill 覆盖先注册者。loader 按
  *  builtin → global → project 顺序注册，故优先级 project > global > builtin。
  */
+import { createRegistry } from "@/common/registry.ts";
+
 export type SkillSource = 'builtin' | 'global' | 'project';
 
 export interface SkillManifest {
@@ -20,22 +23,16 @@ export interface SkillManifest {
     source: SkillSource;
 }
 
-const skills = new Map<string, SkillManifest>();
+const skills = createRegistry<SkillManifest>();
 
 /** 注册/覆盖一个 skill（同名后者覆盖前者） */
-export const registerSkill = (m: SkillManifest): void => {
-    skills.set(m.name, m);
-};
+export const registerSkill = skills.register;
 
 /** 列出全部 skill */
-export const listSkills = (): SkillManifest[] => {
-    return Array.from(skills.values());
-};
+export const listSkills = skills.list;
 
 /** 取某 skill 的正文（load_skill 工具调用） */
-export const getSkillBody = (name: string): string | undefined => {
-    return skills.get(name)?.body;
-};
+export const getSkillBody = (name: string): string | undefined => skills.get(name)?.body;
 
 /**
  * 拼接"技能目录"清单字符串（供注入系统提示词，每个 skill 一行）。

@@ -90,7 +90,31 @@ const buildSafeEnv = (): Record<string, string> => {
 /**
  * 📟 MCP stdio 客户端：spawn 子进程，stdin/stdout 换行分隔 JSON-RPC。
  */
-export class McpStdioClient implements McpClient {
+/**
+ * MCP client 抽象基类：listTools / callTool 三种 transport 实现完全一致（仅 request 的 transport 不同），
+ * 上提至此避免重复。子类只需实现 transport 相关的 start / request / dispose + serverName。
+ */
+abstract class McpBaseClient implements McpClient {
+    abstract readonly serverName: string;
+    abstract start(): Promise<void>;
+    abstract dispose(): void;
+    /** transport 相关的 JSON-RPC 请求（stdio 走 stdin/stdout，http/sse 走 fetch） */
+    protected abstract request(method: string, params: any): Promise<any>;
+
+    /** 枚举 server 暴露的工具（tools/list） */
+    async listTools(): Promise<any[]> {
+        const result = await this.request("tools/list", {});
+        return Array.isArray(result?.tools) ? result.tools : [];
+    }
+
+    /** 调用工具（tools/call），返回拼接后的文本内容 */
+    async callTool(name: string, args: any): Promise<string> {
+        const result = await this.request("tools/call", { name, arguments: args ?? {} });
+        return joinContentText(result);
+    }
+}
+
+export class McpStdioClient extends McpBaseClient {
     private proc: ChildProcess | null = null;
     private nextId = 1;
     private pending = new Map<number, Pending>();
@@ -98,7 +122,7 @@ export class McpStdioClient implements McpClient {
     /** server stderr 最近片段（消费管道防死锁 + 崩溃诊断用） */
     private stderrBuf = "";
 
-    constructor(public readonly serverName: string, private config: McpServerConfig) {}
+    constructor(public readonly serverName: string, private config: McpServerConfig) { super(); }
 
     /** 启动子进程并完成 initialize 握手 */
     async start(): Promise<void> {
@@ -178,7 +202,7 @@ export class McpStdioClient implements McpClient {
         this.send({ jsonrpc: "2.0", method, params });
     }
 
-    private request(method: string, params: any): Promise<any> {
+    protected request(method: string, params: any): Promise<any> {
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -198,18 +222,6 @@ export class McpStdioClient implements McpClient {
         });
     }
 
-    /** 枚举 server 暴露的工具（tools/list） */
-    async listTools(): Promise<any[]> {
-        const result = await this.request("tools/list", {});
-        return Array.isArray(result?.tools) ? result.tools : [];
-    }
-
-    /** 调用工具（tools/call），返回拼接后的文本内容 */
-    async callTool(name: string, args: any): Promise<string> {
-        const result = await this.request("tools/call", { name, arguments: args ?? {} });
-        return joinContentText(result);
-    }
-
     /** 关闭子进程 */
     dispose(): void {
         try { this.rl?.close(); } catch { /* ignore */ }
@@ -226,11 +238,11 @@ export class McpStdioClient implements McpClient {
  * 🌐 MCP streamable-HTTP 客户端（现代规范）：逐请求 POST JSON-RPC，响应 application/json
  *  或 text/event-stream。无状态服务端为常见情况，故采用「同步逐请求 POST」最简模型。
  */
-export class McpStreamableHttpClient implements McpClient {
+export class McpStreamableHttpClient extends McpBaseClient {
     private nextId = 1;
     private abort: AbortController | null = null;
 
-    constructor(public readonly serverName: string, private config: McpServerConfig) {}
+    constructor(public readonly serverName: string, private config: McpServerConfig) { super(); }
 
     private get url(): string {
         if (!this.config.url) throw new Error("MCP HTTP 配置缺少 url");
@@ -265,7 +277,7 @@ export class McpStreamableHttpClient implements McpClient {
         }).catch(() => { /* 通知失败不影响主流程 */ });
     }
 
-    private async request(method: string, params: any): Promise<any> {
+    protected async request(method: string, params: any): Promise<any> {
         const id = this.nextId++;
         const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
         // 每请求独立超时信号：与 dispose 的 abort 合并
@@ -334,16 +346,6 @@ export class McpStreamableHttpClient implements McpClient {
         throw new Error(`MCP HTTP SSE 流结束，未拿到 id=${expectedId} 的响应`);
     }
 
-    async listTools(): Promise<any[]> {
-        const result = await this.request("tools/list", {});
-        return Array.isArray(result?.tools) ? result.tools : [];
-    }
-
-    async callTool(name: string, args: any): Promise<string> {
-        const result = await this.request("tools/call", { name, arguments: args ?? {} });
-        return joinContentText(result);
-    }
-
     dispose(): void {
         try { this.abort?.abort(); } catch { /* ignore */ }
         this.abort = null;
@@ -354,7 +356,7 @@ export class McpStreamableHttpClient implements McpClient {
  * 📡 MCP legacy SSE 客户端：GET 开常驻事件流（server→client），client→server 经 endpoint POST。
  *  响应经 GET 流按 id 路由（复用 stdio 的 pending-map）。legacy 协议，尽力实现。
  */
-export class McpSSEClient implements McpClient {
+export class McpSSEClient extends McpBaseClient {
     private nextId = 1;
     private pending = new Map<number, Pending>();
     private endpoint: string | null = null;
@@ -363,6 +365,7 @@ export class McpSSEClient implements McpClient {
     private resolveEndpoint!: () => void;
 
     constructor(public readonly serverName: string, private config: McpServerConfig) {
+        super();
         // endpoint 到达信号：start() 中等它 resolve 后再发 initialize
         this.endpointReady = new Promise((resolve) => { this.resolveEndpoint = resolve; });
     }
@@ -473,7 +476,7 @@ export class McpSSEClient implements McpClient {
         }).catch(() => { /* 通知失败不影响主流程 */ });
     }
 
-    private request(method: string, params: any): Promise<any> {
+    protected request(method: string, params: any): Promise<any> {
         if (!this.endpoint) return Promise.reject(new Error("MCP SSE endpoint 尚未就绪"));
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
@@ -497,16 +500,6 @@ export class McpSSEClient implements McpClient {
                 }
             });
         });
-    }
-
-    async listTools(): Promise<any[]> {
-        const result = await this.request("tools/list", {});
-        return Array.isArray(result?.tools) ? result.tools : [];
-    }
-
-    async callTool(name: string, args: any): Promise<string> {
-        const result = await this.request("tools/call", { name, arguments: args ?? {} });
-        return joinContentText(result);
     }
 
     dispose(): void {

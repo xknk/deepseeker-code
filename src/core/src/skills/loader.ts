@@ -20,17 +20,13 @@ import { CustomTool } from "@/tool/type.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { registerSkill, listSkills, SkillManifest, SkillSource } from "./registry.ts";
 import { skillTools } from "@/tool/registry/skill.ts";
+import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
 
 /** 内置 skill 目录：本文件所在目录下的 builtin/ */
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "builtin");
 
-interface ScanSource {
-    dir: string;
-    source: SkillSource;
-}
-
 /** 三个来源（顺序即注册顺序，决定覆盖优先级） */
-const SOURCES: ScanSource[] = [
+const SOURCES: LoadSource<SkillSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "skills"), source: "global" },
     { dir: path.join(process.cwd(), ".deepSeekCode", "skills"), source: "project" },
@@ -77,34 +73,15 @@ const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource)
     };
 };
 
-/** 扫描一个来源目录下的所有 <name>/SKILL.md */
-const scanSource = async (s: ScanSource): Promise<SkillManifest[]> => {
-    let entries: any[];
-    try {
-        entries = await fs.readdir(s.dir, { withFileTypes: true });
-    } catch {
-        return []; // 目录不存在静默跳过
-    }
-    const result: SkillManifest[] = [];
-    for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const skillFile = path.join(s.dir, entry.name, "SKILL.md");
-        const m = await parseSkillAt(skillFile, s.dir, s.source);
-        if (m) result.push(m);
-    }
-    return result;
-};
-
-/** 按 includeProject 过滤来源：未信任时排除 project（防项目级 skill 注入）。 */
-const sourcesFor = (includeProject: boolean): ScanSource[] =>
-    includeProject ? SOURCES : SOURCES.filter(s => s.source !== "project");
-
-/** 扫描并注册全部 skill（按优先级顺序）；返回去重后技能数 */
+/** 扫描并注册全部 skill（按优先级顺序）；返回去重后技能数。
+ *  扫描骨架（readdir 容错 + 单项失败隔离）走 common.scanSources；skills 的扫描模式 = 子目录/SKILL.md。 */
 export const loadSkills = async (includeProject: boolean): Promise<number> => {
-    for (const s of sourcesFor(includeProject)) {
-        const manifests = await scanSource(s);
-        for (const m of manifests) registerSkill(m);
-    }
+    const picked = await scanSources(
+        filterSources(SOURCES, includeProject),
+        (e, dir) => e.isDirectory() ? path.join(dir, e.name, "SKILL.md") : undefined,
+        parseSkillAt,
+    );
+    for (const { item } of picked) registerSkill(item);
     return listSkills().length;
 };
 

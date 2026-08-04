@@ -1,9 +1,11 @@
 /**
  * @file agents/registry.ts
  * @description 声明式子 Agent 全局注册表：按 name 去重（覆盖语义）、提供目录清单与查找。
- *  镜像 skills/registry.ts 结构。覆盖语义：loader 按 builtin → global → project 顺序注册，
- *  故优先级 project > global > builtin（同名后者覆盖前者）。
+ *  共用的 Map/register/list/get 基座走 common/registry.ts 的 createRegistry；此处保留 agent 特化的 role 拼接目录。
+ *  覆盖语义：loader 按 builtin → global → project 顺序注册，故优先级 project > global > builtin。
  */
+import { createRegistry } from "@/common/registry.ts";
+
 export type AgentSource = 'builtin' | 'global' | 'project';
 
 export interface AgentManifest {
@@ -28,27 +30,19 @@ export interface AgentManifest {
     dir: string;
 }
 
-const agents = new Map<string, AgentManifest>();
+const agents = createRegistry<AgentManifest>();
 
 /** 注册/覆盖一个声明式子 Agent（同名后者覆盖前者） */
-export const registerAgent = (m: AgentManifest): void => {
-    agents.set(m.name, m);
-};
+export const registerAgent = agents.register;
 
 /** 清空全部（测试 / 热重载用） */
-export const clearAgents = (): void => {
-    agents.clear();
-};
+export const clearAgents = agents.clear;
 
 /** 列出全部声明式子 Agent */
-export const listAgents = (): AgentManifest[] => {
-    return Array.from(agents.values());
-};
+export const listAgents = agents.list;
 
 /** 按 name 查找（spawn_agent 调用） */
-export const getAgent = (name: string): AgentManifest | undefined => {
-    return agents.get(name);
-};
+export const getAgent = agents.get;
 
 /**
  * 拼接"子 Agent 目录"清单字符串（供注入系统提示词，每个 agent 一行）。
