@@ -27,6 +27,9 @@ export const appConfig = {
     COMPACT_RATIO: 0.85,
     KEEP_RECENT_UNITS: 5,
     MAX_TOOL_RESULT_CHARS: 16000,
+    /** 后台工具（isSync:false）兜底超时（ms）：超时强制收尾释放互斥锁，防 generator 卡死导致锁永久泄漏。
+     *  abort 仍是主取消通道，此值仅作最后防线；默认 30min 远超合理后台任务时长，正常任务不受影响。 */
+    MAX_BACKGROUND_TOOL_MS: 30 * 60 * 1000,
     userWorkspaceDir: (() => {
         // 1. 获取当前 Node.js 的规范化绝对工作目录
         let cwd = process.cwd().replace(/\\/g, '/'); // 强行把 Windows 的反斜杠 \ 换成正斜杠 / 

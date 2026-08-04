@@ -185,6 +185,18 @@ export const checkPermission = (toolName: string, args: any): PermissionVerdict 
     }
 };
 
+/**
+ * 构造「精确值作用域」的 allow 规则字符串（供 allow-always 审批记忆持久化）。
+ *  - 工具在 PRIMARY_ARG 有主参数映射、且本次调用提供了非空 string 值 → `ToolName(value)`（精确匹配该值，最小权限）；
+ *  - 否则回退裸 `ToolName`（无主参数映射的工具本就只有按名匹配语义）。
+ * 防止「始终允许 run_command(npm test)」被误写成裸 run_command，导致 rm -rf 等破坏性调用也免审。
+ */
+export const buildScopedAllowRule = (toolName: string, args: any): string => {
+    const argKey = PRIMARY_ARG[toolName];
+    const val = argKey ? args?.[argKey] : undefined;
+    return (argKey && typeof val === 'string' && val) ? `${toolName}(${val})` : toolName;
+};
+
 /** 解析 settings.json 路径：global=~/.deepSeekCode，project=<cwd>/.deepSeekCode */
 const resolveSettingsPath = (scope: 'global' | 'project'): string =>
     scope === 'global'

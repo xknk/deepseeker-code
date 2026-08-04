@@ -69,6 +69,8 @@ export async function chatWithModelWithSummary(
             model: MODEL_NAME,
             tool_choice: "auto",
             tools: tools,
+            // 摘要/归并是直白的文本压缩任务，无需思考；显式关闭避免白付 reasoning token。
+            thinking: { type: "disabled" },
             stream: false,
         } as MsgParams;
         const completion = await model.chat.completions.create(requestBody, {

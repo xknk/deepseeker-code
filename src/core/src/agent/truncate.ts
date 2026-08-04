@@ -30,12 +30,14 @@ import { ensureOptions, RunAgentEvents } from "./type.ts";
 /** ANSI / OSC 转义序列（终端着色等） */
 const ANSI_ESCAPE = /\u001b\[[\d;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
 /**
- * @description: 获取除主目录外，所有允许/可能被访问的代码库根目录（自愈整形版）
- * @return {string[]} 根目录列表（当前为空数组，预留扩展位）
+ * @description: 获取除主目录外，所有允许/可能被访问的代码库根目录。
+ *  预留多根目录扩展位——当前恒返回空数组，relativizeWorkspacePathsInText 仅对 userWorkspaceDir 相对化。
+ *  将来接入额外根目录时，在此填充并保证格式与 userWorkspaceDir 字节级对齐（盘符大写、正斜杠）。
+ * @return {string[]} 根目录列表（当前为空数组）
  */
 export const getFileAccessRoots = (): string[] => {
     const roots: string[] = [];
-    // 工业级标准整形：确保所有加进来的外部路径格式与 userWorkspaceDir 字节级对齐
+    // 整形：确保加进来的外部路径格式与 userWorkspaceDir 字节级对齐（盘符大写、正斜杠）
     return roots.map(r => {
         let norm = r.replace(/\\/g, '/');
         if (/^[a-z]:/i.test(norm)) {
@@ -210,7 +212,9 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     let lastSize = estimateTokens(event.messageArr); // 获取当前上下文token总量
     const startTime = performance.now();
     let round = 0
-    while (estimateTokens(event.messageArr) > event.modelWindow * event.compactRatio) {
+    // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
+    //   唯一的 continue 分支（keep--）不修改 messageArr，故 lastSize 始终与实际 token 量一致。省一次全量扫描/轮。
+    while (lastSize > event.modelWindow * event.compactRatio) {
         if (event.signal?.aborted) {
             return
         }; // 是否停止
@@ -258,7 +262,8 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 event.messageArr.length = 0;
                 event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
                 const store = await getRollingState(event.sessionId);
-                store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
+                // 注：本分支 toCompact 为空（无新归档消息），仅对既有摘要做再压缩——归档计数不变，
+                //   仅需把新的 summary 内容落盘。原先 `+ toCompact.length`(=0) 是误导死代码，已移除。
                 await setRollingState(event.sessionId, {
                     archivedMessageCount: store.archivedMessageCount,
                     rollingSummary: summaryMsg.content,

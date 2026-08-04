@@ -18,7 +18,7 @@ import path from "path";
 import ignore from "ignore"; // 需要安装: npm install ignore
 import { ToolContext, ToolSafetyLevel } from "./type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
-import { addPermissionRule } from "./permissions.ts";
+import { addPermissionRule, buildScopedAllowRule } from "./permissions.ts";
 
 /** 工作区根目录：优先取环境变量 WORKSPACE_ROOT，否则回退到进程当前目录；所有路径安全校验以此为边界。 */
 export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || process.cwd();
@@ -162,6 +162,8 @@ export const requestApproval = async (
     detail: string,
     ctx: ToolContext,
     safetyLevel?: ToolSafetyLevel,
+    // 本次调用的参数：仅供构造精确值作用域的 allow 规则（宿主审批通道不感知）。
+    args?: any,
 ): Promise<boolean> => {
     // 🔒 审批详情瘦身闸：大 diff（如上千行 edit_file 的 old_str/new_str）仅保留头尾，
     //   防止单条 SSE 帧过大与前端渲染卡顿；完整改动可经工具参数或 read_file 核对。
@@ -184,11 +186,12 @@ export const requestApproval = async (
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
     } else if (decision === 'allow-always') {
-        // ★ 持久化 allow 规则（按工具名）：下次 checkPermission 直接命中免审。
-        //   项目级未信任目录时 addPermissionRule 返回 false（不落盘），自然降级为"仅本次放行"。
-        const persisted = await addPermissionRule('project', 'allow', toolName).catch(() => false);
+        // ★ 持久化「精确值作用域」allow 规则（如 run_command(npm test)）：下次 checkPermission 命中该精确值免审。
+        //   避免写裸工具名导致 rm -rf 等破坏性调用也被静默放行。项目级未信任目录时降级为"仅本次放行"。
+        const ruleStr = buildScopedAllowRule(toolName, args);
+        const persisted = await addPermissionRule('project', 'allow', ruleStr).catch(() => false);
         console.log(persisted
-            ? `📌 [审批记忆] 已写持久 allow 规则：${toolName}（项目 .deepSeekCode/settings.json），后续免审`
+            ? `📌 [审批记忆] 已写持久 allow 规则：${ruleStr}（项目 .deepSeekCode/settings.json），后续命中该精确值免审`
             : `♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：未信任目录或写入失败）`);
     }
     return approved;

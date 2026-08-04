@@ -31,6 +31,7 @@ export type TraceEventType =
     | "tool.execute.start"      // 工具执行开始：具体的函数或 API 开始运行
     | "tool.execute.end"        // 工具执行结束：拿到工具返回的结果
     | "tool.denied"             // 工具拒绝：可能触发了安全策略或用户手动拒绝执行
+    | "tool.repeat_break"       // 重复熔断：连续多轮完全相同的工具调用被系统主动中止（非用户拒绝）
     | "tool.validation.failed"  // 校验失败：工具入参不符合定义（Schema 校验失败）
     | "tool.failed"            // 工具执行失败：工具执行过程中发生错误
     | "user.aborted"           // 会话开始：用户发起请求，系统初始化

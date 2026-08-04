@@ -165,8 +165,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     sys.content += `\n\n${NUDGE_MARK}你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
                 }
             }
-            yield { type: 'round.start', round };
-            // 前端用户主动停止运行
+            // ★ 前端用户主动停止运行：检测先于 round.start，避免中止后再多发一个 round.start 事件。
             if (signal?.aborted) {
                 events({
                     sessionId,
@@ -186,6 +185,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
 
             }
+            yield { type: 'round.start', round };
             try {
                 // 判断是否需要压缩上下文并触发摘要
                 await ensureFitsWindow(
@@ -261,6 +261,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     if (chunk.usage) lastUsage = chunk.usage;
                 }
                 if (signal?.aborted) {
+                    // ★ 中止落盘：仅有文本、无半截 tool_call 时，把用户已看到的 partial assistant 文本落盘，
+                    //   恢复会话后仍可见；若有半截 tool_call（不可保留半工具），整体丢弃。
+                    if (contentBuf && toolCallsBuf.size === 0) {
+                        message.push({ role: 'assistant', content: contentBuf });
+                        await appendMessage({ sessionId, role: 'assistant', content: contentBuf });
+                    }
                     yield { type: 'final', text: contentBuf || lastContent || "（已中止）" };
                     return;
                 }
@@ -293,7 +299,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         prompt_tokens: lastUsage?.prompt_tokens,
                         completion_tokens: lastUsage?.completion_tokens,
                         total_tokens: lastUsage?.total_tokens,
-                        compress_tokens: lastUsage?.total_tokens,
                         prompt_cache_hit_tokens: lastUsage?.prompt_tokens_details?.cached_tokens,
                         prompt_cache_miss_tokens: (lastUsage?.prompt_tokens || 0) - (lastUsage?.prompt_tokens_details?.cached_tokens || 0)
                     },
@@ -356,7 +361,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
 
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-                yield { type: 'final', text: lastContent || "" };
+                // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
+                yield { type: 'final', text: assistantMessage.content || lastContent || "" };
                 return;
             }
             // 2、检测是否一直重复调用同一个工具，如果超过3次，则主动跳出循环
@@ -370,7 +376,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 stopReason = 'repeat';
                 events({
                     sessionId: sessionId,
-                    eventType: 'tool.denied',
+                    eventType: 'tool.repeat_break',
                     metadata: {
                         depth: depth,
                         decisionSource: llmDecisionSource,
@@ -405,7 +411,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             })
             // 执行工具（abort 占位 + 截断 + 实时落盘 + 事件）
             let abortedDuringTools = false;
-            for (const toolCall of assistantMessage.tool_calls) {
+            // ★ 终结类工具（enter/exit_plan_mode）拦截返回前，为本条 assistant 消息中【其后】的并行 tool_call
+            //   补占位 tool result，避免留下孤儿 tool_call_id——否则会话恢复重建上下文时 API 因配对缺失返回 400。
+            //   （修复前依赖「终结工具必单独调用/排在末位」这一模型未保证的前提。）
+            const fillRestPlaceholders = async (fromIdx: number) => {
+                const tcs = assistantMessage.tool_calls!;
+                for (let j = fromIdx + 1; j < tcs.length; j++) {
+                    const ph = "（已跳过：终结类工具 enter/exit_plan_mode 之后的并行调用未执行）";
+                    message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
+                    await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
+                }
+            };
+            for (let i = 0; i < assistantMessage.tool_calls.length; i++) {
+                const toolCall = assistantMessage.tool_calls[i];
                 let calledName = "";
                 let calledArgs: any = {};
                 let parseFailed = false; // 判读是否解析失败
@@ -419,24 +437,27 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   设计选择：exit_plan_mode 的拦截故意先于 abort 占位检查——模型已主动提交的方案应当呈现给
                 //   用户审批；abort 主要约束后续「实现阶段」的工具执行，而非吞掉已提交的方案。
                 //   （极端 edge case：提交与中止同拍时优先展示方案，符合「计划先于执行」语义。）
+                //   并行安全：返回前 fillRestPlaceholders 为其后排的 tool_call 补占位 result，消除孤儿 tool_call_id。
                 if (calledName === "exit_plan_mode") {
                     const plan = typeof calledArgs?.plan === "string" ? calledArgs.plan : "";
                     const note = "✅ [计划模式] 实现方案已提交，等待用户审批后进入实现阶段。";
                     message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
                     await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
+                    await fillRestPlaceholders(i);
                     yield { type: 'plan.proposed', plan };
                     yield { type: 'final', text: plan || note };
                     return;
                 }
                 // ★ 自主进入计划模式：非计划模式下模型主动请求先规划 → 结束本轮，通知上层翻转 planMode 并以只读重跑。
                 //   与 exit_plan_mode 对称：拦截先于 abort 占位检查，避免吞掉模型已发出的进入请求。
-                //   约定：终结类工具（exit/enter_plan_mode）应单独调用，不与其它工具并行——否则本条 assistant
-                //   消息中排在之后的 tool_call 不会补 result。与 exit_plan_mode 同假设。
+                //   并行安全（已修复）：终结类工具不再假设「必排在末位」——返回前 fillRestPlaceholders 为其后排的
+                //   tool_call 补占位 result，消除孤儿 tool_call_id（否则会话恢复重建上下文时 API 400）。
                 if (calledName === "enter_plan_mode") {
                     const reason = typeof calledArgs?.reason === "string" ? calledArgs.reason : "";
                     const note = "📋 [进入计划模式] 模型请求先以只读方式调研并规划方案，已切换至计划模式。";
                     message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
                     await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
+                    await fillRestPlaceholders(i);
                     yield { type: 'plan.enterRequested', reason };
                     yield { type: 'final', text: reason ? `📋 模型请求进入计划模式：${reason}` : note };
                     return;
@@ -519,7 +540,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             let approved = false;
                             // ★ 审批通道（宿主）异常一律按拒绝处理（fail-closed），不逃逸出工具循环
                             try {
-                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level);
+                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs);
                             } catch (e: any) {
                                 denied = true;
                                 result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;
