@@ -27,7 +27,12 @@ interface StringDict {
     planTitle: string;
     planPrompt: string;
     planAccept: string;
+    planEdit: string;
     planReject: string;
+    planEditTitle: string;
+    planEditHint: string;
+    planRejected: string;
+    planEditEmpty: string;
     approvalTitle: string;
     approvalPrompt: string;
     approvalAllow: string;
@@ -90,9 +95,14 @@ const STRINGS: Record<Locale, StringDict> = {
         toolDone: (name, ok) => `⏺ ${name} · ${ok ? "成功" : "失败"}`,
         toolDenied: (name) => `🚫 ${name} 已被拒绝`,
         planTitle: "✅ 实现方案（计划模式）",
-        planPrompt: "↑↓ 选择后 Enter：接受则进入实现，拒绝则继续计划。",
-        planAccept: "接受方案，开始实现",
-        planReject: "拒绝，继续计划",
+        planPrompt: "↑↓ 选择 · Enter 确认（修改项进入编辑，Enter 提交 / Esc 取消）。",
+        planAccept: "接受并执行",
+        planEdit: "修改方案",
+        planReject: "拒绝，回到输入框",
+        planEditTitle: "✏️ 编辑方案",
+        planEditHint: "Enter 按此方案执行 · Esc 取消回到选项",
+        planRejected: "✋ 已拒绝方案，本轮未执行。",
+        planEditEmpty: "方案不能为空",
         approvalTitle: "🔐 操作审批",
         approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
         approvalAllow: "允许本次",
@@ -184,9 +194,14 @@ const STRINGS: Record<Locale, StringDict> = {
         toolDone: (name, ok) => `⏺ ${name} · ${ok ? "ok" : "failed"}`,
         toolDenied: (name) => `🚫 ${name} denied`,
         planTitle: "✅ Implementation plan (plan mode)",
-        planPrompt: "↑↓ then Enter: accept to implement, reject to keep planning.",
-        planAccept: "Accept plan, start implementing",
-        planReject: "Reject, keep planning",
+        planPrompt: "↑↓ then Enter (edit opens the editor: Enter to save / Esc to cancel).",
+        planAccept: "Accept and implement",
+        planEdit: "Edit plan",
+        planReject: "Reject, back to prompt",
+        planEditTitle: "✏️ Edit plan",
+        planEditHint: "Enter to implement with this plan · Esc back to options",
+        planRejected: "✋ Plan rejected, nothing executed this turn.",
+        planEditEmpty: "Plan cannot be empty",
         approvalTitle: "🔐 Action approval",
         approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
         approvalAllow: "Allow once",

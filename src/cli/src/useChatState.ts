@@ -27,13 +27,18 @@ export type { ChatRow } from "./replay.ts";
 
 /** 待审批请求（模态驱动）。 */
 export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
+/** 计划审批决策：accept=执行（plan 缺省=原方案，带 plan=编辑后方案）；reject=终止回输入框。 */
+export type PlanResolution =
+    | { action: 'accept'; plan?: string }
+    | { action: 'reject' };
 /** 待审批方案（计划模式两阶段）。 */
-export type PendingPlan = { plan: string; resolve: (v: boolean) => void };
+export type PendingPlan = { plan: string; resolve: (r: PlanResolution) => void };
 /** 待选择的历史会话（/sessions 选择器）。resolve(null)=取消。 */
 export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string | null) => void };
 
-/** 流式缓冲 flush 间隔：过小易闪屏，过大跟手略迟（约 20fps）。 */
-const FLUSH_MS = 50;
+/** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
+ *  80ms≈12fps：在 Windows Terminal 上显著减闪（帧数较 50ms 降约 37%），而流式文本/打字延迟无感。 */
+const FLUSH_MS = 80;
 
 /** 模型自主进入计划模式后，重跑计划阶段发给模型的引导语（用户原文已入 transcript，勿重复）。 */
 const ENTER_PLAN_RESEARCH_PROMPT = "（已进入计划模式。请以只读方式完成调研，然后调用 exit_plan_mode 提交完整实现方案。）";
@@ -248,8 +253,13 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 break;
             }
             case "plan.proposed": {
-                flush();
-                proposedPlanRef.current = (obj.plan as string) ?? "";
+                // ★ 方案作为 Static 消息行渲染（写一次、不参与动态区擦写）→ 治审批切换闪屏。
+                //   assistant kind 享 RichText（代码块/列表）；不带 streaming → 进 Static。proposedPlanRef 仍供编辑预填。
+                closeStreaming();
+                const planText = (obj.plan as string) ?? "";
+                proposedPlanRef.current = planText;
+                const id = newRowId();
+                setRows((prev) => [...prev, { id, kind: "assistant", text: planText }]);
                 break;
             }
             case "final": {
@@ -300,10 +310,10 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         enterPlanReasonRef.current = null;
         return r;
     }, []);
-    const setPlan = useCallback((plan: string): Promise<boolean> =>
-        new Promise<boolean>((resolve) => setPendingPlan({ plan, resolve })), []);
-    const resolvePlan = useCallback((v: boolean) => {
-        setPendingPlan((prev) => { prev?.resolve(v); return null; });
+    const setPlan = useCallback((plan: string): Promise<PlanResolution> =>
+        new Promise<PlanResolution>((resolve) => setPendingPlan({ plan, resolve })), []);
+    const resolvePlan = useCallback((r: PlanResolution) => {
+        setPendingPlan((prev) => { prev?.resolve(r); return null; });
     }, []);
 
     /** trace 透传：捕获 llm.response 的真实 usage，供 assistant 行收尾时附上。 */
@@ -352,13 +362,16 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
         await runOnce(sid, researchPrompt, true);
         const plan = takeProposedPlan();
-        if (plan != null) {
-            const accepted = await setPlan(plan);
-            if (accepted) {
-                await runOnce(sid, "（用户已批准上述方案，请开始实现。）", false);
-            }
+        if (plan == null) return;
+        const res = await setPlan(plan);
+        if (res.action === 'accept') {
+            // ★ 编辑后方案不在 transcript，必须把最终方案全文塞进实现轮 prompt，否则模型按原方案执行。
+            const finalPlan = res.plan ?? plan;
+            await runOnce(sid, `（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false);
+        } else {
+            pushInfo(S.planRejected);
         }
-    }, [runOnce, setPlan, takeProposedPlan]);
+    }, [runOnce, setPlan, takeProposedPlan, pushInfo]);
 
     /** 提交一轮对话。计划模式下走两阶段（调研 → 方案审批 → 实现）；模型亦可在普通轮主动请求进入计划模式。 */
     const submit = useCallback(async (content: string) => {

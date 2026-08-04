@@ -24,6 +24,7 @@ import { ToolCard } from "./components/ToolCard.tsx";
 import { TodosPanel } from "./components/TodosPanel.tsx";
 import { ApprovalModal } from "./components/ApprovalModal.tsx";
 import { PlanModal } from "./components/PlanModal.tsx";
+import { PlanEditor } from "./components/PlanEditor.tsx";
 import { SessionPicker } from "./components/SessionPicker.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
@@ -54,8 +55,9 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     const cols = stdout?.columns ?? 80;
     const wrapW = Math.max(16, cols - 2);
     /** 流式正文动态区保留的尾部行数：终端高度 - 预留（任务面板/生成指示/输入/状态/留白）。
-     *  稳定动态区高度 → 治闪屏/错位；收尾后整行进 Static 渲染全文，不丢内容。 */
-    const streamTail = Math.max(4, (stdout?.rows ?? 24) - 12);
+     *  稳定动态区高度 → 治闪屏/错位；收尾后整行进 Static 渲染全文，不丢内容。
+     *  ★ rows-18（原 -12）：Ink log-update 全量擦写动态区，高度越低越不闪；30 行终端→12 行尾巴。 */
+    const streamTail = Math.max(4, (stdout?.rows ?? 24) - 18);
 
     const [input, setInput] = useState("");
     const [cursor, setCursor] = useState(0);
@@ -63,13 +65,21 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     const [modelDisplay, setModelDisplay] = useState(MODEL_NAME);
     /** 语言切换计数器：setLocale 后 setTick 触发重渲染，刷新界面文案（S 在 render 期读取）。 */
     const [tick, setTick] = useState(0);
+    /** 计划方案编辑相位：pendingPlan 下选「修改」进入编辑器，预填原方案；Enter 确认 / Esc 取消回选项。 */
+    const [planEditing, setPlanEditing] = useState(false);
+    const [planDraft, setPlanDraft] = useState("");
+    const [planCursor, setPlanCursor] = useState(0);
 
     const inputRef = useRef(input);
     const selectIdxRef = useRef(selectIdx);
     const busyRef = useRef(state.busy);
+    const planEditingRef = useRef(false);
+    const planDraftRef = useRef("");
     inputRef.current = input;
     selectIdxRef.current = selectIdx;
     busyRef.current = state.busy;
+    planEditingRef.current = planEditing;
+    planDraftRef.current = planDraft;
 
     const staticRows = useMemo(() => state.rows.filter((r) => !isDynamicRow(r)), [state.rows]);
     const dynamicRows = useMemo(() => state.rows.filter(isDynamicRow), [state.rows]);
@@ -114,7 +124,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); }, [state.pendingApproval, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
 
     // —— 本地斜杠命令 ——
     const runLocalSlash = (text: string): boolean => {
@@ -210,6 +220,12 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
         await state.submit(v);
     };
 
+    /** 计划编辑器确认（编辑态 Enter）：空方案不确认；否则以编辑后方案接受。 */
+    const confirmPlanEdit = () => {
+        if (!planDraftRef.current.trim()) { state.pushInfo(S.planEditEmpty); return; }
+        state.resolvePlan({ action: 'accept', plan: planDraftRef.current });
+    };
+
     // —— 全局按键分发（模态优先） ——
     useInput((ch, key) => {
         if (key.ctrl && ch === "c") { exit(); return; }
@@ -222,9 +238,23 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
             return;
         }
         if (state.pendingPlan) {
-            if (key.upArrow || key.downArrow) setSelectIdx((i) => (i === 0 ? 1 : 0));
-            else if (key.return) state.resolvePlan(selectIdxRef.current === 0);
-            else if (key.escape || (key.ctrl && ch === "g")) state.resolvePlan(false);
+            // 编辑态：仅 Esc/Ctrl+G 取消回选项；其余按键交给 PlanEditor 的 MultilineInput 处理
+            if (planEditingRef.current) {
+                if (key.escape || (key.ctrl && ch === "g")) setPlanEditing(false);
+                return;
+            }
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + 3) % 3);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % 3);
+            else if (key.return) {
+                const idx = selectIdxRef.current;
+                if (idx === 0) state.resolvePlan({ action: 'accept' });
+                else if (idx === 1) {
+                    // 进入编辑器，预填原方案、光标置末尾
+                    setPlanDraft(state.pendingPlan.plan);
+                    setPlanCursor(state.pendingPlan.plan.length);
+                    setPlanEditing(true);
+                } else state.resolvePlan({ action: 'reject' });
+            } else if (key.escape || (key.ctrl && ch === "g")) state.resolvePlan({ action: 'reject' });
             return;
         }
         if (state.pendingSessions) {
@@ -291,7 +321,16 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                         <ApprovalModal toolName={state.pendingApproval.toolName} detail={state.pendingApproval.detail} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {state.pendingPlan ? (
-                        <PlanModal plan={state.pendingPlan.plan} selectedIndex={selectIdx} wrapW={wrapW} />
+                        planEditing ? (
+                            <PlanEditor
+                                value={planDraft}
+                                cursor={planCursor}
+                                onChange={(v, c) => { setPlanDraft(v); setPlanCursor(c); }}
+                                onSubmit={confirmPlanEdit}
+                            />
+                        ) : (
+                            <PlanModal selectedIndex={selectIdx} />
+                        )
                     ) : null}
                     {state.pendingSessions ? (
                         <SessionPicker sessions={state.pendingSessions.sessions} selectedIndex={selectIdx} wrapW={wrapW} />
