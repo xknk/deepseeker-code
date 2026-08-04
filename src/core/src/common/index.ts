@@ -91,6 +91,31 @@ export const atomicWriteJSON = async (file: string, value: unknown): Promise<voi
     }
 };
 
+// ============ 并发信号量（workflow 并行编排共用）============
+/**
+ * 轻量异步信号量（计数信号量）：限制同时进行的异步任务数量。
+ *  - acquire()：拿到一个槽位（立即或排队等待）；返回 Promise，resolve 后即持有许可。
+ *  - release()：释放槽位；若有等待者则直接【移交】（active 不变），否则 active-1。
+ *  纯内存、单进程；用 max=1 即退化成互斥锁（串行化临界区，如 workflow 并行子 agent 的审批通道）。
+ *  实现无 await 竞态：槽位移交在 release 内同步完成，active 始终精确反映在飞任务数。
+ * @param max 最大并发数（<1 视为 1）
+ */
+export const createSemaphore = (max: number) => {
+    if (max < 1) max = 1;
+    let active = 0;
+    const queue: Array<() => void> = [];
+    const acquire = (): Promise<void> => {
+        if (active < max) { active++; return Promise.resolve(); }
+        return new Promise<void>(resolve => queue.push(resolve));
+    };
+    const release = (): void => {
+        const next = queue.shift();
+        if (next) { next(); return; }   // 移交槽位（active 不变）
+        active = Math.max(0, active - 1);
+    };
+    return { acquire, release };
+};
+
 // ============ 系统提示词幂等注入（skills/agents/projectGuide 共用）============
 /**
  * 向 message[0].content 幂等追加一个带 fence 锚点的块：

@@ -18,6 +18,7 @@
 import { CustomTool } from "./type.ts";
 import { systemTools } from "./registry/system.ts";
 import { createAgentTools } from "./registry/agent.ts";
+import { createWorkflowTools } from "./registry/workflow.ts";
 // 后续扩展可以继续 import:
 import { fsTools } from "./registry/fs.ts";
 import { searchTools } from "./registry/search.ts";
@@ -37,11 +38,14 @@ export const agentTools: CustomTool[] = [];
 
 // 2. 动态生成 agent 协同工具，并把“获取自身”的闭包传进去
 const agentSubTools = createAgentTools(() => agentTools);
+// 2.1 P0-3 多 subagent 并行编排（run_workflow），同样需要「获取自身」闭包以派生子 agent
+const workflowTools = createWorkflowTools(() => agentTools);
 
 // 3. 将所有分类工具 push 到最终的注册表数组中
 agentTools.push(
     ...systemTools,
     ...agentSubTools,
+    ...workflowTools,    // P0-3 并行/流水线编排（spawn_agent 的多派生强化版）
     ...fsTools,      // 以后加了文件读写直接解构进来
     ...searchTools,  // 以后加了正则检索直接解构进来
     ...commandTools, // 命令执行（DANGER，强制审批）

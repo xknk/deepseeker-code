@@ -77,4 +77,12 @@ export const appConfig = {
     /** P0-1 并行工具执行灰度开关：设 DEEP_SEEK_PARALLEL_SAFE_TOOLS=1 开启后，同一轮多个 SAFE 只读工具并发执行
      *  （写工具 / 审批 / 终结类 / 后台工具仍串行，appendMessage 落盘始终串行）。默认关闭 = 完全串行现状，零回归。 */
     parallelSafeTools: process.env.DEEP_SEEK_PARALLEL_SAFE_TOOLS === "1",
+    /** P0-3 多 subagent 并行编排（run_workflow）默认并发上限：限制同时在飞的子 agent 数，
+     *  防止模型一次性派生十几个子 agent 打爆 DeepSeek API 速率 / 计费。env DEEP_SEEK_WORKFLOW_CONCURRENCY 可覆盖。 */
+    workflowConcurrency: Number(process.env.DEEP_SEEK_WORKFLOW_CONCURRENCY) || 4,
+    /** P0-3 run_workflow 单次允许的最多步骤数（并行扇出 / 流水线阶段总数上限）。防失控派生烧 token。 */
+    workflowMaxSteps: Number(process.env.DEEP_SEEK_WORKFLOW_MAX_STEPS) || 8,
+    /** P0-3 run_workflow 单个子 agent 结果的字符预算：超出按头尾截断，避免单个巨型结果挤占聚合输出。
+     *  最终聚合再受工具 maxOutputCharacters 兜底。 */
+    workflowPerStepChars: 6000,
 }
