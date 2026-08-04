@@ -11,7 +11,7 @@ import * as ts from "typescript";
 import path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import {
-    WORKSPACE_ROOT,
+    getActiveWorkspaceRoot,
     resolveSafePath,
     assertWithinWorkspace,
     initializeWorkspaceIgnore,
@@ -100,7 +100,7 @@ export const fsTools: CustomTool[] = [
                     // ★ 读保护三道闸（防密钥外泄到云端模型）：
                     //   1) 敏感凭证文件硬黑名单 → 直接拒读；
                     //   2) .gitignore / 通用忽略规则 → 跳过（与 list_dir 同口径，避免读到 .env 等被忽略产物）。
-                    const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
+                    const relForCheck = path.relative(getActiveWorkspaceRoot(), absPath).replace(/\\/g, "/");
                     const readBlock = await assertReadable(relForCheck, args.path);
                     if (readBlock) return readBlock;
 
@@ -178,7 +178,7 @@ export const fsTools: CustomTool[] = [
                         const validEntries = entries.filter(entry => {
                             if (entry.isSymbolicLink()) return false;
                             const fullPath = path.join(currentPath, entry.name);
-                            const relPath = path.relative(WORKSPACE_ROOT, fullPath).replace(/\\/g, "/");
+                            const relPath = path.relative(getActiveWorkspaceRoot(), fullPath).replace(/\\/g, "/");
                             return !checkIsPathIgnored(entry.isDirectory() ? `${relPath}/` : relPath);
                         });
 
@@ -210,7 +210,7 @@ export const fsTools: CustomTool[] = [
                     };
 
                     // 🚨 关键修复：在此处调用递归函数，并直接 return 最终的树状字符串结果
-                    const treeResult = await buildTreeText(WORKSPACE_ROOT, 1);
+                    const treeResult = await buildTreeText(getActiveWorkspaceRoot(), 1);
 
                     if (!treeResult.trim()) return `工作区扫描完成，未发现可用源码文件。`;
 
@@ -347,7 +347,7 @@ export const fsTools: CustomTool[] = [
                 }
                 // 基于 resolveSafePath 后的规范化 rel 判定根/src（堵住 ./src 等变形绕过；与 execute 对称）
                 let rel = "";
-                try { rel = path.relative(WORKSPACE_ROOT, resolveSafePath(cleanPath)); } catch { /* 路径非法 */ }
+                try { rel = path.relative(getActiveWorkspaceRoot(), resolveSafePath(cleanPath)); } catch { /* 路径非法 */ }
                 if (rel === "" || rel === "src") {
                     return `🚨【高危路径警告】[${args.path}] 规整后指向工作区根目录 / src 源码根，execute 将拒绝执行。请指定更具体的子路径后再审批。`;
                 }
@@ -373,7 +373,7 @@ export const fsTools: CustomTool[] = [
 
                     // 💡 优化 4：【路径穿越 + 根/src 保护二次核验】用 path.relative 得到规范化 rel（不依赖字符串前缀，规避 Windows 盘符大小写）：
                     //   rel === "" → 工作区根；rel === "src" → 源码根；rel 以 ".." 开头或为绝对路径 → 越界
-                    const rel = path.relative(WORKSPACE_ROOT, absPath);
+                    const rel = path.relative(getActiveWorkspaceRoot(), absPath);
                     if (!rel || rel === "" || rel === "src" || rel.startsWith("..") || path.isAbsolute(rel)) {
                         return `❌ [安全熔断]：拒绝销毁工作区根目录 / src 源码根 / 越界路径 [${cleanPath}]！`;
                     }
@@ -474,7 +474,7 @@ export const fsTools: CustomTool[] = [
                 try {
                     const absPath = resolveSafePath(args.path);
                     // ★ 读保护三道闸（与 read_file 对称）：敏感凭证文件拒读 + .gitignore 忽略跳过
-                    const relForCheck = path.relative(WORKSPACE_ROOT, absPath).replace(/\\/g, "/");
+                    const relForCheck = path.relative(getActiveWorkspaceRoot(), absPath).replace(/\\/g, "/");
                     const readBlock = await assertReadable(relForCheck, args.path);
                     if (readBlock) return readBlock;
                     // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，

@@ -6,7 +6,7 @@
  */
 import { spawn } from "child_process";
 import { CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
-import { WORKSPACE_ROOT, resolveSafePath } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { killTree } from "./background.ts";
 
 /**
@@ -74,7 +74,7 @@ export const commandTools: CustomTool[] = [
                 //   虚假安全感，还会误杀合法命令（如 git commit -m "remove unused format"）。
                 //   唯一可靠防线是 DANGER 级强制用户审批（现叠加 token 鉴权 + 审批绑定 sessionId + 127.0.0.1 监听）。
 
-                const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
+                const cwd = args.cwd ? resolveSafePath(args.cwd) : getActiveWorkspaceRoot();
                 const maxChars = RUN_COMMAND_MAX_CHARS; // 对应配置的 maxOutputCharacters（单一来源）
                 let totalYieldedChars = 0;
 

@@ -7,7 +7,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { WORKSPACE_ROOT, resolveSafePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
 
 /** 简易 glob → regex（支持 ** / * / ?），无新依赖 */
 const globToRegex = (pattern: string): RegExp => {
@@ -42,7 +42,7 @@ export const globTools: CustomTool[] = [
                     const cleanPattern = (args.pattern || "").trim();
                     if (!cleanPattern) return "❌ [Glob失败]：传入的检索 pattern 不能为空。";
 
-                    const root = args.path ? resolveSafePath(args.path) : WORKSPACE_ROOT;
+                    const root = args.path ? resolveSafePath(args.path) : getActiveWorkspaceRoot();
                     const re = globToRegex(cleanPattern);
                     await initializeWorkspaceIgnore();
 
@@ -59,7 +59,7 @@ export const globTools: CustomTool[] = [
                         // 过滤掉被忽略的实体
                         const validEntries = entries.filter(e => {
                             const full = path.join(dir, e.name);
-                            const rel = path.relative(WORKSPACE_ROOT, full).replace(/\\/g, "/");
+                            const rel = path.relative(getActiveWorkspaceRoot(), full).replace(/\\/g, "/");
                             return !checkIsPathIgnored(e.isDirectory() ? `${rel}/` : rel);
                         });
 
@@ -72,7 +72,7 @@ export const globTools: CustomTool[] = [
                             if (e.isSymbolicLink()) continue;
 
                             const full = path.join(dir, e.name);
-                            const rel = path.relative(WORKSPACE_ROOT, full).replace(/\\/g, "/");
+                            const rel = path.relative(getActiveWorkspaceRoot(), full).replace(/\\/g, "/");
 
                             if (e.isDirectory()) {
                                 // 💡 优化 4：精准匹配，如果大模型只想找文件，避免把中间每一层父级文件夹都塞进结果集

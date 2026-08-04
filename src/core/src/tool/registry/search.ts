@@ -15,7 +15,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { WORKSPACE_ROOT } from "../guard.ts";
+import { getActiveWorkspaceRoot } from "../guard.ts";
 import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
 import fs from "fs/promises";
@@ -61,7 +61,7 @@ export const searchTools: CustomTool[] = [
                     //   Windows 下 process.cwd() 返回反斜杠（如 D:\code\自研\...），spawn/execFile 用「反斜杠+中文」
                     //   作 cwd 派生 rg 会失败（ENOENT 或无限卡死，实测 search_grep 查 import 卡 >90s）。
                     //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
-                    const searchRoot = WORKSPACE_ROOT.replace(/\\/g, "/");
+                    const searchRoot = getActiveWorkspaceRoot().replace(/\\/g, "/");
                     const rgArgs = [
                         "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",
@@ -121,7 +121,7 @@ export const searchTools: CustomTool[] = [
                 const GUIDE_CANDIDATES = ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
                 for (const name of GUIDE_CANDIDATES) {
                     try {
-                        const content = await fs.readFile(path.join(WORKSPACE_ROOT, name), "utf-8");
+                        const content = await fs.readFile(path.join(getActiveWorkspaceRoot(), name), "utf-8");
                         return `[Project Guide via ${name}]\n\n${content}`;
                     } catch { /* 该候选不存在，继续尝试下一个 */ }
                 }

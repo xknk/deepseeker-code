@@ -15,7 +15,7 @@
 import { spawn, execFile } from "child_process";
 import { promisify } from "util";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { WORKSPACE_ROOT, resolveSafePath } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { createUUID } from "@/common/index.ts";
 
 const execFileAsync = promisify(execFile);
@@ -88,7 +88,7 @@ export const backgroundTools: CustomTool[] = [
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【后台命令审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}\n（将启动常驻后台进程，持续占用资源直至手动停止；同命令互斥）`,
             async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
-                const cwd = args.cwd ? resolveSafePath(args.cwd) : WORKSPACE_ROOT;
+                const cwd = args.cwd ? resolveSafePath(args.cwd) : getActiveWorkspaceRoot();
                 const isWin = process.platform === "win32";
 
                 // ★ 编码处理（与 command.ts 对齐）：Windows 下命令常以系统 OEM 代码页（中文=cp936/GBK）输出，

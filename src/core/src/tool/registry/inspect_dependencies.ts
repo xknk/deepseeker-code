@@ -9,7 +9,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { WORKSPACE_ROOT } from "../guard.ts";
+import { getActiveWorkspaceRoot } from "../guard.ts";
 
 export const dependencyTools: CustomTool[] = [
     {
@@ -25,7 +25,7 @@ export const dependencyTools: CustomTool[] = [
             isSync: true,
             async execute(): Promise<string> {
                 try {
-                    const pjsPath = path.join(WORKSPACE_ROOT, "package.json");
+                    const pjsPath = path.join(getActiveWorkspaceRoot(), "package.json");
                     const raw = await fs.readFile(pjsPath, "utf-8");
                     const pjs = JSON.parse(raw);
                     
