@@ -26,13 +26,15 @@ interface StringDict {
     toolDenied: (name: string) => string;
     planTitle: string;
     planPrompt: string;
-    planAccept: string;
+    planAcceptAuto: string;
+    planAcceptManual: string;
     planEdit: string;
     planReject: string;
     planEditTitle: string;
     planEditHint: string;
     planRejected: string;
     planEditEmpty: string;
+    planAutoExecute: string;
     approvalTitle: string;
     approvalPrompt: string;
     approvalAllow: string;
@@ -96,13 +98,15 @@ const STRINGS: Record<Locale, StringDict> = {
         toolDenied: (name) => `🚫 ${name} 已被拒绝`,
         planTitle: "✅ 实现方案（计划模式）",
         planPrompt: "↑↓ 选择 · Enter 确认（修改项进入编辑，Enter 提交 / Esc 取消）。",
-        planAccept: "接受并执行",
+        planAcceptAuto: "接受并自动执行（实现阶段免审批）",
+        planAcceptManual: "接受并手动执行（逐步审批每个工具）",
         planEdit: "修改方案",
         planReject: "拒绝，回到输入框",
         planEditTitle: "✏️ 编辑方案",
         planEditHint: "Enter 按此方案执行 · Esc 取消回到选项",
         planRejected: "✋ 已拒绝方案，本轮未执行。",
         planEditEmpty: "方案不能为空",
+        planAutoExecute: "⚡ 已进入自动执行：实现阶段工具将免审批直接运行。",
         approvalTitle: "🔐 操作审批",
         approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
         approvalAllow: "允许本次",
@@ -195,13 +199,15 @@ const STRINGS: Record<Locale, StringDict> = {
         toolDenied: (name) => `🚫 ${name} denied`,
         planTitle: "✅ Implementation plan (plan mode)",
         planPrompt: "↑↓ then Enter (edit opens the editor: Enter to save / Esc to cancel).",
-        planAccept: "Accept and implement",
+        planAcceptAuto: "Accept & auto-run (skip impl approvals)",
+        planAcceptManual: "Accept & step-by-step (approve each tool)",
         planEdit: "Edit plan",
         planReject: "Reject, back to prompt",
         planEditTitle: "✏️ Edit plan",
         planEditHint: "Enter to implement with this plan · Esc back to options",
         planRejected: "✋ Plan rejected, nothing executed this turn.",
         planEditEmpty: "Plan cannot be empty",
+        planAutoExecute: "⚡ Auto-run: implementation tools will execute without approval.",
         approvalTitle: "🔐 Action approval",
         approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
         approvalAllow: "Allow once",

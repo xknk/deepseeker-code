@@ -14,7 +14,8 @@ import { S } from "../strings.ts";
 type Props = { selectedIndex: number };
 
 const OPTIONS = [
-    { label: S.planAccept, color: THEME.ok },
+    { label: S.planAcceptAuto, color: THEME.ok },
+    { label: S.planAcceptManual, color: THEME.warn },
     { label: S.planEdit, color: THEME.blue },
     { label: S.planReject, color: THEME.danger },
 ];

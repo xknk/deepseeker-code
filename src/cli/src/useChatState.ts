@@ -27,9 +27,10 @@ export type { ChatRow } from "./replay.ts";
 
 /** 待审批请求（模态驱动）。 */
 export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
-/** 计划审批决策：accept=执行（plan 缺省=原方案，带 plan=编辑后方案）；reject=终止回输入框。 */
+/** 计划审批决策：accept=执行（plan 缺省=原方案，带 plan=编辑后方案；autoExecute=实现阶段免审批）；
+ *  reject=终止回输入框。 */
 export type PlanResolution =
-    | { action: 'accept'; plan?: string }
+    | { action: 'accept'; plan?: string; autoExecute?: boolean }
     | { action: 'reject' };
 /** 待审批方案（计划模式两阶段）。 */
 export type PendingPlan = { plan: string; resolve: (r: PlanResolution) => void };
@@ -39,6 +40,10 @@ export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string
 /** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
  *  80ms≈12fps：在 Windows Terminal 上显著减闪（帧数较 50ms 降约 37%），而流式文本/打字延迟无感。 */
 const FLUSH_MS = 80;
+
+/** 自动执行审批钩子：全部 allow-once 放行（不持久化），用于计划「接受并自动执行」。
+ *  安全边界仍生效：checkPermission 的 deny 规则、环境断言、verifyResult 均先于/独立于此，不被绕过。 */
+const autoRequestApproval = async (): Promise<ApprovalDecision> => 'allow-once';
 
 /** 模型自主进入计划模式后，重跑计划阶段发给模型的引导语（用户原文已入 transcript，勿重复）。 */
 const ENTER_PLAN_RESEARCH_PROMPT = "（已进入计划模式。请以只读方式完成调研，然后调用 exit_plan_mode 提交完整实现方案。）";
@@ -321,14 +326,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         if (base.eventType === "llm.response" && base.usage) lastUsageRef.current = base.usage;
     }, []);
 
-    /** 单次 runAgent 驱动（经 handleUnifiedChat）。planMode=true=只读调研。 */
-    const runOnce = useCallback(async (sid: string, body: string, planMode: boolean) => {
+    /** 单次 runAgent 驱动（经 handleUnifiedChat）。planMode=true=只读调研。
+     *  autoApprove=true=本轮免审批（实现阶段自动执行：requestApproval 全 allow-once 放行）。 */
+    const runOnce = useCallback(async (sid: string, body: string, planMode: boolean, autoApprove = false) => {
         const ac = new AbortController();
         currentAcRef.current = ac;
         setBusy(true);
         setAborting(false);
         const opts: HostOptions = {
-            requestApproval: createCliRequestApproval(askApproval),
+            requestApproval: autoApprove ? autoRequestApproval : createCliRequestApproval(askApproval),
             onUIEvent: pushEvent,
             onTrace,
             planMode,
@@ -367,7 +373,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         if (res.action === 'accept') {
             // ★ 编辑后方案不在 transcript，必须把最终方案全文塞进实现轮 prompt，否则模型按原方案执行。
             const finalPlan = res.plan ?? plan;
-            await runOnce(sid, `（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false);
+            if (res.autoExecute) pushInfo(S.planAutoExecute);
+            await runOnce(sid, `（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false, res.autoExecute);
         } else {
             pushInfo(S.planRejected);
         }

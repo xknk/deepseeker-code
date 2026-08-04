@@ -243,12 +243,13 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 if (key.escape || (key.ctrl && ch === "g")) setPlanEditing(false);
                 return;
             }
-            if (key.upArrow) setSelectIdx((i) => (i - 1 + 3) % 3);
-            else if (key.downArrow) setSelectIdx((i) => (i + 1) % 3);
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + 4) % 4);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % 4);
             else if (key.return) {
                 const idx = selectIdxRef.current;
-                if (idx === 0) state.resolvePlan({ action: 'accept' });
-                else if (idx === 1) {
+                if (idx === 0) state.resolvePlan({ action: 'accept', autoExecute: true });
+                else if (idx === 1) state.resolvePlan({ action: 'accept', autoExecute: false });
+                else if (idx === 2) {
                     // 进入编辑器，预填原方案、光标置末尾
                     setPlanDraft(state.pendingPlan.plan);
                     setPlanCursor(state.pendingPlan.plan.length);
