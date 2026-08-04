@@ -29,6 +29,8 @@ export type RunAgentEvents = (base: TraceBase) => Promise<void>
  */
 /** 思考等级（运行时可切换，缺省回退全局 env 配置）：off=关闭思考 / high=常规 / max=深度。映射见 llm/model.ts。 */
 export type ThinkingLevel = "off" | "high" | "max";
+/** 权限模式（运行时可切换）：default=常规（MUTATION/DANGER 走人工审批）/ auto=辅助模型分类器智能放行（仅工作区内文件编辑，其余转人工）。 */
+export type PermissionMode = "default" | "auto";
 
 export interface RunAgentOptions {
     /** 工具 schema 列表（必传）。不在 runAgent 内置默认，避免与 tool/index.ts 循环依赖。 */
@@ -66,6 +68,8 @@ export interface RunAgentOptions {
     archivedMessageCount?: number,
     /** 计划模式：仅允许只读/研究类工具 + exit_plan_mode，先调研产出方案、经用户审批后再实现（见 agent/planMode.ts）。 */
     planMode?: boolean,
+    /** 权限模式（CLI `/auto` 或 `--auto`）：auto=工作区内文件编辑（edit/write/create）由辅助模型分类器智能放行、高危/异常转人工；default=常规人工审批。见 tool/autoPermission.ts。 */
+    permissionMode?: PermissionMode,
     /** 思考等级（运行时覆盖，缺省回退全局 env）：off=关闭 / high=常规 / max=深度（映射见 llm/model.ts）。 */
     thinkingLevel?: ThinkingLevel,
     /** 回复语言（运行时覆盖）：runAgent 据此向 system prompt 注入「用中文/英文回复」引导。 */

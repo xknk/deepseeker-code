@@ -20,12 +20,13 @@ import { isTrustedDir, trustDir } from "@/trust/index.ts";
 import type { Locale } from "@/common/index.ts";
 
 /** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c。 */
-const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; continue?: boolean } => {
-    const out: { resume?: string; plan?: boolean; continue?: boolean } = {};
+const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean } => {
+    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean } = {};
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--resume" || a === "-r") out.resume = argv[++i];
         else if (a === "--plan" || a === "-p") out.plan = true;
+        else if (a === "--auto" || a === "-a") out.auto = true;
         else if (a === "--continue" || a === "-c") out.continue = true;
     }
     return out;
@@ -179,7 +180,7 @@ const main = async (): Promise<void> => {
     }
 
     const { waitUntilExit } = render(
-        <App resumeSessionId={resumeId} initialPlanMode={args.plan} />,
+        <App resumeSessionId={resumeId} initialPlanMode={args.plan} initialAutoMode={args.auto} />,
         // exitOnCtrlC:false：Ctrl+C 交由 App useInput 处理（统一退出/中止语义）；
         // patchConsole:false：避免 console 劫持与全屏重绘叠加闪屏。
         { exitOnCtrlC: false, patchConsole: false },

@@ -20,6 +20,12 @@ export const model = new OpenAI({
 // Q-4：模型参数外置到环境变量（换模型 / 关 reasoning 不必改源码）。
 export const MODEL_NAME = process.env.DEEP_SEEK_MODEL || "deepseek-v4-flash";
 /**
+ * 辅助模型（摘要 / 未来 auto 审批分类器等轻量任务专用）：独立于主 agent 模型，默认 deepseek-v4-flash（便宜快）。
+ * 设 DEEP_SEEK_AUX_MODEL 覆盖。与主模型分开 —— 主 agent 可换更强模型（DEEP_SEEK_MODEL），而辅助任务仍走轻量
+ * 模型以控成本。默认与主模型同为 flash（未配 DEEP_SEEK_MODEL 时）。
+ */
+export const AUX_MODEL_NAME = process.env.DEEP_SEEK_AUX_MODEL || "deepseek-v4-flash";
+/**
  * DeepSeek V4 reasoning_effort 合法档位（low/medium 已废弃，兼容映射为 high）。
  * 用 clamp 校验环境变量，避免「原值 truthy → 未经校验 → 被强转成合法类型」的失真
  * （如 DEEP_SEEK_REASONING_EFFORT=low 会被原样当成合法值发给 API）。非法/未设一律回落 "high"。

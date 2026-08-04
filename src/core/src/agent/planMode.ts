@@ -23,8 +23,8 @@ export const PLAN_ALLOWED_TOOLS = new Set<string>([
     "web_fetch", "web_search", // 只读研究类（虽为 DANGER 但不写本地状态；仍走各自审批）
 ]);
 
-/** 计划模式追加到系统提示词的指令（带唯一标记，防重复追加） */
-export const PLAN_MODE_SYSTEM_HINT = "【计划模式】你现在处于计划模式：只能读取与检索（read_file/search_grep/glob/git 只读/web 等），严禁修改任何文件或执行命令。完成调研后，必须调用 exit_plan_mode 提交完整实现方案（要改哪些文件、怎么改、为何这么改、有何风险），方案经用户审批后才会进入实现阶段。";
+// P0-4：计划模式约束已静态化进 SYSTEM_PROMPT（agent/systemPrompt.ts【计划模式】段），不再随 planMode 状态
+//   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。真正的模式强制仍由 filterToolsForPlanMode 保证。
 
 /**
  * exit_plan_mode 工具 schema。
@@ -62,9 +62,6 @@ export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
 //  无法主动「先规划再动手」。enter_plan_mode 让模型自主发信号 → 上层（runAgent 拦截 + CLI 编排）
 //  接管：翻转 planMode、以只读重跑计划阶段、复用既有方案审批闸门。真正落约束（剔写工具、走审批）
 //  仍由 harness 完成——模型只能发信号，无法单方面自我设限。
-
-/** 非计划模式下注入系统提示词的引导（带唯一标记，防重复追加）。引导模型在复杂任务主动进计划模式。 */
-export const PLAN_MODE_AUTO_ENTER_HINT = "【自主计划模式】面对非平凡的实现任务（多文件改动、架构决策、不确定的实现路径、涉及高风险操作等），优先调用 enter_plan_mode 工具请求进入计划模式：先以只读方式调研、产出完整实现方案，经用户审批后再动手实现。简单、明确的改动（单行修复、明显的小调整）无需进入计划模式，直接实现即可。";
 
 /**
  * enter_plan_mode 工具 schema：exit_plan_mode 的对偶入口，非计划模式下暴露给模型。

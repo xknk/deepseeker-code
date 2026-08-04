@@ -8,7 +8,7 @@
  */
 import OpenAI from "openai";
 import { Msg } from "@/session/contextCore.ts";
-import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./createModel.ts"
+import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED, AUX_MODEL_NAME } from "./createModel.ts"
 import { MsgParams, outMsg, toolMsg } from "./type.ts";
 import { ThinkingLevel } from "@/agent/type.ts";
 
@@ -66,10 +66,10 @@ export async function chatWithModelWithSummary(
     try {
         const requestBody = {
             messages: messages,
-            model: MODEL_NAME,
+            model: AUX_MODEL_NAME,
             tool_choice: "auto",
             tools: tools,
-            // 摘要/归并是直白的文本压缩任务，无需思考；显式关闭避免白付 reasoning token。
+            // 摘要/归并是直白的文本压缩任务，走轻量辅助模型（AUX_MODEL_NAME）+ 显式关闭思考，控成本。
             thinking: { type: "disabled" },
             stream: false,
         } as MsgParams;
@@ -81,6 +81,38 @@ export async function chatWithModelWithSummary(
     } catch (error) {
         console.error("❌ 接口调用失败:", error);
         throw error;
+    }
+}
+
+/**
+ * 工具调用风险分类器（auto permission mode 用）：走轻量辅助模型（AUX_MODEL_NAME），非流式、关思考。
+ * 只回 'safe'/'risky'。严格解析——只接受显式 SAFE，其余一律 risky（fail-closed）。
+ * 静默：异常/超时（10s）/中止 → risky，不 console.error/throw（避免污染 CLI 的 Ink stdout 追踪）。
+ * 不带 tool_choice/tools（分类任务不递归调工具）。
+ */
+export async function classifyToolRisk(
+    toolName: string, args: any, detail: string, signal?: AbortSignal,
+): Promise<'safe' | 'risky'> {
+    // 合并「外部中止信号」与「10s 超时」——分类器不能拖慢审批（model 单例默认 timeout 120s 太长）
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 10_000);
+    if (signal) signal.addEventListener('abort', () => ac.abort(), { once: true });
+    try {
+        const completion = await model.chat.completions.create({
+            messages: [
+                { role: 'system', content: '你是工具调用风险分类器。只回 SAFE 或 RISKY，不要任何解释。规则：工作区内常规文件创建/编辑=SAFE；覆盖敏感文件（.env/.git/.ssh/密钥/credentials）或工作区外或危险操作=RISKY。' },
+                { role: 'user', content: `工具:${toolName}\n参数:${JSON.stringify(args).slice(0, 800)}\n说明:${detail || ''}` },
+            ],
+            model: AUX_MODEL_NAME,
+            thinking: { type: 'disabled' },
+            stream: false,
+        } as MsgParams, { signal: ac.signal });
+        const text = ((completion as outMsg).choices[0]?.message?.content ?? '').trim().toUpperCase();
+        return text.startsWith('SAFE') ? 'safe' : 'risky';
+    } catch {
+        return 'risky';   // 异常/超时/中止 → fail-closed（由调用方转人工）
+    } finally {
+        clearTimeout(timer);
     }
 }
 

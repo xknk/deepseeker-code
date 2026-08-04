@@ -60,7 +60,7 @@ const finalizeThinkingRow = (row: Extract<ChatRow, { kind: "thinking" }>): ChatR
  * @param initialSessionId --resume 传入的会话 ID；缺省首轮由 getOrCreateSessionId 生成并复用。
  * @param initialPlanMode --plan 初始即进入计划模式。
  */
-export const useChatState = (initialSessionId?: string, initialPlanMode?: boolean) => {
+export const useChatState = (initialSessionId?: string, initialPlanMode?: boolean, initialAutoMode?: boolean) => {
     const [rows, setRows] = useState<ChatRow[]>([]);
     const [todos, setTodos] = useState<Todo[]>([]);
     const [busy, setBusy] = useState(false);
@@ -88,6 +88,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const enterPlanReasonRef = useRef<string | null>(null);
     const modelRef = useRef<string>("");
     const planModeRef = useRef<boolean>(initialPlanMode ?? false);
+    const autoModeRef = useRef<boolean>(initialAutoMode ?? false);
     /** 思考等级（off/high/max），初始据全局 env 推导；/thinking 运行时覆盖，runOnce 透传给 model。 */
     const thinkingLevelRef = useRef<ThinkingLevel>(
         !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high",
@@ -338,6 +339,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             onUIEvent: pushEvent,
             onTrace,
             planMode,
+            permissionMode: (!autoApprove && autoModeRef.current) ? 'auto' : undefined,
             model: modelRef.current || undefined,
             thinkingLevel: thinkingLevelRef.current,
             locale: getLocale(),
@@ -455,6 +457,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
     const setPlanMode = useCallback((on: boolean) => { planModeRef.current = on; }, []);
     const getPlanMode = useCallback(() => planModeRef.current, []);
+    /** /auto 切换自动权限模式（引擎层分类器：工作区内文件编辑自动放行，高危/异常转人工）。 */
+    const setAutoMode = useCallback((on: boolean) => { autoModeRef.current = on; }, []);
+    const getAutoMode = useCallback(() => autoModeRef.current, []);
     /** /thinking 切换思考等级（off/high/max），影响下一次 runOnce 透传给 model 的 thinking/reasoning_effort。 */
     const setThinkingLevel = useCallback((lvl: ThinkingLevel) => { thinkingLevelRef.current = lvl; }, []);
     const getThinkingLevel = useCallback((): ThinkingLevel => thinkingLevelRef.current, []);
@@ -466,7 +471,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         // 动作
         submit, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, setPlan, resolvePlan,
-        toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode,
+        toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel,
         openSessionPicker, resolveSession, loadSession,
     };

@@ -12,16 +12,18 @@ type Props = {
     busy: boolean;
     aborting: boolean;
     planMode: boolean;
+    autoMode: boolean;
     sessionShort: string;
     cols: number;
 };
 
-export const StatusStrip = ({ model, busy, aborting, planMode, sessionShort }: Props): React.ReactElement => {
+export const StatusStrip = ({ model, busy, aborting, planMode, autoMode, sessionShort }: Props): React.ReactElement => {
     const stateText = aborting ? S.statusAborting : busy ? S.statusStreaming : S.statusIdle;
     const stateColor = busy ? THEME.coralBright : THEME.gray;
     const bits = [
         model ? `model: ${model}` : "",
         planMode ? S.statusPlan : "",
+        autoMode ? S.statusAuto : "",
         `state: ${stateText}`,
         sessionShort ? `session: ${sessionShort}` : "",
     ].filter(Boolean);

@@ -124,6 +124,7 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
                         events: ctx.events,
                         onUIEvent: ctx.onUIEvent, // ★ 必须透传：否则子 agent 调用需审批工具时前端收不到弹窗，waitForUserApproval 永久挂起（死锁）
                         requestApproval: ctx.requestApproval, // ★ 同步透传宿主审批钩子，子 agent 高危工具仍走同一审批通道
+                        permissionMode: ctx.permissionMode, // ★ P1-6 透传：子 agent 工作区文件编辑也走 auto 分类器
                         model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
                     };
 

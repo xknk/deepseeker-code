@@ -47,12 +47,14 @@ interface StringDict {
     statusIdle: string;
     statusAborting: string;
     statusPlan: string;
+    statusAuto: string;
     noApiKey: (env: string) => string;
     startupBanner: (cwd: string, projectKey: string, isHome: boolean) => string;
     /** 本地命令描述（命令 name 不翻译，仅描述随 locale） */
     cmdHelp: string;
     cmdStatus: string;
     cmdPlan: string;
+    cmdAuto: string;
     cmdModel: string;
     cmdThinking: string;
     cmdLang: string;
@@ -114,11 +116,12 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "拒绝",
         errAborted: "已中止当前轮。",
         busyBlockSend: "⏳ 正在生成，请等待或按 Esc 中止后再发送。",
-        cmdHint: "/help 帮助 · /plan 计划模式 · /model 切换模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /exit 退出",
+        cmdHint: "/help 帮助 · /plan 计划模式 · /auto 自动模式 · /model 切换模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /exit 退出",
         statusStreaming: "生成中",
         statusIdle: "就绪",
         statusAborting: "中止中…",
         statusPlan: "计划模式",
+        statusAuto: "自动模式",
         noApiKey: (env) => `❌ 未配置 ${env}，无法调用模型。\n请在环境变量中设置后重试，或先启动 serve 用 Web 界面。`,
         startupBanner: (cwd, projectKey, isHome) => {
             // 普通目录不打印（TopPanel 已显示）；仅家目录时打印黄色风险警告。
@@ -133,6 +136,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdHelp: "查看帮助与快捷键",
         cmdStatus: "查看当前模型/会话/模式",
         cmdPlan: "切换计划模式（只读调研→审批→实现）",
+        cmdAuto: "切换自动模式（文件编辑分类器自动放行，高危转人工）",
         cmdModel: "切换模型：/model <deepseek-v4|deepseek-v4-flash|…>",
         cmdThinking: "切换思考等级：/thinking <off|high|max>",
         cmdLang: "切换界面语言：/lang <zh|en>",
@@ -215,11 +219,12 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "Deny",
         errAborted: "Aborted current turn.",
         busyBlockSend: "⏳ Still generating—wait or press Esc to abort before sending.",
-        cmdHint: "/help help · /plan plan mode · /model switch model · /thinking thinking level · /lang language · /sessions history · /clear clear · /exit quit",
+        cmdHint: "/help help · /plan plan mode · /auto auto mode · /model switch model · /thinking thinking level · /lang language · /sessions history · /clear clear · /exit quit",
         statusStreaming: "streaming",
         statusIdle: "ready",
         statusAborting: "aborting…",
         statusPlan: "plan mode",
+        statusAuto: "auto mode",
         noApiKey: (env) => `❌ ${env} is not configured—cannot call the model.\nSet it as an env var and retry, or start serve for the Web UI.`,
         startupBanner: (cwd, projectKey, isHome) => {
             if (!isHome) return "";
@@ -233,6 +238,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdHelp: "Show help & shortcuts",
         cmdStatus: "Show current model/session/mode",
         cmdPlan: "Toggle plan mode (read-only research → review → implement)",
+        cmdAuto: "Toggle auto mode (classifier auto-approves file edits, escalates risky)",
         cmdModel: "Switch model: /model <deepseek-v4|deepseek-v4-flash|…>",
         cmdThinking: "Switch thinking level: /thinking <off|high|max>",
         cmdLang: "Switch interface language: /lang <zh|en>",
@@ -294,4 +300,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "model", "thinking", "lang", "sessions", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "sessions", "clear", "exit"] as const;

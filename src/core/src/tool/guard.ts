@@ -87,6 +87,31 @@ export const assertWithinWorkspace = (absPath: string): void => {
 };
 
 /**
+ * 🛡️ P1-7 受保护目录清单：写/删工具无论授权与否一律禁碰，防 VCS（.git/.hg/.svn）、凭证（.ssh/.aws）、
+ * 项目配置（.deepSeekCode：hooks/permissions/skills/agents，防 agent 自我篡改提权）被改。
+ * 仅作用于写工具（isUndoTrigger：edit_file/write_file/create_file/delete_path）；读不受限（模型可读 .git/.env 调试）。
+ * 注：单个敏感文件（.env 等）不在此列——由 auto deny 清单（auto 模式）/ 人工审批（默认模式）处理，避免阻碍常规编辑。
+ */
+export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepSeekCode'];
+
+/**
+ * 路径是否落入受保护目录（含其子路径）。解析为绝对路径后按路径段匹配（小写归一），避免误判文件名巧合。
+ * 异常/空路径 → false（不阻断，交由既有 resolveSafePath 围栏 + 审批）。
+ */
+export const isProtectedWrite = (relOrAbs: string, cwd?: string): boolean => {
+    if (!relOrAbs) return false;
+    try {
+        const base = cwd || WORKSPACE_ROOT;
+        const abs = path.isAbsolute(relOrAbs) ? relOrAbs : path.resolve(base, relOrAbs);
+        const lower = abs.replace(/\\/g, '/').toLowerCase();
+        return PROTECTED_WRITE_DIRS.some(d => {
+            const seg = ('/' + d).toLowerCase();
+            return lower.endsWith(seg) || lower.includes(seg + '/');
+        });
+    } catch { return false; }
+};
+
+/**
  * 递归扫描全盘内部私有闭包函数，支持 Monorepo 级多层子目录 ignore 动态联动
  */
 const scanIgnoreFilesRecursive = async (dirPath: string): Promise<void> => {

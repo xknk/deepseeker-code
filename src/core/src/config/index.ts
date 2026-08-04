@@ -74,4 +74,7 @@ export const appConfig = {
      * 注意：即便放行，云元数据端点（169.254.169.254 等）仍硬拦防凭证窃取。
      */
     webFetchAllowPrivate: process.env.WEB_FETCH_ALLOW_PRIVATE === "1",
+    /** P0-1 并行工具执行灰度开关：设 DEEP_SEEK_PARALLEL_SAFE_TOOLS=1 开启后，同一轮多个 SAFE 只读工具并发执行
+     *  （写工具 / 审批 / 终结类 / 后台工具仍串行，appendMessage 落盘始终串行）。默认关闭 = 完全串行现状，零回归。 */
+    parallelSafeTools: process.env.DEEP_SEEK_PARALLEL_SAFE_TOOLS === "1",
 }

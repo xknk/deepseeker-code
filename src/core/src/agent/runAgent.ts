@@ -28,9 +28,9 @@ import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolRes
 import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
-import { requestApproval } from "@/tool/guard.ts";
+import { requestApproval, isProtectedWrite } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
-import { filterToolsForPlanMode, PLAN_MODE_SYSTEM_HINT, appendEnterPlanModeTool, PLAN_MODE_AUTO_ENTER_HINT } from "./planMode.ts";
+import { filterToolsForPlanMode, appendEnterPlanModeTool } from "./planMode.ts";
 import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
@@ -39,6 +39,9 @@ import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { injectSkillCatalog } from "@/skills/inject.ts";
 import { injectAgentCatalog } from "@/agents/inject.ts";
 import { injectProjectGuide } from "@/projectGuide/inject.ts";
+import { injectMarkedBlock } from "@/common/index.ts";
+import { appConfig } from "@/config/index.ts";
+import { runAutoCheck } from "@/tool/autoPermission.ts";
 
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
@@ -63,6 +66,21 @@ const applyPrivacyMasking = (
     } catch {
         return output;
     }
+};
+
+/**
+ * P0-1 单个 tool_call 的处理结果（processToolCall 返回）。纯数据——副作用（yield tool.end / message.push /
+ * appendMessage）由分波调度层统一 flush，使 processToolCall 可被 Promise.all 并发调用。
+ */
+type ToolCallOutcome = {
+    toolCallId: string;
+    calledName: string;
+    calledArgs: any;
+    resultForModel: string;
+    resultForUser: string;
+    ok: boolean;
+    aborted?: boolean;
+    terminal?: { kind: 'exit_plan_mode' | 'enter_plan_mode'; plan?: string; reason?: string };
 };
 
 
@@ -108,28 +126,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     }));
     // 预留系统提示词和摘要存放区域
     ensureSummarySlot(message);
-    // 计划模式：向系统提示词注入只读约束；非计划模式：注入自主进入计划模式的引导（均带唯一标记防重复追加）
-    {
-        const sys = message[0] as any;
-        if (sys && sys.role === 'system' && typeof sys.content === 'string') {
-            if (options.planMode) {
-                if (!sys.content.includes("【计划模式】")) {
-                    sys.content += `\n\n${PLAN_MODE_SYSTEM_HINT}`;
-                }
-            } else if (!sys.content.includes("【自主计划模式】")) {
-                sys.content += `\n\n${PLAN_MODE_AUTO_ENTER_HINT}`;
-            }
-        }
-    }
-    // 回复语言：按 locale 注入「用中文/英文回复」引导（带【回复语言】标记防重复追加）
+    // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]
+    //   （改写会破坏 DeepSeek 隐式前缀缓存）。真正的模式强制仍由 filterToolsForPlanMode（限制工具表）保证。
+    // 回复语言：按 locale 幂等注入「用中文/英文回复」引导（fence 机制，会话内不变 → 不破坏前缀缓存）
     if (options.locale) {
-        const sys = message[0] as any;
-        if (sys && sys.role === 'system' && typeof sys.content === 'string' && !sys.content.includes("【回复语言】")) {
-            const hint = options.locale === "zh" ? "【回复语言】请始终用中文回复用户。" : "【回复语言】Always reply to the user in English.";
-            sys.content += `\n\n${hint}`;
-        }
+        const hint = options.locale === "zh" ? "请始终用中文回复用户。" : "Always reply to the user in English.";
+        injectMarkedBlock(message, "⟦DSC:LOCALE⟧", hint);
     }
-    // ★ Skills：把【可用技能目录】幂等注入系统提示词（复刻 planMode 追加模式，不动 message 下标）
+    // ★ Skills：把【可用技能目录】幂等注入系统提示词（fence 机制，不动 message 下标）
     injectSkillCatalog(message);
     injectAgentCatalog(message);
     injectProjectGuide(message);
@@ -145,7 +149,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //         （对标 Claude Code：不在低轮数硬停，靠模型自收敛 + 用户中止）。
     //  兜底：MAX_AGENT_ROUNDS 极高（500），仅防失控烧 token 的病理死循环；正常任务不会触及，触及亦 graceful（可"继续"接续）。
     const NUDGE_EVERY = 40;
-    const NUDGE_MARK = "【轮数自评】";
+    const NUDGE_FENCE = "⟦DSC:NUDGE⟧";
     const MAX_AGENT_ROUNDS = 500;
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
@@ -159,15 +163,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 yield { type: 'final', text: (lastContent || "") + `\n（已达防失控兜底上限 ${MAX_AGENT_ROUNDS} 轮，非任务错误——任务未完成直接回复"继续"即可接续。）` };
                 return;
             }
-            // ★ 软提醒（让模型自决）：每 NUDGE_EVERY 轮注入自评提示，由模型决定"收尾给答案"还是"继续推进"。
-            //   不硬停、零用户配置（对标 Claude Code：靠模型自收敛 + 用户中止）。NUDGE_MARK 标记幂等替换，不堆积、不污染。
-            if (round > 1 && round % NUDGE_EVERY === 1) {
-                const sys = message[0] as any;
-                if (sys?.role === 'system' && typeof sys.content === 'string') {
-                    sys.content = sys.content.split(NUDGE_MARK)[0].trimEnd();
-                    sys.content += `\n\n${NUDGE_MARK}你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
-                }
-            }
+            // ★ P0-4 前缀稳定性：NUDGE 轮数自评已移至「推理时附加尾部副本」（见下方 inferenceMessages 构造），
+            //   不再改写 message[0]——保 message[0] 前缀绝对稳定，DeepSeek 隐式缓存跨轮命中。
+            //   机制不变：每 NUDGE_EVERY 轮由模型自决收尾（对标 CC：靠模型自收敛 + 用户中止，不硬停）。
             // ★ 前端用户主动停止运行：检测先于 round.start，避免中止后再多发一个 round.start 事件。
             if (signal?.aborted) {
                 events({
@@ -212,6 +210,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return
             }
 
+            // ★ P0-4 前缀稳定性：NUDGE 轮数自评改为「推理时附加尾部副本」——不进 message 数组/transcript/压缩，
+            //   保 message[0] 前缀绝对稳定 → DeepSeek 隐式缓存跨轮命中。机制不变（每 NUDGE_EVERY 轮模型自决收尾）。
+            const nudgeMsg = (round > 1 && round % NUDGE_EVERY === 1)
+                ? { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` }
+                : null;
+            const inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
             let assistantMessage: OpenAI.Chat.ChatCompletionMessage = { role: 'assistant', content: null } as OpenAI.Chat.ChatCompletionMessage;
             try {
                 events({
@@ -225,7 +229,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         round
                     },
                     usage: {
-                        prompt_tokens: estimateTokens(message),
+                        prompt_tokens: estimateTokens(inferenceMessages),
                     },
                     payload: {
                         input: message[message.length - 1].content as string,
@@ -238,7 +242,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 let reasoningBuf = ""; // DeepSeek reasoning_content 累积：工具调用轮后续必须回传给 API（见下方 assistantMessage）
                 const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
                 let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
-                for await (const chunk of chatWithModelWithTools(message, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
+                for await (const chunk of chatWithModelWithTools(inferenceMessages, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
                     if (signal?.aborted) break;
                     const delta = chunk.choices?.[0]?.delta;
                     if (delta) {
@@ -453,102 +457,61 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
                 }
             };
-            for (let i = 0; i < assistantMessage.tool_calls.length; i++) {
-                const toolCall = assistantMessage.tool_calls[i];
+            // ★ P0-1 processToolCall：单个 tool_call 的完整处理（解析→终结/abort 判定→匹配→权限→锁→审批→
+            //   pre-hook→undo 备份→execute→verify→post-hook→脱敏→截断→outputFilter）。
+            //   纯函数——不 yield / 不 message.push / 不 appendMessage（副作用统一由调度层 flush），便于并发 Promise.all。
+            //   逻辑与原串行循环体逐行等价，仅把 yield tool.start/tool.end、message.push、appendMessage、return
+            //   换成「写入 outcome 后返回」；终结类与 abort 也以 outcome 表达。
+            const processToolCall = async (toolCall: any): Promise<ToolCallOutcome> => {
                 let calledName = "";
                 let calledArgs: any = {};
-                let parseFailed = false; // 判读是否解析失败
+                let parseFailed = false;
                 if (toolCall.type === 'function') {
                     calledName = toolCall.function.name;
                     try { calledArgs = JSON.parse(toolCall.function.arguments || "{}"); }
                     catch { parseFailed = true; }
                     console.log(`🤖 模型请求调用工具: ${calledName}，参数:`, calledArgs);
                 }
-                // ★ 计划模式终结：模型提交实现方案 → yield plan.proposed 并结束循环（不走常规 execute）
-                //   设计选择：exit_plan_mode 的拦截故意先于 abort 占位检查——模型已主动提交的方案应当呈现给
-                //   用户审批；abort 主要约束后续「实现阶段」的工具执行，而非吞掉已提交的方案。
-                //   （极端 edge case：提交与中止同拍时优先展示方案，符合「计划先于执行」语义。）
-                //   并行安全：返回前 fillRestPlaceholders 为其后排的 tool_call 补占位 result，消除孤儿 tool_call_id。
+                // ★ 终结类（优先于 abort：模型已提交的方案/进入请求应呈现给用户，不被中止吞掉——「计划先于执行」）
                 if (calledName === "exit_plan_mode") {
                     const plan = typeof calledArgs?.plan === "string" ? calledArgs.plan : "";
                     const note = "✅ [计划模式] 实现方案已提交，等待用户审批后进入实现阶段。";
-                    message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
-                    await fillRestPlaceholders(i);
-                    yield { type: 'plan.proposed', plan };
-                    yield { type: 'final', text: plan || note };
-                    return;
+                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'exit_plan_mode', plan } };
                 }
-                // ★ 自主进入计划模式：非计划模式下模型主动请求先规划 → 结束本轮，通知上层翻转 planMode 并以只读重跑。
-                //   与 exit_plan_mode 对称：拦截先于 abort 占位检查，避免吞掉模型已发出的进入请求。
-                //   并行安全（已修复）：终结类工具不再假设「必排在末位」——返回前 fillRestPlaceholders 为其后排的
-                //   tool_call 补占位 result，消除孤儿 tool_call_id（否则会话恢复重建上下文时 API 400）。
                 if (calledName === "enter_plan_mode") {
                     const reason = typeof calledArgs?.reason === "string" ? calledArgs.reason : "";
                     const note = "📋 [进入计划模式] 模型请求先以只读方式调研并规划方案，已切换至计划模式。";
-                    message.push({ role: 'tool', tool_call_id: toolCall.id, content: note });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: note });
-                    await fillRestPlaceholders(i);
-                    yield { type: 'plan.enterRequested', reason };
-                    yield { type: 'final', text: reason ? `📋 模型请求进入计划模式：${reason}` : note };
-                    return;
+                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'enter_plan_mode', reason } };
                 }
-                // abort 占位：为未执行的 tool_call 补 result，保证下次读回配对完整
+                // abort 占位（调度层据此设 abortedDuringTools 并为剩余 tool_call 补占位）
                 if (signal?.aborted) {
-                    abortedDuringTools = true;
                     const placeholder = "（已中止，未执行）";
-                    message.push({ role: 'tool', tool_call_id: toolCall.id, content: placeholder });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: placeholder });
-                    continue;
+                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
                 }
                 const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
-                // ★ execute 传入 ctx（sessionId/abortSignal/depth），spawn_agent 用它创建子 agent
-                // cc 风格：取消统一由用户主动中断（ctx.abortSignal）驱动，不在工具级挂固定定时器超时
-                // （对标 Claude Code：长任务走 isSync:false 后台模式，而非固定 timeoutMs 杀进程，避免误杀合法长构建/测试）
-                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, emitProgress: (message: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message }) };
+                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
                 let result = "";
-                // ★ 显式成败标志：校验/工具层可显式声明 ok（如未知工具），优先于下方前缀嗅探。
-                //   null=未显式声明 → 回退前缀嗅探；与"让 execute 返回显式 {status}"的演进方向一致。
                 let explicitOk: boolean | null = null;
-                yield { type: 'tool.start', toolCallId: toolCall.id, toolName: calledName, args: calledArgs };
                 if (parseFailed) {
                     result = `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`;
-                    events({
-                        sessionId: sessionId,
-                        eventType: 'tool.validation.failed',
-                        metadata: {
-                            depth: depth,
-                            decisionSource: llmDecisionSource,
-                            durationMs: performance.now() - startTime,
-                            round,
-                            tools_id: toolCall.id,
-                            toolName: calledName,
-                            toolSource: 'builtin',
-                            ok: false,
-                            attempt: round
-                        },
-                        payload: {
-                            output: result,
-                        }
-                    })
+                    events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
                 } else if (matchedTool && typeof matchedTool.function.execute === 'function') {
-                    // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前由执行层统一请求用户审批
-                    //   （MUTATION 将来接入 --yes / 免审目录配置后可自动放行，此处先默认需审）
+                    // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前请求用户审批
                     const level = matchedTool.function.safetyLevel;
                     let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
                     let denied = false;
-                    // ★ G1 细粒度权限规则（deny>ask>allow）：命中 allow 免审批；deny 直接拒（作用于所有工具含 SAFE）；
-                    //   ask 强制审批（即使 SAFE）；未匹配走默认 safetyLevel。异常一律降级默认（fail-safe）。
+                    // ★ P1-7 保护路径硬规则：写工具（isUndoTrigger）碰受保护目录（.git/.ssh/.aws/.deepSeekCode 等）→ 无论授权都拒
+                    //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
+                    if (isUndoTrigger(calledName) && isProtectedWrite(calledArgs?.path, toolCtx.cwd)) {
+                        denied = true;
+                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepSeekCode 等 VCS/凭证/配置）：${calledArgs?.path ?? ''}。`;
+                    }
+                    // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
                     try {
                         const perm = checkPermission(calledName, calledArgs);
-                        if (perm === 'deny') {
-                            denied = true;
-                            result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`;
-                        } else if (perm === 'allow') {
-                            needApproval = false;   // 跳过整个审批块，免审批直放行
-                        } else if (perm === 'ask') {
-                            needApproval = true;    // 即使 SAFE 也强制审批
-                        }
+                        if (perm === 'deny') { denied = true; result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`; }
+                        else if (perm === 'allow') { needApproval = false; }
+                        else if (perm === 'ask') { needApproval = true; }
                     } catch { /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
                     // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
                     const isBgTool = matchedTool.function.isSync === false;
@@ -557,182 +520,80 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         denied = true;
                         result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
                     }
+                    // ★ P1-6 auto permission mode：分类器仅 permissionMode==='auto' 且 needApproval 且 !denied 时介入。
+                    //   allow → 免审放行（allow-once 语义，不写持久规则）；deny → 内置高危清单硬拒；ask → 保持 needApproval 转人工（fail-closed）。
+                    //   优先级：checkPermission 显式规则（上方已判）> auto deny 清单 > auto 分类器 > requestApproval 人工 > safetyLevel 默认。
+                    if (options.permissionMode === 'auto' && needApproval && !denied) {
+                        const auto = await runAutoCheck(calledName, calledArgs, toolCtx);
+                        if (auto === 'allow') { needApproval = false; }
+                        else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
+                        // 'ask'（risky/不确定/超时/异常/非文件编辑/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
+                    }
                     if (needApproval && !denied) {
                         const ra = matchedTool.function.requireApproval;
                         let detail = `申请执行高危工具 [${calledName}]`;
-                        // ★ requireApproval（用户自定义函数）异常一律按拒绝处理，不逃逸出工具循环
-                        try {
-                            if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra;
-                        } catch (e: any) {
-                            denied = true;
-                            result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;
-                        }
+                        try { if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra; }
+                        catch (e: any) { denied = true; result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
                         if (!denied) {
                             let approved = false;
-                            // ★ 审批通道（宿主）异常一律按拒绝处理（fail-closed），不逃逸出工具循环
-                            try {
-                                approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs);
-                            } catch (e: any) {
-                                denied = true;
-                                result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`;
-                            }
-                            if (!approved && !denied) {
-                                denied = true;
-                                result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`;
-                            }
+                            try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs); }
+                            catch (e: any) { denied = true; result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
+                            if (!approved && !denied) { denied = true; result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`; }
                         }
                     }
-                    // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截）
+                    // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截，异常 fail-closed）
                     if (!denied) {
-                        // ★ pre-hook 自身异常按"安全失败"拒绝处理（fail-closed），不逃逸出工具循环
                         let veto: { deny: boolean; reason?: string };
-                        try {
-                            veto = await runPreHooks(calledName, calledArgs, toolCtx);
-                        } catch (e: any) {
-                            veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` };
-                        }
-                        if (veto.deny) {
-                            denied = true;
-                            result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
-                        }
+                        try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
+                        catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
+                        if (veto.deny) { denied = true; result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`; }
                     }
-                    // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前，对 fs 变更工具快照原文件/目录。
-                    //   备份失败一律阻断写入（凡改必可回退）；仅 isSync:true 的四个 fs 工具触发，其余直通。
-                    //   首期不覆盖 isSync:false 后台工具的写操作（其 lockKey 占用前已返回，备份时序复杂）。
+                    // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前快照原文件/目录（凡改必可回退，失败则阻断写入）
                     if (!denied && isUndoTrigger(calledName)) {
-                        try {
-                            await beforeMutationBackup(calledName, calledArgs, toolCall.id, sessionId);
-                        } catch (e: any) {
-                            denied = true;
-                            result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`;
-                        }
+                        try { await beforeMutationBackup(calledName, calledArgs, toolCall.id, sessionId); }
+                        catch (e: any) { denied = true; result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`; }
                     }
                     if (!denied) {
                         try {
-                            events({
-                                sessionId: sessionId,
-                                eventType: 'tool.execute.start',
-                                metadata: {
-                                    depth: depth,
-                                    decisionSource: llmDecisionSource,
-                                    durationMs: performance.now() - startTime,
-                                    round,
-                                    tools_id: toolCall.id,
-                                    toolName: calledName,
-                                    toolSource: 'builtin',
-                                },
-                                payload: {
-                                    output: JSON.stringify(calledArgs),
-                                }
-                            })
-                            // 执行工具（cc 风格：不设定时器超时；取消由用户主动中断 ctx.abortSignal 驱动，
-                            //   command 等工具已把 abortSignal 接到 spawn，中断即真正终止底层任务）
+                            events({ sessionId, eventType: 'tool.execute.start', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin' }, payload: { output: JSON.stringify(calledArgs) } });
+                            // 执行工具（取消由 ctx.abortSignal 驱动；长任务走 isSync:false 后台模式，不挂固定 timeout）
                             const execRet = matchedTool.function.execute(calledArgs, toolCtx);
                             if (isBgTool) {
-                                // ★ isSync:false 后台工具：取首个 yield 为即时结果（不阻塞循环），剩余后台排空，锁在任务结束时释放
-                                //   signal 透传：用户停止时后台 generator 立即收尾 + 释放锁，避免孤儿后台任务
+                                // 后台工具：取首个 yield 为即时结果，剩余后台排空，锁在任务结束时释放
                                 result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
                             } else {
-                                // ★ 实时 stdout：流式工具（run_command 等）逐块 yield → onChunk → toolCtx.emitProgress
-                                //   → tool.progress UIEvent，前端即可在命令运行期间看到逐行输出，而非结束后才整块到达。
+                                // 流式工具：逐块 yield → emitProgress → tool.progress UIEvent（运行期间逐行可见）
                                 result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk));
                             }
-                            // verifyResult 判定：工具自报成败，FAILED 时前置警告（防模型对报错产生“成功”幻觉）
+                            // verifyResult 判定：FAILED 时前置警告（防模型对报错产生"成功"幻觉）
                             if (matchedTool.function.verifyResult) {
                                 const verdict = matchedTool.function.verifyResult(result, toolCtx);
                                 if (verdict.status === ToolExecutionResultStatus.FAILED) {
                                     result = `【系统判定：执行失败】${verdict.summary ?? ''}\n请正视下方输出，不要乐观假设成功。\n\n${result}`;
                                 }
                             }
-                            events({
-                                sessionId: sessionId,
-                                eventType: 'tool.execute.end',
-                                metadata: {
-                                    depth: depth,
-                                    decisionSource: llmDecisionSource,
-                                    durationMs: performance.now() - startTime,
-                                    round,
-                                    tools_id: toolCall.id,
-                                    toolName: calledName,
-                                    toolSource: 'builtin',
-                                    ok: true,
-                                },
-                                payload: {
-                                    output: result,
-                                }
-                            })
+                            events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: result } });
                         } catch (err) {
                             console.error(`❌ 执行工具 ${calledName} 时发生错误:`, err);
                             result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
-                            events({
-                                sessionId: sessionId,
-                                eventType: 'tool.failed',
-                                metadata: {
-                                    depth: depth,
-                                    decisionSource: llmDecisionSource,
-                                    durationMs: performance.now() - startTime,
-                                    round,
-                                    tools_id: toolCall.id,
-                                    toolName: calledName,
-                                    toolSource: 'builtin',
-                                    ok: false,
-                                    attempt: round
-                                },
-                                payload: {
-                                    output: result,
-                                }
-                            })
+                            events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
                         }
-                        // ★ post-hooks：执行后观察（成功或异常都触发，不拦截）
-                        //   自身异常仅告警，绝不击垮主循环（observe-only，不应影响 result）
+                        // post-hooks：执行后观察（不拦截，自身异常仅告警）
                         await runPostHooks(calledName, calledArgs, result, toolCtx).catch((e: any) => {
                             console.warn(`⚠️ post-hook [${calledName}] 异常（已忽略）:`, e?.message ?? e);
                         });
                     }
                 } else {
                     result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
-                    explicitOk = false; // ★ 未知工具显式失败：透传到公共 tool.end，避免前缀嗅探（"错误："已移除）误判为成功
-                    events({
-                        sessionId: sessionId,
-                        eventType: 'tool.validation.failed',
-                        metadata: {
-                            depth: depth,
-                            decisionSource: llmDecisionSource,
-                            durationMs: performance.now() - startTime,
-                            round,
-                            tools_id: toolCall.id,
-                            toolName: calledName,
-                            toolSource: 'builtin',
-                            ok: false,
-                            attempt: round
-                        },
-                        payload: {
-                            output: result,
-                        }
-                    })
+                    explicitOk = false; // 未知工具显式失败，避免前缀嗅探误判为成功
+                    events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
                 }
-                // ★ 敏感数据脱敏（privacyMaskingRules）：在 verifyResult 之后、truncate 之前，
-                //   把工具返回中的密钥/凭证替换为 [MASKED_SECRET]，再回灌模型上下文。
-                //   verifyResult 需原文判定成败，故脱敏只影响「发给云端模型的视图」，不影响本地校验。
+                // 脱敏（verifyResult 之后、truncate 之前；只影响发往云端模型的视图）
                 result = applyPrivacyMasking(matchedTool?.function?.privacyMaskingRules, calledArgs, result);
-                // 获取工具返回的信息，如果超过最大值，则截取中间，留头尾
-                // ★ 防御：未知工具名时 matchedTool 为 undefined（模型幻觉 / 被环境过滤的工具），
-                //   用可选链避免 TypeError 击垮主循环（truncateToolResult 第二参数支持 undefined）
                 result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters);
-                // ok 判定：result 以任一已知失败前缀开头即判失败（覆盖 runAgent 内部失败 + 各工具 catch/verifyResult 失败），
-                //   避免失败结果被判 ok=true 助长模型"已成功"幻觉。
-                //   注：前缀列表是过渡方案——根本解法是让 execute 返回显式成败标志（后续工具协议演进），届时可移除此列表。
-                // ★ ok 判定（仅作 UI/trace 提示，不进入模型上下文——模型看到的是完整 result 字符串）。
-                //   优先级：explicitOk（校验/工具层显式声明，如未知工具=false）＞ 前缀嗅探。
-                //   前缀嗅探收窄高碰撞通用词：已移除"错误："（文件内容首行可能是"错误：xxx"日志会误判），
-                //   未知工具改由 explicitOk 兜底；保留项目内部专有失败标记（❌/操作失败:/读取文件失败 等），
-                //   success 输出均以 [File:/[Workspace 等专有前缀开头，不会与失败标记碰撞。
-                //   根本解法（让 execute 返回显式 {status}）是后续工具协议演进，此处保持过渡方案。
                 const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
                 const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
-                // F-2：outputFilter（可选）——工具可把结果分流为"喂模型的精简版（toModel）"与"给用户看的完整版（toUser）"。
-                //   未声明时两者均为原 result，行为不变（additive，当前无工具声明则零影响）。
-                //   典型场景：长构建日志给用户看全文、给模型只喂摘要，省 token 又保体验。
+                // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
                 let resultForModel = result;
                 let resultForUser = result;
                 if (matchedTool?.function?.outputFilter) {
@@ -740,13 +601,97 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         const split = matchedTool.function.outputFilter(result);
                         resultForModel = split.toModel;
                         resultForUser = split.toUser;
-                    } catch { /* 容错：outputFilter 异常则两者均用原 result，不阻断 */ }
+                    } catch { /* 容错：outputFilter 异常则两者均用原 result */ }
                 }
-                yield { type: 'tool.end', toolCallId: toolCall.id, toolName: calledName, result: resultForUser, ok };
-                // 存储本次工具结果的消息到上下文中（模型看 toModel 精简版；transcript 与 context 一致）
-                message.push({ role: 'tool', tool_call_id: toolCall.id, content: resultForModel });
-                // 添加到本地上下文中
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: toolCall.id, content: resultForModel });
+                return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok };
+            };
+            // ★ P0-1 分波调度：开启 parallelSafeTools 时，连续的 SAFE 只读工具并发执行（Promise.all）；
+            //   写工具 / ask / deny / 后台 / 终结类 / parseFailed / unknown 一律串行（= 现状，零回归）。
+            //   屏障：写工具走串行（其前并发批次已 await 完成 → undo 备份读到未改原文件）；appendMessage 始终
+            //   串行 flush（JSONL append 非并发安全）；tool.end / message.push 按请求序，使模型行为确定。
+            const parallelSafeToolsEnabled = appConfig.parallelSafeTools;
+            const parseTc = (tc: any): { name: string; args: any; parseFailed: boolean } => {
+                if (tc.type !== 'function') return { name: "", args: {}, parseFailed: true };
+                let args: any = {}; let parseFailed = false;
+                try { args = JSON.parse(tc.function.arguments || "{}"); } catch { parseFailed = true; }
+                return { name: tc.function.name, args, parseFailed };
+            };
+            const canParallelize = (name: string, args: any, parseFailed: boolean): boolean => {
+                if (!parallelSafeToolsEnabled || parseFailed || signal?.aborted) return false;
+                if (name === 'exit_plan_mode' || name === 'enter_plan_mode') return false;
+                if (isUndoTrigger(name)) return false;
+                const matched = rawTools.find((t: any) => t.function.name === name);
+                if (!matched) return false;
+                if (matched.function.safetyLevel !== ToolSafetyLevel.SAFE) return false;
+                if (matched.function.isSync === false) return false;
+                try {
+                    const perm = checkPermission(name, args);
+                    if (perm === 'ask' || perm === 'deny') return false;
+                } catch { return false; }
+                return true;
+            };
+            const tcs = assistantMessage.tool_calls!;
+            let idx = 0;
+            while (idx < tcs.length) {
+                // 上一工具已中止 → 剩余全部补占位并退出（终结类不受影响：其 processToolCall 终结判定先于 abort）
+                if (abortedDuringTools) {
+                    for (let j = idx; j < tcs.length; j++) {
+                        const ph = "（已中止，未执行）";
+                        message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
+                        await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
+                    }
+                    break;
+                }
+                const tc = tcs[idx];
+                const { name: pname, args: pargs, parseFailed: pparseFailed } = parseTc(tc);
+                if (canParallelize(pname, pargs, pparseFailed)) {
+                    // 收集连续可并发段
+                    const batch: any[] = [];
+                    while (idx < tcs.length) {
+                        const btc = tcs[idx];
+                        const bp = parseTc(btc);
+                        if (!canParallelize(bp.name, bp.args, bp.parseFailed)) break;
+                        batch.push(btc);
+                        idx++;
+                    }
+                    // 先发所有 tool.start（请求序）
+                    for (const btc of batch) {
+                        const bp = parseTc(btc);
+                        yield { type: 'tool.start', toolCallId: btc.id, toolName: bp.name, args: bp.args };
+                    }
+                    // 并发执行
+                    const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc)));
+                    // 串行 flush（请求序）
+                    for (const oc of outcomes) {
+                        yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
+                        message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                        await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                        if (oc.aborted) abortedDuringTools = true;
+                    }
+                } else {
+                    // 串行分支（屏障工具 / 开关关 / 终结类 / 后台 / parseFailed / unknown / ask / deny）
+                    yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };
+                    const oc = await processToolCall(tc);
+                    if (oc.terminal) {
+                        // 终结类：push 本条 result + 补其后占位 + yield plan.* + yield final + 结束 runAgent
+                        message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                        await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                        await fillRestPlaceholders(idx);
+                        if (oc.terminal.kind === 'exit_plan_mode') {
+                            yield { type: 'plan.proposed', plan: oc.terminal.plan || '' };
+                            yield { type: 'final', text: oc.terminal.plan || oc.resultForUser };
+                        } else {
+                            yield { type: 'plan.enterRequested', reason: oc.terminal.reason || '' };
+                            yield { type: 'final', text: oc.terminal.reason ? `📋 模型请求进入计划模式：${oc.terminal.reason}` : oc.resultForUser };
+                        }
+                        return;
+                    }
+                    yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
+                    message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                    await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                    if (oc.aborted) abortedDuringTools = true;
+                    idx++;
+                }
             }
             // 主动停止返回最终消息
             if (abortedDuringTools) {

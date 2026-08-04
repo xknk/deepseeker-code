@@ -48,8 +48,8 @@ const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "thinking" && !!r.streaming) ||
     (r.kind === "tool" && r.status === "running");
 
-export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: string; initialPlanMode?: boolean }): React.ReactElement => {
-    const state = useChatState(resumeSessionId, initialPlanMode);
+export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean }): React.ReactElement => {
+    const state = useChatState(resumeSessionId, initialPlanMode, initialAutoMode);
     const { exit } = useApp();
     const { stdout } = useStdout();
     const cols = stdout?.columns ?? 80;
@@ -96,6 +96,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 case "help": return S.cmdHelp;
                 case "status": return S.cmdStatus;
                 case "plan": return S.cmdPlan;
+                case "auto": return S.cmdAuto;
                 case "model": return S.cmdModel;
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
@@ -151,6 +152,12 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 const on = !state.getPlanMode();
                 state.setPlanMode(on);
                 state.pushInfo(`计划模式：${on ? "开（下次提问先只读调研并产出方案，审批后实现）" : "关"}`);
+                return true;
+            }
+            case "/auto": {
+                const on = !state.getAutoMode();
+                state.setAutoMode(on);
+                state.pushInfo(`自动模式：${on ? "开（工作区内文件编辑由分类器自动放行，高危转人工）" : "关"}`);
                 return true;
             }
             case "/model":
@@ -355,7 +362,7 @@ export const App = ({ resumeSessionId, initialPlanMode }: { resumeSessionId?: st
                 </Box>
 
                 <Box paddingX={1} marginTop={1} flexShrink={0}>
-                    <StatusStrip model={modelDisplay} busy={state.busy} aborting={state.aborting} planMode={state.getPlanMode()} sessionShort={sessionShort} cols={cols} />
+                    <StatusStrip model={modelDisplay} busy={state.busy} aborting={state.aborting} planMode={state.getPlanMode()} autoMode={state.getAutoMode()} sessionShort={sessionShort} cols={cols} />
                 </Box>
             </Box>
         </Box>

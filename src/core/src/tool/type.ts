@@ -7,7 +7,7 @@
  *     并发锁 / 上下文裁剪 / 环境断言 / 防幻觉校验 / 终端渲染等工业级字段。
  */
 import OpenAI from "openai";
-import { RunAgentEvents } from "@/agent/type.ts";
+import { RunAgentEvents, PermissionMode } from "@/agent/type.ts";
 import { UIEvent } from "@/observability/type.ts";
 import { RequestApprovalFn } from "@/host/type.ts";
 
@@ -92,6 +92,8 @@ export interface ToolContext {
     onUIEvent?: (evt: UIEvent) => void;
     /** 宿主审批钩子（前端无关）：MUTATION/DANGER 工具执行前由 guard 调用，宿主决定放行/拒绝。未注入时默认拒绝。 */
     requestApproval?: RequestApprovalFn;
+    /** 权限模式透传（spawn_agent 子 agent 继承父级 auto mode）：auto=分类器智能放行；缺省 default。 */
+    permissionMode?: PermissionMode;
     /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."）。
      *  已注入默认实现：runAgent 构造 toolCtx 时将其转发为 tool.progress UIEvent 推前端（onUIEvent）。 */
     emitProgress?: (message: string) => void;

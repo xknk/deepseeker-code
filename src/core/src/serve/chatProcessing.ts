@@ -23,7 +23,7 @@ import { buildContextMessages } from "@/session/content.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase, UIEvent } from "@/observability/type.ts";
-import { RunAgentOptions, ThinkingLevel } from "@/agent/type.ts";
+import { RunAgentOptions, ThinkingLevel, PermissionMode } from "@/agent/type.ts";
 import type { Locale } from "@/common/index.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { RequestApprovalFn } from "@/host/type.ts";
@@ -44,6 +44,8 @@ export interface HostOptions {
     onUIEvent?: (evt: UIEvent) => void;
     /** 计划模式（CLI 两阶段用）：true=只读调研，模型 exit_plan_mode 后 yield plan.proposed 并结束本轮。缺省 false。 */
     planMode?: boolean;
+    /** 权限模式（CLI `/auto`/`--auto`）：auto=工作区内文件编辑分类器智能放行、高危转人工；缺省 default（常规人工审批）。 */
+    permissionMode?: PermissionMode;
     /** per-agent 模型覆盖（CLI /model 用）。缺省回退全局 MODEL_NAME。 */
     model?: string;
     /** 思考等级（CLI /thinking 用）：off=关闭 / high=常规 / max=深度。缺省回退全局 env。 */
@@ -137,6 +139,7 @@ export const handleUnifiedChat = async (
         requestApproval,
         // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
         planMode: opts?.planMode,
+        permissionMode: opts?.permissionMode,
         model: opts?.model,
         thinkingLevel: opts?.thinkingLevel,
         locale: opts?.locale,
