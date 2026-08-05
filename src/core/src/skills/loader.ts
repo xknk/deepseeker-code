@@ -35,6 +35,10 @@ const SOURCES: LoadSource<SkillSource>[] = [
 /** SKILL 正文大小上限：防异常大 SKILL.md 先整文塞进 tool result 再被压缩（Q-12）。 */
 const MAX_SKILL_BODY_BYTES = 64 * 1024;
 
+/** 逗号分隔字符串 → 去空数组（镜像 agents/loader.ts 的 tools 解析；复用 KISS frontmatter，不引 YAML）。 */
+const splitList = (raw: string | undefined): string[] =>
+    (raw ?? "").split(",").map(s => s.trim()).filter(Boolean);
+
 /** 解析单个 SKILL.md 为 manifest；失败返回 null（warn + 跳过） */
 const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource): Promise<SkillManifest | null> => {
     let raw: string;
@@ -70,6 +74,10 @@ const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource)
         dir,
         body,
         source,
+        // allowed-tools / allowed_tools 均接受（兼容 kebab/snake）；triggers/context 同理
+        allowedTools: splitList(parsed.frontmatter["allowed-tools"] ?? parsed.frontmatter.allowed_tools),
+        context: parsed.frontmatter.context?.trim() || undefined,
+        triggers: splitList(parsed.frontmatter.triggers),
     };
 };
 
@@ -93,6 +101,18 @@ export const initSkills = async (into: CustomTool[], includeProject: boolean): P
     try {
         const n = await loadSkills(includeProject);
         if (n > 0) {
+            // 白名单校验（镜像 agents/loader.ts:87-91）：剔除 allowedTools 里 into 表不存在的工具名，catch 拼写错误。
+            //   软约束下非安全关键（仅影响 body 提示文案）；load_skill 此刻尚未注入（紧随本块注入），故不在 known 中——
+            //   skill 限定到 load_skill 本就无意义，剔除正确。
+            const known = new Set(into.map((t: any) => t.function.name));
+            for (const s of listSkills()) {
+                if (s.allowedTools.length === 0) continue;
+                const unknown = s.allowedTools.filter(t => !known.has(t));
+                if (unknown.length) {
+                    console.warn(`⚠️ [skills] ${s.name} 声明了未知工具 [${unknown.join(", ")}]，已剔除`);
+                    s.allowedTools = s.allowedTools.filter(t => known.has(t));
+                }
+            }
             // 防御重复注入（热重载场景）
             const hasLoadSkill = into.some(t => (t.function as any).name === "load_skill");
             if (!hasLoadSkill) into.push(...skillTools);

@@ -60,14 +60,18 @@ export const listHooks = (): { event: string; matcher: string; source: string; o
     return rules.map(r => ({ event: r.event, matcher: strMatcher(r.matcher), source: r.source, onError: r.onError }));
 };
 
+/** dispatch 返回：deny/reason（拦截语义）+ contextAdditions（prompt-type hook 注入文本，仅 UserPromptSubmit 消费）。 */
+export type DispatchResult = { deny: boolean; reason?: string; contextAdditions?: string[] };
+
 /**
  * 按事件分发：
  *  - 可拦截事件（PreToolUse/UserPromptSubmit）：串行 + 短路（首个 deny 即拦）。handler 抛错按 rule.onError 决策
  *    （默认 'allow' 放行防误拦；安全类 hook 可设 'deny' fail-closed）。
  *  - 观察事件（其余）：Promise.all 并发执行（累积延迟不再线性叠加），单个失败仅告警。
+ *  - contextAdditions 全程累积（即便后续 rule deny，已累积的注入仍随返回带出）；仅 UserPromptSubmit 接缝消费。
  * matcher 仅对 Pre/PostToolUse 生效（按 ctx.toolName 过滤）。
  */
-export const dispatch = async (event: EventType, ctx: any): Promise<{ deny: boolean; reason?: string }> => {
+export const dispatch = async (event: EventType, ctx: any): Promise<DispatchResult> => {
     const interceptable = INTERCEPTABLE_EVENTS.has(event);
     const isToolEvent = TOOL_EVENTS.has(event);
     const matched = rules.filter(rule => {
@@ -79,34 +83,46 @@ export const dispatch = async (event: EventType, ctx: any): Promise<{ deny: bool
         return true;
     });
 
-    // 观察事件：并发执行，单个异常仅告警（不击垮主流程、不相互阻塞）
+    const pack = (additions: string[]): DispatchResult => ({
+        deny: false,
+        contextAdditions: additions.length > 0 ? additions : undefined,
+    });
+
+    // 观察事件：并发执行，单个异常仅告警（不击垮主流程、不相互阻塞）；顺带收集 contextAdditions（仅 UserPromptSubmit 消费）
     if (!interceptable) {
-        await Promise.all(matched.map(rule =>
+        const results = await Promise.all(matched.map(rule =>
             // ★ Promise.resolve().then(...) 而非 Promise.resolve(rule.run(ctx))：后者对【同步抛错】的 handler
             //   会在 .catch 挂上前就抛出（参数先求值），逃逸出 catch。延到 then 里执行才能捕获同步异常。
-            Promise.resolve().then(() => rule.run(ctx)).catch((e: any) => console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${e?.message ?? e}`))
+            Promise.resolve().then(() => rule.run(ctx)).catch((e: any) => {
+                console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${e?.message ?? e}`);
+                return undefined as HookResult;
+            })
         ));
-        return { deny: false };
+        const additions: string[] = [];
+        for (const r of results) if (r?.contextAdditions) additions.push(...r.contextAdditions);
+        return pack(additions);
     }
 
-    // 可拦截事件：串行 + 短路；handler 抛错时按 rule.onError 决策
+    // 可拦截事件：串行 + 短路；handler 抛错时按 rule.onError 决策。累积 contextAdditions。
+    const additions: string[] = [];
     for (const rule of matched) {
         try {
             const res: HookResult = await rule.run(ctx);
+            if (res?.contextAdditions) additions.push(...res.contextAdditions);
             if (res && res.deny) {
-                return { deny: true, reason: res.reason };
+                return { deny: true, reason: res.reason, contextAdditions: additions.length > 0 ? additions : undefined };
             }
         } catch (e: any) {
             const msg = e?.message ?? e;
             if (rule.onError === 'deny') {
                 // ★ fail-closed 逃生阀：安全类 hook 自身崩溃即拒绝，避免缺陷 hook 放行高危操作
                 console.warn(`⚠️ [hook:${event}] 执行异常，按 onError:'deny' 拒绝（fail-closed）: ${msg}`);
-                return { deny: true, reason: `[hook:${event}] 执行异常（fail-closed）: ${msg}` };
+                return { deny: true, reason: `[hook:${event}] 执行异常（fail-closed）: ${msg}`, contextAdditions: additions.length > 0 ? additions : undefined };
             }
             console.warn(`⚠️ [hook:${event}] 执行异常，按放行处理: ${msg}`);
         }
     }
-    return { deny: false };
+    return pack(additions);
 };
 
 // ============ 兼容门面：保持 runAgent 现有调用签名不变 ============
@@ -119,7 +135,7 @@ export const runPreHooks = async (
     toolName: string,
     args: any,
     ctx: ToolContext,
-): Promise<{ deny: boolean; reason?: string }> => {
+): Promise<DispatchResult> => {
     return dispatch('PreToolUse', {
         sessionId: ctx.sessionId,
         cwd: ctx.cwd,

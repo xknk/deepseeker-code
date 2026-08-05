@@ -120,8 +120,20 @@ export interface PermissionRequestCtx extends BaseHookCtx {
     args?: any;
 }
 
-/** 可拦截事件返回 deny 即阻断；观察事件忽略 deny。 */
-export type HookResult = void | { deny: boolean; reason?: string };
+/** hook 执行类型（声明式配置的 type 字段；缺省 'command'）。
+ *  - command：spawn shell 命令（既有行为，shellExecutor）；
+ *  - http：POST 上下文 JSON 到 url，按响应决策 deny（webhook/云集成，httpExecutor）；
+ *  - prompt：向 agent 注入附加上下文文本（仅 UserPromptSubmit 合法，经 contextAdditions 通道）。
+ */
+export type HookType = 'command' | 'http' | 'prompt';
+
+/**
+ * hook 返回值。
+ * - deny（可选）：可拦截事件返回 deny:true 即阻断；观察事件忽略。
+ * - contextAdditions（可选）：prompt-type hook 经此通道注入文本，由 UserPromptSubmit 接缝拼入用户输入。
+ *   向后兼容：现有 {deny:false} / dispatch 的 `if(res&&res.deny)` 判定不受影响（deny 缺省即 undefined→falsy）。
+ */
+export type HookResult = void | { deny?: boolean; reason?: string; contextAdditions?: string[] };
 
 /**
  * 工具名匹配器（沿用旧 tool/hooks.ts 语义）：

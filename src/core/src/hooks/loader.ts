@@ -16,26 +16,46 @@
  *    "hooks": {
  *      "PreToolUse":   [{ "matcher": "run_command", "command": "./pre.sh", "timeoutMs": 5000 }],
  *      "PostToolUse":  [{ "matcher": "edit_file", "command": "npx prettier --write ${FILE_PATH}" }],
- *      "UserPromptSubmit": [{ "command": "node ./audit.js", "denyOnNonZero": true }]
+ *      "UserPromptSubmit": [{ "command": "node ./audit.js", "denyOnNonZero": true }],
+ *      "PreToolUse":   [{ "matcher": "edit_file", "type": "http", "url": "https://audit.corp/hook", "denyOnNonZero": true }],
+ *      "UserPromptSubmit": [{ "type": "prompt", "text": "本次任务如涉及数据库，务必先确认备份策略。" }]
  *    }
  *  }
+ *
+ *  执行类型（type，缺省 'command'）：
+ *   - command：spawn shell 命令（既有行为，shellExecutor）。必需 command。
+ *   - http：POST 上下文 JSON 到 url，按响应决策 deny（webhook/云集成，httpExecutor）。必需 url（http/https）。
+ *           响应体为 JSON 且含 {deny:true,reason} 即拒；否则非 2xx 按 denyOnNonZero 决策。
+ *   - prompt：经 contextAdditions 通道向 agent 注入文本（仅 UserPromptSubmit 合法）。必需 text；不 deny。
  */
 import fs from "fs/promises";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
 import { registerHooks } from "./registry.ts";
 import { executeHookCommand } from "./shellExecutor.ts";
-import { HookRule, EventType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT } from "./types.ts";
+import { executeHttpHook } from "./httpExecutor.ts";
+import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT } from "./types.ts";
 
-/** 单条声明式规则（校验后的中间形态） */
+/** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
 interface RawHookRule {
-    command: string;
+    /** 执行类型，缺省 'command'（向后兼容：无 type 的旧配置走 shell） */
+    type?: HookType;
+    /** type='command' 的 shell 命令（既有行为） */
+    command?: string;
+    /** type='http' 的目标 URL（validateRule 强制 http/https） */
+    url?: string;
+    /** type='http' 的 method，缺省 POST */
+    method?: string;
+    /** type='http' 的自定义请求头（与默认 content-type:application/json 合并） */
+    headers?: Record<string, string>;
+    /** type='prompt' 的注入文本（仅 UserPromptSubmit 合法） */
+    text?: string;
     /** 仅 Pre/PostToolUse 用 */
     matcher?: string;
     timeoutMs?: number;
-    /** 非零退出码是否拦截；默认 PreToolUse=true，其余=false */
+    /** 非零退出码（command）/ 非 2xx（http）是否拦截；默认 PreToolUse=true，其余=false。prompt 不消费 */
     denyOnNonZero?: boolean;
-    /** handler 抛错（hook 崩溃）时处置；默认 'allow' 放行，安全类 hook 可设 'deny' fail-closed */
+    /** handler 抛错（hook 崩溃）时处置；默认 'allow' 放行，安全类 hook 可设 'deny' fail-closed。prompt 不消费 */
     onError?: 'deny' | 'allow';
     /** 预留：首次执行走审批网关（MVP 暂不接入，仅校验保留） */
     requireApproval?: boolean;
@@ -97,39 +117,78 @@ const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string): 
     }
 };
 
-/** 校验单条规则；非法返回 null（warn + 跳过） */
-const validateRule = (raw: any, event: EventType, src: string, idx: number): RawHookRule | null => {
+/** 校验单条规则；非法返回 null（warn + 跳过）。导出供单测覆盖类型分支（loader 文件扫描按惯例不单测）。 */
+export const validateRule = (raw: any, event: EventType, src: string, idx: number): RawHookRule | null => {
     if (!raw || typeof raw !== "object") {
         console.warn(`⚠️ [hooks] ${event}[${idx}] 非对象（${src}），已跳过`);
         return null;
     }
-    const command = raw.command;
-    if (typeof command !== "string" || !command.trim()) {
-        console.warn(`⚠️ [hooks] ${event}[${idx}] 缺少有效 command（${src}），已跳过`);
-        return null;
+    const type: HookType = raw.type === 'http' || raw.type === 'prompt' ? raw.type : 'command';
+    const where = `${event}[${idx}]（${src}）`;
+
+    // —— 按 type 校验各自必需字段 ——
+    if (type === 'command') {
+        if (typeof raw.command !== "string" || !raw.command.trim()) {
+            console.warn(`⚠️ [hooks] ${where} command 类型缺少有效 command，已跳过`);
+            return null;
+        }
+    } else if (type === 'http') {
+        const url = typeof raw.url === "string" ? raw.url.trim() : "";
+        if (!url) {
+            console.warn(`⚠️ [hooks] ${where} http 类型缺少 url，已跳过`);
+            return null;
+        }
+        let proto = "";
+        try { proto = new URL(url).protocol; } catch { /* 非法 URL，下面拦截 */ }
+        if (proto !== "http:" && proto !== "https:") {
+            console.warn(`⚠️ [hooks] ${where} http 类型 url 须为 http/https 协议（得 ${proto || "非法 URL"}），已跳过`);
+            return null;
+        }
+    } else { // prompt
+        if (typeof raw.text !== "string" || !raw.text.trim()) {
+            console.warn(`⚠️ [hooks] ${where} prompt 类型缺少有效 text，已跳过`);
+            return null;
+        }
+        // prompt 注入只在进 agent 前（UserPromptSubmit）有意义；其余事件 warn+skip
+        if (event !== 'UserPromptSubmit') {
+            console.warn(`⚠️ [hooks] ${where} prompt 类型仅支持 UserPromptSubmit 事件（注入只在进 agent 前生效），已跳过`);
+            return null;
+        }
     }
+
     // matcher 仅工具事件支持
     if (!TOOL_EVENTS.has(event) && raw.matcher !== undefined) {
-        console.warn(`⚠️ [hooks] ${event}[${idx}] 非工具事件不支持 matcher，已忽略（${src}）`);
+        console.warn(`⚠️ [hooks] ${where} 非工具事件不支持 matcher，已忽略`);
     }
     const matcher = TOOL_EVENTS.has(event) && typeof raw.matcher === "string" ? raw.matcher : undefined;
     const timeoutMs = typeof raw.timeoutMs === "number" && raw.timeoutMs > 0 ? raw.timeoutMs : undefined;
-    // denyOnNonZero 仅对可拦截事件（PreToolUse/UserPromptSubmit）生效；其余事件 deny 无意义（工具已执行/输入已处理），告警并忽略
+    // denyOnNonZero 仅对可拦截事件（PreToolUse/UserPromptSubmit）生效；prompt 类型不消费（它只注入不 deny）
     let denyOnNonZero = typeof raw.denyOnNonZero === "boolean" ? raw.denyOnNonZero : undefined;
     if (denyOnNonZero === true && !INTERCEPTABLE_EVENTS.has(event)) {
-        console.warn(`⚠️ [hooks] ${event}[${idx}] 非拦截事件，denyOnNonZero 不生效（仅 PreToolUse/UserPromptSubmit 可拦截），已忽略（${src}）`);
+        console.warn(`⚠️ [hooks] ${where} 非拦截事件，denyOnNonZero 不生效（仅 PreToolUse/UserPromptSubmit 可拦截），已忽略`);
         denyOnNonZero = undefined;
     }
-    // onError：仅可拦截事件消费（观察事件抛错本就忽略）；非法值告警忽略
+    if (type === 'prompt' && denyOnNonZero !== undefined) {
+        console.warn(`⚠️ [hooks] ${where} prompt 类型不消费 denyOnNonZero（仅注入文本，不 deny），已忽略`);
+        denyOnNonZero = undefined;
+    }
+    // onError：仅可拦截事件消费（观察事件抛错本就忽略）；prompt 类型不 deny 故无意义
     let onError: 'deny' | 'allow' | undefined;
     if (raw.onError === 'deny' || raw.onError === 'allow') {
-        onError = INTERCEPTABLE_EVENTS.has(event) ? raw.onError : undefined;
-        if (raw.onError && !INTERCEPTABLE_EVENTS.has(event)) {
-            console.warn(`⚠️ [hooks] ${event}[${idx}] 非拦截事件，onError 不生效，已忽略（${src}）`);
+        const usable = INTERCEPTABLE_EVENTS.has(event) && type !== 'prompt';
+        onError = usable ? raw.onError : undefined;
+        if (!usable) {
+            console.warn(`⚠️ [hooks] ${where} ${type === 'prompt' ? 'prompt 类型' : '非拦截事件'}不支持 onError，已忽略`);
         }
     }
+    const headersRaw = raw.headers;
     return {
-        command: command.trim(),
+        type,
+        command: typeof raw.command === "string" ? raw.command.trim() : undefined,
+        url: type === 'http' && typeof raw.url === "string" ? raw.url.trim() : undefined,
+        method: type === 'http' && typeof raw.method === "string" && raw.method.trim() ? raw.method.trim().toUpperCase() : undefined,
+        headers: type === 'http' && headersRaw && typeof headersRaw === "object" && !Array.isArray(headersRaw) ? headersRaw as Record<string, string> : undefined,
+        text: type === 'prompt' && typeof raw.text === "string" ? raw.text : undefined,
         matcher,
         timeoutMs,
         denyOnNonZero,
@@ -138,20 +197,63 @@ const validateRule = (raw: any, event: EventType, src: string, idx: number): Raw
     };
 };
 
-/** 把校验后的规则编译为 HookRule（run 调 shellExecutor，按 denyOnNonZero 决策） */
-const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
-    // 安全默认：PreToolUse hook 异常（非零/超时）则拦截；其余事件默认不拦截
+/** 把校验后的规则编译为 HookRule（按 type 分派到 shellExecutor / httpExecutor / prompt 注入）。导出供单测覆盖类型分支。 */
+export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
+    // 安全默认：PreToolUse hook 异常（非零/超时/非 2xx）则拦截；其余事件默认不拦截
     const denyOnNonZero = raw.denyOnNonZero ?? (event === "PreToolUse");
     // ★ 梯度超时：用户显式 timeoutMs 优先，否则按事件类型取默认（Start/UserPrompt=10s，工具/Stop=30s，SessionEnd=60s）
     const timeoutMs = raw.timeoutMs ?? DEFAULT_TIMEOUT_BY_EVENT[event];
+    const base = { event, matcher: raw.matcher, source: "config" as const, onError: raw.onError };
+
+    // —— prompt：经 contextAdditions 注入文本（不 deny；仅 UserPromptSubmit，validateRule 已保证）——
+    if (raw.type === 'prompt') {
+        const text = raw.text!;
+        return { ...base, run: async () => ({ contextAdditions: [text] }) };
+    }
+
+    // —— http：POST 上下文到 url，按响应决策 deny ——
+    if (raw.type === 'http') {
+        const url = raw.url!;
+        return {
+            ...base,
+            run: async (ctx: any) => {
+                const res = await executeHttpHook({
+                    url,
+                    method: raw.method,
+                    headers: raw.headers,
+                    body: ctx, // 整个 hook 上下文 JSON 化发出（含 sessionId/toolName/args/prompt 等）
+                    timeoutMs,
+                });
+                if (!res.ok) {
+                    // 网络失败/超时/中止：按 denyOnNonZero 决策（镜像 command 的 timedOut 处理）
+                    return denyOnNonZero
+                        ? { deny: true, reason: `hook http 请求失败：${res.error}` }
+                        : { deny: false };
+                }
+                // 响应体为 JSON 且含 { deny: true, reason } → 直接采纳对端决策
+                try {
+                    const parsed = JSON.parse(res.responseBody);
+                    if (parsed && typeof parsed === "object" && parsed.deny === true) {
+                        const reason = typeof parsed.reason === "string" ? parsed.reason : `hook http 拒绝（status ${res.status}）`;
+                        return { deny: true, reason };
+                    }
+                } catch { /* 非 JSON 响应：退回按状态码决策 */ }
+                // 非 2xx → 按 denyOnNonZero 决策（默认 PreToolUse=true 拦）
+                if (denyOnNonZero && (res.status < 200 || res.status >= 300)) {
+                    return { deny: true, reason: `hook http 状态码 ${res.status}` };
+                }
+                return { deny: false };
+            },
+        };
+    }
+
+    // —— command（默认/既有）：spawn shell，按 exitCode 决策 ——
+    const command = raw.command!;
     return {
-        event,
-        matcher: raw.matcher,
-        source: "config",
-        onError: raw.onError,
+        ...base,
         run: async (ctx: any) => {
             const res = await executeHookCommand({
-                command: raw.command,
+                command,
                 cwd: ctx?.cwd,
                 env: ctx?.env,
                 timeoutMs,

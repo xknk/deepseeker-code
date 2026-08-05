@@ -8,7 +8,22 @@
  *   - 仅在有 skill 时由 initSkills 注入（无 skill 不暴露，避免无效工具位）。
  */
 import { CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
-import { getSkillBody } from "@/skills/registry.ts";
+import { getSkillManifest } from "@/skills/registry.ts";
+
+/**
+ * 把 skill manifest 拼装为 load_skill 的返回内容：
+ *   body（正文）+ context（附加上下文段，若有）+ allowedTools（工具限定软约束指令，若有）。
+ *
+ * ★ allowed-tools 软约束：不硬过滤 tools 数组（保 DeepSeek 前缀缓存稳定），而是在末尾追加限定指令让模型自律。
+ */
+const assembleSkillContent = (m: { body: string; context?: string; allowedTools: string[] }): string => {
+    let out = m.body;
+    if (m.context) out += `\n\n## 附加上下文\n${m.context}`;
+    if (m.allowedTools.length > 0) {
+        out += `\n\n⚠️【工具限定】本技能激活期间，仅允许调用以下工具：${m.allowedTools.join("、 ")}。请勿调用列表外的工具。`;
+    }
+    return out;
+};
 
 export const skillTools: CustomTool[] = [
     {
@@ -31,11 +46,11 @@ export const skillTools: CustomTool[] = [
                 if (typeof name !== "string" || !name.trim()) {
                     return "❌ [load_skill] 缺少参数 name。请先查看【可用技能目录】中的技能名。";
                 }
-                const body = getSkillBody(name.trim());
-                if (!body) {
+                const manifest = getSkillManifest(name.trim());
+                if (!manifest) {
                     return `❌ 未找到技能：${name}。请核对【可用技能目录】中的名称拼写。`;
                 }
-                return body;
+                return assembleSkillContent(manifest);
             },
         },
     },

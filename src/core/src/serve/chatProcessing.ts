@@ -102,6 +102,14 @@ export const handleUnifiedChat = async (
         return;
     }
 
+    // ★ prompt-type hook 注入的附加上下文（UserPromptSubmit 专属）。
+    //   必须在 buildContextMessages / appendMessage 之前拼入 inbound.content——这样 transcript 忠实记录模型所见
+    //   （对齐上方斜杠展开的既有原则）；一个接缝同时覆盖 CLI（经 handleUnifiedChat）与 HTTP 宿主。
+    if (promptVeto.contextAdditions && promptVeto.contextAdditions.length > 0) {
+        const inject = promptVeto.contextAdditions.map(t => `📎 [Hook 注入]\n${t}`).join('\n\n');
+        inbound.content = `${inbound.content}\n\n${inject}`;
+    }
+
     // ★ SYSTEM_PROMPT 已抽取为共享模块（@/agent/systemPrompt.ts），Web/CLI 宿主复用，避免双处维护。
     const fullMessages: Msg[] = await buildContextMessages(
         sessionId,

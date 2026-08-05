@@ -7,6 +7,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { matches, registerHook, clearHooks, dispatch } from "@/hooks/registry.ts";
+import { compileRule, validateRule } from "@/hooks/loader.ts";
+import { executeHttpHook } from "@/hooks/httpExecutor.ts";
 import { requestApproval } from "@/tool/guard.ts";
 import { ToolSafetyLevel } from "@/tool/type.ts";
 
@@ -130,5 +132,187 @@ describe("dispatch PreCompact/PostCompact/PermissionRequest（P1-8 压缩与权�
         assert.equal(captured?.safetyLevel, 'danger');
         assert.equal(approved, false, 'host deny → approved=false');
         clearHooks();
+    });
+});
+
+describe("dispatch contextAdditions（prompt 注入通道 · P1-8）", () => {
+    it("可拦截事件：多 rule 的 contextAdditions 累积带出（不 deny）", async () => {
+        clearHooks();
+        registerHook({ event: 'UserPromptSubmit', run: () => ({ contextAdditions: ['提示A'] }), source: 'builtin' });
+        registerHook({ event: 'UserPromptSubmit', run: () => ({ contextAdditions: ['提示B'] }), source: 'builtin' });
+        const res = await dispatch('UserPromptSubmit', { sessionId: 's', prompt: 'hi' });
+        assert.equal(res.deny, false);
+        assert.deepEqual(res.contextAdditions, ['提示A', '提示B']);
+        clearHooks();
+    });
+
+    it("deny 时已累积的 contextAdditions 仍随返回带出（短路前已注入的保留）", async () => {
+        clearHooks();
+        registerHook({ event: 'UserPromptSubmit', run: () => ({ contextAdditions: ['先注入'] }), source: 'builtin' });
+        registerHook({ event: 'UserPromptSubmit', run: () => ({ deny: true, reason: '拦截' }), source: 'builtin' });
+        const res = await dispatch('UserPromptSubmit', { sessionId: 's', prompt: 'hi' });
+        assert.equal(res.deny, true);
+        assert.deepEqual(res.contextAdditions, ['先注入']);
+        clearHooks();
+    });
+
+    it("无注入 → contextAdditions 为 undefined（向后兼容）", async () => {
+        clearHooks();
+        registerHook({ event: 'UserPromptSubmit', run: () => ({ deny: false }), source: 'builtin' });
+        const res = await dispatch('UserPromptSubmit', { sessionId: 's', prompt: 'hi' });
+        assert.equal(res.contextAdditions, undefined);
+        clearHooks();
+    });
+
+    it("观察事件也收集 contextAdditions（仅 UserPromptSubmit 消费，但收集口径一致）", async () => {
+        clearHooks();
+        registerHook({ event: 'Stop', run: () => ({ contextAdditions: ['x'] }), source: 'builtin' });
+        const res = await dispatch('Stop', { sessionId: 's', lastText: '', reason: 'normal' });
+        assert.deepEqual(res.contextAdditions, ['x']);
+        clearHooks();
+    });
+});
+
+// —— executeHttpHook / compileRule 单测：mock 全局 fetch，避免真实网络 ——
+const origFetch = globalThis.fetch;
+/** 临时替换 globalThis.fetch；返回恢复函数。impl 抛错模拟网络失败/超时。 */
+const mockFetch = (impl: (url: string, init?: any) => Promise<{ status: number; text: () => Promise<string> }>): (() => void) => {
+    globalThis.fetch = ((url: string, init?: any) => impl(url, init)) as any;
+    return () => { globalThis.fetch = origFetch; };
+};
+
+describe("executeHttpHook（http 执行器 · P1-8）", () => {
+    it("2xx 响应：ok=true，返回状态码与响应体", async () => {
+        const restore = mockFetch(async () => ({ status: 200, text: async () => '{"deny":true}' }));
+        const r = await executeHttpHook({ url: 'https://x/hook', body: { a: 1 } });
+        assert.equal(r.ok, true);
+        assert.equal(r.status, 200);
+        assert.equal(r.responseBody, '{"deny":true}');
+        restore();
+    });
+
+    it("网络失败（fetch 抛错）：ok=false，带 error", async () => {
+        const restore = mockFetch(async () => { throw new Error('ECONNREFUSED'); });
+        const r = await executeHttpHook({ url: 'https://x/hook' });
+        assert.equal(r.ok, false);
+        assert.equal(r.status, 0);
+        assert.match(r.error || '', /ECONNREFUSED/);
+        restore();
+    });
+
+    it("超时（TimeoutError）：ok=false，error 含超时", async () => {
+        const restore = mockFetch(async () => { const e = new Error('timeout'); (e as any).name = 'TimeoutError'; throw e; });
+        const r = await executeHttpHook({ url: 'https://x/hook', timeoutMs: 5000 });
+        assert.equal(r.ok, false);
+        assert.match(r.error || '', /超时/);
+        restore();
+    });
+
+    it("大响应体截断到 ~4KB", async () => {
+        const restore = mockFetch(async () => ({ status: 200, text: async () => 'x'.repeat(10000) }));
+        const r = await executeHttpHook({ url: 'https://x/hook' });
+        assert.ok(r.responseBody.length < 10000, '应被截断');
+        assert.match(r.responseBody, /响应截断/);
+        restore();
+    });
+});
+
+describe("compileRule（执行类型分支 · P1-8）", () => {
+    it("prompt 类型：run → contextAdditions（不 deny）", async () => {
+        const rule = compileRule('UserPromptSubmit', { type: 'prompt', text: '注入文本' });
+        const res: any = await rule.run({});
+        assert.deepEqual(res, { contextAdditions: ['注入文本'] });
+    });
+
+    it("http 类型：响应 JSON {deny:true,reason} → deny 采纳并透传 reason", async () => {
+        const restore = mockFetch(async () => ({ status: 200, text: async () => JSON.stringify({ deny: true, reason: '不允许' }) }));
+        const rule = compileRule('PreToolUse', { type: 'http', url: 'https://x/h', matcher: 'edit_file' });
+        const res: any = await rule.run({ toolName: 'edit_file' });
+        assert.equal(res.deny, true);
+        assert.match(res.reason, /不允许/);
+        restore();
+    });
+
+    it("http 类型：非 2xx + PreToolUse 默认 denyOnNonZero → deny（状态码）", async () => {
+        const restore = mockFetch(async () => ({ status: 500, text: async () => 'err' }));
+        const rule = compileRule('PreToolUse', { type: 'http', url: 'https://x/h' });
+        const res: any = await rule.run({ toolName: 't' });
+        assert.equal(res.deny, true);
+        assert.match(res.reason, /状态码 500/);
+        restore();
+    });
+
+    it("http 类型：2xx 且无 deny JSON → 放行", async () => {
+        const restore = mockFetch(async () => ({ status: 200, text: async () => JSON.stringify({ ok: true }) }));
+        const rule = compileRule('PreToolUse', { type: 'http', url: 'https://x/h' });
+        const res: any = await rule.run({ toolName: 't' });
+        assert.equal(res.deny, false);
+        restore();
+    });
+
+    it("http 类型：网络失败 + denyOnNonZero=false → 放行", async () => {
+        const restore = mockFetch(async () => { throw new Error('down'); });
+        const rule = compileRule('PostToolUse', { type: 'http', url: 'https://x/h', denyOnNonZero: false });
+        const res: any = await rule.run({ toolName: 't' });
+        assert.equal(res.deny, false);
+        restore();
+    });
+
+    it("command 类型：既有行为保留（exitCode 0 + denyOnNonZero → 放行）", async () => {
+        // command 走 shellExecutor（真实 spawn），此处只验证 compileRule 产出结构正确、type 落 command
+        const rule = compileRule('PostToolUse', { type: 'command', command: 'exit 0', matcher: 'read_file' });
+        assert.equal(rule.event, 'PostToolUse');
+        assert.equal((rule as any).matcher, 'read_file');
+        assert.equal(rule.source, 'config');
+        const res: any = await rule.run({ toolName: 'read_file', cwd: process.cwd() });
+        assert.equal(res.deny, false);
+    });
+});
+
+describe("validateRule（执行类型校验 · P1-8）", () => {
+    const SRC = 'test', IDX = 0;
+
+    it("command 类型缺 command → null", () => {
+        assert.equal(validateRule({ type: 'command' }, 'PreToolUse', SRC, IDX), null);
+    });
+
+    it("无 type 默认 command，有 command → 通过", () => {
+        const r = validateRule({ command: 'echo hi' }, 'PreToolUse', SRC, IDX);
+        assert.equal(r?.type, 'command');
+        assert.equal(r?.command, 'echo hi');
+    });
+
+    it("http 类型缺 url → null", () => {
+        assert.equal(validateRule({ type: 'http' }, 'PreToolUse', SRC, IDX), null);
+    });
+
+    it("http 类型非 http(s) 协议 → null", () => {
+        assert.equal(validateRule({ type: 'http', url: 'ftp://x' }, 'PreToolUse', SRC, IDX), null);
+        assert.equal(validateRule({ type: 'http', url: 'not-a-url' }, 'PreToolUse', SRC, IDX), null);
+    });
+
+    it("http 类型合法 → 通过，method 大写、headers 透传", () => {
+        const r = validateRule({ type: 'http', url: 'https://x/h', method: 'post', headers: { 'x-token': 't' } }, 'PreToolUse', SRC, IDX);
+        assert.equal(r?.type, 'http');
+        assert.equal(r?.url, 'https://x/h');
+        assert.equal(r?.method, 'POST');
+        assert.deepEqual(r?.headers, { 'x-token': 't' });
+    });
+
+    it("prompt 类型缺 text → null", () => {
+        assert.equal(validateRule({ type: 'prompt' }, 'UserPromptSubmit', SRC, IDX), null);
+    });
+
+    it("prompt 类型仅 UserPromptSubmit 合法；其余事件 → null", () => {
+        assert.equal(validateRule({ type: 'prompt', text: 'x' }, 'PreToolUse', SRC, IDX), null);
+        assert.equal(validateRule({ type: 'prompt', text: 'x' }, 'Stop', SRC, IDX), null);
+    });
+
+    it("prompt 类型合法 → 通过，denyOnNonZero/onError 被忽略", () => {
+        const r = validateRule({ type: 'prompt', text: '注入', denyOnNonZero: true, onError: 'deny' }, 'UserPromptSubmit', SRC, IDX);
+        assert.equal(r?.type, 'prompt');
+        assert.equal(r?.text, '注入');
+        assert.equal(r?.denyOnNonZero, undefined, 'prompt 不消费 denyOnNonZero');
+        assert.equal(r?.onError, undefined, 'prompt 不消费 onError');
     });
 });

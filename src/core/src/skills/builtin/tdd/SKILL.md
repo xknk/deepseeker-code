@@ -2,6 +2,7 @@
 name: tdd
 description: 测试驱动开发工作流。当用户要求实现新功能、修复 bug、或明确提到 TDD/测试驱动/先写测试时激活。
 version: 1
+triggers: TDD, 测试驱动, 先写测试, 红绿重构
 ---
 
 # 测试驱动开发（TDD）
