@@ -7,6 +7,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { matches, registerHook, clearHooks, dispatch } from "@/hooks/registry.ts";
+import { requestApproval } from "@/tool/guard.ts";
+import { ToolSafetyLevel } from "@/tool/type.ts";
 
 describe("matches（hook 工具名匹配器）", () => {
     it("string：精确名匹配", () => {
@@ -70,6 +72,63 @@ describe("dispatch SubagentStart/Stop（P1-8 子 agent 生命周期 · 观察事
         registerHook({ event: 'SubagentStart', run: () => { startCount++; }, source: 'builtin' });
         await dispatch('SubagentStop', { sessionId: 's', parentSessionId: 'm', task: 'x', depth: 1, ok: true, output: '' });
         assert.equal(startCount, 0, 'SubagentStop 不应触发 SubagentStart hook');
+        clearHooks();
+    });
+});
+
+describe("dispatch PreCompact/PostCompact/PermissionRequest（P1-8 压缩与权限审计 · 观察事件）", () => {
+    it("PreCompact 携带 tokensBefore/tokensThreshold/depth", async () => {
+        clearHooks();
+        let captured: any = null;
+        registerHook({ event: 'PreCompact', run: (ctx: any) => { captured = ctx; }, source: 'builtin' });
+        const res = await dispatch('PreCompact', { sessionId: 's', depth: 0, tokensBefore: 220000, tokensThreshold: 212500 });
+        assert.equal(captured?.tokensBefore, 220000);
+        assert.equal(captured?.tokensThreshold, 212500);
+        assert.equal(res.deny, false);
+        clearHooks();
+    });
+
+    it("PostCompact 携带 tokensBefore/tokensAfter", async () => {
+        clearHooks();
+        let captured: any = null;
+        registerHook({ event: 'PostCompact', run: (ctx: any) => { captured = ctx; }, source: 'builtin' });
+        await dispatch('PostCompact', { sessionId: 's', depth: 0, tokensBefore: 220000, tokensAfter: 80000 });
+        assert.equal(captured?.tokensBefore, 220000);
+        assert.equal(captured?.tokensAfter, 80000);
+        clearHooks();
+    });
+
+    it("PermissionRequest 携带 toolName/toolCallId/detail/safetyLevel", async () => {
+        clearHooks();
+        let captured: any = null;
+        registerHook({ event: 'PermissionRequest', run: (ctx: any) => { captured = ctx; }, source: 'builtin' });
+        await dispatch('PermissionRequest', { sessionId: 's', cwd: '/tmp', toolName: 'run_command', toolCallId: 'c1', detail: '申请执行', safetyLevel: 'danger', args: { command: 'rm -rf x' } });
+        assert.equal(captured?.toolName, 'run_command');
+        assert.equal(captured?.toolCallId, 'c1');
+        assert.equal(captured?.safetyLevel, 'danger');
+        clearHooks();
+    });
+
+    it("三者均为观察事件（deny 被忽略，返回 deny:false）", async () => {
+        clearHooks();
+        for (const ev of ['PreCompact', 'PostCompact', 'PermissionRequest'] as const) {
+            registerHook({ event: ev, run: () => ({ deny: true, reason: '试图拦截' }), source: 'builtin' });
+            const res = await dispatch(ev, { sessionId: 's', depth: 0, tokensBefore: 1, tokensAfter: 1, tokensThreshold: 1, toolName: 't', toolCallId: 'c', detail: '' });
+            assert.equal(res.deny, false, `${ev} 不应被拦截`);
+            clearHooks();
+        }
+    });
+
+    it("guard.requestApproval 集成：派发 PermissionRequest（host deny → approved=false，无 LLM）", async () => {
+        clearHooks();
+        let captured: any = null;
+        registerHook({ event: 'PermissionRequest', run: (ctx: any) => { captured = ctx; }, source: 'builtin' });
+        const ctx: any = { sessionId: 's', cwd: '/tmp', requestApproval: async () => 'deny' as const, onUIEvent: () => {} };
+        const approved = await requestApproval('run_command', 'call_1', '申请执行 echo', ctx, ToolSafetyLevel.DANGER, { command: 'echo hi' });
+        assert.equal(captured?.toolName, 'run_command');
+        assert.equal(captured?.toolCallId, 'call_1');
+        assert.equal(captured?.safetyLevel, 'danger');
+        assert.equal(approved, false, 'host deny → approved=false');
         clearHooks();
     });
 });

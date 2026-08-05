@@ -20,6 +20,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { ToolContext, ToolSafetyLevel } from "./type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
 import { addPermissionRule, buildScopedAllowRule } from "./permissions.ts";
+import { dispatch } from "./hooks.ts";
 
 /** 工作区根目录（全局默认）：优先取环境变量 WORKSPACE_ROOT，否则回退到进程当前目录。
  *  ★ 现为「回退默认值」——真正生效的围栏基座由 ALS（getActiveWorkspaceRoot）决定：
@@ -270,6 +271,9 @@ export const requestApproval = async (
     }
 
     console.log(`⏳ [审批挂起] ${toolName} | 会话=${ctx.sessionId} | 凭证=${toolCallId}（交由宿主审批）`);
+
+    // ★ P1-8 PermissionRequest：审批请求发出前，观察事件（审计/记录）。best-effort，不阻断审批流
+    await dispatch('PermissionRequest', { sessionId: ctx.sessionId, cwd: ctx.cwd, toolName, toolCallId, detail: safeDetail, safetyLevel, args }).catch(() => { });
 
     // ★ 三态决策：allow-once 仅本次 / allow-always 放行+写持久规则 / deny 拒绝
     const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId });

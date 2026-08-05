@@ -3,9 +3,9 @@
  * @description Hooks 系统的类型定义：生命周期事件枚举、各类事件上下文、规则与返回值。
  *
  *  设计要点：
- *  - 8 类事件覆盖 agent 全生命周期：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd
- *    + SubagentStart / SubagentStop（P1-8 子 agent 生命周期，spawn_agent / run_workflow 派生时触发）。
- *  - 仅 PreToolUse / UserPromptSubmit 可拦截（deny）；其余（含 SubagentStart/Stop）为观察型。
+ *  - 11 类事件覆盖 agent 全生命周期：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd
+ *    + SubagentStart / SubagentStop（子 agent 生命周期）+ PreCompact / PostCompact（上下文压缩）+ PermissionRequest（权限审计）。
+ *  - 仅 PreToolUse / UserPromptSubmit 可拦截（deny）；其余（含 Subagent/Compact/Permission 系列）为观察型。
  *  - matcher（工具名匹配）仅 Pre/PostToolUse 消费，沿用旧 tool/hooks.ts 语义（精确串 / '*' / RegExp / 谓词）。
  *  - 与 @/tool/type.ts 的 ToolContext 解耦：工具事件额外携带 toolContext 供 handler 访问完整运行时。
  */
@@ -20,7 +20,10 @@ export type EventType =
     | 'Stop'                // agent 主循环退出（正常/中止/熔断/错误；仅观察）
     | 'SessionEnd'          // 请求结束、SSE 关闭前（紧邻 session.end trace；仅观察）
     | 'SubagentStart'       // P1-8 子 agent 实际启动（spawn_agent / run_workflow 派生后；仅观察）
-    | 'SubagentStop';       // P1-8 子 agent 收尾（正常/中止/崩溃；仅观察，含 ok/产出）
+    | 'SubagentStop'        // P1-8 子 agent 收尾（正常/中止/崩溃；仅观察，含 ok/产出）
+    | 'PreCompact'          // P1-8 上下文压缩触发前（token 超阈值、尚未摘要；仅观察）
+    | 'PostCompact'         // P1-8 上下文压缩完成后（含压缩前后 token；仅观察）
+    | 'PermissionRequest';  // P1-8 工具审批请求发出前（宿主审批/自动模式；仅观察，审计用）
 
 /** 各事件上下文共享的基座 */
 export interface BaseHookCtx {
@@ -87,6 +90,36 @@ export interface SubagentStopCtx extends BaseHookCtx {
     output: string;
 }
 
+// —— P1-8 上下文压缩生命周期（观察事件）——
+export interface PreCompactCtx extends BaseHookCtx {
+    /** 当前上下文 token 估算（触发压缩时）。 */
+    tokensBefore: number;
+    /** 压缩阈值（modelWindow × compactRatio）。 */
+    tokensThreshold: number;
+    /** 嵌套深度（主 agent=0）。 */
+    depth: number;
+}
+
+export interface PostCompactCtx extends BaseHookCtx {
+    /** 压缩前 token 估算。 */
+    tokensBefore: number;
+    /** 压缩后 token 估算。 */
+    tokensAfter: number;
+    depth: number;
+}
+
+// —— P1-8 权限请求审计（观察事件；不可拦截，决策仍由宿主审批/自动模式定）——
+export interface PermissionRequestCtx extends BaseHookCtx {
+    toolName: string;
+    toolCallId: string;
+    /** 风险说明（已瘦身，同宿主审批展示）。 */
+    detail: string;
+    /** 安全等级（safe/mutation/danger）。 */
+    safetyLevel?: string;
+    /** 本次工具调用参数（审计用）。 */
+    args?: any;
+}
+
 /** 可拦截事件返回 deny 即阻断；观察事件忽略 deny。 */
 export type HookResult = void | { deny: boolean; reason?: string };
 
@@ -125,7 +158,7 @@ export const INTERCEPTABLE_EVENTS: ReadonlySet<EventType> = new Set<EventType>([
 export const TOOL_EVENTS: ReadonlySet<EventType> = new Set<EventType>(['PreToolUse', 'PostToolUse']);
 
 /** 全部合法事件（供 loader 校验用） */
-export const ALL_EVENTS: EventType[] = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop'];
+export const ALL_EVENTS: EventType[] = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'PermissionRequest'];
 
 /**
  * 各生命周期事件的【默认超时】梯度（ms）：编译期由 loader.compileRule 在用户未显式配置 timeoutMs 时采用。
@@ -146,4 +179,7 @@ export const DEFAULT_TIMEOUT_BY_EVENT: Readonly<Record<EventType, number>> = {
     SessionEnd: 60_000,
     SubagentStart: 10_000,
     SubagentStop: 30_000,
+    PreCompact: 10_000,
+    PostCompact: 30_000,
+    PermissionRequest: 10_000,
 };

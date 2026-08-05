@@ -26,6 +26,7 @@ import { estimateTokens, Msg, splitUntils } from "@/session/contextCore.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
+import { dispatch } from "@/tool/hooks.ts";
 
 /** ANSI / OSC 转义序列（终端着色等） */
 const ANSI_ESCAPE = /\u001b\[[\d;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
@@ -206,6 +207,9 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
  */
 export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     if (estimateTokens(event.messageArr) <= event.modelWindow * event.compactRatio) return;
+    // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
+    const tokensThreshold = Math.round(event.modelWindow * event.compactRatio);
+    await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: estimateTokens(event.messageArr), tokensThreshold });
     const systemMsg = event.messageArr[0]; // 获取系统提示词
     const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
     let keep = event.keepRecentUnits;
@@ -321,6 +325,9 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         if (newSize >= lastSize) break;
         lastSize = newSize;
     }
+
+    // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
+    await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: lastSize, tokensAfter: estimateTokens(event.messageArr) }).catch(() => { });
 
     if (estimateTokens(event.messageArr) > event.modelWindow * 0.9) {
         throw new Error(`上下文超出模型窗口上限（估算约 ${estimateTokens(event.messageArr)} / ${event.modelWindow} token），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
