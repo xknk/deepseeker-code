@@ -148,3 +148,23 @@ export function disposeAllMcpClients(): void {
     clients.forEach(c => { try { c.dispose(); } catch { /* ignore */ } });
     clients.length = 0;
 }
+
+/**
+ * 列出已连接的 MCP server（供 /mcp 可观测命令展示）。
+ * toolCount 取自 listTools（best-effort：单 server 3s 超时，失败标 -1 不阻断其余）。
+ */
+export async function listMcpClients(): Promise<{ serverName: string; toolCount: number }[]> {
+    const out: { serverName: string; toolCount: number }[] = [];
+    for (const c of clients) {
+        let toolCount = -1;
+        try {
+            const tools = await Promise.race([
+                c.listTools(),
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
+            ]);
+            toolCount = Array.isArray(tools) ? tools.length : 0;
+        } catch { /* 超时/失败：标 -1 */ }
+        out.push({ serverName: c.serverName, toolCount });
+    }
+    return out;
+}

@@ -46,6 +46,21 @@ export const clearHooks = (): void => {
 };
 
 /**
+ * 列出当前已注册的 hook 规则（供 /hooks 可观测命令展示）。
+ * matcher 序列化：string 原样 / RegExp → /source/flags / 函数 → [fn]。
+ * 不含 run 句柄（不可序列化）。
+ */
+export const listHooks = (): { event: string; matcher: string; source: string; onError?: string }[] => {
+    const strMatcher = (m: HookMatcher | undefined): string => {
+        if (m === undefined) return '*';
+        if (typeof m === 'string') return m;
+        if (m instanceof RegExp) return `${m.toString()}`;
+        return '[fn]';
+    };
+    return rules.map(r => ({ event: r.event, matcher: strMatcher(r.matcher), source: r.source, onError: r.onError }));
+};
+
+/**
  * 按事件分发：
  *  - 可拦截事件（PreToolUse/UserPromptSubmit）：串行 + 短路（首个 deny 即拦）。handler 抛错按 rule.onError 决策
  *    （默认 'allow' 放行防误拦；安全类 hook 可设 'deny' fail-closed）。

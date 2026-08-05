@@ -61,6 +61,13 @@ interface StringDict {
     cmdClear: string;
     cmdExit: string;
     cmdSessions: string;
+    /** P2-15 可观测性命令 */
+    cmdUsage: string;
+    cmdContext: string;
+    cmdPermissions: string;
+    cmdMcp: string;
+    cmdHooks: string;
+    cmdDebug: string;
     /** /sessions 选择器与 --continue */
     sessionsTitle: string;
     sessionsPrompt: string;
@@ -143,6 +150,12 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdClear: "清空当前屏幕",
         cmdExit: "退出 CLI",
         cmdSessions: "选择并载入历史会话（续接对话）",
+        cmdUsage: "查看本会话 token 用量（主/子 agent、缓存命中）",
+        cmdContext: "查看上下文窗口治理（阈值、填充率、已归档）",
+        cmdPermissions: "查看已加载的权限规则（allow/ask/deny）",
+        cmdMcp: "查看已连接的 MCP server 与工具数",
+        cmdHooks: "查看已注册的 hook 规则",
+        cmdDebug: "排障快照（session/cwd/模型/配置/环境）",
         sessionsTitle: "📪 历史会话（↑↓ 选择 · Enter 载入续接）",
         sessionsPrompt: "↑↓ 选择 · Enter 载入 · Esc 取消",
         noHistory: "（暂无历史会话）",
@@ -245,6 +258,12 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdClear: "Clear the screen",
         cmdExit: "Quit the CLI",
         cmdSessions: "Pick a past session to resume",
+        cmdUsage: "Show this session's token usage (main/sub agent, cache hit)",
+        cmdContext: "Show context window governance (threshold, fill, archived)",
+        cmdPermissions: "Show loaded permission rules (allow/ask/deny)",
+        cmdMcp: "Show connected MCP servers and tool counts",
+        cmdHooks: "Show registered hook rules",
+        cmdDebug: "Debug snapshot (session/cwd/model/config/env)",
         sessionsTitle: "📪 Past sessions (↑↓ to pick · Enter to resume)",
         sessionsPrompt: "↑↓ pick · Enter resume · Esc cancel",
         noHistory: "(no past sessions)",
@@ -300,4 +319,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "sessions", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "sessions", "usage", "context", "permissions", "mcp", "hooks", "debug", "clear", "exit"] as const;

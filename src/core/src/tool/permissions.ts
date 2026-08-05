@@ -194,6 +194,15 @@ export const checkPermission = (toolName: string, args: any): PermissionVerdict 
 };
 
 /**
+ * 列出当前已加载的权限规则（供 /permissions 可观测命令展示）。
+ * @returns 三类规则的序列化视图（toolName + raw 原文），不含内部正则。
+ */
+export const listPermissionRules = (): { allow: { toolName: string; raw: string }[]; deny: { toolName: string; raw: string }[]; ask: { toolName: string; raw: string }[] } => {
+    const proj = (rs: CompiledRule[]) => rs.map(r => ({ toolName: r.toolName, raw: r.raw }));
+    return { allow: proj(rules.allow), deny: proj(rules.deny), ask: proj(rules.ask) };
+};
+
+/**
  * 构造「精确值作用域」的 allow 规则字符串（供 allow-always 审批记忆持久化）。
  *  - 工具在 PRIMARY_ARG 有主参数映射、且本次调用提供了非空 string 值 → `ToolName(value)`（精确匹配该值，最小权限）；
  *  - 否则回退裸 `ToolName`（无主参数映射的工具本就只有按名匹配语义）。

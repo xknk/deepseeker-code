@@ -30,6 +30,7 @@ import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
 import { TopPanel } from "./components/TopPanel.tsx";
+import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHooks, inspectDebug } from "./inspect.ts";
 
 const KNOWN_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
 const CWD = process.cwd();
@@ -101,6 +102,12 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
                 case "sessions": return S.cmdSessions;
+                case "usage": return S.cmdUsage;
+                case "context": return S.cmdContext;
+                case "permissions": return S.cmdPermissions;
+                case "mcp": return S.cmdMcp;
+                case "hooks": return S.cmdHooks;
+                case "debug": return S.cmdDebug;
                 case "clear": return S.cmdClear;
                 case "exit": return S.cmdExit;
                 default: return "";
@@ -127,8 +134,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
 
     useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
 
-    // —— 本地斜杠命令 ——
-    const runLocalSlash = (text: string): boolean => {
+    // —— 本地斜杠命令（异步：可观测性命令需读 trace / MCP / store）——
+    const runLocalSlash = async (text: string): Promise<boolean> => {
         const [cmd, ...rest] = text.trim().split(/\s+/);
         const arg = rest.join(" ");
         switch (cmd) {
@@ -147,6 +154,24 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 return true;
             case "/status":
                 state.pushInfo(S.statusText(modelDisplay, state.getThinkingLevel(), state.getPlanMode(), getLocale(), CWD));
+                return true;
+            case "/usage":
+                state.pushInfo(await inspectUsage(state.sessionIdRef.current ?? ""));
+                return true;
+            case "/context":
+                state.pushInfo(await inspectContext(state.sessionIdRef.current ?? ""));
+                return true;
+            case "/permissions":
+                state.pushInfo(inspectPermissions());
+                return true;
+            case "/mcp":
+                state.pushInfo(await inspectMcp());
+                return true;
+            case "/hooks":
+                state.pushInfo(inspectHooks());
+                return true;
+            case "/debug":
+                state.pushInfo(inspectDebug(state.sessionIdRef.current ?? ""));
                 return true;
             case "/plan": {
                 const on = !state.getPlanMode();
@@ -208,7 +233,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     const executeSlash = async (fullText: string): Promise<void> => {
         const text = fullText.trim();
         if (!text.startsWith("/")) { await state.submit(text); return; }
-        if (runLocalSlash(text)) return;
+        if (await runLocalSlash(text)) return;
         const name = text.slice(1).split(/\s+/)[0] ?? "";
         if (listCommands().some((c) => c.name === name)) { await state.submit(text); return; }
         state.pushInfo(`未知命令：/${name || "(空)"}（输入 / 查看可用命令）`);
