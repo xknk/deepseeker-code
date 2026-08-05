@@ -16,6 +16,7 @@ import { createUUID } from "@/common/index.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { CustomTool, MAX_AGENT_DEPTH, ToolContext } from "@/tool/type.ts";
 import { getAgent } from "@/agents/registry.ts";
+import { dispatch } from "@/tool/hooks.ts";
 
 /**
  * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）
@@ -142,27 +143,39 @@ export const runSubagent = async (
             model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
         };
 
-        // ★ 异步生存流的异常与中止熔断监控
+        // ★ P1-8 SubagentStart：子 agent 实际启动（观察事件；声明式名/深度/任务供 hook 记录/计量）
+        const startCtx = { sessionId: subSessionId, parentSessionId: ctx.sessionId, task, depth: ctx.depth + 1, name: manifest?.name, cwd: ctx.cwd };
+        await dispatch('SubagentStart', startCtx);
+
+        // ★ 异步生存流的异常与中止熔断监控；SubagentStop 在 finally 统一收尾（正常/中止/崩溃均触发）
+        let result: SubagentResult | undefined;
         try {
             for await (const e of runAgent(subMessages, subOptions)) {
                 if (ctx.abortSignal?.aborted) {
-                    return { ok: false, output: `❌ [子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`, sessionId: subSessionId, manifestName: manifest?.name };
+                    result = { ok: false, output: `❌ [子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`, sessionId: subSessionId, manifestName: manifest?.name };
+                    break;
                 }
                 if (e.type === 'final') {
                     subResult = e.text;
                     hasFinalResult = true;
                 }
             }
+            if (result === undefined) {
+                // 生成器异常结束未返回 final 文本 → 抓取兜底摘要
+                if (!hasFinalResult || !subResult.trim()) {
+                    subResult = `（未能获取到结构化 final 回报。请检查该子 Session [${subSessionId}] 的执行历史）`;
+                }
+                result = { ok: true, output: subResult, sessionId: subSessionId, manifestName: manifest?.name };
+            }
         } catch (streamError: any) {
-            return { ok: false, output: `❌ [子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`, sessionId: subSessionId, manifestName: manifest?.name };
+            result = { ok: false, output: `❌ [子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`, sessionId: subSessionId, manifestName: manifest?.name };
+        } finally {
+            // ★ P1-8 SubagentStop：观察事件，best-effort（hook 异常不击垮子 agent）。output 截断防巨量回灌 hook
+            if (result) {
+                await dispatch('SubagentStop', { ...startCtx, ok: result.ok, output: result.output.slice(0, 2000) }).catch((e: any) => console.warn(`⚠️ SubagentStop hook 异常（已忽略）: ${e?.message ?? e}`));
+            }
         }
-
-        // 生成器异常结束未返回 final 文本 → 抓取兜底摘要
-        if (!hasFinalResult || !subResult.trim()) {
-            subResult = `（未能获取到结构化 final 回报。请检查该子 Session [${subSessionId}] 的执行历史）`;
-        }
-
-        return { ok: true, output: subResult, sessionId: subSessionId, manifestName: manifest?.name };
+        return result ?? { ok: false, output: `❌ [派生执行失败]: 未知错误`, sessionId: subSessionId, manifestName: manifest?.name };
     } catch (error: any) {
         return { ok: false, output: `❌ [派生执行失败]: ${error.message}`, sessionId: subSessionId, manifestName: manifest?.name };
     }

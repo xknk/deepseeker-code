@@ -82,7 +82,9 @@ export const dispatch = async (event: EventType, ctx: any): Promise<{ deny: bool
     // 观察事件：并发执行，单个异常仅告警（不击垮主流程、不相互阻塞）
     if (!interceptable) {
         await Promise.all(matched.map(rule =>
-            Promise.resolve(rule.run(ctx)).catch((e: any) => console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${e?.message ?? e}`))
+            // ★ Promise.resolve().then(...) 而非 Promise.resolve(rule.run(ctx))：后者对【同步抛错】的 handler
+            //   会在 .catch 挂上前就抛出（参数先求值），逃逸出 catch。延到 then 里执行才能捕获同步异常。
+            Promise.resolve().then(() => rule.run(ctx)).catch((e: any) => console.warn(`⚠️ [hook:${event}] 执行异常，已忽略: ${e?.message ?? e}`))
         ));
         return { deny: false };
     }

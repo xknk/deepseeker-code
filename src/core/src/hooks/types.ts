@@ -3,8 +3,9 @@
  * @description Hooks 系统的类型定义：生命周期事件枚举、各类事件上下文、规则与返回值。
  *
  *  设计要点：
- *  - 6 类事件覆盖 agent 全生命周期：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd。
- *  - 仅 PreToolUse / UserPromptSubmit 可拦截（deny）；其余为观察型。
+ *  - 8 类事件覆盖 agent 全生命周期：SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / Stop / SessionEnd
+ *    + SubagentStart / SubagentStop（P1-8 子 agent 生命周期，spawn_agent / run_workflow 派生时触发）。
+ *  - 仅 PreToolUse / UserPromptSubmit 可拦截（deny）；其余（含 SubagentStart/Stop）为观察型。
  *  - matcher（工具名匹配）仅 Pre/PostToolUse 消费，沿用旧 tool/hooks.ts 语义（精确串 / '*' / RegExp / 谓词）。
  *  - 与 @/tool/type.ts 的 ToolContext 解耦：工具事件额外携带 toolContext 供 handler 访问完整运行时。
  */
@@ -17,7 +18,9 @@ export type EventType =
     | 'PreToolUse'          // 工具审批通过后、execute 前（可拦截）
     | 'PostToolUse'         // 工具 execute 后（含异常；仅观察）
     | 'Stop'                // agent 主循环退出（正常/中止/熔断/错误；仅观察）
-    | 'SessionEnd';         // 请求结束、SSE 关闭前（紧邻 session.end trace；仅观察）
+    | 'SessionEnd'          // 请求结束、SSE 关闭前（紧邻 session.end trace；仅观察）
+    | 'SubagentStart'       // P1-8 子 agent 实际启动（spawn_agent / run_workflow 派生后；仅观察）
+    | 'SubagentStop';       // P1-8 子 agent 收尾（正常/中止/崩溃；仅观察，含 ok/产出）
 
 /** 各事件上下文共享的基座 */
 export interface BaseHookCtx {
@@ -61,6 +64,29 @@ export interface StopCtx extends BaseHookCtx {
 
 export interface SessionEndCtx extends BaseHookCtx { }
 
+// —— P1-8 子 agent 生命周期（观察事件；不可拦截）——
+export interface SubagentStartCtx extends BaseHookCtx {
+    /** 父会话 id（派生该子 agent 的主/父会话）。 */
+    parentSessionId: string;
+    /** 交给子 agent 的任务。 */
+    task: string;
+    /** 嵌套深度（主 agent=0，子 agent=1+）。 */
+    depth: number;
+    /** 命中的声明式子 Agent 名（未用声明式则 undefined）。 */
+    name?: string;
+}
+
+export interface SubagentStopCtx extends BaseHookCtx {
+    parentSessionId: string;
+    task: string;
+    depth: number;
+    name?: string;
+    /** 是否成功拿到 final 文本（中止/崩溃/异常均为 false）。 */
+    ok: boolean;
+    /** 子 agent 最终产出（已截断，仅观察/记录用）。 */
+    output: string;
+}
+
 /** 可拦截事件返回 deny 即阻断；观察事件忽略 deny。 */
 export type HookResult = void | { deny: boolean; reason?: string };
 
@@ -99,7 +125,7 @@ export const INTERCEPTABLE_EVENTS: ReadonlySet<EventType> = new Set<EventType>([
 export const TOOL_EVENTS: ReadonlySet<EventType> = new Set<EventType>(['PreToolUse', 'PostToolUse']);
 
 /** 全部合法事件（供 loader 校验用） */
-export const ALL_EVENTS: EventType[] = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd'];
+export const ALL_EVENTS: EventType[] = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop'];
 
 /**
  * 各生命周期事件的【默认超时】梯度（ms）：编译期由 loader.compileRule 在用户未显式配置 timeoutMs 时采用。
@@ -118,4 +144,6 @@ export const DEFAULT_TIMEOUT_BY_EVENT: Readonly<Record<EventType, number>> = {
     PostToolUse: 30_000,
     Stop: 30_000,
     SessionEnd: 60_000,
+    SubagentStart: 10_000,
+    SubagentStop: 30_000,
 };
