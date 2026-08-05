@@ -9,7 +9,7 @@
 import OpenAI from "openai";
 import { RunAgentEvents, PermissionMode } from "@/agent/type.ts";
 import { UIEvent } from "@/observability/type.ts";
-import { RequestApprovalFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 
 export const MAX_AGENT_DEPTH = 3;
 
@@ -92,6 +92,8 @@ export interface ToolContext {
     onUIEvent?: (evt: UIEvent) => void;
     /** 宿主审批钩子（前端无关）：MUTATION/DANGER 工具执行前由 guard 调用，宿主决定放行/拒绝。未注入时默认拒绝。 */
     requestApproval?: RequestApprovalFn;
+    /** P2-12 宿主提问钩子：ask_question 工具经此向用户结构化提问（阻塞至用户作答）。仅交互式 CLI 注入。 */
+    requestQuestion?: RequestQuestionFn;
     /** 权限模式透传（spawn_agent 子 agent 继承父级 auto mode）：auto=分类器智能放行；缺省 default。 */
     permissionMode?: PermissionMode;
     /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."）。

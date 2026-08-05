@@ -6,7 +6,7 @@
  *  本函数把「问用户 + 等结果」委托给 askApproval（由 useChatState 提供：弹模态、返回 Promise<boolean>）。
  *  完全 in-process：无 token、无端口、无 HTTP，模型无法程序化自批准。
  */
-import type { RequestApprovalFn, ApprovalDecision } from "@/host/type.ts";
+import type { RequestApprovalFn, ApprovalDecision, RequestQuestionFn, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
 
 /**
  * 构造 CLI 宿主审批钩子。
@@ -17,4 +17,15 @@ export const createCliRequestApproval = (
     askApproval: (detail: string, toolName: string) => Promise<ApprovalDecision>,
 ): RequestApprovalFn => {
     return async (detail, meta) => askApproval(detail, meta.toolName);
+};
+
+/**
+ * 构造 CLI 宿主提问钩子（P2-12）：把 RequestQuestionFn 契约接到 Ink 提问模态。
+ * @param askQuestion (req) => Promise<QuestionAnswer>：由 UI 提供，弹提问模态并返回用户选择。
+ * @returns RequestQuestionFn，注入 RunAgentOptions.requestQuestion。
+ */
+export const createCliRequestQuestion = (
+    askQuestion: (req: QuestionRequest) => Promise<QuestionAnswer>,
+): RequestQuestionFn => {
+    return async (req) => askQuestion(req);
 };

@@ -9,7 +9,7 @@
  */
 import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { Msg } from "@/session/contextCore.ts";
-import { RequestApprovalFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 import type { Locale } from "@/common/index.ts";
 
 /**
@@ -52,6 +52,8 @@ export interface RunAgentOptions {
     /** 宿主审批钩子（前端无关，见 host/type.ts）：决定 MUTATION/DANGER 工具是否放行。未注入时默认拒绝。
      *  Web 注入 HTTP/SSE 审批；CLI/VSCode（预留）注入终端/IDE 交互。 */
     requestApproval?: RequestApprovalFn;
+    /** P2-12 宿主提问钩子：ask_question 工具经此向用户结构化提问。未注入时工具优雅降级（仅交互式 CLI 注入）。 */
+    requestQuestion?: RequestQuestionFn;
     /** 模型上下文窗口大小（token），超出 modelWindow * compactRatio 时触发压缩。 */
     modelWindow: number;
     /** agent 嵌套深度，主 agent 为 0，spawn_agent 子 agent 递增。 */

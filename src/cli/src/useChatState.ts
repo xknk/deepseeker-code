@@ -14,10 +14,10 @@ import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/sessi
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
-import type { ApprovalDecision } from "@/host/type.ts";
+import type { ApprovalDecision, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
-import { createCliRequestApproval } from "./cliHost.ts";
+import { createCliRequestApproval, createCliRequestQuestion } from "./cliHost.ts";
 import { S, getLocale } from "./strings.ts";
 import { truncateMiddle } from "./util.ts";
 import { buildReplayRows, type ChatRow } from "./replay.ts";
@@ -27,6 +27,8 @@ export type { ChatRow } from "./replay.ts";
 
 /** 待审批请求（模态驱动）。 */
 export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
+/** P2-12 待答提问：ask_question 工具 → requestQuestion → 弹模态 → resolveQuestion 回传选择。 */
+export type PendingQuestion = { req: QuestionRequest; resolve: (a: QuestionAnswer) => void };
 /** 计划审批决策：accept=执行（plan 缺省=原方案，带 plan=编辑后方案；autoExecute=实现阶段免审批）；
  *  reject=终止回输入框。 */
 export type PlanResolution =
@@ -68,6 +70,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** 是否展开显示思考全文（Ctrl+T 切换；仅对 streaming 思考生效，已完成思考恒收起）。 */
     const [showThinkingText, setShowThinkingText] = useState(false);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+    const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
     const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
     const [pendingSessions, setPendingSessions] = useState<PendingSessions | null>(null);
 
@@ -303,6 +306,13 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setPendingApproval((prev) => { prev?.resolve(v); return null; });
     }, []);
 
+    // —— 结构化提问（RequestQuestionFn → Ink 提问模态） ——
+    const askQuestion = useCallback((req: QuestionRequest): Promise<QuestionAnswer> =>
+        new Promise<QuestionAnswer>((resolve) => setPendingQuestion({ req, resolve })), []);
+    const resolveQuestion = useCallback((a: QuestionAnswer) => {
+        setPendingQuestion((prev) => { prev?.resolve(a); return null; });
+    }, []);
+
     // —— 方案审批（计划模式两阶段） ——
     /** 取出本轮 yield 的方案文本（若有），并清空。供 submit 在计划轮结束后判断是否弹模态。 */
     const takeProposedPlan = useCallback((): string | null => {
@@ -336,6 +346,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setAborting(false);
         const opts: HostOptions = {
             requestApproval: autoApprove ? autoRequestApproval : createCliRequestApproval(askApproval),
+            requestQuestion: createCliRequestQuestion(askQuestion),
             onUIEvent: pushEvent,
             onTrace,
             planMode,
@@ -466,11 +477,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, todos, busy, aborting, showThinkingText, pendingApproval, pendingPlan, pendingSessions,
+        rows, todos, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions,
         sessionIdRef,
         // 动作
         submit, abortCurrent, pushUser, pushInfo, pushEvent,
-        askApproval, resolveApproval, setPlan, resolvePlan,
+        askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel,
         openSessionPicker, resolveSession, loadSession,

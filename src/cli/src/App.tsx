@@ -23,6 +23,7 @@ import { ThinkingBlock } from "./components/ThinkingBlock.tsx";
 import { ToolCard } from "./components/ToolCard.tsx";
 import { TodosPanel } from "./components/TodosPanel.tsx";
 import { ApprovalModal } from "./components/ApprovalModal.tsx";
+import { QuestionModal } from "./components/QuestionModal.tsx";
 import { PlanModal } from "./components/PlanModal.tsx";
 import { PlanEditor } from "./components/PlanEditor.tsx";
 import { SessionPicker } from "./components/SessionPicker.tsx";
@@ -70,6 +71,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     const [planEditing, setPlanEditing] = useState(false);
     const [planDraft, setPlanDraft] = useState("");
     const [planCursor, setPlanCursor] = useState(0);
+    /** P2-12 提问模态：qCursor=选项光标，qChecked=多选已勾选项集合。 */
+    const [qCursor, setQCursor] = useState(0);
+    const [qChecked, setQChecked] = useState<Set<number>>(new Set());
+    const qCursorRef = useRef(0);
+    const qCheckedRef = useRef<Set<number>>(new Set());
 
     const inputRef = useRef(input);
     const selectIdxRef = useRef(selectIdx);
@@ -81,6 +87,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     busyRef.current = state.busy;
     planEditingRef.current = planEditing;
     planDraftRef.current = planDraft;
+    qCursorRef.current = qCursor;
+    qCheckedRef.current = qChecked;
 
     const staticRows = useMemo(() => state.rows.filter((r) => !isDynamicRow(r)), [state.rows]);
     const dynamicRows = useMemo(() => state.rows.filter(isDynamicRow), [state.rows]);
@@ -126,13 +134,15 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
         return menuEntries.filter((c) => c.name.toLowerCase().startsWith(q));
     }, [input, menuEntries]);
 
-    const menuActive = state.pendingApproval != null || state.pendingPlan != null || state.pendingSessions != null;
+    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null;
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
     // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
+    // ★ 提问模态打开/切换时重置光标与已勾选
+    useEffect(() => { setQCursor(0); setQChecked(new Set()); }, [state.pendingQuestion]);
 
     // —— 本地斜杠命令（异步：可观测性命令需读 trace / MCP / store）——
     const runLocalSlash = async (text: string): Promise<boolean> => {
@@ -269,6 +279,26 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
             else if (key.escape || (key.ctrl && ch === "g")) state.resolveApproval('deny');
             return;
         }
+        if (state.pendingQuestion) {
+            const q = state.pendingQuestion.req;
+            const n = q.options.length;
+            const multi = !!q.multiSelect;
+            if (key.upArrow) setQCursor((i) => (i - 1 + n) % n);
+            else if (key.downArrow) setQCursor((i) => (i + 1) % n);
+            else if (multi && ch === " ") {
+                setQChecked((prev) => { const nx = new Set(prev); nx.has(qCursorRef.current) ? nx.delete(qCursorRef.current) : nx.add(qCursorRef.current); return nx; });
+            } else if (key.return) {
+                if (multi) {
+                    const sel = qCheckedRef.current.size > 0
+                        ? [...qCheckedRef.current].sort((a, b) => a - b).map(i => q.options[i]?.label).filter(Boolean)
+                        : [q.options[qCursorRef.current]?.label].filter(Boolean);
+                    state.resolveQuestion({ selected: sel });
+                } else {
+                    state.resolveQuestion({ selected: [q.options[qCursorRef.current]?.label].filter(Boolean) });
+                }
+            } else if (key.escape || (key.ctrl && ch === "g")) state.resolveQuestion({ selected: [] });
+            return;
+        }
         if (state.pendingPlan) {
             // 编辑态：仅 Esc/Ctrl+G 取消回选项；其余按键交给 PlanEditor 的 MultilineInput 处理
             if (planEditingRef.current) {
@@ -352,6 +382,16 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 <Box flexDirection="column" paddingX={1} flexShrink={0}>
                     {state.pendingApproval ? (
                         <ApprovalModal toolName={state.pendingApproval.toolName} detail={state.pendingApproval.detail} selectedIndex={selectIdx} wrapW={wrapW} />
+                    ) : null}
+                    {state.pendingQuestion ? (
+                        <QuestionModal
+                            question={state.pendingQuestion.req.question}
+                            options={state.pendingQuestion.req.options}
+                            multiSelect={!!state.pendingQuestion.req.multiSelect}
+                            cursor={qCursor}
+                            checked={qChecked}
+                            wrapW={wrapW}
+                        />
                     ) : null}
                     {state.pendingPlan ? (
                         planEditing ? (

@@ -117,7 +117,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
     // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
-    const validationCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval };
+    const validationCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion };
     const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
     // 格式化工具消息
     const cleanedToolSchemas = rawTools.map((t: any) => ({
@@ -489,7 +489,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
                 }
                 const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
-                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
+                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
                 let result = "";
                 let explicitOk: boolean | null = null;
                 if (parseFailed) {
@@ -618,7 +618,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             };
             const canParallelize = (name: string, args: any, parseFailed: boolean): boolean => {
                 if (!parallelSafeToolsEnabled || parseFailed || signal?.aborted) return false;
-                if (name === 'exit_plan_mode' || name === 'enter_plan_mode') return false;
+                if (name === 'exit_plan_mode' || name === 'enter_plan_mode' || name === 'ask_question') return false;
                 if (isUndoTrigger(name)) return false;
                 const matched = rawTools.find((t: any) => t.function.name === name);
                 if (!matched) return false;

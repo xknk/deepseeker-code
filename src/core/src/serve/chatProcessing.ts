@@ -26,7 +26,7 @@ import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { RunAgentOptions, ThinkingLevel, PermissionMode } from "@/agent/type.ts";
 import type { Locale } from "@/common/index.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
-import { RequestApprovalFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
 import { expandSlashCommand } from "@/commands/expand.ts";
 import { SYSTEM_PROMPT } from "@/agent/systemPrompt.ts";
@@ -40,6 +40,8 @@ type SseWriter = (obj: Record<string, unknown>) => void;
 export interface HostOptions {
     /** 宿主审批钩子（决定 MUTATION/DANGER 工具放行）。缺省用 Web 宿主 createWebRequestApproval。 */
     requestApproval?: RequestApprovalFn;
+    /** P2-12 宿主提问钩子（ask_question 工具经此向用户提问）。仅交互式 CLI 注入；缺省 undefined（工具优雅降级）。 */
+    requestQuestion?: RequestQuestionFn;
     /** 面向前端的 UI 交互事件通道（approval_request / todo.update 等）。缺省走 sseWrite。 */
     onUIEvent?: (evt: UIEvent) => void;
     /** 计划模式（CLI 两阶段用）：true=只读调研，模型 exit_plan_mode 后 yield plan.proposed 并结束本轮。缺省 false。 */
@@ -137,6 +139,7 @@ export const handleUnifiedChat = async (
         },
         onUIEvent,
         requestApproval,
+        requestQuestion: opts?.requestQuestion,
         // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
         planMode: opts?.planMode,
         permissionMode: opts?.permissionMode,

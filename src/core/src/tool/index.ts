@@ -30,6 +30,7 @@ import { webTools } from "./registry/web.ts";
 import { todoTools } from "./registry/todo.ts";
 import { backgroundTools } from "./registry/background.ts";
 import { undoTools } from "./registry/undo.ts";
+import { askTools } from "./registry/ask.ts";
 
 export * from "./type.ts";
 
@@ -56,4 +57,5 @@ agentTools.push(
     ...todoTools,        // 任务清单管理（SAFE，整表覆盖 + UIEvent 推前端）
     ...backgroundTools,  // 后台任务（run/get_output/stop，自管理进程注册表）
     ...undoTools,        // 文件回退（undo_list 只读 + undo_restore 回退，含写前自动备份）
+    ...askTools,         // P2-12 结构化提问（ask_question：多选问用户，阻塞至作答）
 );

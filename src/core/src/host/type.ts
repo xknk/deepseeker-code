@@ -35,6 +35,38 @@ export interface ApprovalMeta {
  */
 export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
 
+// ============ P2-12 结构化提问（ask_question 工具的宿主钩子）============
+
+/** 一个可选项：label 为简短选项（展示 + 回传），description 为说明（可选）。 */
+export interface QuestionOption {
+    label: string;
+    description?: string;
+}
+
+/** 模型向用户提问的请求（经 ask_question 工具 → ctx.requestQuestion → 宿主模态）。 */
+export interface QuestionRequest {
+    /** 问题正文（展示给用户）。 */
+    question: string;
+    /** 2-4 个选项。 */
+    options: QuestionOption[];
+    /** 多选（true）或单选（false/缺省）。 */
+    multiSelect?: boolean;
+}
+
+/**
+ * 用户的选择回传：selected 为被选选项的 label 数组（单选时长度 1；用户取消时为空数组）。
+ * 用 label 而非下标回传——模型用人类可读 label 提问，回传 label 语义自洽。
+ */
+export interface QuestionAnswer {
+    selected: string[];
+}
+
+/**
+ * 宿主提问钩子：ask_question 工具执行时调用，由宿主弹交互模态、阻塞至用户作答。
+ * 未注入时（如 headless HTTP）ask_question 工具优雅降级（返回「不支持，请用纯文本提问」）。
+ */
+export type RequestQuestionFn = (req: QuestionRequest) => Promise<QuestionAnswer>;
+
 /**
  * 宿主审批钩子：核心在执行 MUTATION/DANGER 工具前调用，由宿主决定放行/拒绝。
  * @param detail 工具声明的风险说明（已由核心瘦身，适合直接展示）
