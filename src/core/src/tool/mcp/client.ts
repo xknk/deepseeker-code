@@ -31,12 +31,19 @@ export interface McpServerConfig {
     headers?: Record<string, string>;
 }
 
-/** transport 无关的公共接口（loader.ts 仅消费这 4 个方法 + serverName） */
+/** transport 无关的公共接口（loader.ts 消费 tools/resources/prompts 三类能力 + serverName + 能力旗标） */
 export interface McpClient {
     readonly serverName: string;
     start(): Promise<void>;
     listTools(): Promise<any[]>;
     callTool(name: string, args: any): Promise<string>;
+    /** server 是否在 initialize 握手中声明了 resources / prompts 能力（即时，无网络往返） */
+    readonly supportsResources: boolean;
+    readonly supportsPrompts: boolean;
+    listResources(): Promise<any[]>;
+    readResource(uri: string): Promise<string>;
+    listPrompts(): Promise<any[]>;
+    getPrompt(name: string, args?: any): Promise<string>;
     dispose(): void;
 }
 
@@ -64,6 +71,40 @@ const joinContentText = (result: any): string => {
         return `❌ [MCP 工具报错]\n${text || JSON.stringify(result)}`;
     }
     return text || JSON.stringify(result);
+};
+
+/**
+ * resources/read 结果 → 文本拼接（导出供单测）。
+ * contents[] 每项可含 text（文本，拼接）或 blob（base64 二进制，文本模型无法消费 → 占位说明）。
+ * 无任何文本内容时返回占位，避免返回空串被误判为失败。
+ */
+export const joinResourceContents = (result: any): string => {
+    const contents = Array.isArray(result?.contents) ? result.contents : [];
+    const parts = contents.map((c: any) => {
+        if (typeof c?.text === "string") return c.text;
+        if (c?.blob) return `[二进制资源 ${c?.uri ?? ""}（mimeType=${c?.mimeType ?? "未知"}），已省略 base64 内容]`;
+        return "";
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("\n\n") : "(资源无文本内容)";
+};
+
+/**
+ * prompts/get 结果 messages[] → 文本拼接（导出供单测）。
+ * 每条 message.content 可能是 string、{type:"text",text} 单对象、或 content 数组（ExtractedContent）。
+ */
+export const joinPromptMessages = (result: any): string => {
+    const messages = Array.isArray(result?.messages) ? result.messages : [];
+    const parts = messages.map((m: any) => {
+        const content = m?.content;
+        if (typeof content === "string") return content;
+        if (Array.isArray(content)) {
+            return content.filter((c: any) => c?.type === "text" && typeof c.text === "string")
+                .map((c: any) => c.text).join("\n");
+        }
+        if (content?.type === "text" && typeof content.text === "string") return content.text;
+        return "";
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("\n\n") : "(prompt 无文本内容)";
 };
 
 /** 客户端信息（握手用），与 serverName 解耦 */
@@ -101,6 +142,12 @@ abstract class McpBaseClient implements McpClient {
     /** transport 相关的 JSON-RPC 请求（stdio 走 stdin/stdout，http/sse 走 fetch） */
     protected abstract request(method: string, params: any): Promise<any>;
 
+    /** server 在 initialize 握手中声明的能力（resources?/prompts?/...）；start() 捕获，缺省 {} */
+    protected serverCapabilities: any = {};
+    /** 是否声明了 resources / prompts 能力（读 serverCapabilities，即时无往返） */
+    get supportsResources(): boolean { return !!this.serverCapabilities?.resources; }
+    get supportsPrompts(): boolean { return !!this.serverCapabilities?.prompts; }
+
     /** 枚举 server 暴露的工具（tools/list） */
     async listTools(): Promise<any[]> {
         const result = await this.request("tools/list", {});
@@ -111,6 +158,30 @@ abstract class McpBaseClient implements McpClient {
     async callTool(name: string, args: any): Promise<string> {
         const result = await this.request("tools/call", { name, arguments: args ?? {} });
         return joinContentText(result);
+    }
+
+    /** 枚举 server 暴露的资源（resources/list） */
+    async listResources(): Promise<any[]> {
+        const result = await this.request("resources/list", {});
+        return Array.isArray(result?.resources) ? result.resources : [];
+    }
+
+    /** 读取资源（resources/read），返回拼接后的文本（blob 二进制置占位） */
+    async readResource(uri: string): Promise<string> {
+        const result = await this.request("resources/read", { uri });
+        return joinResourceContents(result);
+    }
+
+    /** 枚举 server 暴露的 prompt 模板（prompts/list） */
+    async listPrompts(): Promise<any[]> {
+        const result = await this.request("prompts/list", {});
+        return Array.isArray(result?.prompts) ? result.prompts : [];
+    }
+
+    /** 获取 prompt 渲染后的消息文本（prompts/get） */
+    async getPrompt(name: string, args?: any): Promise<string> {
+        const result = await this.request("prompts/get", { name, arguments: args ?? {} });
+        return joinPromptMessages(result);
     }
 }
 
@@ -168,12 +239,13 @@ export class McpStdioClient extends McpBaseClient {
             this.pending.clear();
         });
 
-        // initialize 握手
-        await this.request("initialize", {
+        // initialize 握手（捕获 server 能力，供 supportsResources/supportsPrompts 判定）
+        const init = await this.request("initialize", {
             protocolVersion: PROTOCOL_VERSION_STDIO,
             capabilities: {},
             clientInfo: CLIENT_INFO,
         });
+        this.serverCapabilities = init?.capabilities ?? {};
         // 握手完成通知（无 id = notification）
         this.notify("notifications/initialized", {});
     }
@@ -259,11 +331,12 @@ export class McpStreamableHttpClient extends McpBaseClient {
 
     async start(): Promise<void> {
         this.abort = new AbortController();
-        await this.request("initialize", {
+        const init = await this.request("initialize", {
             protocolVersion: PROTOCOL_VERSION_HTTP,
             capabilities: {},
             clientInfo: CLIENT_INFO,
         });
+        this.serverCapabilities = init?.capabilities ?? {};
         this.notify("notifications/initialized", {});
     }
 
@@ -393,11 +466,12 @@ export class McpSSEClient extends McpBaseClient {
                 REQUEST_TIMEOUT_MS,
             )),
         ]);
-        await this.request("initialize", {
+        const init = await this.request("initialize", {
             protocolVersion: PROTOCOL_VERSION_HTTP,
             capabilities: {},
             clientInfo: CLIENT_INFO,
         });
+        this.serverCapabilities = init?.capabilities ?? {};
         this.notify("notifications/initialized", {});
     }
 
