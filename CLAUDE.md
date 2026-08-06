@@ -13,7 +13,7 @@
   npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
   ```
 - 默认监听 `127.0.0.1:3000`；`HOST`/`PORT` 环境变量可覆盖。鉴权：设 `DEEPSEEK_CODE_TOKEN` 跨重启稳定，否则启动时随机生成并打印到 stdout。
-- 配置位置：声明式 hooks → `~/.deepSeekCode/settings.json` 或 `<项目>/.deepSeekCode/settings.json`；skills → 对应目录下的 `skills/<name>/SKILL.md`。
+- 配置位置：声明式 hooks → `~/.deepSeekCode/settings.json` 或 `<项目>/.deepSeekCode/settings.json`；skills → 对应目录下的 `skills/<name>/SKILL.md`；输出风格（output-styles）→ `~/.deepSeekCode/output-styles/<name>.md` 或 `<项目>/.deepSeekCode/output-styles/<name>.md`（frontmatter `name`+`description` + persona 正文，`/output-style <name>` 选用）；状态栏（statusline）→ settings.json 的 `statusLine` 段：`{"statusLine":{"command":"<shell 命令>","padding":0}}`，命令经 stdin 收 JSON 上下文、stdout 首行作底部状态栏。
 
 ## 架构要点
 

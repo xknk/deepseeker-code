@@ -7,9 +7,12 @@
  *  按键：Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 切换思考 · 模态/菜单 ↑↓Enter。
  *  useInput 闭包易过期：input/selectIdx/busy 用 ref 镜像读取最新值。
  */
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { listCommands } from "@/commands/registry.ts";
+import { listOutputStyles } from "@/outputStyles/registry.ts";
+import { readStatusLineConfig, type StatusLineConfig } from "@/statusLine/config.ts";
+import { runStatusLine, type StatusLineContext } from "@/statusLine/runner.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { useChatState, type ChatRow } from "./useChatState.ts";
@@ -90,6 +93,50 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     qCursorRef.current = qCursor;
     qCheckedRef.current = qChecked;
 
+    // ★ P2-16 statusline（对标 Claude Code）：加载用户 settings.json 的 statusLine.command，
+    //   按轮次边界 + 5s 慢速轮询刷新底部状态栏；无配置则全程跳过（零开销）。出错保留上次好值防闪烁。
+    const statusLineCfgRef = useRef<StatusLineConfig | null>(null);
+    const statusLineRunRef = useRef(false);
+    const [statusLineText, setStatusLineText] = useState("");
+    /** 组装上下文并执行一次状态栏命令；cfg 缺失/重入中 → 直接返回。 */
+    const refreshStatusLine = useCallback(async () => {
+        const cfg = statusLineCfgRef.current;
+        if (!cfg || statusLineRunRef.current) return;
+        statusLineRunRef.current = true;
+        try {
+            const ctx: StatusLineContext = {
+                session_id: state.sessionIdRef.current ?? "",
+                cwd: CWD,
+                model: modelDisplay,
+                state: state.aborting ? "aborting" : state.busy ? "busy" : "idle",
+                plan_mode: state.getPlanMode(),
+                auto_mode: state.getAutoMode(),
+                output_style: state.getOutputStyle() ?? null,
+                workspace: { current_dir: CWD, project_dir: CWD },
+            };
+            const text = await runStatusLine(cfg, ctx);
+            if (text) setStatusLineText(text); // 仅非空更新；出错/超时返回 "" → 保留上次好值
+        } finally {
+            statusLineRunRef.current = false;
+        }
+    }, [modelDisplay, state.busy, state.aborting, state.getPlanMode, state.getAutoMode, state.getOutputStyle, state.sessionIdRef]);
+    const refreshStatusLineRef = useRef(refreshStatusLine);
+    refreshStatusLineRef.current = refreshStatusLine;
+    // 挂载时加载配置并首刷
+    useEffect(() => {
+        void (async () => {
+            statusLineCfgRef.current = await readStatusLineConfig(true); // CLI 渲染前信任流程已完成 → includeProject=true
+            await refreshStatusLineRef.current();
+        })();
+    }, []);
+    // 轮次边界（busy/aborting/模型 翻转）刷新
+    useEffect(() => { void refreshStatusLineRef.current(); }, [state.busy, state.aborting, modelDisplay]);
+    // 慢速 idle 轮询（5s），让状态栏反映命令内部的时间敏感信息（如 git 分支/时钟）
+    useEffect(() => {
+        const id = setInterval(() => { void refreshStatusLineRef.current(); }, 5000);
+        return () => clearInterval(id);
+    }, []);
+
     const staticRows = useMemo(() => state.rows.filter((r) => !isDynamicRow(r)), [state.rows]);
     const dynamicRows = useMemo(() => state.rows.filter(isDynamicRow), [state.rows]);
 
@@ -109,6 +156,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 case "model": return S.cmdModel;
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
+                case "output-style": return S.cmdOutputStyle;
                 case "sessions": return S.cmdSessions;
                 case "usage": return S.cmdUsage;
                 case "context": return S.cmdContext;
@@ -232,6 +280,29 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 void writeLocale(l as Locale);   // 持久化（异步，不阻塞）
                 setTick((t) => t + 1);            // 触发重渲染，刷新界面文案
                 state.pushInfo(S.langSet(l));
+                return true;
+            }
+            case "/output-style": {
+                const styles = listOutputStyles();
+                if (styles.length === 0) { state.pushInfo(S.outputStyleNone()); return true; }
+                const listText = styles.map((s) => `  · ${s.name} — ${s.description}`).join("\n");
+                if (!arg) {
+                    const cur = state.getOutputStyle();
+                    state.pushInfo(`${S.outputStyleCurrent(cur)}\n${listText}\n${S.outputStyleHint()}`);
+                    return true;
+                }
+                const a = arg.toLowerCase();
+                if (a === "off" || a === "none" || a === "default") {
+                    state.setOutputStyle(undefined);
+                    state.pushInfo(S.outputStyleCleared());
+                    return true;
+                }
+                if (!styles.some((s) => s.name === a)) {
+                    state.pushInfo(`${S.outputStyleUnknown(arg)}\n${listText}`);
+                    return true;
+                }
+                state.setOutputStyle(a);
+                state.pushInfo(S.outputStyleSet(a));
                 return true;
             }
             default:
@@ -427,7 +498,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 </Box>
 
                 <Box paddingX={1} marginTop={1} flexShrink={0}>
-                    <StatusStrip model={modelDisplay} busy={state.busy} aborting={state.aborting} planMode={state.getPlanMode()} autoMode={state.getAutoMode()} sessionShort={sessionShort} cols={cols} />
+                    <StatusStrip model={modelDisplay} busy={state.busy} aborting={state.aborting} planMode={state.getPlanMode()} autoMode={state.getAutoMode()} sessionShort={sessionShort} cols={cols} customLine={statusLineText} />
                 </Box>
             </Box>
         </Box>

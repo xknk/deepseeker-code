@@ -39,6 +39,7 @@ import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { injectSkillCatalog } from "@/skills/inject.ts";
 import { injectAgentCatalog } from "@/agents/inject.ts";
 import { injectProjectGuide } from "@/projectGuide/inject.ts";
+import { injectOutputStyle } from "@/outputStyles/inject.ts";
 import { injectMarkedBlock } from "@/common/index.ts";
 import { appConfig } from "@/config/index.ts";
 import { runAutoCheck } from "@/tool/autoPermission.ts";
@@ -133,6 +134,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         const hint = options.locale === "zh" ? "请始终用中文回复用户。" : "Always reply to the user in English.";
         injectMarkedBlock(message, "⟦DSC:LOCALE⟧", hint);
     }
+    // ★ P2-16 输出风格：按 outputStyle 幂等注入 persona 正文（fence 机制，会话内不变 → 不破坏前缀缓存）
+    injectOutputStyle(message, options.outputStyle);
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（fence 机制，不动 message 下标）
     injectSkillCatalog(message);
     injectAgentCatalog(message);

@@ -58,6 +58,8 @@ interface StringDict {
     cmdModel: string;
     cmdThinking: string;
     cmdLang: string;
+    /** P2-16 输出风格 */
+    cmdOutputStyle: string;
     cmdClear: string;
     cmdExit: string;
     cmdSessions: string;
@@ -79,6 +81,13 @@ interface StringDict {
     langCurrent: () => string;
     langSet: (l: string) => string;
     langInvalid: (arg: string) => string;
+    /** P2-16 输出风格（/output-style） */
+    outputStyleNone: () => string;
+    outputStyleCurrent: (cur: string | undefined) => string;
+    outputStyleHint: () => string;
+    outputStyleCleared: () => string;
+    outputStyleUnknown: (arg: string) => string;
+    outputStyleSet: (name: string) => string;
     askTrust: (cwd: string) => string;
     optTrust: string;
     optExit: string;
@@ -147,6 +156,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdModel: "切换模型：/model <deepseek-v4|deepseek-v4-flash|…>",
         cmdThinking: "切换思考等级：/thinking <off|high|max>",
         cmdLang: "切换界面语言：/lang <zh|en>",
+        cmdOutputStyle: "切换输出风格：/output-style <name|off>",
         cmdClear: "清空当前屏幕",
         cmdExit: "退出 CLI",
         cmdSessions: "选择并载入历史会话（续接对话）",
@@ -176,6 +186,12 @@ const STRINGS: Record<Locale, StringDict> = {
         langCurrent: () => `当前界面语言：中文（/lang en 切换英文）`,
         langSet: (l) => `界面语言已切换：${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `无效语言：${arg}（可选：zh 中文 / en English）`,
+        outputStyleNone: () => `未加载任何输出风格（在 ~/.deepSeekCode/output-styles/ 放 <name>.md）。`,
+        outputStyleCurrent: (cur) => `当前输出风格：${cur ?? "默认（中性）"}。可用：`,
+        outputStyleHint: () => `用法：/output-style <name> 选用 · /output-style off 回中性`,
+        outputStyleCleared: () => `输出风格已清除，回到中性默认。`,
+        outputStyleUnknown: (arg) => `未知输出风格：${arg}。可用：`,
+        outputStyleSet: (name) => `输出风格已切换：${name}（下次回复生效）。`,
         askTrust: (cwd) => `安全检查：这是你信任的项目吗？\n${cwd}\n\ndeepSeekCode 将在此目录读取、编辑和执行文件。`,
         optTrust: "信任此目录",
         optExit: "退出",
@@ -255,6 +271,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdModel: "Switch model: /model <deepseek-v4|deepseek-v4-flash|…>",
         cmdThinking: "Switch thinking level: /thinking <off|high|max>",
         cmdLang: "Switch interface language: /lang <zh|en>",
+        cmdOutputStyle: "Switch output style: /output-style <name|off>",
         cmdClear: "Clear the screen",
         cmdExit: "Quit the CLI",
         cmdSessions: "Pick a past session to resume",
@@ -284,6 +301,12 @@ const STRINGS: Record<Locale, StringDict> = {
         langCurrent: () => `Interface language: English (/lang zh for 中文)`,
         langSet: (l) => `Interface language: ${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `Invalid language: ${arg} (choose zh / en)`,
+        outputStyleNone: () => `No output styles loaded (drop a <name>.md in ~/.deepSeekCode/output-styles/).`,
+        outputStyleCurrent: (cur) => `Current output style: ${cur ?? "default (neutral)"}. Available:`,
+        outputStyleHint: () => `Usage: /output-style <name> to apply · /output-style off for neutral`,
+        outputStyleCleared: () => `Output style cleared, back to neutral default.`,
+        outputStyleUnknown: (arg) => `Unknown output style: ${arg}. Available:`,
+        outputStyleSet: (name) => `Output style: ${name} (takes effect on next reply).`,
         askTrust: (cwd) => `Quick safety check: is this a project you trust?\n${cwd}\n\ndeepSeekCode will read, edit, and execute files here.`,
         optTrust: "Yes, I trust this folder",
         optExit: "No, exit",
@@ -319,4 +342,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "sessions", "usage", "context", "permissions", "mcp", "hooks", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "usage", "context", "permissions", "mcp", "hooks", "debug", "clear", "exit"] as const;

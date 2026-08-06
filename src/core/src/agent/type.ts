@@ -76,6 +76,8 @@ export interface RunAgentOptions {
     thinkingLevel?: ThinkingLevel,
     /** 回复语言（运行时覆盖）：runAgent 据此向 system prompt 注入「用中文/英文回复」引导。 */
     locale?: Locale,
+    /** 输出风格名（运行时覆盖，P2-16）：runAgent 据此向 system prompt 注入对应风格的 persona 文本。未设/未命中=不注入。 */
+    outputStyle?: string,
 }
 
 /**

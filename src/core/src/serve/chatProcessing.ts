@@ -55,6 +55,8 @@ export interface HostOptions {
     thinkingLevel?: ThinkingLevel;
     /** 回复语言（CLI /lang 用）：runAgent 据此注入回复语言引导。 */
     locale?: Locale;
+    /** 输出风格名（CLI /output-style 用，P2-16）：runAgent 据此注入对应风格 persona。未设/未命中=不注入。 */
+    outputStyle?: string;
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
 }
@@ -155,6 +157,7 @@ export const handleUnifiedChat = async (
         model: opts?.model,
         thinkingLevel: opts?.thinkingLevel,
         locale: opts?.locale,
+        outputStyle: opts?.outputStyle,
     }
 
     // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）

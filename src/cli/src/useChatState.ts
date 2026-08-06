@@ -96,6 +96,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const thinkingLevelRef = useRef<ThinkingLevel>(
         !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high",
     );
+    /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
+    const outputStyleRef = useRef<string | undefined>(undefined);
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
     const lastUsageRef = useRef<TraceBase['usage'] | null>(null);
 
@@ -354,6 +356,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             model: modelRef.current || undefined,
             thinkingLevel: thinkingLevelRef.current,
             locale: getLocale(),
+            outputStyle: outputStyleRef.current,
         };
         try {
             await handleUnifiedChat(
@@ -474,6 +477,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /thinking 切换思考等级（off/high/max），影响下一次 runOnce 透传给 model 的 thinking/reasoning_effort。 */
     const setThinkingLevel = useCallback((lvl: ThinkingLevel) => { thinkingLevelRef.current = lvl; }, []);
     const getThinkingLevel = useCallback((): ThinkingLevel => thinkingLevelRef.current, []);
+    /** /output-style 切换输出风格（P2-16）：undefined=中性默认，否则注入对应风格 persona。 */
+    const setOutputStyle = useCallback((name: string | undefined) => { outputStyleRef.current = name; }, []);
+    const getOutputStyle = useCallback((): string | undefined => outputStyleRef.current, []);
 
     return {
         // 状态
@@ -483,7 +489,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         submit, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
-        setThinkingLevel, getThinkingLevel,
+        setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
         openSessionPicker, resolveSession, loadSession,
     };
 };
