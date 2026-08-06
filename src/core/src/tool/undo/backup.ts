@@ -19,7 +19,7 @@ import { getTodayDateString } from "@/observability/traceCalculate.ts";
 import { UndoRecord, UndoOperationType } from "./type.ts";
 
 /** 受 Undo 管理的变更工具名单（单一来源，供 runAgent 与本模块共用判断）。 */
-const MUTATION_TOOLS = new Set<UndoOperationType>(['edit_file', 'write_file', 'create_file', 'delete_path']);
+const MUTATION_TOOLS = new Set<UndoOperationType>(['edit_file', 'write_file', 'create_file', 'delete_path', 'notebook_edit']);
 
 /** 判定某工具是否触发 Undo 写前备份（供 runAgent 调度层调用）。 */
 export const isUndoTrigger = (toolName: string): boolean =>
@@ -125,7 +125,8 @@ export async function beforeMutationBackup(
     let record: UndoRecord;
     switch (toolName) {
         case 'edit_file':
-        case 'write_file': record = await backupFileOverwrite(common, undoDir, args); break;
+        case 'write_file':
+        case 'notebook_edit': record = await backupFileOverwrite(common, undoDir, args); break;
         case 'create_file': record = await backupFileCreate(common); break;
         case 'delete_path': record = await backupDelete(common, undoDir, relativePath); break;
         default: throw new Error(`[undo] 未知工具: ${toolName}`);

@@ -3,8 +3,8 @@
  * @description 文件回退（Undo）机制的类型定义：
  *  UndoRecord（单次文件变更的备份索引记录）、BackupKind、UndoOperationType。
  */
-/** 受 Undo 管理的变更工具集合（与 fs.ts 的四个写工具一一对应）。 */
-export type UndoOperationType = 'edit_file' | 'write_file' | 'create_file' | 'delete_path';
+/** 受 Undo 管理的变更工具集合（与四个 fs 写工具 + notebook_edit 一一对应）。 */
+export type UndoOperationType = 'edit_file' | 'write_file' | 'create_file' | 'delete_path' | 'notebook_edit';
 
 /**
  * 备份内容形态：

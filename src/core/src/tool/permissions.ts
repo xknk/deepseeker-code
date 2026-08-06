@@ -52,6 +52,7 @@ const PRIMARY_ARG: Record<string, string> = {
     create_file: 'path',
     write_file: 'path',
     delete_path: 'path',
+    notebook_edit: 'path',
     move_file: 'src',
     search_grep: 'query',
     glob: 'pattern',

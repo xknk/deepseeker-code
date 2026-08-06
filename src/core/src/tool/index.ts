@@ -32,6 +32,7 @@ import { backgroundTools } from "./registry/background.ts";
 import { undoTools } from "./registry/undo.ts";
 import { askTools } from "./registry/ask.ts";
 import { worktreeTools } from "./registry/worktree.ts";
+import { notebookTools } from "./registry/notebook.ts";
 
 export * from "./type.ts";
 
@@ -60,4 +61,5 @@ agentTools.push(
     ...undoTools,        // 文件回退（undo_list 只读 + undo_restore 回退，含写前自动备份）
     ...askTools,         // P2-12 结构化提问（ask_question：多选问用户，阻塞至作答）
     ...worktreeTools,    // P2-13 独立 worktree（enter/exit/status，会话作用域隔离）
+    ...notebookTools,    // P2-10 NotebookEdit（.ipynb cell 编辑，MUTATION + undo 接线）
 );

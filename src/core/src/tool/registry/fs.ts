@@ -52,8 +52,8 @@ export const maskSecretsInContent = (_args: any, output: string): string => {
         .replace(/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[MASKED_SECRET (private key block)]');
 };
 
-/** 原子写临时路径：absPath + 时间戳 + 随机段（防同目录同毫秒并发碰撞）。create_file / write_file 共用。 */
-const makeTmpPath = (absPath: string): string =>
+/** 原子写临时路径：absPath + 时间戳 + 随机段（防同目录同毫秒并发碰撞）。create_file / write_file / notebook_edit 共用。 */
+export const makeTmpPath = (absPath: string): string =>
     `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
 
 /**
