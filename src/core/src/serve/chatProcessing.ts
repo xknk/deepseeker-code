@@ -29,6 +29,7 @@ import { createWebRequestApproval } from "@/host/webHost.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
 import { expandSlashCommand } from "@/commands/expand.ts";
+import { runWithSessionContext } from "@/tool/guard.ts";
 import { SYSTEM_PROMPT } from "@/agent/systemPrompt.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
@@ -156,15 +157,20 @@ export const handleUnifiedChat = async (
         locale: opts?.locale,
     }
 
-    for await (const event of runAgent(fullMessages, options)) {
-        if (event.type === 'final') {
-            replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
-            // SSE 模式：流式文本已由 text.delta 实时推送，final 仅作结束信号（text 置空，避免前端重复显示全文）
-            sseWrite?.({ type: 'final', text: '' });
-        } else {
-            sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
+    // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）
+    //   据此经 per-session 注册表查「激活的 worktree」（enter_worktree 工具用）。ALS 跨 await 边界继承。
+    //   无 session worktree 时 getActiveWorkspaceRoot/getActiveCwd 走原回退，行为零回归。
+    await runWithSessionContext(sessionId, async () => {
+        for await (const event of runAgent(fullMessages, options)) {
+            if (event.type === 'final') {
+                replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
+                // SSE 模式：流式文本已由 text.delta 实时推送，final 仅作结束信号（text 置空，避免前端重复显示全文）
+                sseWrite?.({ type: 'final', text: '' });
+            } else {
+                sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
+            }
         }
-    }
+    });
 
     // ★ SessionEnd hook（观察）。store 与 transcript 已物理隔离（<id>.state.json / <id>.jsonl），
     //   hook 现在可安全持久化到 state.json；transcript 永远只追加、不被覆盖。

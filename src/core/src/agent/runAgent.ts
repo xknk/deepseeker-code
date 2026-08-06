@@ -28,7 +28,7 @@ import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolRes
 import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
-import { requestApproval, isProtectedWrite } from "@/tool/guard.ts";
+import { requestApproval, isProtectedWrite, getActiveCwd } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
 import { filterToolsForPlanMode, appendEnterPlanModeTool } from "./planMode.ts";
 import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
@@ -489,7 +489,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
                 }
                 const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
-                const toolCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
+                const toolCtx: ToolContext = { sessionId, cwd: getActiveCwd(cwd), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
                 let result = "";
                 let explicitOk: boolean | null = null;
                 if (parseFailed) {

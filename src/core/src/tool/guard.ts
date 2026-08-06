@@ -21,6 +21,7 @@ import { ToolContext, ToolSafetyLevel } from "./type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
 import { addPermissionRule, buildScopedAllowRule } from "./permissions.ts";
 import { dispatch } from "./hooks.ts";
+import { getSessionWorktreeRoot } from "./worktree/sessionRegistry.ts";
 
 /** 工作区根目录（全局默认）：优先取环境变量 WORKSPACE_ROOT，否则回退到进程当前目录。
  *  ★ 现为「回退默认值」——真正生效的围栏基座由 ALS（getActiveWorkspaceRoot）决定：
@@ -29,22 +30,61 @@ export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || process.cwd();
 
 // ============ AsyncLocalStorage：按 agent 上下文切换「活动工作区根」============
 /**
- * 工作区根的异步上下文存储。run_workflow 的 worktree 模式用 runWithWorkspaceRoot 包住整个子 agent
- * 运行，子 agent 内所有 async 链（runAgent 流式消费 / processToolCall / Promise.all 并发 / undo 备份）
- * 自动继承该 store；resolveSafePath / assertWithinWorkspace / ignore 引擎据此读「活动根」。
- * 无 store → 回退 WORKSPACE_ROOT（主工作区，向后兼容）。
+ * 工作区根的异步上下文存储。store 可携带两种键（互不依赖）：
+ *  - workspaceRoot：显式覆盖活动根（run_workflow 的 worktree 隔离用 runWithWorkspaceRoot 设置；【替换】store）。
+ *  - sessionId：外裹 session 上下文（runWithSessionContext），供 getActiveWorkspaceRoot/getActiveCwd
+ *    经 per-session 注册表查「该 session 激活的 worktree」（独立 enter_worktree 工具用）。
+ *
+ * 子 agent 内所有 async 链（runAgent 流式消费 / processToolCall / Promise.all 并发 / undo 备份）自动继承 store；
+ * resolveSafePath / assertWithinWorkspace / ignore 引擎据此读「活动根」。无 store → 回退 WORKSPACE_ROOT。
  *
  * ★ 禁区：ALS 不得用于 abort 监听器 / 原生事件发射器回调内（这类回调在注册方上下文之外同步触发，
  *   如 background.ts/command.ts 的 signal.addEventListener('abort')）。当前这类回调不做路径解析，安全。
  */
-const workspaceAls = new AsyncLocalStorage<{ workspaceRoot: string }>();
+const workspaceAls = new AsyncLocalStorage<{ sessionId?: string; workspaceRoot?: string }>();
 
-/** 当前活动工作区根：ALS store 优先，否则回退全局 WORKSPACE_ROOT。 */
-export const getActiveWorkspaceRoot = (): string => workspaceAls.getStore()?.workspaceRoot ?? WORKSPACE_ROOT;
+/**
+ * 当前活动工作区根。优先级：
+ *  1. ALS.workspaceRoot（显式覆盖——run_workflow 子 agent 用自己的 wt.path）
+ *  2. session 注册表（ALS.sessionId 命中——enter_worktree 激活的 session worktree）
+ *  3. 全局 WORKSPACE_ROOT（默认主工作区，向后兼容）
+ * 即 workflow 子 agent 用 wt.path；主 agent 用 session worktree（若 enter 过）；其余回退全局。
+ */
+export const getActiveWorkspaceRoot = (): string => {
+    const store = workspaceAls.getStore();
+    if (store?.workspaceRoot) return store.workspaceRoot;
+    if (store?.sessionId) {
+        const wtRoot = getSessionWorktreeRoot(store.sessionId);
+        if (wtRoot) return wtRoot;
+    }
+    return WORKSPACE_ROOT;
+};
 
-/** 在 root 上下文里执行 fn（fn 及其所有 async 续延均视 root 为工作区根）。用于 worktree 隔离。 */
+/** 显式覆盖活动根（run_workflow 的 worktree 隔离用；替换 store，不合并 sessionId——保 workflow 子 agent 用 wt.path）。 */
 export const runWithWorkspaceRoot = <T>(root: string, fn: () => T): T =>
     workspaceAls.run({ workspaceRoot: root }, fn);
+
+/**
+ * 外裹 session 上下文（携带 sessionId）。chatProcessing 在消费 runAgent 的 for-await 外裹本函数，
+ * 使整个 turn 内所有 async 链（工具调用 / 路径解析 / hook 派发）都能经 sessionId 查到 session worktree。
+ */
+export const runWithSessionContext = <T>(sessionId: string, fn: () => T): T =>
+    workspaceAls.run({ sessionId }, fn);
+
+/**
+ * 当前活动 cwd：session worktree 激活时返回 worktree 路径，否则返回 fallback（零回归）。
+ * runAgent 据此构造 toolCtx.cwd（替代原先冻结的 options.cwd）——使 run_command / isProtectedWrite
+ * 等读 ctx.cwd 的逻辑在 enter_worktree 后也跟随到 worktree。
+ * ★ 无 session worktree 时返回 fallback（= 原 options.cwd），行为与既有完全一致。
+ */
+export const getActiveCwd = (fallback: string): string => {
+    const store = workspaceAls.getStore();
+    if (store?.sessionId) {
+        const wtRoot = getSessionWorktreeRoot(store.sessionId);
+        if (wtRoot) return wtRoot;
+    }
+    return fallback;
+};
 
 // ============ ignore 引擎：按 base 多实例（替代原单例）============
 /**

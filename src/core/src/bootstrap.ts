@@ -14,7 +14,7 @@ import { initSkills } from "@/skills/loader.ts";
 import { initAgents } from "@/agents/loader.ts";
 import { initProjectGuide } from "@/projectGuide/loader.ts";
 import { initCommands } from "@/commands/loader.ts";
-import { sweepOrphanedWorktrees } from "@/tool/worktree/manager.ts";
+import { sweepOrphanedWorktrees, disposeAllSessionWorktrees } from "@/tool/worktree/manager.ts";
 
 /**
  * 初始化引擎：Node 版本特性检测 + 7 步声明式加载。
@@ -48,6 +48,10 @@ export const initEngine = async (into: CustomTool[], opts?: { includeProject?: b
     // ★ 加载斜杠命令（builtin/global/project；用户输入 /<name> 时前置展开）。未信任时跳过项目级
     await initCommands(includeProject);
 
-    // ★ 返回退出清理：dispose 所有 MCP 子进程，避免孤儿化。各宿主在 SIGINT/SIGTERM/退出钩子里调用。
-    return disposeAllMcpClients;
+    // ★ 返回退出清理：dispose 所有 MCP 子进程 + 清理 session worktree，避免孤儿化。
+    //   各宿主在 SIGINT/SIGTERM/退出钩子里调用。worktree 清理异步、best-effort（退出时可能来不及，残留由启动期 sweep 兜底）。
+    return () => {
+        try { disposeAllMcpClients(); } catch { /* ignore */ }
+        try { void disposeAllSessionWorktrees(); } catch { /* ignore */ }
+    };
 };

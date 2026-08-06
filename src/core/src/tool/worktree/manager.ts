@@ -21,6 +21,7 @@ import fs from "fs";
 import { appConfig } from "@/config/index.ts";
 import { WORKSPACE_ROOT } from "../guard.ts";
 import { killBackgroundTasksUnder } from "../registry/background.ts";
+import { drainAllSessionWorktrees } from "./sessionRegistry.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -171,6 +172,17 @@ export const sweepOrphanedWorktrees = async (): Promise<void> => {
     if (swept > 0) {
         try { await runMainGit(["worktree", "prune"]); } catch { /* ignore */ }
         console.log(`🧹 [worktree] 启动期清扫 ${swept} 个孤儿 worktree`);
+    }
+};
+
+/**
+ * 进程退出 dispose：取出全部 session 活动 worktree 并逐个清理（防长跑进程的 worktree 泄漏）。
+ * best-effort（逐个 catch）；进程退出时可能来不及完成，残留由下次启动期 sweepOrphanedWorktrees 兜底。
+ */
+export const disposeAllSessionWorktrees = async (): Promise<void> => {
+    const all = drainAllSessionWorktrees();
+    for (const wt of all) {
+        try { await removeWorktree(wt); } catch { /* ignore */ }
     }
 };
 
