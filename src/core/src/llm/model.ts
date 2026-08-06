@@ -12,6 +12,13 @@ import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED, AUX_
 import { MsgParams, outMsg, toolMsg } from "./type.ts";
 import { ThinkingLevel } from "@/agent/type.ts";
 
+/** 流式 idle 超时阈值（ms）：两 chunk 间隔超过此值即判定为 stall（连接保持但不吐 chunk），
+ *  中止底层 fetch 并上抛带标记错误，供 runAgent 重试或优雅收尾。
+ *  ★ 缘由：SDK client 的 timeout（createModel 120s）仅覆盖【初始请求】，不防流式中途 stall——
+ *    思考模式下偶发的中途静默会让 for await 永久阻塞，进而卡死整个 agent 主循环。
+ *  env DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS 可覆盖；默认 120s（与请求 timeout 同口径，思考模式长间隔亦安全）。 */
+const STREAM_IDLE_TIMEOUT_MS = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
+
 /**
  * 流式对话：yield 每个 ChatCompletionChunk，调用方(runAgent)负责消费。
  * - 文本增量 delta.content 由 runAgent yield 为 text.delta 推前端
@@ -44,14 +51,43 @@ async function* chatWithModelWithTools(
         stream_options: { include_usage: true }, // 流式下 usage 在末包 chunk
     } as MsgParams;
 
-    // stream:true 时 SDK 返回 Stream<ChatCompletionChunk>（AsyncIterable），按可迭代消费
-    // signal 透传给 SDK：中止时真正取消底层 fetch + 服务端停止生成，而非仅在 chunk 到达后 break
+    // ★ 流式 idle 超时：本地 idleAc 与外部 signal 用 AbortSignal.any 合成后传给 SDK，任一触发都中止 fetch。
+    //   AbortSignal.any 为项目既有用法（见 tool/mcp/client.ts、tool/registry/web.ts；bootstrap 已对 Node 20.3+ 做特性检测）。
+    const idleAc = new AbortController();
+    const extSignal = callOpts?.signal;
+    const combinedSignal = extSignal ? AbortSignal.any([idleAc.signal, extSignal]) : idleAc.signal;
+    // stream:true 时 SDK 返回 Stream<ChatCompletionChunk>（AsyncIterable），手动驱动 reader 消费
     const stream = await model.chat.completions.create(requestBody, {
-        signal: callOpts?.signal,
+        signal: combinedSignal,
     }) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
-    for await (const chunk of stream) {
-        if (callOpts?.signal?.aborted) break;   // 调用方中止则停止拉取（双保险）
-        yield chunk;
+
+    const reader = stream[Symbol.asyncIterator]();
+    try {
+        while (true) {
+            if (extSignal?.aborted) break;   // 调用方中止则停止拉取（双保险）
+            // 每片拉取前起 idle 定时器（惯法同 classifyToolRisk 的 setTimeout+abort）：到点未收到下一 chunk
+            //   → idleAc.abort() → 中止 fetch → reader.next() reject；其 await 被 catch 后识别为 idle 超时。
+            const idleTimer = setTimeout(() => idleAc.abort(), STREAM_IDLE_TIMEOUT_MS);
+            let next: IteratorResult<OpenAI.Chat.ChatCompletionChunk>;
+            try {
+                next = await reader.next();
+            } catch (e) {
+                // idle 超时（本地定时器触发，非用户中止）→ 抛带标记错误供 runAgent 识别重试/收尾
+                if (idleAc.signal.aborted && !extSignal?.aborted) throw new Error('stream_idle_timeout');
+                // 用户中止（extSignal）→ 吞掉 AbortError 并干净结束流，交调用方既有的 signal.aborted
+                //   检查处理（保留 runAgent 的 partial 文本落盘等中止收尾逻辑，避免回归）
+                if (extSignal?.aborted) break;
+                throw e;   // 其他意外错误原样上抛
+            } finally {
+                clearTimeout(idleTimer);
+            }
+            if (next.done) break;
+            if (extSignal?.aborted) break;
+            yield next.value;
+        }
+    } finally {
+        // 流句柄清理：正常结束 / 用户中止 / idle 超时均触发，释放底层连接避免句柄泄漏
+        await reader.return?.();
     }
 }
 

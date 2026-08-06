@@ -245,30 +245,51 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 let reasoningBuf = ""; // DeepSeek reasoning_content 累积：工具调用轮后续必须回传给 API（见下方 assistantMessage）
                 const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
                 let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
-                for await (const chunk of chatWithModelWithTools(inferenceMessages, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
-                    if (signal?.aborted) break;
-                    const delta = chunk.choices?.[0]?.delta;
-                    if (delta) {
-                        if (delta.content) {
-                            contentBuf += delta.content;
-                            yield { type: 'text.delta', text: delta.content };
-                        }
-                        // DeepSeek reasoning 流式：reasoning_content 是 DeepSeek 对 OpenAI delta 的扩展（标准类型未定义），用窄化类型读取而非 any
-                        const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
-                        if (reasoning) { reasoningBuf += reasoning; yield { type: 'thinking.delta', text: reasoning }; }
-                        if (delta.tool_calls) {
-                            for (const tc of delta.tool_calls) {
-                                const idx = tc.index ?? 0;
-                                let buf = toolCallsBuf.get(idx);
-                                if (!buf) { buf = { function: { name: "", arguments: "" } }; toolCallsBuf.set(idx, buf); }
-                                if (tc.id) buf.id = tc.id;
-                                if (tc.type) buf.type = tc.type;
-                                if (tc.function?.name) buf.function.name += tc.function.name;
-                                if (tc.function?.arguments) buf.function.arguments += tc.function.arguments;
+                // ★ 流式 stall 有限重试：model.ts 的 idle 超时会抛 stream_idle_timeout。仅当本回合【尚未产出任何内容】
+                //   （三个 buffer 全空 = stall 发生在首 chunk 之前，最常见的连接级 stall）时重试，避免已 yield 给前端的
+                //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
+                //   （emit llm.error + yield final + return → busy 自动清零，杜绝永久卡死）。
+                const MAX_STREAM_RETRIES = 2;
+                for (let streamAttempt = 0; ; streamAttempt++) {
+                    try {
+                        for await (const chunk of chatWithModelWithTools(inferenceMessages, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
+                            if (signal?.aborted) break;
+                            const delta = chunk.choices?.[0]?.delta;
+                            if (delta) {
+                                if (delta.content) {
+                                    contentBuf += delta.content;
+                                    yield { type: 'text.delta', text: delta.content };
+                                }
+                                // DeepSeek reasoning 流式：reasoning_content 是 DeepSeek 对 OpenAI delta 的扩展（标准类型未定义），用窄化类型读取而非 any
+                                const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
+                                if (reasoning) { reasoningBuf += reasoning; yield { type: 'thinking.delta', text: reasoning }; }
+                                if (delta.tool_calls) {
+                                    for (const tc of delta.tool_calls) {
+                                        const idx = tc.index ?? 0;
+                                        let buf = toolCallsBuf.get(idx);
+                                        if (!buf) { buf = { function: { name: "", arguments: "" } }; toolCallsBuf.set(idx, buf); }
+                                        if (tc.id) buf.id = tc.id;
+                                        if (tc.type) buf.type = tc.type;
+                                        if (tc.function?.name) buf.function.name += tc.function.name;
+                                        if (tc.function?.arguments) buf.function.arguments += tc.function.arguments;
+                                    }
+                                }
                             }
+                            if (chunk.usage) lastUsage = chunk.usage;
                         }
+                        break; // 流正常结束（含用户中止经 model.ts 干净 break）→ 跳出重试循环
+                    } catch (streamErr) {
+                        // 用户中止：model.ts 已干净 break 不会到此；防御性判断交外层 signal.aborted 分支处理
+                        if (signal?.aborted) throw streamErr;
+                        const isIdleTimeout = streamErr instanceof Error && streamErr.message === 'stream_idle_timeout';
+                        const noOutputYet = !contentBuf && !reasoningBuf && toolCallsBuf.size === 0;
+                        if (isIdleTimeout && noOutputYet && streamAttempt < MAX_STREAM_RETRIES) {
+                            console.warn(`⚠️ 流式 stall（idle 超时，尚无输出），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
+                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
+                            continue;
+                        }
+                        throw streamErr; // 重试耗尽 / 已有部分输出 / 非 idle 错误 → 交外层 catch 优雅收尾
                     }
-                    if (chunk.usage) lastUsage = chunk.usage;
                 }
                 if (signal?.aborted) {
                     // ★ 中止落盘：仅有文本、无半截 tool_call 时，把用户已看到的 partial assistant 文本落盘，
