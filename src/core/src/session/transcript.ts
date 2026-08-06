@@ -61,6 +61,12 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
 
         const p = getTranscriptPath(sessionId);
         const payload = JSON.stringify(line) + "\n";
+ // ★ 编码体检：内容含 U+FFFD（无效 UTF-8 的替换符）多半是 Windows 子进程 GBK 输出被误解码，
+ // 或用户粘贴了乱码文本。不擅改内容，原样落盘 + 打日志便于追溯乱码来源。
+ if (payload.includes("\uFFFD")) {
+ const fffdCount = (payload.match(/\uFFFD/g) || []).length;
+ console.warn(`⚠️ [transcript] 消息含 ${fffdCount} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
+ }
         // ★ 短重试：磁盘瞬时忙/锁（尤其 Windows）下 appendFile 偶发失败，
         //   重试 3 次降低「内存已 push、磁盘未落」导致重启后转录不一致的概率。
         //   部分写入防御：appendFile 可能写入部分字节后抛错（磁盘满/中断），若直接重试会再追加完整行 →

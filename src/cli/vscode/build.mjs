@@ -6,30 +6,37 @@
  *  2) dist/webview.js —— webview 前端（src/webview/app.js，零依赖，bundle 为 IIFE）。
  *  3) dist/style.css + dist/builtin/ —— 前端样式与 core 内置 skills/agents/commands 资产。
  *
- *  ⚠️ 本工程按「与 cli/core 平级（src/vscode/）」编写 tsconfig paths（@/* → ../core/src/*）。
- *     先执行目录迁移（见 README）再运行构建；生成阶段位于 cli/vscode/ 时 ../core 尚不存在，
- *     请先 `mv vscode ../vscode`（在 src/ 下）后 npm install && npm run build。
+ *  ★ 所有路径基于 __dirname（脚本所在目录）而非 process.cwd()，从任何目录执行均正确。
+ *  ⚠️ 本工程支持两种目录位置，无需迁移：
+ *    - cli/vscode/（当前）：@/* → ../../core/src/*（即 src/core/src）
+ *    - src/vscode/（与 cli/core 平级）：@/* → ../core/src/*
+ *  tsconfig paths 与下方 CORE_CANDIDATES 均已双候选兼容，任一处 npm run build 皆可。
  */
 import { build } from "esbuild";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.dirname(fileURLToPath(import.meta.url)); // 本工程根（vscode/）
+const DIST = path.join(ROOT, "dist");
 const watch = process.argv.includes("--watch");
 const ctx = {};
 
-/** 校验 core 源码可达（目录迁移后 ../core 才存在），否则给出明确报错。 */
-async function assertCoreReachable() {
-  const coreDir = path.resolve(__dirname, "../core/src");
-  if (!existsSync(coreDir)) {
+/** core 源码目录双候选（与 tsconfig paths 一致：cli/vscode 与 src/vscode）。 */
+const CORE_CANDIDATES = [
+  path.resolve(ROOT, "../../core/src"), // 位于 cli/vscode/ 时 → src/core/src
+  path.resolve(ROOT, "../core/src"), // 位于 src/vscode/ 时 → src/core/src
+];
+const coreDir = CORE_CANDIDATES.find((p) => existsSync(p));
+
+/** 校验 core 源码可达，否则给出明确报错。 */
+function assertCoreReachable() {
+  if (!coreDir) {
     console.error(
-      "\n❌ 未找到 core 源码目录：" + coreDir +
-      "\n   本工程 tsconfig paths 按 src/vscode/ 最终位置编写（@/* → ../core/src/*）。" +
-      "\n   请先在 src/ 目录下执行目录迁移后重试，例如：" +
-      "\n     cd D:/code/自研/deepSeekCode/src && mv cli/vscode vscode" +
-      "\n   再回到 vscode/ 执行 npm install && npm run build。\n"
+      "\n❌ 未找到 core 源码目录（已尝试：\n" +
+        CORE_CANDIDATES.map((p) => "     " + p).join("\n") +
+        "\n   请确认工程位于 cli/vscode/ 或 src/vscode/（core 在 src/core/）。\n"
     );
     process.exit(1);
   }
@@ -39,15 +46,20 @@ async function assertCoreReachable() {
 async function buildExtension() {
   await assertCoreReachable();
   const res = await build({
-    entryPoints: ["src/extension.ts"],
+    entryPoints: [path.join(ROOT, "src/extension.ts")],
     bundle: true,
     platform: "node",
     format: "cjs",
     target: "node20",
-    tsconfig: "tsconfig.json",
+    tsconfig: path.join(ROOT, "tsconfig.json"),
     packages: "external",
     external: ["vscode"],
-    outfile: "dist/extension.js",
+    // ★ cjs 输出下 import.meta 为空，而 core 的 skills/agents/commands/outputStyles loader
+    //   用 fileURLToPath(import.meta.url) 定位 dist/builtin —— 用 define 固化为本工程真实主文件 URL。
+    define: {
+      "import.meta.url": JSON.stringify(pathToFileURL(path.join(DIST, "extension.js")).href),
+    },
+    outfile: path.join(DIST, "extension.js"),
     sourcemap: true,
     logLevel: "info",
     ...(watch ? { watch: true } : {}),
@@ -58,12 +70,12 @@ async function buildExtension() {
 // —— webview 前端（零依赖，IIFE） ——
 async function buildWebview() {
   const res = await build({
-    entryPoints: ["src/webview/app.js"],
+    entryPoints: [path.join(ROOT, "src/webview/app.js")],
     bundle: true,
     platform: "browser",
     format: "iife",
     target: "es2020",
-    outfile: "dist/webview.js",
+    outfile: path.join(DIST, "webview.js"),
     sourcemap: watch,
     logLevel: "info",
     ...(watch ? { watch: true } : {}),
@@ -73,16 +85,17 @@ async function buildWebview() {
 
 // —— 拷贝静态资产（style.css + core 内置 skills/agents/commands） ——
 async function copyAssets() {
-  await mkdir("dist", { recursive: true });
-  await cp("src/webview/style.css", "dist/style.css", { force: true }).catch(() => {});
+  await mkdir(DIST, { recursive: true });
+  await cp(path.join(ROOT, "src/webview/style.css"), path.join(DIST, "style.css"), { force: true }).catch(() => {});
+  if (!coreDir) return;
 
   // core 内置资产：skills/<name>/SKILL.md、<name>.agent.md、<name>.md —— 合并拷入 dist/builtin/
   const coreBuiltin = [
-    path.resolve(__dirname, "../core/src/skills/builtin"),
-    path.resolve(__dirname, "../core/src/agents/builtin"),
-    path.resolve(__dirname, "../core/src/commands/builtin"),
+    path.join(coreDir, "skills/builtin"),
+    path.join(coreDir, "agents/builtin"),
+    path.join(coreDir, "commands/builtin"),
   ];
-  const destBuiltin = path.resolve(__dirname, "dist/builtin");
+  const destBuiltin = path.join(DIST, "builtin");
   await mkdir(destBuiltin, { recursive: true });
   for (const dir of coreBuiltin) {
     if (!existsSync(dir)) continue;
@@ -104,7 +117,7 @@ async function main() {
   await buildExtension();
   await buildWebview();
   await copyAssets();
-  console.log("✓ 构建完成：dist/extension.js + dist/webview.js + dist/style.css + dist/builtin/");
+  console.log("✓ 构建完成：" + path.join(DIST, "extension.js") + " + webview.js + style.css + builtin/");
 }
 
 main().catch((err) => {

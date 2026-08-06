@@ -4,6 +4,8 @@
  */
 import { randomUUID } from "node:crypto";
 import fs from "fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 /**
  * 将（含后缀的）会话 ID 映射到它所属的主会话文件夹名：
  * - 子 agent ID（含 __sub__）→ 取其父主 ID；
@@ -134,4 +136,33 @@ export const injectMarkedBlock = (message: any[], fence: string, body: string): 
         sys.content = sys.content.split(fence)[0].trimEnd();
     }
     sys.content += `\n\n${fence}\n${body}`;
+};
+
+// ============ Windows 子进程输出编码兜底（GBK OEM 代码页防乱码） ============
+/**
+ * 解码子进程原始输出字节：先按 UTF-8 尝试，若出现 U+FFFD（无效字节序列标记，典型是
+ * Windows 中文环境子进程按 OEM 代码页 cp936/GBK 输出、被误当 UTF-8 解码的产物），
+ * 回退用 GBK 重新解码。纯 ASCII 输出两编码下结果一致，天然安全。
+ */
+export const decodeProcessOutput = (buf: Buffer): string => {
+const utf8 = buf.toString("utf8");
+if (!utf8.includes("\uFFFD")) return utf8;
+try {
+return new TextDecoder("gbk").decode(buf);
+} catch {
+return utf8; // 精简 ICU 无 gbk → 退回 utf-8 结果
+}
+};
+
+/** execFile 智能解码版：以 Buffer 模式捕获原始字节，再经 decodeProcessOutput 兜底（防 git/rg 中文输出乱码）。 */
+export const execFileSmart = async (
+file: string,
+args: string[],
+opts: { cwd?: string; maxBuffer?: number; timeout?: number; killSignal?: NodeJS.Signals; windowsHide?: boolean } = {},
+): Promise<{ stdout: string; stderr: string }> => {
+const res = await promisify(execFile)(file, args, { ...opts, encoding: "buffer" as const });
+return {
+stdout: decodeProcessOutput(res.stdout as Buffer),
+stderr: decodeProcessOutput(res.stderr as Buffer),
+};
 };

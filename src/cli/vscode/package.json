@@ -2,7 +2,7 @@
   "name": "deepseek-code",
   "displayName": "deepSeekCode",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.0",
+  "version": "1.0.10",
   "publisher": "deepSeekCode",
   "license": "MIT",
   "engines": {
@@ -12,17 +12,19 @@
   "activationEvents": [
     "onCommand:deepseekCode.openChat",
     "onCommand:deepseekCode.newSession",
-    "onView:deepseekCode.chatView"
+    "onCommand:deepseekCode.listSessions"
   ],
   "contributes": {
     "commands": [
       {
         "command": "deepseekCode.openChat",
-        "title": "deepSeekCode: 打开聊天"
+        "title": "deepSeekCode: 打开聊天",
+        "icon": "$(sparkle)"
       },
       {
         "command": "deepseekCode.newSession",
-        "title": "deepSeekCode: 新会话"
+        "title": "deepSeekCode: 新会话",
+        "icon": "$(add)"
       },
       {
         "command": "deepseekCode.abort",
@@ -35,24 +37,29 @@
       {
         "command": "deepseekCode.toggleAutoMode",
         "title": "deepSeekCode: 切换自动模式"
+      },
+      {
+        "command": "deepseekCode.listSessions",
+        "title": "deepSeekCode: 历史会话",
+        "icon": "$(history)"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
+    "menus": {
+      "editor/title": [
         {
-          "id": "deepseekCode",
-          "title": "deepSeekCode",
-          "icon": "$(sparkle)"
-        }
-      ]
-    },
-    "views": {
-      "deepseekCode": [
+          "command": "deepseekCode.openChat",
+          "group": "navigation@1",
+          "when": "resourceScheme != 'output'"
+        },
         {
-          "type": "webview",
-          "id": "deepseekCode.chatView",
-          "name": "Chat",
-          "icon": "$(comment-discussion)"
+          "command": "deepseekCode.listSessions",
+          "group": "navigation@2",
+          "when": "resourceScheme != 'output'"
+        },
+        {
+          "command": "deepseekCode.newSession",
+          "group": "navigation@3",
+          "when": "resourceScheme != 'output'"
         }
       ]
     },
@@ -71,12 +78,23 @@
         },
         "deepseekCode.locale": {
           "type": "string",
-          "enum": ["", "zh", "en"],
+          "enum": [
+            "",
+            "zh",
+            "en"
+          ],
           "default": "",
           "description": "界面/回复语言。留空表示首次询问。"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "deepseekCode.openChat",
+        "key": "ctrl+esc",
+        "mac": "ctrl+esc"
+      }
+    ]
   },
   "scripts": {
     "build": "node build.mjs",
@@ -88,12 +106,12 @@
     "ignore": "^7.0.5",
     "openai": "^6.42.0",
     "undici": "^8.8.0",
-    "vscode-ripgrep": "^1.13.2"
+    "vscode-ripgrep": "^1.13.2",
+    "typescript": "^6.0.3"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.1",
-    "esbuild": "^0.25.0",
-    "typescript": "^6.0.3"
+    "esbuild": "^0.25.0"
   }
 }

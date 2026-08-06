@@ -16,20 +16,24 @@
 
   // ———————— 状态 ————————
   const state = {
-    order: [],                    // 有序 row key
-    rowMap: new Map(),            // key -> row
-    toolRowByCallId: new Map(),   // toolCallId -> key
-    currentAssistant: null,       // 流式 assistant 行 key
-    currentThinking: null,        // 流式 thinking 行 key
-    busy: false,
-    planMode: false,
-    autoMode: false,
-    pendingApproval: null,
-    pendingQuestion: null,
-    pendingPlan: null,
-    sessions: [],
-    showTodos: false,
-    todos: [],
+order: [], // 有序 row key
+rowMap: new Map(), // key -> row
+toolRowByCallId: new Map(), // toolCallId -> key
+currentAssistant: null, // 流式 assistant 行 key
+currentThinking: null, // 流式 thinking 行 key
+busy: false,
+planMode: false,
+autoMode: false,
+thinkingLevel: "high",
+locale: "zh",
+model: "",
+pendingApproval: null,
+pendingQuestion: null,
+pendingPlan: null,
+sessions: [],
+showTodos: false,
+todos: [],
+roundSeq: 1,
   };
 
   const FLUSH_MS = 60;
@@ -109,30 +113,32 @@
         break;
       }
       case "thinking": {
-        const lines = (row.text || "").split("\n").length;
-        if (row.expanded) {
-          wrap.innerHTML =
-            `<div class="think-head">✻ 思考过程（${lines} 行）· 点击收起</div>` +
-            `<div class="think-body">${escapeHtml(row.text)}</div>`;
-        } else if (row.streaming) {
-          const elapsed = row.startedAt ? Math.max(0, Math.round((Date.now() - row.startedAt) / 1000)) : 0;
-          wrap.innerHTML = `<div class="think-head">✻ 思考中 · ${elapsed}s</div>`;
-        } else if (row.durationMs != null) {
-          wrap.innerHTML = `<div class="think-head">✻ Thought for ${Math.round(row.durationMs / 1000)}s</div>`;
-        } else {
-          wrap.innerHTML = `<div class="think-head">✻ Thoughts（${lines} 行）</div>`;
-        }
-        wrap.querySelector(".think-head")?.addEventListener("click", () => {
-          row.expanded = !row.expanded;
-          rebuildRow(row);
-        });
-        break;
-      }
-      case "tool": {
+const lines = (row.text || "").split("\n").length;
+if (row.expanded) {
+wrap.classList.add("expanded");
+const dur = row.durationMs ?? (row.startedAt ? Date.now() - row.startedAt : 0);
+wrap.innerHTML =
+`<div class="think-head"><span class="think-caret">▾</span> Thought for ${Math.round(dur / 1000)}s</div>` +
+`<div class="think-body">${escapeHtml(row.text)}</div>`;
+} else if (row.streaming) {
+const elapsed = row.startedAt ? Math.max(0, Math.round((Date.now() - row.startedAt) / 1000)) : 0;
+wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> Thinking... ${elapsed}s</div>`;
+} else if (row.durationMs != null) {
+wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> Thought for ${Math.round(row.durationMs / 1000)}s</div>`;
+} else {
+wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> Thoughts（${lines} 行）</div>`;
+}
+wrap.querySelector(".think-head")?.addEventListener("click", () => {
+row.expanded = !row.expanded;
+rebuildRow(row);
+});
+break;
+}
+case "tool": {
         const level = toolLevel(row.toolName);
         const statusIcon = row.status === "running" ? "" : row.ok ? "✓" : "✗";
         const statusCls = row.status === "running" ? "run" : row.ok ? "ok" : "fail";
-        const head = `<span class="tool-icon">⚙</span><span class="tool-name lvl-${level}">${escapeHtml(row.toolName)}</span>` +
+        const head = `<span class="tool-icon lvl-${level}">⏺</span><span class="tool-name lvl-${level}">${escapeHtml(row.toolName)}</span>` +
           (row.args && argHint(row.args) ? `<span class="tool-hint">${escapeHtml(argHint(row.args))}</span>` : "") +
           (statusIcon ? `<span class="tool-status ${statusCls}">${statusIcon}</span>` : "");
         let body = "";
@@ -159,7 +165,11 @@
         });
         break;
       }
-      case "info":
+      case "meta": {
+wrap.innerHTML = `<div class="meta-line">${escapeHtml(row.text)}</div>`;
+break;
+}
+case "info":
         wrap.innerHTML = `<div class="info-line">› ${escapeHtml(row.text)}</div>`;
         break;
       case "system":
@@ -189,8 +199,11 @@
   function appendRow(row) {
     state.order.push(row.key);
     state.rowMap.set(row.key, row);
-    messagesEl().appendChild(buildRowEl(row));
+    const wrap = buildRowEl(row);
+wrap.classList.add("row-enter");
+messagesEl().appendChild(wrap);
     if (nearBottom()) scrollToBottom();
+  updateEmptyState();
   }
 
   function updateRow(key, patch) {
@@ -232,7 +245,7 @@
 
   function ensureThinkingRow() {
     if (state.currentThinking != null) return;
-    const row = { key: nextKey(), kind: "thinking", text: "", streaming: true, expanded: true, startedAt: Date.now() };
+    const row = { key: nextKey(), kind: "thinking", text: "", streaming: true, expanded: false, startedAt: Date.now() };
     state.currentThinking = row.key;
     appendRow(row);
   }
@@ -285,13 +298,36 @@
     state.rowMap.clear();
     state.toolRowByCallId.clear();
     messagesEl().innerHTML = "";
+    buildEmptyState();
     renderTodos();
+  updateEmptyState();
   }
 
   // ———————— 事件分发（host → webview） ————————
   function handleEvent(evt) {
-    if (!evt || typeof evt !== "object") return;
-    switch (evt.type) {
+if (!evt || typeof evt !== "object") return;
+// ★ host 经 sink 发来的完整行（用户消息 / 回放 / meta），与 onMessage 顶层 row 逻辑一致
+if (evt.type === "row" || evt.type === "rowUpdate") {
+if (evt.type === "row") {
+// 轮次分割线：用户开始新一轮对话时插入（首轮不插）
+if (evt.kind === "user" && state.order.length > 0) {
+state.roundSeq = (state.roundSeq || 0) + 1;
+appendRow({ key: nextKey(), kind: "meta", text: `第 ${state.roundSeq} 轮` });
+}
+const row = { key: evt.key || nextKey(), kind: evt.kind, text: evt.text ?? "" };
+if (evt.kind === "tool") {
+row.toolName = String(evt.toolName ?? "");
+row.args = evt.args;
+row.status = evt.status || "running";
+}
+if (evt.kind === "thinking") row.expanded = false;
+appendRow(row);
+} else {
+if (evt.key) updateRow(evt.key, evt.patch || {});
+}
+return;
+}
+switch (evt.type) {
       case "text.delta": {
         ensureAssistantRow();
         textBuf += String(evt.text ?? "");
@@ -403,6 +439,7 @@
         state.planMode = !!msg.state?.planMode;
         state.autoMode = !!msg.state?.autoMode;
         syncToolbar();
+ renderInitError(String(msg.state?.initError ?? ""));
         break;
       }
       case "question":
@@ -415,7 +452,7 @@
         break;
       case "sessions":
         state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
-        renderSessionsPopup();
+        renderSessionsPanel();
         break;
       case "sessionReset":
         clearMessages();
@@ -425,6 +462,21 @@
     }
   }
   window.addEventListener("message", (e) => onMessage(e.data));
+
+// ———————— 初始化错误横幅（缺 API Key 等配置问题） ————————
+function renderInitError(msg) {
+let el = $("#init-error");
+if (!msg) {
+if (el) el.remove();
+return;
+}
+if (!el) {
+el = document.createElement("div");
+el.id = "init-error";
+messagesEl().parentElement.insertBefore(el, messagesEl());
+}
+el.textContent = "⚠️ " + msg;
+}
 
   // ———————— 审批条 ————————
   function renderApproval() {
@@ -553,45 +605,97 @@
     });
   }
 
-  // ———————— 历史会话弹层 ————————
-  function renderSessionsPopup() {
-    const anchor = $("#approval-anchor");
-    if (!state.pendingSessions && state.sessions.length === 0) {
-      if (!anchor.dataset.sessionsOpen) return;
-    }
-    anchor.dataset.sessionsOpen = "1";
-    const list = state.sessions;
-    if (list.length === 0) {
-      anchor.innerHTML = `<div class="modal sessions"><div class="modal-title">🕘 历史会话</div><div class="modal-detail">（暂无历史会话）</div>
-        <div class="modal-actions"><button class="btn" id="s-close">关闭</button></div></div>`;
-    } else {
-      anchor.innerHTML = `<div class="modal sessions">
-        <div class="modal-title">🕘 历史会话（点击载入续接）</div>
-        <div class="session-list">${list
-          .map(
-            (s, i) =>
-              `<div class="session-item" data-i="${i}">
-                <div class="s-preview">${escapeHtml(s.preview || "(空会话)")}</div>
-                <div class="s-meta">${escapeHtml(relTime(s.updatedAt))} · ${s.messageCount} 条 · ${escapeHtml(String(s.sessionId).slice(0, 8))}</div>
-              </div>`,
-          )
-          .join("")}</div>
-        <div class="modal-actions"><button class="btn" id="s-close">关闭</button></div>
-      </div>`;
-      anchor.querySelectorAll(".session-item").forEach((el) => {
-        el.addEventListener("click", () => {
-          const s = list[Number(el.dataset.i)];
-          if (s) {
-            vscode.postMessage({ type: "loadSession", id: s.sessionId });
-            closeAllModals();
-          }
-        });
-      });
-    }
-    anchor.querySelector("#s-close")?.addEventListener("click", closeAllModals);
-  }
+  // ———————— 历史会话面板（终端风格：搜索 + 单行列表） ————————
+let sessionsFilter = "";
 
-  function relTime(iso) {
+function buildSessionsPanel() {
+if ($("#sessions-panel")) return;
+const panel = document.createElement("div");
+panel.id = "sessions-panel";
+panel.className = "sessions-panel";
+panel.style.display = "none";
+panel.innerHTML = `
+<div class="sessions-search">
+<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<input id="sessions-filter" type="text" placeholder="Search sessions..." spellcheck="false"/>
+<button id="sessions-close" class="sessions-close" title="关闭">✕</button>
+</div>
+<div class="sessions-list" id="sessions-list"></div>`;
+document.querySelector("#approval-anchor").before(panel);
+$("#sessions-filter").addEventListener("input", (e) => {
+sessionsFilter = e.target.value.trim().toLowerCase();
+renderSessionsPanel();
+});
+$("#sessions-filter").addEventListener("keydown", (e) => {
+if (e.key === "Escape") {
+closeSessionsPanel();
+const inp = $("#input");
+if (inp) inp.focus();
+}
+});
+$("#sessions-close").addEventListener("click", () => {
+closeSessionsPanel();
+const inp = $("#input");
+if (inp) inp.focus();
+});
+}
+
+function toggleSessionsPanel() {
+let panel = $("#sessions-panel");
+if (!panel) buildSessionsPanel();
+panel = $("#sessions-panel");
+if (panel && panel.style.display !== "none") {
+closeSessionsPanel();
+return;
+}
+openSessionsPanel();
+}
+
+function openSessionsPanel() {
+vscode.postMessage({ type: "listSessions" });
+let panel = $("#sessions-panel");
+if (!panel) buildSessionsPanel();
+panel = $("#sessions-panel");
+panel.style.display = "";
+const f = $("#sessions-filter");
+if (f) { f.value = ""; sessionsFilter = ""; f.focus(); }
+renderSessionsPanel();
+}
+
+function closeSessionsPanel() {
+const p = $("#sessions-panel");
+if (p) p.style.display = "none";
+sessionsFilter = "";
+}
+
+function renderSessionsPanel() {
+const panel = $("#sessions-panel");
+if (!panel || panel.style.display === "none") return;
+const list = state.sessions;
+const q = sessionsFilter;
+const filtered = q ? list.filter((s) => String(s.preview || "").toLowerCase().includes(q)) : list;
+const box = $("#sessions-list");
+if (!filtered.length) {
+box.innerHTML = `<div class="sessions-empty">${q ? "无匹配会话" : "暂无历史会话"}</div>`;
+return;
+}
+box.innerHTML = filtered.map((s, i) =>
+`<div class="session-row" data-i="${i}">
+<span class="session-title">${escapeHtml(s.preview || "(空会话)")}</span>
+<span class="session-tools"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8h9M8 3.5L12.5 8 8 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+<span class="session-meta">${escapeHtml(relTime(s.updatedAt))} · ${s.messageCount} 条</span>
+</div>`
+).join("");
+box.querySelectorAll(".session-row").forEach((el) => {
+el.addEventListener("click", () => {
+const s = filtered[Number(el.dataset.i)];
+if (!s) return;
+vscode.postMessage({ type: "loadSession", id: s.sessionId });
+closeSessionsPanel();
+});
+});
+}
+function relTime(iso) {
     if (!iso) return "";
     const t = Date.parse(iso);
     if (!t) return "";
@@ -610,8 +714,6 @@
     state.pendingApproval = null;
     state.pendingQuestion = null;
     state.pendingPlan = null;
-    state.pendingSessions = false;
-    delete document.querySelector("#approval-anchor").dataset.sessionsOpen;
     document.querySelector("#approval-anchor").innerHTML = "";
   }
 
@@ -642,158 +744,270 @@
 
   // ———————— 本地斜杠命令（与 CLI 对齐） ————————
   function maybeLocalCommand(text) {
-    if (!text.startsWith("/")) return false;
-    const parts = text.slice(1).trim().split(/\s+/);
-    const cmd = parts[0];
-    const arg = parts.slice(1).join(" ");
-    switch (cmd) {
-      case "plan": {
-        const on = !state.planMode;
-        vscode.postMessage({ type: "setPlanMode", on });
-        addInfo(`计划模式：${on ? "开" : "关"}`);
-        return true;
-      }
-      case "auto": {
-        const on = !state.autoMode;
-        vscode.postMessage({ type: "setAutoMode", on });
-        addInfo(`自动模式：${on ? "开" : "关"}`);
-        return true;
-      }
-      case "model":
-        if (arg) {
-          vscode.postMessage({ type: "setModel", model: arg });
-          addInfo(`模型：${arg}`);
-        }
-        return true;
-      case "thinking":
-        if (["off", "high", "max"].includes(arg)) {
-          vscode.postMessage({ type: "setThinking", level: arg });
-          addInfo(`思考等级：${arg}`);
-        }
-        return true;
-      case "lang":
-        if (arg === "zh" || arg === "en") {
-          vscode.postMessage({ type: "setLocale", locale: arg });
-          addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}`);
-        }
-        return true;
-      case "clear":
-        clearMessages();
-        return true;
-      case "new":
-        vscode.postMessage({ type: "newSession" });
-        return true;
-      case "sessions":
-        vscode.postMessage({ type: "listSessions" });
-        state.pendingSessions = true;
-        return true;
-      case "help":
-        addInfo("/help 帮助 · /plan 计划模式 · /auto 自动模式 · /model 切换模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /new 新会话");
-        return true;
-      case "status":
-        addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"}`);
-        return true;
-      default:
-        return false; // 非本地命令 → 交给 agent（自定义 slash 命令）
-    }
-  }
+if (!text.startsWith("/")) return false;
+const parts = text.slice(1).trim().split(/\s+/);
+const cmd = parts[0];
+const arg = parts.slice(1).join(" ");
+switch (cmd) {
+case "plan": {
+state.planMode = !state.planMode;
+vscode.postMessage({ type: "setPlanMode", on: state.planMode });
+addInfo(`计划模式：${state.planMode ? "开" : "关"}`);
+syncToolbar();
+return true;
+}
+case "auto": {
+state.autoMode = !state.autoMode;
+vscode.postMessage({ type: "setAutoMode", on: state.autoMode });
+addInfo(`自动模式：${state.autoMode ? "开" : "关"}`);
+syncToolbar();
+return true;
+}
+case "model":
+if (arg) {
+state.model = arg;
+vscode.postMessage({ type: "setModel", model: arg });
+addInfo(`模型：${arg}`);
+syncToolbar();
+} else {
+addInfo("用法：/model <模型名>，如 /model deepseek-v4");
+}
+return true;
+case "thinking":
+if (["off", "high", "max"].includes(arg)) {
+state.thinkingLevel = arg;
+vscode.postMessage({ type: "setThinking", level: arg });
+addInfo(`思考等级：${arg}`);
+syncToolbar();
+} else {
+addInfo("用法：/thinking off|high|max");
+}
+return true;
+case "lang":
+if (arg === "zh" || arg === "en") {
+state.locale = arg;
+vscode.postMessage({ type: "setLocale", locale: arg });
+addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}`);
+syncToolbar();
+}
+return true;
+case "clear":
+clearMessages();
+return true;
+case "new":
+vscode.postMessage({ type: "newSession" });
+return true;
+case "sessions":
+toggleSessionsPanel();
+return true;
+case "help":
+addInfo("/help 帮助 · /plan 计划模式 · /auto 自动模式 · /model 模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /new 新会话");
+return true;
+case "status":
+addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}`);
+return true;
+default:
+return false; // 非本地命令 → 交给 agent（自定义 slash 命令）
+}
+}
+function buildEmptyState() {
+const host = messagesEl();
+if ($("#empty-state")) return;
+const el = document.createElement("div");
+el.id = "empty-state";
+el.className = "empty-state";
+el.innerHTML = `
+<svg width="32" height="32" viewBox="0 0 16 16" fill="#D97706" aria-hidden="true">
+<rect x="3" y="0" width="2" height="2"/><rect x="11" y="0" width="2" height="2"/>
+<rect x="4" y="2" width="8" height="2"/>
+<rect x="2" y="4" width="2" height="2"/><rect x="6" y="4" width="4" height="2"/><rect x="12" y="4" width="2" height="2"/>
+<rect x="3" y="6" width="2" height="2"/><rect x="5" y="6" width="2" height="2"/><rect x="9" y="6" width="2" height="2"/><rect x="11" y="6" width="2" height="2"/>
+<rect x="4" y="8" width="2" height="2"/><rect x="10" y="8" width="2" height="2"/>
+<rect x="3" y="10" width="2" height="2"/><rect x="11" y="10" width="2" height="2"/>
+</svg>
+<div class="empty-title">DeepSeekCode</div>
+<div class="empty-sub">You've come to the absolutely right place!</div>`;
+host.appendChild(el);
+}
 
-  // ———————— 输入区 ————————
-  function buildComposer() {
-    const c = $("#composer");
-    c.innerHTML = `
-      <div class="composer-box">
-        <textarea id="input" rows="1" placeholder="发送消息（Enter 发送，Shift+Enter 换行）…" spellcheck="false"></textarea>
-        <button id="btn-send" title="发送">➤</button>
-      </div>`;
-    const input = $("#input");
-    const send = $("#btn-send");
-    const doSend = () => {
-      const text = input.value;
-      if (!text.trim()) return;
-      if (maybeLocalCommand(text)) {
-        input.value = "";
-        autoGrow(input);
-        return;
-      }
-      vscode.postMessage({ type: "submit", text });
-      input.value = "";
-      autoGrow(input);
-      input.focus();
-    };
-    send.addEventListener("click", doSend);
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
-        e.preventDefault();
-        doSend();
-      }
-    });
-    input.addEventListener("input", () => autoGrow(input));
-  }
+function updateEmptyState() {
+const el = $("#empty-state");
+if (!el) return;
+el.style.display = state.order.length > 0 ? "none" : "";
+}
 
-  function autoGrow(el) {
+function buildComposer() {
+const c = $("#composer");
+c.innerHTML = `
+<div class="composer-shell">
+<div class="composer-meta"><span id="meta-status"></span></div>
+<div class="composer-line">
+<span class="composer-prompt">❯</span>
+<textarea id="input" rows="1" placeholder="输入消息，/ 查看命令" spellcheck="false"></textarea>
+<button class="composer-edit-btn" id="btn-auto-edit" title="自动执行编辑（切换 auto 模式）">&lt;&gt; Edit automatically</button>
+<button class="composer-send-btn" id="btn-send" title="发送 (Enter)">↑</button>
+</div>
+<div class="slash-menu" id="slash-menu" style="display:none"></div>
+</div>
+<div class="composer-hint">ctrl esc to focus or unfocus DeepSeek</div>`;
+const input = $("#input");
+const menu = $("#slash-menu");
+const btnSend = $("#btn-send");
+const btnAutoEdit = $("#btn-auto-edit");
+
+// 命令驱动表：全部功能经斜杠命令交互，UI 零控件
+const SLASH = [
+{ cmd: "/plan", hint: "切换计划模式", arg: false },
+{ cmd: "/auto", hint: "切换自动模式", arg: false },
+{ cmd: "/model", hint: "设置模型，如 /model deepseek-v4", arg: true },
+{ cmd: "/thinking", hint: "思考等级 off | high | max", arg: true },
+{ cmd: "/lang", hint: "界面语言 zh | en", arg: true },
+{ cmd: "/clear", hint: "清空当前会话", arg: false },
+{ cmd: "/new", hint: "新会话", arg: false },
+{ cmd: "/sessions", hint: "历史会话", arg: false },
+{ cmd: "/help", hint: "显示帮助", arg: false },
+{ cmd: "/status", hint: "显示当前状态", arg: false },
+];
+
+let slashItems = [];
+let selIdx = -1;
+
+function runSlash(s) {
+if (s.arg) {
+input.value = s.cmd + " ";
+input.focus();
+autoGrow(input);
+} else {
+input.value = s.cmd;
+doSend();
+}
+updateSlashMenu();
+}
+
+function updateSlashMenu() {
+const v = input.value;
+if (!v.startsWith("/")) { menu.style.display = "none"; slashItems = []; selIdx = -1; return; }
+const q = v.toLowerCase();
+slashItems = SLASH.filter((s) => s.cmd.startsWith(q) || q.startsWith(s.cmd)).slice(0, 6);
+if (!slashItems.length) { menu.style.display = "none"; slashItems = []; selIdx = -1; return; }
+selIdx = Math.min(Math.max(selIdx, 0), slashItems.length - 1);
+menu.innerHTML = slashItems.map((s, i) =>
+`<div class="slash-item${i === selIdx ? " selected" : ""}" data-i="${i}"><span class="slash-cmd">${s.cmd}</span><span class="slash-hint">${s.hint}</span></div>`
+).join("");
+menu.style.display = "";
+menu.querySelectorAll(".slash-item").forEach((el) => {
+el.addEventListener("click", () => runSlash(slashItems[Number(el.dataset.i)]));
+});
+}
+
+const doSend = () => {
+const text = input.value;
+if (!text.trim()) return;
+if (maybeLocalCommand(text)) {
+input.value = "";
+autoGrow(input);
+updateSlashMenu();
+return;
+}
+vscode.postMessage({ type: "submit", text });
+input.value = "";
+autoGrow(input);
+input.focus();
+updateSlashMenu();
+};
+// ★ 全键盘驱动：↑↓ 移动选择命令，Enter 执行选中项；无菜单时 Enter 发送
+input.addEventListener("keydown", (e) => {
+if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+if (menu.style.display !== "none" && slashItems.length) {
+e.preventDefault();
+selIdx = e.key === "ArrowUp"
+? (selIdx <= 0 ? slashItems.length - 1 : selIdx - 1)
+: (selIdx + 1) % slashItems.length;
+updateSlashMenu();
+}
+return;
+}
+if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
+e.preventDefault();
+if (menu.style.display !== "none" && slashItems.length) {
+runSlash(slashItems[selIdx >= 0 ? selIdx : 0]);
+return;
+}
+doSend();
+}
+});
+input.addEventListener("input", () => { autoGrow(input); updateSlashMenu(); });
+input.addEventListener("focus", () => updateSlashMenu());
+input.addEventListener("blur", () => setTimeout(() => { menu.style.display = "none"; }, 150));
+
+// 发送/中止一体按钮：空闲 ↑（发送），生成中 ■（中止）
+btnSend.addEventListener("click", () => {
+if (state.busy) {
+vscode.postMessage({ type: "abort" });
+} else {
+doSend();
+}
+});
+// Edit automatically 文本按钮：切换 auto 模式
+btnAutoEdit.addEventListener("click", () => {
+state.autoMode = !state.autoMode;
+vscode.postMessage({ type: "setAutoMode", on: state.autoMode });
+addInfo(`自动模式：${state.autoMode ? "开" : "关"}`);
+syncToolbar();
+});
+updateMetaStatus();
+}
+function autoGrow(el) {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }
 
   // ———————— 工具栏 ————————
   function buildToolbar() {
-    const tb = $("#toolbar");
-    tb.innerHTML = `
-      <div class="brand"><span class="logo">✻</span> deepSeekCode <span id="busy-dot" class="dot"></span></div>
-      <div class="actions">
-        <button id="btn-new" title="新会话" class="icon-btn">＋</button>
-        <button id="btn-sessions" title="历史会话" class="icon-btn">🕘</button>
-        <button id="btn-todos" title="任务清单" class="icon-btn">☑</button>
-      </div>
-      <div class="modes">
-        <label class="switch" title="计划模式（只读调研→方案审批→实现）"><input type="checkbox" id="chk-plan"/>计划</label>
-        <label class="switch" title="自动模式（工作区文件编辑分类器放行）"><input type="checkbox" id="chk-auto"/>自动</label>
-        <select id="sel-thinking" title="思考等级">
-          <option value="off">off</option><option value="high" selected>high</option><option value="max">max</option>
-        </select>
-        <select id="sel-lang" title="语言"><option value="zh" selected>中文</option><option value="en">EN</option></select>
-      </div>
-      <div class="model-row">
-        <input id="inp-model" placeholder="模型（可选）" spellcheck="false"/>
-        <button id="btn-stop" title="中止生成" class="icon-btn danger">■</button>
-      </div>`;
-    $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
-    $("#btn-sessions").addEventListener("click", () => {
-      vscode.postMessage({ type: "listSessions" });
-      state.pendingSessions = true;
-    });
-    $("#btn-todos").addEventListener("click", () => {
-      state.showTodos = !state.showTodos;
-      renderTodos();
-    });
-    $("#chk-plan").addEventListener("change", (e) => vscode.postMessage({ type: "setPlanMode", on: e.target.checked }));
-    $("#chk-auto").addEventListener("change", (e) => vscode.postMessage({ type: "setAutoMode", on: e.target.checked }));
-    $("#sel-thinking").addEventListener("change", (e) => vscode.postMessage({ type: "setThinking", level: e.target.value }));
-    $("#sel-lang").addEventListener("change", (e) => vscode.postMessage({ type: "setLocale", locale: e.target.value }));
-    $("#inp-model").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        vscode.postMessage({ type: "setModel", model: e.target.value.trim() });
-        addInfo(`模型：${e.target.value.trim() || "(默认)"}`);
-      }
-    });
-    $("#btn-stop").addEventListener("click", () => vscode.postMessage({ type: "abort" }));
-  }
+const tb = $("#toolbar");
+tb.innerHTML = `
+<div class="brand"><span class="logo">✻</span> <span class="brand-name">deepSeekCode</span> <span id="busy-dot" class="dot"></span></div>
+<div class="actions">
+<button id="btn-new" title="新会话" class="icon-svg"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+<button id="btn-sessions" title="历史会话" class="icon-svg"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.2l2.5 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+</div>`;
+$("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
+$("#btn-sessions").addEventListener("click", () => {
+toggleSessionsPanel();
+});
+}
+function syncToolbar() {
+const dot = $("#busy-dot");
+if (dot) {
+dot.className = "dot" + (state.busy ? " busy" : "");
+dot.title = state.busy ? "生成中…" : "就绪";
+}
+const btnSend = $("#btn-send");
+if (btnSend) {
+btnSend.textContent = state.busy ? "■" : "↑";
+btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
+}
+const btnAutoEdit = $("#btn-auto-edit");
+if (btnAutoEdit) {
+const on = state.autoMode;
+btnAutoEdit.textContent = on ? "✓ <> Edit automatically" : "<> Edit automatically";
+btnAutoEdit.classList.toggle("on", on);
+}
+updateMetaStatus();
+}
 
-  function syncToolbar() {
-    const dot = $("#busy-dot");
-    if (dot) {
-      dot.className = "dot" + (state.busy ? " busy" : "");
-      dot.title = state.busy ? "生成中…" : "就绪";
-    }
-    const plan = $("#chk-plan");
-    const auto = $("#chk-auto");
-    if (plan && plan.checked !== state.planMode) plan.checked = state.planMode;
-    if (auto && auto.checked !== state.autoMode) auto.checked = state.autoMode;
-  }
-
-  // 链接安全：webview 内 a 标签不导航（除 http/https 外拦截）
-  document.addEventListener("click", (e) => {
+function updateMetaStatus() {
+const el = $("#meta-status");
+if (!el) return;
+const p = [];
+p.push(state.planMode ? "plan on" : "plan off");
+p.push(state.autoMode ? "auto on" : "auto off");
+p.push("think:" + state.thinkingLevel);
+p.push(state.locale);
+if (state.model) p.push(state.model);
+el.textContent = p.join("  ");
+}
+document.addEventListener("click", (e) => {
     const a = e.target.closest?.("a");
     if (a) {
       e.preventDefault();
@@ -806,6 +1020,9 @@
   });
 
   // ———————— 初始化 ————————
+  buildEmptyState();
+  updateEmptyState();
+  buildSessionsPanel();
   buildToolbar();
   buildComposer();
   syncToolbar();

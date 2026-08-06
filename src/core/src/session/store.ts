@@ -296,9 +296,17 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
                 let msg: any;
                 try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
                 messageCount++;
-                if (!preview && msg?.role === "user" && typeof msg.content === "string") {
-                    preview = msg.content.replace(/\s+/g, " ").trim();
-                }
+ if (!preview && msg?.role === "user" && typeof msg.content === "string") {
+ const t = msg.content.replace(/\s+/g, " ").trim();
+ // ★ 乱码预览过滤：被错误解码的输入/输出会产生 U+FFFD 替换符（乱码不可恢复），
+ // 从 preview 中剥离并打标记，避免历史列表整片「�」影响可读性。
+ if (t.includes("\uFFFD")) {
+ const cleaned = t.replace(/\uFFFD+/g, "").trim();
+ preview = cleaned ? `（含乱码片段）${cleaned}` : "（该条消息内容为乱码，无法正常显示）";
+ } else {
+ preview = t;
+ }
+ }
             }
         } catch { /* 无 jsonl（空会话）→ 0 条 */ }
 

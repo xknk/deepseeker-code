@@ -11,16 +11,13 @@
  * @description 内容检索类工具集。search_grep：基于 ripgrep（vscode-ripgrep）在工作区全文检索，
  *  返回带行列号的匹配行；支持字面量（默认自动转义）与正则两种模式。与 glob（按文件名）互补。
  */
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import { getActiveWorkspaceRoot } from "../guard.ts";
+import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
 import fs from "fs/promises";
-
-const execFileAsync = promisify(execFile);
 
 /** 将字符串中的正则特殊字符转义，用于把字面量关键词安全地当作正则 pattern。 */
 function escapeRegExp(string: string): string {
@@ -78,7 +75,7 @@ export const searchTools: CustomTool[] = [
                         searchRoot,
                     ];
 
-                    const { stdout } = await execFileAsync(rgPath, rgArgs, {
+                    const { stdout } = await execFileSmart(rgPath, rgArgs, {
                         // 不传 cwd：避免反斜杠+中文路径派生 rg 失败（搜索根已作为显式 path 参数传入）
                         maxBuffer: 1024 * 1024,
                         // ★ 兜底硬超时：极端文件卡住 rg 时最多 30s 判失败返回，绝不让 search_grep 挂死 agent

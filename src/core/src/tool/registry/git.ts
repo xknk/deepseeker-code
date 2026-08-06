@@ -7,16 +7,13 @@
  *  - git_commit（MUTATION，提交暂存区；可选 stage_all 一并 git add -A）
  *  设计：统一用 execFile（不走 shell，天然防注入）+ getActiveWorkspaceRoot() 锚定 + 非 git 仓库兜底。
  */
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
-
-const execFileAsync = promisify(execFile);
+import { execFileSmart } from "@/common/index.ts";
 
 /** 统一 git 执行入口：锚定工作区根，限制缓冲，返回 { stdout, stderr }。 */
 function runGit(args: string[], maxBuffer = 1024 * 1024 * 15) {
-    return execFileAsync("git", args, { cwd: getActiveWorkspaceRoot(), maxBuffer });
+    return execFileSmart("git", args, { cwd: getActiveWorkspaceRoot(), maxBuffer });
 }
 
 /** 判定是否「非 git 仓库」错误（兼容大小写与 stderr/message 两种来源）。 */

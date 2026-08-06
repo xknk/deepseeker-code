@@ -12,14 +12,11 @@
  *     持久化——服务重启后旧任务无法再用工具管理（v1 已知限制）。
  *  3) 输出走环形缓冲（每任务上限 MAX_BUFFER_CHARS），防止 dev server 长连接日志吃爆内存。
  */
-import { spawn, execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
-import { createUUID } from "@/common/index.ts";
-
-const execFileAsync = promisify(execFile);
+import { createUUID, execFileSmart } from "@/common/index.ts";
 
 interface BgTask {
     taskId: string;
@@ -53,7 +50,7 @@ export async function killTree(proc: any): Promise<void> {
         if (isWin) {
             // ★ execFile 加 5s 超时兜底：taskkill 极罕见挂起时不让整个 killTree 永久 pending
             //   （shellExecutor 的 void killTree 是 fire-and-forget，超时分支不会回头兜底）。
-            await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
+            await execFileSmart("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
         } else {
             process.kill(-pid, "SIGKILL");
         }

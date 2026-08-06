@@ -13,17 +13,14 @@
  *  - 移除前 killBackgroundTasksUnder：杀掉 cwd 落在该 worktree 的常驻进程（dev server 等），防悬空 cwd。
  *  - 崩溃孤儿由 sweepOrphanedWorktrees 在 initEngine 启动期回收（进程重启 = 上次所有 worktree 均为孤儿）。
  */
-import { execFile } from "child_process";
-import { promisify } from "util";
 import path from "path";
 import os from "os";
 import fs from "fs";
 import { appConfig } from "@/config/index.ts";
+import { execFileSmart } from "@/common/index.ts";
 import { WORKSPACE_ROOT } from "../guard.ts";
 import { killBackgroundTasksUnder } from "../registry/background.ts";
 import { drainAllSessionWorktrees } from "./sessionRegistry.ts";
-
-const execFileAsync = promisify(execFile);
 
 /** worktree 句柄：create 返回，remove/harvestDiff 消费。 */
 export interface WorktreeHandle {
@@ -37,7 +34,7 @@ export interface WorktreeHandle {
 
 /** 在【主仓】执行 git（worktree admin 操作锚定主仓，不受 ALS 影响）。 */
 const runMainGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileAsync("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
+    execFileSmart("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
 
 /**
  * worktree 根目录：<os.tmpdir()/deepSeekCode-worktrees>/<userWorkspaceDir>/（按项目隔离，sweep 按此扫）。
@@ -124,7 +121,7 @@ export const harvestDiff = async (wt: WorktreeHandle): Promise<string> => {
 
 /** 在 worktree 内执行 git（git -C <wt>）。 */
 const runInWorktree = (wtPath: string, args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileAsync("git", ["-C", wtPath, ...args], { maxBuffer });
+    execFileSmart("git", ["-C", wtPath, ...args], { maxBuffer });
 
 /**
  * 移除 worktree：先杀其下常驻后台进程，再 git worktree remove + prune + 删临时分支。

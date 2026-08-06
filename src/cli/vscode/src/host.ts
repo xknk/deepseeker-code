@@ -254,7 +254,7 @@ export class ChatHost {
     this.sessionId = id;
     this.callbacks.onSessionReset();
     try {
-      const msgs = await readMessages(id);
+      const msgs = (await readMessages(id)) as unknown as Array<Record<string, unknown>>;
       emitReplay(msgs, this.callbacks.sink);
     } catch {
       /* 无历史或读取失败 → 空回放，不阻塞 */
