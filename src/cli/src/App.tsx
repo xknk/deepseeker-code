@@ -43,6 +43,15 @@ const CWD = process.cwd();
 const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW: number; streamTail?: number; showThinking?: boolean }): React.ReactElement => {
     if (row.kind === "tool") return <ToolCard toolName={row.toolName} args={row.args} result={row.result} ok={row.ok} status={row.status} progress={row.progress} wrapW={wrapW} />;
     if (row.kind === "thinking") return <ThinkingBlock streaming={row.streaming ?? false} startedAt={row.startedAt} durationMs={row.durationMs} tokens={row.tokens} text={row.text} expanded={showThinking} wrapW={wrapW} />;
+    // ★ 每轮对话（user 提问）前加淡色横线，视觉分隔各轮，便于在长对话中定位（user 提问 + assistant 回复 = 一个轮次单元）
+    if (row.kind === "user") {
+        return (
+            <Box flexDirection="column" marginTop={1}>
+                <Text color={THEME.grayDim}>{"─".repeat(Math.max(8, wrapW))}</Text>
+                <MessageBlock row={row} wrapW={wrapW} streamTail={streamTail} />
+            </Box>
+        );
+    }
     return <MessageBlock row={row} wrapW={wrapW} streamTail={streamTail} />;
 };
 
@@ -61,8 +70,10 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     const wrapW = Math.max(16, cols - 2);
     /** 流式正文动态区保留的尾部行数：终端高度 - 预留（任务面板/生成指示/输入/状态/留白）。
      *  稳定动态区高度 → 治闪屏/错位；收尾后整行进 Static 渲染全文，不丢内容。
-     *  ★ rows-18（原 -12）：Ink log-update 全量擦写动态区，高度越低越不闪；30 行终端→12 行尾巴。 */
-    const streamTail = Math.max(4, (stdout?.rows ?? 24) - 18);
+     *  ★ rows-18（原 -12）：Ink log-update 全量擦写动态区，高度越低越不闪；30 行终端→12 行尾巴。
+     *  ★ cap 14（治"生成过多闪屏"）：大终端按 rows-18 会算出几十行尾巴，擦写面积大→闪；
+     *    取尾部 14 行已够流式上下文，封顶后动态区高度与终端高度解耦，大屏不再更闪。 */
+    const streamTail = Math.min(Math.max(4, (stdout?.rows ?? 24) - 18), 14);
 
     const [input, setInput] = useState("");
     const [cursor, setCursor] = useState(0);
@@ -443,12 +454,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                     <TodosPanel todos={state.todos} wrapW={wrapW} />
                 </Box>
 
-                <Box flexDirection="column" paddingX={1}>
-                    {dynamicRows.map((row) => <RowView key={row.id} row={row} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />)}
-                    {state.busy ? (
-                        <Box marginTop={0.5}><Text color={THEME.coralBright}>● {S.generating}</Text></Box>
-                    ) : null}
-                </Box>
+                {/* ★ 治"审批/模态选择闪屏"：任意模态打开时（审批/提问/计划/会话）不渲染流式尾巴，
+                    动态区瘦到只剩模态本身 + 输入 + 状态条。否则 ↑↓ 选择会触发 Ink log-update
+                    全量擦写「长尾巴 + 高模态」的大动态区 → 闪屏（根因见 cli-render-flicker）。 */}
+                {menuActive ? null : (
+                    <Box flexDirection="column" paddingX={1}>
+                        {dynamicRows.map((row) => <RowView key={row.id} row={row} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />)}
+                        {state.busy ? (
+                            <Box marginTop={0.5}><Text color={THEME.coralBright}>● {S.generating}</Text></Box>
+                        ) : null}
+                    </Box>
+                )}
 
                 <Box flexDirection="column" paddingX={1} flexShrink={0}>
                     {state.pendingApproval ? (

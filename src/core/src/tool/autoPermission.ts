@@ -1,17 +1,22 @@
 /**
  * @file tool/autoPermission.ts
- * @description auto permission mode 的业务封装：决定一个工具调用在 auto 模式下是放行/硬拒/转人工。
+ * @description 工具调用的分类器审批封装：决定放行 / 硬拒 / 转人工。
  *
- *  分层判定（runAgent processToolCall 在 checkPermission 之后、requestApproval 之前调用 runAutoCheck）：
- *   1) 范围限定：edit_file / write_file / create_file / delete_path 才进 auto；其余（run_command/web_fetch/
- *      run_in_background/MCP/git_commit）一律 'ask'（转人工）——命令/网络/后台/MCP 的 prompt injection 风险高。
- *      delete_path 纳入：爆炸半径虽大，但有完整 undo 备份兜底（backupDelete 整树快照 + 失败阻断写入），删错可 undo_restore。
- *   2) 工作区围栏：path 不在工作区内 → 'ask'（转人工）。复用 cwd 边界判定。
- *   3) 内置 deny 清单：覆盖敏感文件（.env/.git/.ssh/密钥/credentials 等）→ 'deny'（硬拒，不转人工）。
- *   4) 辅助模型分类器：safe → 'allow'（放行）；risky/异常/超时 → 'ask'（转人工，fail-closed）。
+ *  两档（runAgent processToolCall 在 checkPermission 之后、requestApproval 之前调用 runAutoCheck）：
+ *   - default（aggressive=false）：文件增删改移（edit/write/create/delete_path/move_file）进分类器——高频。
+ *     edit/write/create/delete 有 undo 备份兜底（backupDelete 整树快照 + 失败阻断写入）；move_file 虽无 undo，
+ *     但走双路径围栏（source+destination 均须在工作区内）+ 敏感文件 deny，爆炸半径小于销毁（可手动移回）。
+ *   - /auto（aggressive=true）：额外覆盖命令/网络/后台/MCP/git_commit。这些无 undo 兜底、且是 prompt injection
+ *     重灾区，故仅作显式 opt-in；并加命令 deny 清单对灾难性命令硬拒兜底（分类器是 flash 启发式，非安全边界）。
+ *
+ *  分层判定：
+ *   1) 范围：default 仅 AUTO_SCOPE；aggressive 额外含 AUTO_AGGRESSIVE_EXTRA + mcp__*。
+ *   2) 文件类：工作区围栏（path 不在工作区内→ask）+ 敏感文件 deny 清单（.env/.git/.ssh/密钥→deny）。
+ *   3) 命令类（aggressive）：高危命令 deny 清单（rm -rf /、格式化、curl|sh、外传敏感、shutdown…→deny）。
+ *   4) 辅助模型分类器：safe→allow；risky/异常/超时→ask（fail-closed，绝不静默放行）。
  *
  *  ★ 安全定位：分类器是「减少打扰的启发式」，非安全边界——既有后盾（checkPermission 规则、guard 审批网关、
- *    工具内部 resolveSafePath/SSRF/undo 备份）全部保留，在本层之前或独立执行。
+ *    工具内部 resolveSafePath/SSRF/undo 备份）全部保留，在本层之前或独立执行。MCP 黑盒，分类器倾向保守（risky→人工）。
  */
 import path from "path";
 import { classifyToolRisk } from "@/llm/model.ts";
@@ -19,8 +24,11 @@ import type { ToolContext } from "./type.ts";
 
 export type AutoVerdict = 'allow' | 'deny' | 'ask';
 
-/** auto 模式覆盖工作区内文件编辑 + delete_path（undo 备份兜底）；命令/网络/后台/MCP/git_commit 一律转人工。 */
-const AUTO_SCOPE = new Set(['edit_file', 'write_file', 'create_file', 'delete_path']);
+/** default 档覆盖：工作区内文件增删改移。move_file 虽无 undo，但有双路径围栏 + 可手动移回。 */
+const AUTO_SCOPE = new Set(['edit_file', 'write_file', 'create_file', 'delete_path', 'move_file']);
+/** /auto（aggressive）档额外覆盖：命令/网络/后台/git_commit。MCP 工具（mcp__ 前缀）由 isMcpTool 判定纳入。 */
+const AUTO_AGGRESSIVE_EXTRA = new Set(['run_command', 'run_in_background', 'web_fetch', 'web_search', 'git_commit']);
+const isMcpTool = (name: string): boolean => name.startsWith('mcp__');
 
 /**
  * 内置高危文件清单：即使分类器说 safe，覆盖这些路径也硬拒（deny）。
@@ -43,6 +51,27 @@ const matchBuiltinDeny = (p: string): boolean => {
     return BUILTIN_AUTO_DENY.some(re => re.test(norm));
 };
 
+/**
+ * aggressive 档命令类高危 deny 清单：命令无 undo 兜底，对灾难性命令硬拒（不进分类器），兜底分类器误判。
+ * 覆盖：递归删根/家/通配、格式化、fork bomb、dd 写设备、关机重启、chmod 777、远程执行（curl|sh）、外传敏感。
+ * 刻意不拦「写系统目录」等宽泛模式（会误杀 cat /etc/hosts 等只读），交给分类器判读/写。
+ */
+const COMMAND_DENY: RegExp[] = [
+    /rm\s+-[a-z]*r[a-z]*f?\s+(\/|~|\*)/i,            // rm -rf / | ~ | *（递归删根/家/通配）
+    /\bmkfs(\.\w+)?\b/i,                              // 格式化 mkfs / mkfs.ext4
+    /:\s*\(\s*\)\s*\{\s*:\s*\|/,                      // fork bomb :(){:|:&};:
+    /\bdd\b.*of=\/dev\//i,                            // dd 写裸设备
+    /\b(shutdown|reboot|halt|poweroff)\b/i,
+    /\bchmod\s+[-+]?[0-7]*77[0-7]\b/i,                // chmod 777 / 0777 / -R 777
+    /\b(curl|wget)\b[^|]*\|\s*(sh|bash|zsh)\b/i,      // curl … | sh 远程执行
+    /\b(curl|wget)\b[^;]*\.(env|pem|key|pfx|keystore)\b/i, // 外传敏感文件（.env/私钥/证书）
+];
+
+const matchCommandDeny = (cmd: string): boolean => {
+    if (!cmd) return false;
+    return COMMAND_DENY.some(re => re.test(cmd));
+};
+
 /** path 是否在 cwd 工作区内（含 cwd 自身）。非字符串/无法解析 → false（转人工）。 */
 const isWithinWorkspace = (p: string, cwd?: string): boolean => {
     if (!p || !cwd) return false;
@@ -54,18 +83,31 @@ const isWithinWorkspace = (p: string, cwd?: string): boolean => {
 };
 
 /**
- * auto 模式判定：返回 allow（放行，等价 allow-once，不写持久规则）/ deny（硬拒）/ ask（转人工）。
+ * 分类器审批判定：返回 allow（放行，allow-once 语义，不写持久规则）/ deny（硬拒）/ ask（转人工）。
+ * @param aggressive false=default（仅文件增删改）；true=/auto（额外含命令/网络/后台/MCP/git_commit）。
  * 静默 fail-closed：分类器异常/超时 → ask（绝不静默放行）。
  */
-export const runAutoCheck = async (name: string, args: any, ctx: ToolContext): Promise<AutoVerdict> => {
-    // 1) 范围限定：仅文件编辑才进 auto
-    if (!AUTO_SCOPE.has(name)) return 'ask';
-    // 2) 工作区围栏：工作区外 → 转人工
-    const p = typeof args?.path === 'string' ? args.path : '';
-    if (!isWithinWorkspace(p, ctx.cwd)) return 'ask';
-    // 3) 内置 deny 清单：敏感文件覆盖 → 硬拒
-    if (matchBuiltinDeny(p)) return 'deny';
-    // 4) 辅助模型分类器：safe→放行，risky/异常→转人工
+export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, aggressive = false): Promise<AutoVerdict> => {
+    // 1) 范围：default 仅文件增删改；aggressive 额外含命令/网络/后台/git_commit + MCP
+    const isFileTool = AUTO_SCOPE.has(name);
+    const inScope = isFileTool || (aggressive && (AUTO_AGGRESSIVE_EXTRA.has(name) || isMcpTool(name)));
+    if (!inScope) return 'ask';
+    // 2) 文件类：工作区围栏 + 敏感文件 deny。move_file 双路径（source+destination），其余单 path
+    if (isFileTool) {
+        const paths = name === 'move_file' ? [args?.source, args?.destination] : [args?.path];
+        for (const p of paths) {
+            const s = typeof p === 'string' ? p : '';
+            if (!isWithinWorkspace(s, ctx.cwd)) return 'ask';
+            if (matchBuiltinDeny(s)) return 'deny';
+        }
+    }
+    // 3) 命令类（aggressive）：高危命令 deny 清单硬拒（兜底分类器误判；命令无 undo）
+    if (name === 'run_command' || name === 'run_in_background') {
+        const cmd = typeof args?.command === 'string' ? args.command : '';
+        if (matchCommandDeny(cmd)) return 'deny';
+    }
+    // 4) 网络/web：SSRF 已在工具内拦截；MCP/git_commit：黑盒/低危——均仅分类器判断
+    // 5) 辅助模型分类器：safe→放行，risky/异常/超时→转人工（fail-closed）
     const v = await classifyToolRisk(name, args, '', ctx.abortSignal);
     return v === 'safe' ? 'allow' : 'ask';
 };

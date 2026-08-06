@@ -523,14 +523,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         denied = true;
                         result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
                     }
-                    // ★ P1-6 auto permission mode：分类器仅 permissionMode==='auto' 且 needApproval 且 !denied 时介入。
-                    //   allow → 免审放行（allow-once 语义，不写持久规则）；deny → 内置高危清单硬拒；ask → 保持 needApproval 转人工（fail-closed）。
-                    //   优先级：checkPermission 显式规则（上方已判）> auto deny 清单 > auto 分类器 > requestApproval 人工 > safetyLevel 默认。
-                    if (options.permissionMode === 'auto' && needApproval && !denied) {
-                        const auto = await runAutoCheck(calledName, calledArgs, toolCtx);
+                    // ★ 分类器审批（P1-6，2026-08-06 两档）：
+                    //   default（permissionMode!=='auto'）：仅文件增删改（edit/write/create/delete_path）跑分类器——高频且均有
+                    //     undo 备份兜底（凡改必可回退），默认自动化减少审批疲劳。
+                    //   /auto（permissionMode==='auto'）：额外覆盖命令/网络/后台/MCP/git_commit——显式 opt-in 的激进档；这些无 undo
+                    //     兜底且是 prompt injection 重灾区，故加 COMMAND_DENY 清单（rm -rf /、curl|sh、外传敏感…）硬拒兜底分类器误判。
+                    //   两档共用：safe→免审放行、risky/异常/超时→转人工、敏感文件/高危命令 deny 清单→硬拒（fail-closed，绝不静默放行）。
+                    //   想对某项目/工具强制人工：配 permissions.ask（优先级高于分类器）。
+                    //   优先级：保护路径 > checkPermission 显式规则（上方已判）> deny 清单 > 分类器 > requestApproval 人工。
+                    if (needApproval && !denied) {
+                        const auto = await runAutoCheck(calledName, calledArgs, toolCtx, options.permissionMode === 'auto');
                         if (auto === 'allow') { needApproval = false; }
                         else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
-                        // 'ask'（risky/不确定/超时/异常/非文件编辑/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
+                        // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
                     }
                     if (needApproval && !denied) {
                         const ra = matchedTool.function.requireApproval;

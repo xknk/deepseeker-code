@@ -40,8 +40,10 @@ export type PendingPlan = { plan: string; resolve: (r: PlanResolution) => void }
 export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string | null) => void };
 
 /** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
- *  80ms≈12fps：在 Windows Terminal 上显著减闪（帧数较 50ms 降约 37%），而流式文本/打字延迟无感。 */
-const FLUSH_MS = 80;
+ *  120ms≈8fps：在 Windows Terminal 上进一步减闪（帧数较 80ms 再降约 33%），流式文本/打字延迟仍可接受。
+ *  闪屏与动态区高度成正比（Ink log-update 全量擦写无行级 diff）——减帧率（此处）+ 减面积
+ *  （App.tsx streamTail cap 14 / 模态打开隐藏尾巴）双管齐下；仍闪则继续调大此处或再降 streamTail。 */
+const FLUSH_MS = 120;
 
 /** 自动执行审批钩子：全部 allow-once 放行（不持久化），用于计划「接受并自动执行」。
  *  安全边界仍生效：checkPermission 的 deny 规则、环境断言、verifyResult 均先于/独立于此，不被绕过。 */
@@ -190,10 +192,13 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     };
 
     const pushUser = useCallback((text: string) => {
-        flush();
+        // ★ 先关闭上一轮流式行（assistant/thinking 进 Static），再 append 新 user——否则新 user（Static）
+        //   会渲染在上一轮仍 streaming 的 assistant 尾巴（动态区）上方，造成新旧对话交叉。
+        //   closeStreaming 内含 flush 且幂等（final 已关则 no-op），作边界时序的兜底。
+        closeStreaming();
         const id = newRowId();
         setRows((prev) => [...prev, { id, kind: "user", text }]);
-    }, [flush]);
+    }, [closeStreaming]);
 
     /** 追加一条中性信息行（本地斜杠命令回显等，非错误、非轮次）。 */
     const pushInfo = useCallback((text: string) => {
