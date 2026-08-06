@@ -39,8 +39,9 @@ import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHo
 const KNOWN_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
 const CWD = process.cwd();
 
-/** 单行渲染分发：tool/thinking 走专用组件，其余走 MessageBlock。 */
+/** 单行渲染分发：tool/thinking/todos 走专用组件，其余走 MessageBlock。 */
 const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW: number; streamTail?: number; showThinking?: boolean }): React.ReactElement => {
+    if (row.kind === "todos") return <TodosPanel todos={row.todos} wrapW={wrapW} />;
     if (row.kind === "tool") return <ToolCard toolName={row.toolName} args={row.args} result={row.result} ok={row.ok} status={row.status} progress={row.progress} wrapW={wrapW} />;
     if (row.kind === "thinking") return <ThinkingBlock streaming={row.streaming ?? false} startedAt={row.startedAt} durationMs={row.durationMs} tokens={row.tokens} text={row.text} expanded={showThinking} wrapW={wrapW} />;
     // ★ 每轮对话（user 提问）前加淡色横线，视觉分隔各轮，便于在长对话中定位（user 提问 + assistant 回复 = 一个轮次单元）
@@ -55,12 +56,14 @@ const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW
     return <MessageBlock row={row} wrapW={wrapW} streamTail={streamTail} />;
 };
 
-/** 是否留在动态区：仅流式中的 assistant/thinking 与运行中的 tool。
- *  ★ 思考行完成后回 Static——之前"始终动态"导致已完成的思考堆积在末尾（消息混乱）。 */
+/** 是否留在动态区：仅流式中的 assistant/thinking、运行中的 tool、活动中的 todos 行。
+ *  ★ 思考行完成后回 Static——之前"始终动态"导致已完成的思考堆积在末尾（消息混乱）。
+ *  ★ todos 行 active 时留动态区随状态刷新；pushUser 冻结为 Static，留在原位（新消息上方）。 */
 const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "assistant" && !!r.streaming) ||
     (r.kind === "thinking" && !!r.streaming) ||
-    (r.kind === "tool" && r.status === "running");
+    (r.kind === "tool" && r.status === "running") ||
+    (r.kind === "todos" && !!r.active);
 
 export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean }): React.ReactElement => {
     const state = useChatState(resumeSessionId, initialPlanMode, initialAutoMode);
@@ -448,12 +451,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                     : <RowView key={item.id} row={item} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />}
             </Static>
 
-            {/* 动态区：流式尾巴 + 任务面板 + 模态 + 输入 + 状态 */}
+            {/* 动态区：流式尾巴 + 模态 + 输入 + 状态（任务清单已改为内联行，见 RowView / isDynamicRow） */}
             <Box flexDirection="column" width={cols}>
-                <Box paddingX={1}>
-                    <TodosPanel todos={state.todos} wrapW={wrapW} />
-                </Box>
-
                 {/* ★ 治"审批/模态选择闪屏"：任意模态打开时（审批/提问/计划/会话）不渲染流式尾巴，
                     动态区瘦到只剩模态本身 + 输入 + 状态条。否则 ↑↓ 选择会触发 Ink log-update
                     全量擦写「长尾巴 + 高模态」的大动态区 → 闪屏（根因见 cli-render-flicker）。 */}

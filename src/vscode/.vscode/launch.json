@@ -1,0 +1,18 @@
+ {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Run Extension (deepSeekCode)",
+        "type": "extensionHost",
+        "request": "launch",
+        "args": [
+          "--extensionDevelopmentPath=D:\\code\\自研\\deepSeekCode\\src\\vscode"
+        ],
+        "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+        "preLaunchTask": "deepseekCode: build",
+        "env": {
+          "DEEP_SEEK_API_KEY": "${env:DEEP_SEEK_API_KEY}"
+        }
+      }
+    ]
+  }

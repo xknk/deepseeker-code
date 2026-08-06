@@ -30,7 +30,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
 import { requestApproval, isProtectedWrite, getActiveCwd } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
-import { filterToolsForPlanMode, appendEnterPlanModeTool } from "./planMode.ts";
+import { filterToolsForPlanMode, appendPlanControlTools } from "./planMode.ts";
 import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
@@ -99,8 +99,8 @@ type ToolCallOutcome = {
  */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
     const rawToolsAll = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
-    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode；非计划模式：注入 enter_plan_mode 供模型自主进入（见 agent/planMode.ts）
-    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : appendEnterPlanModeTool(rawToolsAll);
+    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode；非计划模式：注入 enter_plan_mode + exit_plan_mode 供模型自主进入计划/提交方案（见 agent/planMode.ts）
+    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : appendPlanControlTools(rawToolsAll);
     const sessionId = options.sessionId; // 本次会话id
     // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
     //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
@@ -702,10 +702,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };
                     const oc = await processToolCall(tc);
                     if (oc.terminal) {
-                        // 终结类：push 本条 result + 补其后占位 + yield plan.* + yield final + 结束 runAgent
+                        // 终结类：push 本条 result + 补其后占位 + yield tool.end + yield plan.* + yield final + 结束 runAgent
                         message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
                         await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
                         await fillRestPlaceholders(idx);
+                        // ★ 补 tool.end：终结类上方已 yield tool.start，但原逻辑直接跳 plan.*/final 未 yield tool.end，
+                        //   导致 CLI 的 ToolCard 永远停在「运行中…」（status 恒 running、滞留动态区），表现为 enter_plan_mode 卡死。
+                        //   工具实际已成功完成（用户已看到方案/进入请求），补发 tool.end 让前端把卡片标记 done 并移出动态区。
+                        yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
                         if (oc.terminal.kind === 'exit_plan_mode') {
                             yield { type: 'plan.proposed', plan: oc.terminal.plan || '' };
                             yield { type: 'final', text: oc.terminal.plan || oc.resultForUser };

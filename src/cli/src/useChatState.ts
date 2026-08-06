@@ -45,6 +45,11 @@ export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string
  *  （App.tsx streamTail cap 14 / 模态打开隐藏尾巴）双管齐下；仍闪则继续调大此处或再降 streamTail。 */
 const FLUSH_MS = 120;
 
+/** 中止安全网宽限期（ms）：用户 Esc/Ctrl+G 后，底层 run 若在此期间仍未结束（忽略 abort 信号、真挂起），
+ *  强制复位 busy/aborting，避免 CLI 被永久卡死（表现：卡住后再次对话无任何输出——busy 恒 true，submit 被 `if(busy) return` 静默吞掉）。
+ *  正常中止在 <1s 内完成（stream 经 signal 立即 break）→ 宽限期内清表，不触发强制复位。 */
+const ABORT_GRACE_MS = 8000;
+
 /** 自动执行审批钩子：全部 allow-once 放行（不持久化），用于计划「接受并自动执行」。
  *  安全边界仍生效：checkPermission 的 deny 规则、环境断言、verifyResult 均先于/独立于此，不被绕过。 */
 const autoRequestApproval = async (): Promise<ApprovalDecision> => 'allow-once';
@@ -66,7 +71,6 @@ const finalizeThinkingRow = (row: Extract<ChatRow, { kind: "thinking" }>): ChatR
  */
 export const useChatState = (initialSessionId?: string, initialPlanMode?: boolean, initialAutoMode?: boolean) => {
     const [rows, setRows] = useState<ChatRow[]>([]);
-    const [todos, setTodos] = useState<Todo[]>([]);
     const [busy, setBusy] = useState(false);
     const [aborting, setAborting] = useState(false);
     /** 是否展开显示思考全文（Ctrl+T 切换；仅对 streaming 思考生效，已完成思考恒收起）。 */
@@ -88,6 +92,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     const sessionIdRef = useRef<string | null>(initialSessionId ?? null);
     const currentAcRef = useRef<AbortController | null>(null);
+    /** 轮次代际：每轮 submit 自增；submit/runOnce 的 finally 据此判断「是否仍是本轮」，
+     *  被中止安全网强制复位或新一轮接管时，旧轮 finally 不再改动状态（防串扰：旧轮复位 busy/aborting 会误伤新轮）。 */
+    const turnGenRef = useRef(0);
+    /** 中止安全网定时器句柄（abortCurrent 设、runOnce 正常结束时清）。 */
+    const abortGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const proposedPlanRef = useRef<string | null>(null);
     /** 模型自主请求进入计划模式时的原因（plan.enterRequested 事件存入；submit 据此转入计划阶段）。 */
     const enterPlanReasonRef = useRef<string | null>(null);
@@ -197,7 +206,12 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         //   closeStreaming 内含 flush 且幂等（final 已关则 no-op），作边界时序的兜底。
         closeStreaming();
         const id = newRowId();
-        setRows((prev) => [...prev, { id, kind: "user", text }]);
+        setRows((prev) => {
+            // ★ 新轮开始：把上一轮的活动 todos 行冻结（active=false → 移入 Static），使其留在原位（新 user 消息上方），
+            //   而非继续挂在动态区底部、落到新消息下方（"已办完的任务内容在新输入的信息下方"的根因）。
+            const frozen = prev.map((r) => (r.kind === "todos" && r.active) ? { ...r, active: false } : r);
+            return [...frozen, { id, kind: "user" as const, text }];
+        });
     }, [closeStreaming]);
 
     /** 追加一条中性信息行（本地斜杠命令回显等，非错误、非轮次）。 */
@@ -280,6 +294,13 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "final": {
                 closeStreaming();
+                // ★ 兜底渲染：若本轮未流式产出正文，final.text 承载的是压缩超窗/模型错误/中止等终结消息
+                //   （handleUnifiedChat 已据此决定是否转发；正常完成时 text 为空，不触发）。显示出来避免静默无输出。
+                const ft = (obj.text as string) ?? "";
+                if (ft) {
+                    const id = newRowId();
+                    setRows((prev) => [...prev, { id, kind: "system", text: ft }]);
+                }
                 break;
             }
             case "error": {
@@ -289,7 +310,20 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 break;
             }
             case "todo.update": {
-                setTodos((obj.todos as Todo[]) ?? []);
+                // ★ 任务清单作为内联行渲染（同 tool 行）：更新当前活动 todos 行；无则追加一行。
+                //   active=true 留动态区随状态刷新；pushUser 时冻结为 Static，留在原位（新消息上方）。
+                const todos = (obj.todos as Todo[]) ?? [];
+                const id = newRowId();
+                setRows((prev) => {
+                    const idx = prev.findIndex((r) => r.kind === "todos" && r.active);
+                    if (idx >= 0) {
+                        const copy = prev.slice();
+                        const cur = copy[idx] as Extract<ChatRow, { kind: "todos" }>;
+                        copy[idx] = { ...cur, todos };
+                        return copy;
+                    }
+                    return [...prev, { id, kind: "todos" as const, todos, active: true }];
+                });
                 break;
             }
             case "tool.denied": {
@@ -374,22 +408,24 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         } catch (e) {
             pushEvent({ type: "error", message: e instanceof Error ? e.message : String(e) });
         } finally {
-            // ★ 中止收尾（问题4）：信号链路已打通（ac.signal → runAgent → SDK），此处补 CLI 侧状态/反馈——
-            //   复位 aborting（原仅在下一次 runOnce 开头复位 → 中止后状态条永远卡"中止中"），并追加可见确认行。
-            if (ac.signal.aborted) {
-                flush();
-                setRows((prev) => [...prev, { id: nextId.current++, kind: "meta", text: "🛑 已中止生成" }]);
+            // ★ 仅当仍是本轮 ac 时清理：被中止安全网强制复位、或新一轮已接管时 currentAcRef 已不是本 ac，
+            //   跳过清理避免串扰（旧轮的 aborting 复位 / ac 清空会误伤正在跑的新轮）。
+            if (currentAcRef.current === ac) {
+                // ★ 中止收尾（问题4）：信号链路已打通（ac.signal → runAgent → SDK），此处补 CLI 侧状态/反馈——
+                //   复位 aborting（原仅在下一次 runOnce 开头复位 → 中止后状态条永远卡"中止中"），并追加可见确认行。
+                if (ac.signal.aborted) {
+                    flush();
+                    setRows((prev) => [...prev, { id: nextId.current++, kind: "meta", text: "🛑 已中止生成" }]);
+                }
+                setAborting(false);
+                currentAcRef.current = null;
+                if (abortGuardRef.current) { clearTimeout(abortGuardRef.current); abortGuardRef.current = null; }
             }
-            setAborting(false);
-            currentAcRef.current = null;
         }
     }, [askApproval, flush, onTrace, pushEvent]);
 
-    /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。 */
-    const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
-        await runOnce(sid, researchPrompt, true);
-        const plan = takeProposedPlan();
-        if (plan == null) return;
+    /** 方案审批 + 实现：弹出方案审批模态，接受则按方案实现（autoExecute=实现阶段免审批）。 */
+    const approveAndImplement = useCallback(async (sid: string, plan: string) => {
         const res = await setPlan(plan);
         if (res.action === 'accept') {
             // ★ 编辑后方案不在 transcript，必须把最终方案全文塞进实现轮 prompt，否则模型按原方案执行。
@@ -399,43 +435,80 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         } else {
             pushInfo(S.planRejected);
         }
-    }, [runOnce, setPlan, takeProposedPlan, pushInfo]);
+    }, [runOnce, setPlan, pushInfo]);
+
+    /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。 */
+    const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
+        await runOnce(sid, researchPrompt, true);
+        const plan = takeProposedPlan();
+        if (plan != null) await approveAndImplement(sid, plan);
+    }, [runOnce, takeProposedPlan, approveAndImplement]);
 
     /** 提交一轮对话。计划模式下走两阶段（调研 → 方案审批 → 实现）；模型亦可在普通轮主动请求进入计划模式。 */
     const submit = useCallback(async (content: string) => {
         const text = content.trim();
         if (!text || busy) return;
-        // 首轮解析并固化 sessionId（跨轮复用，使 transcript/上下文累积）
-        if (sessionIdRef.current == null) {
-            sessionIdRef.current = await getOrCreateSessionId(initialSessionId ?? undefined);
-        }
-        const sid = sessionIdRef.current;
-        pushUser(text);
-
-        if (planModeRef.current) {
-            await runPlanStage(sid, text);
-        } else {
-            await runOnce(sid, text, false);
-            // ★ 模型自主进入计划模式：普通轮内调用 enter_plan_mode → 翻转 planMode 并以只读重跑计划阶段。
-            //   自动进入为「一次性」：计划阶段结束后自动退出，恢复普通模式（手动开启的计划模式不受影响）。
-            const enterReason = takeEnterPlanRequest();
-            if (enterReason != null) {
-                pushInfo(`📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`);
-                planModeRef.current = true;
-                await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
-                planModeRef.current = false;
+        // ★ busy 在此显式置 true 并以 try/finally 兜底复位：保证任何 await 抛错时 busy 不被遗留为 true
+        //   （否则顶部 `if(busy) return` 会吞掉后续所有输入 → "卡住后再次对话无任何输出"）。
+        setBusy(true);
+        const myGen = ++turnGenRef.current;
+        try {
+            // 首轮解析并固化 sessionId（跨轮复用，使 transcript/上下文累积）
+            if (sessionIdRef.current == null) {
+                sessionIdRef.current = await getOrCreateSessionId(initialSessionId ?? undefined);
             }
-        }
-        setBusy(false);
-    }, [busy, initialSessionId, pushUser, pushInfo, runOnce, runPlanStage, takeEnterPlanRequest]);
+            const sid = sessionIdRef.current;
+            pushUser(text);
 
-    /** 中止当前轮（Esc / Ctrl+G）。 */
+            if (planModeRef.current) {
+                await runPlanStage(sid, text);
+            } else {
+                await runOnce(sid, text, false);
+                // ★ 模型在普通轮可能：(a) 调 exit_plan_mode 直接提交方案（自行只读调研后）；(b) 调 enter_plan_mode
+                //   请求进入计划模式。两者都在 runOnce 返回后处理。先看方案（exit）——若已提交则直接走审批弹窗，
+                //   否则看是否请求进入计划模式。这样无论模型走哪条路径都收敛到方案审批，不会退回纯文本方案。
+                const proposedPlan = takeProposedPlan();
+                if (proposedPlan != null) {
+                    await approveAndImplement(sid, proposedPlan);
+                } else {
+                    const enterReason = takeEnterPlanRequest();
+                    if (enterReason != null) {
+                        pushInfo(`📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`);
+                        planModeRef.current = true;
+                        await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
+                        planModeRef.current = false;
+                    }
+                }
+            }
+        } finally {
+            // ★ 代际守卫：被中止安全网强制复位、或已被新一轮接管时（gen 变化）不再复位 busy，避免误伤新轮。
+            if (turnGenRef.current === myGen) setBusy(false);
+        }
+    }, [busy, initialSessionId, pushUser, pushInfo, runOnce, runPlanStage, takeEnterPlanRequest, takeProposedPlan, approveAndImplement]);
+
+    /** 中止当前轮（Esc / Ctrl+G）。
+     *  ★ 安全网：abort 后若宽限期内本轮仍未结束（底层 run 忽略 abort 信号、真挂起——如卡在不查 signal 的
+     *    工具/钩子里、或模型流 stall），强制复位 busy/aborting/currentAc，避免 CLI 被永久卡死。
+     *    代际自增使挂起轮的 submit/runOnce finally 失效，不串扰后续轮。 */
     const abortCurrent = useCallback(() => {
         const ac = currentAcRef.current;
         if (!ac) return;
         setAborting(true);
         ac.abort();
-    }, []);
+        if (abortGuardRef.current) clearTimeout(abortGuardRef.current);
+        abortGuardRef.current = setTimeout(() => {
+            abortGuardRef.current = null;
+            // 仍是这个 ac → 宽限期内未结束：底层真挂起，强制复位避免砖化
+            if (currentAcRef.current === ac) {
+                currentAcRef.current = null;
+                turnGenRef.current++;            // 旧轮 finally 据此跳过状态改动，不误伤后续轮
+                setBusy(false);
+                setAborting(false);
+                flush();
+                setRows((prev) => [...prev, { id: nextId.current++, kind: "meta", text: "🛑 已强制中止（底层未响应中断，已复位，可继续对话）" }]);
+            }
+        }, ABORT_GRACE_MS);
+    }, [flush]);
 
     /** Ctrl+T：切换思考全文显示（仅对 streaming 思考生效；已完成思考进 Static 冻结恒收起）。 */
     const toggleShowThinking = useCallback(() => setShowThinkingText((v) => !v), []);
@@ -443,7 +516,6 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const clearRows = useCallback(() => {
         flush();
         setRows([]);
-        setTodos([]);
         toolRowByCallId.current.clear();
     }, [flush]);
 
@@ -488,7 +560,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, todos, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions,
+        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions,
         sessionIdRef,
         // 动作
         submit, abortCurrent, pushUser, pushInfo, pushEvent,

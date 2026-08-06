@@ -1,0 +1,99 @@
+{
+  "name": "deepseek-code",
+  "displayName": "deepSeekCode",
+  "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
+  "version": "1.0.0",
+  "publisher": "deepSeekCode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:deepseekCode.openChat",
+    "onCommand:deepseekCode.newSession",
+    "onView:deepseekCode.chatView"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "deepseekCode.openChat",
+        "title": "deepSeekCode: 打开聊天"
+      },
+      {
+        "command": "deepseekCode.newSession",
+        "title": "deepSeekCode: 新会话"
+      },
+      {
+        "command": "deepseekCode.abort",
+        "title": "deepSeekCode: 中止生成"
+      },
+      {
+        "command": "deepseekCode.togglePlanMode",
+        "title": "deepSeekCode: 切换计划模式"
+      },
+      {
+        "command": "deepseekCode.toggleAutoMode",
+        "title": "deepSeekCode: 切换自动模式"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deepseekCode",
+          "title": "deepSeekCode",
+          "icon": "$(sparkle)"
+        }
+      ]
+    },
+    "views": {
+      "deepseekCode": [
+        {
+          "type": "webview",
+          "id": "deepseekCode.chatView",
+          "name": "Chat",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "deepSeekCode",
+      "properties": {
+        "deepseekCode.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek API Key。留空时回退读取环境变量 DEEP_SEEK_API_KEY。"
+        },
+        "deepseekCode.model": {
+          "type": "string",
+          "default": "",
+          "description": "默认模型（如 deepseek-v4 / deepseek-v4-flash）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
+        },
+        "deepseekCode.locale": {
+          "type": "string",
+          "enum": ["", "zh", "en"],
+          "default": "",
+          "description": "界面/回复语言。留空表示首次询问。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "package": "npm run build && vsce package --allow-missing-repository",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ignore": "^7.0.5",
+    "openai": "^6.42.0",
+    "undici": "^8.8.0",
+    "vscode-ripgrep": "^1.13.2"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^6.0.3"
+  }
+}

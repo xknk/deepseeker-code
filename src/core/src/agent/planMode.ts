@@ -9,7 +9,7 @@
  *  3) filterToolsForPlanMode —— 过滤工具表为允许集合并注入 exit_plan_mode。
  *
  *  对偶入口（让模型自主进入计划模式，而非只能用户手动开启）：
- *  4) enterPlanModeToolSchema / appendEnterPlanModeTool —— 非计划模式下暴露 enter_plan_mode，模型主动调用；
+ *  4) enterPlanModeToolSchema / appendPlanControlTools —— 非计划模式下暴露 enter_plan_mode（主动进入计划模式）+ exit_plan_mode（自行调研后直接提交方案）；
  *  5) PLAN_MODE_AUTO_ENTER_HINT —— 引导模型对非平凡任务优先进入计划模式的系统提示词。
  */
 import { CustomTool } from "@/tool/index.ts";
@@ -85,10 +85,20 @@ export const enterPlanModeToolSchema = {
 };
 
 /**
- * 非计划模式下把 enter_plan_mode 追加到工具表（filterToolsForPlanMode 的对偶）。
+ * 非计划模式（正常模式）下追加计划控制工具：enter_plan_mode（请求进入专属计划模式）+ exit_plan_mode
+ * （已在正常轮自行只读调研后直接提交方案）。两者均为 runAgent 按名拦截的「终结类」工具。
+ *
+ * ★ 为何正常模式也暴露 exit_plan_mode：DeepSeek 有时会跳过 enter_plan_mode、自行用只读工具（read_file 等）
+ *   先调研，随后想提交方案却找不到 exit_plan_mode（原仅计划模式注入）→ 退回纯文本方案，方案审批弹窗永不触发。
+ *   正常模式一并暴露 exit_plan_mode，使「自行调研后提交方案」也能正确走审批弹窗；enter_plan_mode 仍保留给
+ *   「想进入强制只读的专属计划模式」语义。两条路径都收敛到方案审批。
  * @param tools 完整工具表（agentTools）
- * @returns 追加了 enter_plan_mode 的工具表
+ * @returns 追加了 enter_plan_mode + exit_plan_mode 的工具表
  */
-export function appendEnterPlanModeTool(tools: CustomTool[]): CustomTool[] {
-    return [...tools, enterPlanModeToolSchema as unknown as CustomTool];
+export function appendPlanControlTools(tools: CustomTool[]): CustomTool[] {
+    return [
+        ...tools,
+        enterPlanModeToolSchema as unknown as CustomTool,
+        exitPlanModeToolSchema as unknown as CustomTool,
+    ];
 }

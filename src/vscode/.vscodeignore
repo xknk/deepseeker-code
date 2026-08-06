@@ -1,0 +1,10 @@
+.vscode/**
+src/**
+build.mjs
+tsconfig.json
+node_modules/.cache/**
+**/*.map
+**/tsconfig.tsbuildinfo
+.gitignore
+**/smoke-*.ts
+**/测试工具.md

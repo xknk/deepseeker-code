@@ -16,6 +16,35 @@ import { cleanMsg, Msg } from "./contextCore.ts";
 import { readMessages } from "./transcript.ts";
 import { getRollingState } from "./store.ts";
 /**
+ * 修复孤儿 tool_call：assistant 的 tool_calls 必须每条都有紧随的 tool 结果消息，否则 API 返回 400
+ * （"messages must contain tool responses"）。会话被中途杀掉（assistant 已 appendMessage 落盘、
+ * tool 结果未落盘）时，重建的上下文会出现孤儿 tool_call_id，导致续接/恢复后每次对话都 400。
+ * 此处为缺失项补占位 tool 结果，使被中断的会话仍可续接。
+ */
+const repairOrphanToolCalls = (msgs: Msg[]): Msg[] => {
+    const out: Msg[] = [];
+    for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i] as any;
+        out.push(m);
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+            // 收集紧跟其后的 tool 结果已应答的 tool_call_id
+            const answered = new Set<string>();
+            let j = i + 1;
+            while (j < msgs.length && (msgs[j] as any).role === 'tool') {
+                answered.add((msgs[j] as any).tool_call_id);
+                j++;
+            }
+            // 为未应答的 tool_call 补占位（插在已有 tool 结果之后、下一非 tool 消息之前）
+            for (const tc of m.tool_calls) {
+                if (tc.id && !answered.has(tc.id)) {
+                    out.push({ role: 'tool', tool_call_id: tc.id, content: '（该工具调用因上次会话异常中断未留下结果，已跳过。）' } as Msg);
+                }
+            }
+        }
+    }
+    return out;
+}
+/**
  * 跨会话构建发给模型的上下文视图：
  * - 输出布局 [system, 摘要槽, ...active, user]，与 runAgent.ensureSummarySlot 一致
  * 必须在 appendMessage(本次user) 之前调用，否则本次 user 被重复读入。
@@ -33,7 +62,8 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
         result.push(currentUserMsg)
         return result
     }
-    result.push(...messageAll)
+    // ★ 修复孤儿 tool_call（会话被中断后恢复时，assistant 的 tool_calls 可能缺配对 tool 结果 → API 400）
+    result.push(...repairOrphanToolCalls(messageAll))
     result.push(currentUserMsg);
     return result;
 }

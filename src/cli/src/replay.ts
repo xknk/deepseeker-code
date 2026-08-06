@@ -4,7 +4,7 @@
  *  从 useChatState.tsx 抽出，使其脱离 React/Ink 即可在 node:test 下单测。
  *  唯一外部依赖是 core 的 TraceBase 类型（@/observability/type），无 React/Ink。
  */
-import type { TraceBase } from "@/observability/type.ts";
+import type { TraceBase, Todo } from "@/observability/type.ts";
 
 /** 一行转录（线性消息流）。 */
 export type ChatRow =
@@ -25,7 +25,9 @@ export type ChatRow =
         status: "running" | "done";
         /** 运行中最新进度片段（tool.progress，如 run_command 的 stdout 末行）；done 后不展示。 */
         progress?: string;
-    };
+    }
+    /** 任务清单行（内联于消息流）：active=true 时留动态区随状态更新；新轮开始冻结为 Static，留在原位（新消息上方）。 */
+    | { id: number; kind: "todos"; todos: Todo[]; active?: boolean };
 
 /**
  * 从转录消息重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。

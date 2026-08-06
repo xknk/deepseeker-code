@@ -130,6 +130,9 @@ export const handleUnifiedChat = async (
     await appendMessage({ sessionId, role: 'user', content: inbound.content })
 
     let replyText = "";
+    // ★ 本轮是否已流式产出正文（text.delta）。若否，final.text 是压缩超窗/模型 400/中止等「首字符前终结」
+    //   路径下唯一的用户可见消息载体——转发时不可清空，否则 CLI 静默无输出（"卡住后再次对话无任何输出"）。
+    let streamedAnyText = false;
     // ★ 宿主注入：CLI 等可传自己的 requestApproval/onUIEvent；缺省回退 Web 宿主（SSE + approvalGate）。
     //   serve 调用点不传 opts → 走 Web 宿主，行为与重构前完全一致。
     const onUIEvent = opts?.onUIEvent ?? ((evt: UIEvent) => sseWrite?.(evt));
@@ -165,10 +168,12 @@ export const handleUnifiedChat = async (
     //   无 session worktree 时 getActiveWorkspaceRoot/getActiveCwd 走原回退，行为零回归。
     await runWithSessionContext(sessionId, async () => {
         for await (const event of runAgent(fullMessages, options)) {
+            if (event.type === 'text.delta') streamedAnyText = true;
             if (event.type === 'final') {
                 replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
-                // SSE 模式：流式文本已由 text.delta 实时推送，final 仅作结束信号（text 置空，避免前端重复显示全文）
-                sseWrite?.({ type: 'final', text: '' });
+                // SSE/CLI 模式：本轮已流式推送过正文 → final 仅作结束信号（text 置空，避免前端重复显示全文）；
+                //   本轮【未产出正文】（压缩超窗/模型 400/中止等首字符前终结）→ final.text 是唯一可见消息，必须原样转发。
+                sseWrite?.({ type: 'final', text: streamedAnyText ? '' : event.text });
             } else {
                 sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
             }
