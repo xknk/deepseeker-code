@@ -27,6 +27,9 @@
  *   - http：POST 上下文 JSON 到 url，按响应决策 deny（webhook/云集成，httpExecutor）。必需 url（http/https）。
  *           响应体为 JSON 且含 {deny:true,reason} 即拒；否则非 2xx 按 denyOnNonZero 决策。
  *   - prompt：经 contextAdditions 通道向 agent 注入文本（仅 UserPromptSubmit 合法）。必需 text；不 deny。
+ *   - agent：spawn 子 agent 智能评判（仅 PreToolUse 合法）。必需 task；子 agent 按 DECISION 协议
+ *           （最后一行 DENY: <理由> / ALLOW）决策；深度门控防递归（仅主 agent depth=0 触发）。
+ *           注：每次命中工具调用都 spawn 一个完整子 agent，成本显著，谨慎配置。
  */
 import fs from "fs/promises";
 import path from "path";
@@ -34,6 +37,8 @@ import { appConfig } from "@/config/index.ts";
 import { registerHooks } from "./registry.ts";
 import { executeHookCommand } from "./shellExecutor.ts";
 import { executeHttpHook } from "./httpExecutor.ts";
+import { runSubagent } from "@/agent/subagent.ts";
+import { agentTools } from "@/tool/index.ts";
 import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT } from "./types.ts";
 
 /** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
@@ -50,6 +55,8 @@ interface RawHookRule {
     headers?: Record<string, string>;
     /** type='prompt' 的注入文本（仅 UserPromptSubmit 合法） */
     text?: string;
+    /** type='agent' 的评判任务（仅 PreToolUse 合法；spawn 子 agent 评判并按 DECISION 协议决策） */
+    task?: string;
     /** 仅 Pre/PostToolUse 用 */
     matcher?: string;
     timeoutMs?: number;
@@ -123,7 +130,7 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
         console.warn(`⚠️ [hooks] ${event}[${idx}] 非对象（${src}），已跳过`);
         return null;
     }
-    const type: HookType = raw.type === 'http' || raw.type === 'prompt' ? raw.type : 'command';
+    const type: HookType = raw.type === 'http' || raw.type === 'prompt' || raw.type === 'agent' ? raw.type : 'command';
     const where = `${event}[${idx}]（${src}）`;
 
     // —— 按 type 校验各自必需字段 ——
@@ -144,7 +151,7 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
             console.warn(`⚠️ [hooks] ${where} http 类型 url 须为 http/https 协议（得 ${proto || "非法 URL"}），已跳过`);
             return null;
         }
-    } else { // prompt
+    } else if (type === 'prompt') {
         if (typeof raw.text !== "string" || !raw.text.trim()) {
             console.warn(`⚠️ [hooks] ${where} prompt 类型缺少有效 text，已跳过`);
             return null;
@@ -152,6 +159,17 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
         // prompt 注入只在进 agent 前（UserPromptSubmit）有意义；其余事件 warn+skip
         if (event !== 'UserPromptSubmit') {
             console.warn(`⚠️ [hooks] ${where} prompt 类型仅支持 UserPromptSubmit 事件（注入只在进 agent 前生效），已跳过`);
+            return null;
+        }
+    } else { // agent
+        if (typeof raw.task !== "string" || !raw.task.trim()) {
+            console.warn(`⚠️ [hooks] ${where} agent 类型缺少有效 task，已跳过`);
+            return null;
+        }
+        // agent 评判需 ctx.toolContext（仅工具事件携带）且 deny 有意义（仅 PreToolUse 可拦截）；
+        // PostToolUse 是观察型（deny 被忽略），spawn 子 agent 纯浪费 → 限制到 PreToolUse。
+        if (event !== 'PreToolUse') {
+            console.warn(`⚠️ [hooks] ${where} agent 类型仅支持 PreToolUse 事件（需 ctx.toolContext 且能 deny），已跳过`);
             return null;
         }
     }
@@ -189,6 +207,7 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
         method: type === 'http' && typeof raw.method === "string" && raw.method.trim() ? raw.method.trim().toUpperCase() : undefined,
         headers: type === 'http' && headersRaw && typeof headersRaw === "object" && !Array.isArray(headersRaw) ? headersRaw as Record<string, string> : undefined,
         text: type === 'prompt' && typeof raw.text === "string" ? raw.text : undefined,
+        task: type === 'agent' && typeof raw.task === "string" ? raw.task : undefined,
         matcher,
         timeoutMs,
         denyOnNonZero,
@@ -197,7 +216,27 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
     };
 };
 
-/** 把校验后的规则编译为 HookRule（按 type 分派到 shellExecutor / httpExecutor / prompt 注入）。导出供单测覆盖类型分支。 */
+/**
+ * 解析 agent hook 子 agent 输出的 DECISION 协议（取最后一行 `DENY: <理由>` / `ALLOW`，忽略大小写）。
+ * @returns { deny, explicit } —— explicit=true=解析到明确决策行；false=无（调用方按 denyOnNonZero 兜底）。
+ * 导出供单测。
+ */
+export const parseAgentDecision = (output: string): { deny: boolean; reason?: string; explicit: boolean } => {
+    const lines = (output ?? "").split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const m = lines[i].match(/^\s*(DENY|ALLOW)\b[：:]?\s*(.*)$/i);
+        if (m) {
+            if (m[1].toUpperCase() === "DENY") {
+                const reason = m[2].trim();
+                return { deny: true, reason: reason || undefined, explicit: true };
+            }
+            return { deny: false, explicit: true };
+        }
+    }
+    return { deny: false, explicit: false };
+};
+
+/** 把校验后的规则编译为 HookRule（按 type 分派到 shellExecutor / httpExecutor / prompt 注入 / agent 子 agent）。导出供单测覆盖类型分支。 */
 export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
     // 安全默认：PreToolUse hook 异常（非零/超时/非 2xx）则拦截；其余事件默认不拦截
     const denyOnNonZero = raw.denyOnNonZero ?? (event === "PreToolUse");
@@ -209,6 +248,47 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
     if (raw.type === 'prompt') {
         const text = raw.text!;
         return { ...base, run: async () => ({ contextAdditions: [text] }) };
+    }
+
+    // —— agent：spawn 子 agent 智能评判（仅 PreToolUse；深度门控防递归；DECISION 协议决策 deny）——
+    if (raw.type === 'agent') {
+        const task = raw.task!;
+        return {
+            ...base,
+            run: async (ctx: any) => {
+                const tc = ctx?.toolContext;
+                // ★ 深度门控：仅主 agent（depth=0）触发。子 agent（depth>0）的工具调用跳过本 hook——
+                //   否则子 agent 的工具调用会再触发 PreToolUse → 再 spawn 子 agent → 树状 fan-out 爆炸。
+                //   （command/http/prompt 不受此门控影响，仍全深度触发。）
+                if (!tc || (typeof tc.depth === "number" && tc.depth > 0)) return { deny: false };
+                const fullTask = [
+                    "审查即将执行的工具调用，决定是否放行。",
+                    `工具：${ctx?.toolName ?? "(未知)"}`,
+                    `参数：${JSON.stringify(ctx?.args) ?? "{}"}`,
+                    "",
+                    `评判要求：${task}`,
+                    "",
+                    '决策协议：在你的回复【最后一行】输出决策——拒绝用 "DENY: <理由>"，放行用 "ALLOW"。',
+                ].join("\n");
+                const res = await runSubagent({ task: fullTask }, tc, () => agentTools);
+                if (!res.ok) {
+                    // 子 agent 崩溃/中止/超深：按 denyOnNonZero 决策（默认 PreToolUse=true fail-closed）
+                    return denyOnNonZero
+                        ? { deny: true, reason: `hook agent 评判失败：${res.output}` }
+                        : { deny: false };
+                }
+                const decision = parseAgentDecision(res.output);
+                if (decision.explicit) {
+                    return decision.deny
+                        ? { deny: true, reason: decision.reason ?? "hook agent 拒绝（未给理由）" }
+                        : { deny: false };
+                }
+                // 无明确 DECISION 行：按 denyOnNonZero 兜底（默认 fail-closed 拒绝）
+                return denyOnNonZero
+                    ? { deny: true, reason: "hook agent 未输出明确决策（DENY/ALLOW），按 fail-closed 拒绝" }
+                    : { deny: false };
+            },
+        };
     }
 
     // —— http：POST 上下文到 url，按响应决策 deny ——

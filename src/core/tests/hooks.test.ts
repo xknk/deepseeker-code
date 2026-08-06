@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { matches, registerHook, clearHooks, dispatch } from "@/hooks/registry.ts";
-import { compileRule, validateRule } from "@/hooks/loader.ts";
+import { compileRule, validateRule, parseAgentDecision } from "@/hooks/loader.ts";
 import { executeHttpHook } from "@/hooks/httpExecutor.ts";
 import { requestApproval } from "@/tool/guard.ts";
 import { ToolSafetyLevel } from "@/tool/type.ts";
@@ -314,5 +314,69 @@ describe("validateRule（执行类型校验 · P1-8）", () => {
         assert.equal(r?.text, '注入');
         assert.equal(r?.denyOnNonZero, undefined, 'prompt 不消费 denyOnNonZero');
         assert.equal(r?.onError, undefined, 'prompt 不消费 onError');
+    });
+
+    it("agent 类型缺 task → null", () => {
+        assert.equal(validateRule({ type: 'agent' }, 'PreToolUse', SRC, IDX), null);
+    });
+
+    it("agent 类型仅 PreToolUse 合法；其余事件 → null", () => {
+        assert.equal(validateRule({ type: 'agent', task: 'x' }, 'PostToolUse', SRC, IDX), null);
+        assert.equal(validateRule({ type: 'agent', task: 'x' }, 'UserPromptSubmit', SRC, IDX), null);
+        assert.equal(validateRule({ type: 'agent', task: 'x' }, 'Stop', SRC, IDX), null);
+    });
+
+    it("agent 类型合法（PreToolUse + task）→ 通过", () => {
+        const r = validateRule({ type: 'agent', task: '审查安全性', matcher: 'run_command' }, 'PreToolUse', SRC, IDX);
+        assert.equal(r?.type, 'agent');
+        assert.equal(r?.task, '审查安全性');
+        assert.equal(r?.matcher, 'run_command');
+    });
+});
+
+describe("parseAgentDecision（agent hook DECISION 协议解析）", () => {
+    it("DENY 带理由 → deny + reason", () => {
+        const d = parseAgentDecision("分析...\nDENY: 命令含 rm -rf，高危");
+        assert.equal(d.deny, true);
+        assert.equal(d.reason, "命令含 rm -rf，高危");
+        assert.equal(d.explicit, true);
+    });
+    it("ALLOW → 放行 + explicit", () => {
+        const d = parseAgentDecision("看起来安全\nALLOW");
+        assert.equal(d.deny, false);
+        assert.equal(d.explicit, true);
+    });
+    it("无 DECISION 行 → explicit:false（调用方按 denyOnNonZero 兜底）", () => {
+        const d = parseAgentDecision("只是分析，没有给结论");
+        assert.equal(d.deny, false);
+        assert.equal(d.explicit, false);
+    });
+    it("多次出现 → 取最后一行决策", () => {
+        const d = parseAgentDecision("DENY: 第一次想法\n重新考虑后\nALLOW");
+        assert.equal(d.deny, false, "取最后一条 ALLOW");
+    });
+    it("大小写不敏感 + 中文冒号兼容", () => {
+        assert.equal(parseAgentDecision("deny：危险").deny, true);
+        assert.equal(parseAgentDecision("allow").explicit, true);
+    });
+    it("DENY 无理由 → deny + reason undefined", () => {
+        const d = parseAgentDecision("DENY");
+        assert.equal(d.deny, true);
+        assert.equal(d.reason, undefined);
+    });
+});
+
+describe("compileRule agent 分支（深度门控防递归 · P1-8）", () => {
+    it("depth>0（子 agent 的工具调用）→ 直接放行，不 spawn 子 agent（防 fan-out）", async () => {
+        const rule = compileRule('PreToolUse', { type: 'agent', task: '审查', matcher: 'edit_file' });
+        // depth=1 模拟子 agent 的工具调用：必须短路返回 deny:false，绝不进入 runSubagent
+        const res: any = await rule.run({ toolName: 'edit_file', toolContext: { depth: 1 } });
+        assert.equal(res.deny, false, '子 agent 深度应跳过 agent hook');
+    });
+
+    it("toolContext 缺失 → 安全放行（无 ctx.toolContext 无法 spawn）", async () => {
+        const rule = compileRule('PreToolUse', { type: 'agent', task: '审查', matcher: 'edit_file' });
+        const res: any = await rule.run({ toolName: 'edit_file' });
+        assert.equal(res.deny, false);
     });
 });

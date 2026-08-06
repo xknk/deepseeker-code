@@ -123,9 +123,10 @@ export interface PermissionRequestCtx extends BaseHookCtx {
 /** hook 执行类型（声明式配置的 type 字段；缺省 'command'）。
  *  - command：spawn shell 命令（既有行为，shellExecutor）；
  *  - http：POST 上下文 JSON 到 url，按响应决策 deny（webhook/云集成，httpExecutor）；
- *  - prompt：向 agent 注入附加上下文文本（仅 UserPromptSubmit 合法，经 contextAdditions 通道）。
+ *  - prompt：向 agent 注入附加上下文文本（仅 UserPromptSubmit 合法，经 contextAdditions 通道）；
+ *  - agent：spawn 子 agent 智能评判（仅 PreToolUse 合法，经 runSubagent；DECISION 文本协议决策 deny）。
  */
-export type HookType = 'command' | 'http' | 'prompt';
+export type HookType = 'command' | 'http' | 'prompt' | 'agent';
 
 /**
  * hook 返回值。
