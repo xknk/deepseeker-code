@@ -1,7 +1,7 @@
 /**
  * @file tool/type.ts
  * @description 工具系统的核心协议定义：
- *  1) 安全等级枚举 ToolSafetyLevel、执行状态枚举 ToolExecutionResultStatus、流式载荷 ToolStreamPayload；
+ *  1) 安全等级枚举 ToolSafetyLevel、执行状态枚举 ToolExecutionResultStatus；
  *  2) 运行时上下文 ToolContext（会话、中止信号、深度、审批通道等）；
  *  3) 终极工具协议 CustomTool —— 兼容 OpenAI Tool Call，并扩展执行调度 / 安全风控 /
  *     并发锁 / 上下文裁剪 / 环境断言 / 防幻觉校验 / 终端渲染等工业级字段。
@@ -41,20 +41,6 @@ export enum ToolExecutionResultStatus {
     TIMEOUT = 'timeout',
     ABORTED = 'aborted'
 }
-
-/** 
- * 工具流式输出的结构化载荷
- * 专门用于将终端炫酷交互（Spinners/Metrics/进度条）与大模型的纯文本上下文进行工程解耦
- */
-export type ToolStreamPayload =
-    /** 正常的标准输出文本或流式日志片断 */
-    | { type: 'text'; content: string }
-    /** 告知终端渲染层：开始转圈圈或停止转圈圈 */
-
-    | { type: 'spinner'; action: 'start' | 'stop'; message?: string }
-    /** 告知终端渲染层：更新某些数字指标（如 "已扫描文件: 140 个"） */
-
-    | { type: 'metrics'; key: string; value: number | string };
 
 
 /**
@@ -120,7 +106,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 工具核心执行逻辑
          * - 支持返回 AsyncGenerator 以实现流式输出（如 tail -f 的实时日志或长任务进度）
          */
-        execute: (args: any, ctx: ToolContext) => Promise<string> | AsyncGenerator<ToolStreamPayload | string>;
+        execute: (args: any, ctx: ToolContext) => Promise<string> | AsyncGenerator<string>;
 
         /**
          * 是否可以同步执行
@@ -205,15 +191,8 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         };
 
         /* ================= 3.8 多维终端交互与元数据 (UI & Metadata) ================= */
-
-        /**
-         * 自定义终端渲染器选项 (CLI Rendering Strategy)
-         * 告诉执行层在终端如何向人类用户展示该工具的运行时外观。
-         * - 'hidden': 悄悄执行，不污染人类的终端屏幕（如一些内部状态检测工具）
-         * - 'panel': 在终端右侧或独立区块开辟一个动态面板展示（如正在跑的 Web Dev Server 日志）
-         * - 'inline': 正常的标准输出插入
-         * 保留字段：当前 web 宿主的面板渲染未就绪，执行层统一走 inline；待前端支持 panel/hidden 分流后再接线。
-         */
-        displayStrategy?: 'inline' | 'panel' | 'hidden';
+        // 已移除 displayStrategy / ToolStreamPayload（无消费方死字段，2026-08-06 清理）：
+        //   displayStrategy 仅 todo 赋值但执行层无分支读取；ToolStreamPayload 在 collectToolResult 只收 string。
+        //   需要面板/hidden 分流或 spinner/metrics 流式载荷时再加回。
     };
 };

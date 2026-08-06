@@ -3,8 +3,9 @@
  * @description auto permission mode 的业务封装：决定一个工具调用在 auto 模式下是放行/硬拒/转人工。
  *
  *  分层判定（runAgent processToolCall 在 checkPermission 之后、requestApproval 之前调用 runAutoCheck）：
- *   1) 范围限定：仅 edit_file / write_file / create_file 才进 auto；其余（run_command/web_fetch/delete_path/
- *      run_in_background/MCP）一律 'ask'（转人工）——命令/网络/删除/MCP 的 prompt injection 风险高。
+ *   1) 范围限定：edit_file / write_file / create_file / delete_path 才进 auto；其余（run_command/web_fetch/
+ *      run_in_background/MCP/git_commit）一律 'ask'（转人工）——命令/网络/后台/MCP 的 prompt injection 风险高。
+ *      delete_path 纳入：爆炸半径虽大，但有完整 undo 备份兜底（backupDelete 整树快照 + 失败阻断写入），删错可 undo_restore。
  *   2) 工作区围栏：path 不在工作区内 → 'ask'（转人工）。复用 cwd 边界判定。
  *   3) 内置 deny 清单：覆盖敏感文件（.env/.git/.ssh/密钥/credentials 等）→ 'deny'（硬拒，不转人工）。
  *   4) 辅助模型分类器：safe → 'allow'（放行）；risky/异常/超时 → 'ask'（转人工，fail-closed）。
@@ -18,8 +19,8 @@ import type { ToolContext } from "./type.ts";
 
 export type AutoVerdict = 'allow' | 'deny' | 'ask';
 
-/** auto 模式只覆盖工作区内的文件编辑工具；命令/网络/删除/后台/MCP 一律转人工。 */
-const AUTO_SCOPE = new Set(['edit_file', 'write_file', 'create_file']);
+/** auto 模式覆盖工作区内文件编辑 + delete_path（undo 备份兜底）；命令/网络/后台/MCP/git_commit 一律转人工。 */
+const AUTO_SCOPE = new Set(['edit_file', 'write_file', 'create_file', 'delete_path']);
 
 /**
  * 内置高危文件清单：即使分类器说 safe，覆盖这些路径也硬拒（deny）。
