@@ -18,7 +18,7 @@ DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、�
 ## 前置要求
 
 - **Node.js ≥ 20**（esbuild target node20）
-- **DeepSeek API Key**：仅通过环境变量 `DEEP_SEEK_API_KEY` 提供（**无交互式输入、无 `--model` 参数**）；缺失会直接退出并提示。
+- **DeepSeek API Key**：通过 `~/.deepseeker-code/config.json` 的 `apiKey` 字段**或**环境变量 `DEEP_SEEK_API_KEY` 提供（**无交互式输入、无 `--model` 参数**）；两者都缺会直接退出并提示。
 - **真实终端（TTY）**：UI 基于 React Ink，依赖 TTY；不要在 `npm run` / 管道 / 非交互 shell 里跑。
 
 ---
@@ -29,7 +29,10 @@ DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、�
 # 1. 全局安装
 npm install -g deepseeker-code
 
-# 2. 配置 API Key（写入 shell 配置持久化，如 ~/.bashrc / ~/.zshrc / PowerShell $PROFILE）
+# 2. 配置 API Key（二选一）
+#    方式 A（推荐，免环境变量）：写入 ~/.deepseeker-code/config.json
+mkdir -p ~/.deepseeker-code && echo '{ "apiKey": "sk-你的key" }' > ~/.deepseeker-code/config.json
+#    方式 B：环境变量（写入 shell 配置持久化，如 ~/.bashrc / ~/.zshrc / PowerShell $PROFILE）
 export DEEP_SEEK_API_KEY=sk-你的key          # Windows PowerShell: $env:DEEP_SEEK_API_KEY="sk-..."
 
 # 3. 进入项目目录运行（agent 的工作区 = 当前目录）
@@ -79,6 +82,46 @@ deepseeker-code --plan
 
 ## 配置
 
+DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.json（CLI）/ 设置项（VSCode）> 内置默认**。环境变量始终最高，作为临时覆盖/CI 的逃生通道。
+
+### 配置文件 config.json（CLI 推荐）
+
+不必再到处设环境变量——把连接/模型/运行时配置写进 `~/.deepseeker-code/config.json`（全局；位于 `DEEPSEEKER_CODE_DATA_DIR` 指向的目录），CLI 启动时自动读取并回填，**仅当对应环境变量未设时才采用 config.json 的值**。
+
+```jsonc
+// ~/.deepseeker-code/config.json
+{
+  "apiKey": "sk-你的key",            // 不必再 export DEEP_SEEK_API_KEY
+  "model": "deepseek-v4-flash",
+  "auxModel": "deepseek-v4-flash",
+  "apiUrl": "https://api.deepseek.com",
+  "reasoningEffort": "high",          // high | max
+  "thinking": true,                   // 默认开；false 关闭深度思考
+  "parallelSafeTools": true,          // 默认开；false 回退同轮工具完全串行
+  "workflowConcurrency": 4,
+  "workflowMaxSteps": 8,
+  "streamIdleTimeoutMs": 120000
+}
+```
+
+| 字段 | 类型 | 默认 | 对应环境变量 |
+| --- | --- | --- | --- |
+| `apiKey` | string | — | `DEEP_SEEK_API_KEY` |
+| `apiUrl` | string | `https://api.deepseek.com` | `DEEP_SEEK_API_URL` |
+| `model` | string | `deepseek-v4-flash` | `DEEP_SEEK_MODEL` |
+| `auxModel` | string | `deepseek-v4-flash` | `DEEP_SEEK_AUX_MODEL` |
+| `reasoningEffort` | `high`\|`max` | `high` | `DEEP_SEEK_REASONING_EFFORT` |
+| `thinking` | boolean | `true` | `DEEP_SEEK_THINKING`（false→`0`） |
+| `parallelSafeTools` | boolean | `true` | `DEEP_SEEK_PARALLEL_SAFE_TOOLS`（false→`0`） |
+| `streamIdleTimeoutMs` | number | `120000` | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` |
+| `workflowConcurrency` | number | `4` | `DEEP_SEEK_WORKFLOW_CONCURRENCY` |
+| `workflowMaxSteps` | number | `8` | `DEEP_SEEK_WORKFLOW_MAX_STEPS` |
+
+> - **VSCode 插件不读 config.json**——在设置界面（`deepseekerCode.*`）配置，字段语义与上表一致。
+> - 文件缺失或字段留空都安全（回退环境变量/默认）；JSON 解析失败会打 stderr 警告并忽略整个文件，不阻断启动。
+> - `DEEPSEEKER_CODE_DATA_DIR` 仍只能用环境变量设（它决定 config.json 的位置，鸡生蛋）。
+> - config.json 明文存放 `apiKey`（与环境变量同等明文），建议加文件权限（`chmod 600`）。
+
 ### 环境变量
 
 #### 模型 / API（`DEEP_SEEK_*` — 指向 DeepSeek 厂商）
@@ -98,7 +141,7 @@ deepseeker-code --plan
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
 | `DEEPSEEKER_CODE_DATA_DIR` | 用户数据目录（会话/skills/hooks/mcp 全在此） | `~/.deepseeker-code` |
-| `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `1` 开启同轮只读工具并发 | 关（串行） |
+| `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `0` 关闭同轮只读工具并发（默认开） | 开（并发） |
 | `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
 | `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
 | `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |
@@ -186,6 +229,7 @@ MCP 配置（`mcp.json`，独立文件）：
 
 ```text
 ~/.deepseeker-code/
+├── config.json            # 连接/模型/运行时配置（CLI 读取，见「配置」段）
 ├── settings.json          # 声明式配置（engine/hooks/permissions/statusLine）
 ├── mcp.json               # MCP server 配置（独立文件）
 ├── prefs.json             # UI 偏好（语言等）

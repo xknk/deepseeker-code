@@ -424,6 +424,11 @@ switch (evt.type) {
         closeStreaming();
         addInfo(String(evt.text ?? ""));
         break;
+      case "replayDone":
+        // ★ 回放结束（host 经 sink 包成 evt 发来，故在此处理而非 onMessage）：所有历史行已入 DOM，
+        //   强制滚到底展示最新对话。rAF 等一帧布局再量 scrollHeight，避免异步渲染/图片高度未定导致量到旧值。
+        requestAnimationFrame(() => scrollToBottom());
+        break;
       case "todo.update": {
         state.todos = Array.isArray(evt.todos) ? evt.todos : [];
         renderTodos();

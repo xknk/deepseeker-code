@@ -97,6 +97,48 @@
           ],
           "default": "",
           "description": "界面/回复语言。留空表示首次询问。"
+        },
+        "deepseekerCode.apiUrl": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek 兼容 API 接入点。留空回退环境变量 DEEP_SEEK_API_URL，再缺省 https://api.deepseek.com。"
+        },
+        "deepseekerCode.auxModel": {
+          "type": "string",
+          "default": "",
+          "description": "辅助模型（摘要等轻量任务）。留空回退 DEEP_SEEK_AUX_MODEL，再缺省 deepseek-v4-flash。"
+        },
+        "deepseekerCode.reasoningEffort": {
+          "type": "string",
+          "enum": ["", "high", "max"],
+          "default": "",
+          "description": "推理力度。留空回退 DEEP_SEEK_REASONING_EFFORT，再缺省 high。（low/medium 已废弃）"
+        },
+        "deepseekerCode.thinking": {
+          "type": "string",
+          "enum": ["", "on", "off"],
+          "default": "",
+          "description": "深度思考开关。默认开；选 off 关闭（等价 DEEP_SEEK_THINKING=0）。"
+        },
+        "deepseekerCode.parallelSafeTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "同轮 SAFE 只读工具并发执行（写工具/审批/终结类/后台工具仍串行）。默认开；关掉回退完全串行。"
+        },
+        "deepseekerCode.workflowConcurrency": {
+          "type": "number",
+          "default": 0,
+          "description": "run_workflow 子 agent 并发上限。留空(0)回退 DEEP_SEEK_WORKFLOW_CONCURRENCY，缺省 4。"
+        },
+        "deepseekerCode.workflowMaxSteps": {
+          "type": "number",
+          "default": 0,
+          "description": "run_workflow 单次最大步骤数。留空(0)回退 DEEP_SEEK_WORKFLOW_MAX_STEPS，缺省 8。"
+        },
+        "deepseekerCode.streamIdleTimeoutMs": {
+          "type": "number",
+          "default": 0,
+          "description": "流式 idle 超时(ms)。留空(0)回退 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS，缺省 120000。"
         }
       }
     },

@@ -80,9 +80,11 @@ export const appConfig = {
      * 注意：即便放行，云元数据端点（169.254.169.254 等）仍硬拦防凭证窃取。
      */
     webFetchAllowPrivate: process.env.WEB_FETCH_ALLOW_PRIVATE === "1",
-    /** P0-1 并行工具执行灰度开关：设 DEEP_SEEK_PARALLEL_SAFE_TOOLS=1 开启后，同一轮多个 SAFE 只读工具并发执行
-     *  （写工具 / 审批 / 终结类 / 后台工具仍串行，appendMessage 落盘始终串行）。默认关闭 = 完全串行现状，零回归。 */
-    parallelSafeTools: process.env.DEEP_SEEK_PARALLEL_SAFE_TOOLS === "1",
+    /** P0-1 并行工具执行开关：默认开启——同一轮多个 SAFE 只读工具并发执行
+     *  （写工具 / 审批 / 终结类 / 后台工具仍串行，appendMessage 落盘始终串行）。设 DEEP_SEEK_PARALLEL_SAFE_TOOLS=0 回退完全串行。
+     *  ★ 反向语义（默认开，与 MODEL_THINKING_ENABLED 同构）：仅显式 "0" 关闭，其余值/未设均为开。
+     *    可经 config.json 的 parallelSafeTools:false / VSCode 设置项 / env=0 关闭（env 优先级最高）。 */
+    parallelSafeTools: process.env.DEEP_SEEK_PARALLEL_SAFE_TOOLS !== "0",
     /** P0-3 多 subagent 并行编排（run_workflow）默认并发上限：限制同时在飞的子 agent 数，
      *  防止模型一次性派生十几个子 agent 打爆 DeepSeek API 速率 / 计费。env DEEP_SEEK_WORKFLOW_CONCURRENCY 可覆盖。 */
     workflowConcurrency: Number(process.env.DEEP_SEEK_WORKFLOW_CONCURRENCY) || 4,

@@ -104,6 +104,8 @@ const BUILTIN_IGNORE_RULES = [
     ".vs", "Debug", "Release", "out",
     ".DerivedData", "Pods",
     ".idea", ".vscode", "*.log", ".env",
+    "*.tmp",  // ★ 原子写临时文件(makeTmpPath 产物):正常被 rename 消费、抛错被 unlink,仅硬中断泄漏;
+              //   纳入忽略让 list_dir/read_file/git 不再曝光(泄漏残体的实盘清扫见 fs.ts 的 sweepStaleAtomicTmp)
 ];
 const ignoreCache = new Map<string, ReturnType<typeof ignore>>();
 const ignoreBuilding = new Map<string, Promise<ReturnType<typeof ignore>>>();

@@ -72,6 +72,48 @@ export const makeTmpPath = (absPath: string): string =>
     `${absPath}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
 
 /**
+ * 原子写临时文件命名指纹：`.<时间戳>.<随机段>.tmp`。makeTmpPath 生成、本处清扫消费，共用同一正则——
+ * 仅认这个结构，绝不盲删用户正经的 `*.tmp`（误删风险收敛到「文件名恰好是 xxx.1690000000.a3f2k.tmp」这种天文小概率）。
+ */
+const ATOMIC_TMP_RE = /\.\d+\.[a-z0-9]{1,12}\.tmp$/i;
+
+/**
+ * 启动清扫：删除工作区内泄漏的原子写临时文件（makeTmpPath 产物）。
+ * 正常成功路径被 rename 消费、抛错路径被 finally/unlink 回收；唯有「硬中断」（进程被杀 / 超时熔断 / 断电）
+ * 停在 writeFile(tmp) 与 rename(tmp→target) 之间时会永久泄漏——会话启动扫一次即可根治「项目里攒一堆 .tmp」。
+ *
+ * - 仅删指纹匹配（ATOMIC_TMP_RE）且 mtime 早于 staleSeconds 的文件：避开启动瞬间理论上的在途写入。
+ * - 跳过重型目录（node_modules/.git 等）防止深树慢扫；其余递归。
+ * - 永不抛错（catch 吞掉）、fire-and-forget 调用方不阻塞会话启动。返回删除条数（仅供 trace/调试）。
+ */
+export const sweepStaleAtomicTmp = async (root?: string, staleSeconds = 60): Promise<number> => {
+    const wsRoot = root ?? getActiveWorkspaceRoot();
+    const skipDirs = new Set(["node_modules", ".git", ".venv", "dist", "build", "target", ".next", "out", ".idea", ".vscode"]);
+    const cutoff = Date.now() - staleSeconds * 1000;
+    let removed = 0;
+    const walk = async (dir: string): Promise<void> => {
+        let entries;
+        try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                if (!skipDirs.has(e.name)) await walk(full);
+                continue;
+            }
+            if (!e.isFile() || !ATOMIC_TMP_RE.test(e.name)) continue;
+            try {
+                const st = await fs.stat(full);
+                if (st.mtimeMs > cutoff) continue; // 太新——可能在途，放过
+                await fs.unlink(full);
+                removed++;
+            } catch { /* 已删 / 权限问题，忽略单文件失败不中断清扫 */ }
+        }
+    };
+    await walk(wsRoot);
+    return removed;
+};
+
+/**
  * 读保护闸门：敏感凭证文件拒读 + .gitignore/通用忽略跳过。read_file / view_symbol_outline 共用。
  * @returns 拦截时返回提示字符串（直接 return 给模型）；放行返回 null。
  */

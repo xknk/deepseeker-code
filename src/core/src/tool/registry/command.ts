@@ -7,7 +7,7 @@
 import { spawn } from "child_process";
 import { CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
-import { killTree } from "./background.ts";
+import { killTree, resolveWinShell } from "./background.ts";
 
 /**
  * 退出码哨兵：用罕用数学括号 ⟦⟧ 界定 + 私有前缀 DSC_EXIT，避免被 stdout 中的字面量 "[exit: 0]"
@@ -51,9 +51,15 @@ export const commandTools: CustomTool[] = [
                 //   旧的 [exit: N] 嗅探会被 stdout 里的字面量骗过，已废弃。
                 const matches = [...rawOutput.matchAll(EXIT_SENTINEL_RE)];
                 const code = matches.length ? parseInt(matches[matches.length - 1][1], 10) : 0;
-                return code === 0
-                    ? { status: ToolExecutionResultStatus.SUCCESS }
-                    : { status: ToolExecutionResultStatus.FAILED, summary: `命令退出码非零：${code}` };
+                if (code === 0) return { status: ToolExecutionResultStatus.SUCCESS };
+                // 退出码语义提示：帮模型/用户定位（255 常为 Unix 命令在非 POSIX shell 缺失、或 exit(-1/255)）
+                const hint =
+                    code === 9009 ? "（Windows：命令未被识别——命令不存在或 PATH 缺失）"
+                    : code === 127 ? "（命令未找到——检查命令名/PATH）"
+                    : code === 255 ? "（255 常见于 Unix 命令在非 POSIX shell 下缺失，或进程显式 exit(-1/255)、连接失败）"
+                    : (code === 4294967295 || code === -1) ? "（进程退出码 -1/未捕获异常被杀）"
+                    : "";
+                return { status: ToolExecutionResultStatus.FAILED, summary: `命令退出码非零：${code}${hint}` };
             },
             // ★ outputFilter：长构建/测试日志分流——用户看全文，模型只看头尾摘要（省 token，保留 EXIT 哨兵与首尾报错）。
             //   verifyResult 在此之前执行（用完整 raw），退出码判定不受影响；写入 message 后不变，不破坏 DeepSeek 前缀缓存。
@@ -89,7 +95,7 @@ export const commandTools: CustomTool[] = [
                 let proc: any;
                 try {
                     proc = spawn(args.command, {
-                        shell: true,
+                        shell: isWin ? (resolveWinShell() ?? true) : true, // ★ Win 优先 Git Bash（POSIX）：cmd.exe 缺 head/tail 等，管道缺失命令会退 255
                         cwd,
                         detached: !isWin, // 非 Win 下支持整个进程组独立
                         signal: ctx?.abortSignal,

@@ -9,6 +9,7 @@
  *
  *  ★ 启动期询问（语言/信任）用 node:readline/promises，在 render 前 rl.close()，随后 Ink 接管 stdin。
  */
+import "./preload-config.ts"; // ★ 必须第一：在任何 core 模块求值前把 ~/.deepseeker-code/config.json 回填到 env（env 仍可覆盖）
 import React from "react";
 import { render } from "ink";
 import os from "os";

@@ -273,6 +273,9 @@ export class ChatHost {
       /* 无历史或读取失败 → 空回放，不阻塞 */
     }
     this.sink({ type: "info", text: "📂 已载入会话（继续对话将续接此会话）" });
+    // ★ 回放结束信号：所有 row 已送出，通知前端强制滚到底（展示最新对话，而非回放起点的顶部）。
+    //   回放行经 appendRow 追加、滚动受 nearBottom() 门控——长会话下永远停在顶部；此信号绕开门控强制落底。
+    this.callbacks.sink({ type: "replayDone" });
   }
 
   /** 枚举本工作区历史会话（供 UI 会话选择器）。 */

@@ -16,6 +16,7 @@
 import { UnifiedInboundMessage, UnifiedOutboundMessage } from "@/channels/unifiedMessage.ts"
 import { runAgent } from "@/agent/runAgent.ts";
 import { agentTools } from "@/tool/index.ts";
+import { sweepStaleAtomicTmp } from "@/tool/registry/fs.ts";
 import { appConfig } from "@/config/index.ts";
 import { getOrCreateSessionId } from "@/session/store.ts"
 import { appendMessage } from "@/session/transcript.ts";
@@ -139,6 +140,8 @@ export const handleUnifiedChat = async (
     })
     // ★ SessionStart hook（观察；不可拦截）。dispatch 内部已容错，外层 catch 双保险。
     await dispatch('SessionStart', { sessionId, cwd: process.cwd() }).catch(() => { });
+    // ★ 清扫泄漏的原子写 .tmp（进程被杀 / 超时熔断残留在项目内的临时文件）。fire-and-forget，绝不阻塞会话启动。
+    void sweepStaleAtomicTmp().catch(() => { });
     await appendMessage({ sessionId, role: 'user', content: inbound.content })
 
     let replyText = "";

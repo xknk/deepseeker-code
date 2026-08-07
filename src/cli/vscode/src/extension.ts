@@ -312,20 +312,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   if (!applyProjectRoot(initialRoot)) return;
 
-  // —— 2. API Key / 模型配置 ——
+  // —— 2. API Key 校验 + 注入（★ 必须在 step 4 动态 import core 之前——core 加载期即把 env 拍成定值）——
   const cfg = vscode.workspace.getConfiguration("deepseekerCode");
   const apiKey = (cfg.get<string>("apiKey") || process.env.DEEP_SEEK_API_KEY || "").trim();
-  initError = null;
-  if (!apiKey) {
-    initError = "未配置 DeepSeek API Key：请在设置中填写 deepseekerCode.apiKey（或环境变量 DEEP_SEEK_API_KEY），保存后重载窗口。";
-  } else {
-    process.env.DEEP_SEEK_API_KEY = apiKey;
-  }
+  initError = apiKey ? null
+    : "未配置 DeepSeek API Key：请在设置中填写 deepseekerCode.apiKey（或环境变量 DEEP_SEEK_API_KEY），保存后重载窗口。";
+  if (apiKey) process.env.DEEP_SEEK_API_KEY = apiKey; // ★ 修原 bug：仅在真值时写，避免空串覆盖 env
 
-  // —— 3. 注入模型配置（项目根的 env + chdir 已在 step 1 由 applyProjectRoot 完成）——
-  process.env.DEEP_SEEK_API_KEY = apiKey;
-  const modelCfg = (cfg.get<string>("model") || process.env.DEEP_SEEK_MODEL || "").trim();
-  if (modelCfg) process.env.DEEP_SEEK_MODEL = modelCfg;
+  // —— 3. 注入其余配置（VSCode 设置项 → env；优先级：设置项 > 环境变量 > core 默认）——
+  /** 仅在配置值为真值时写 env（空串/0=未配置，保留 env 回退）。 */
+  const setEnvIfSet = (envKey: string, v: string | undefined): void => {
+    const s = (v ?? "").trim();
+    if (s) process.env[envKey] = s;
+  };
+  setEnvIfSet("DEEP_SEEK_API_URL", cfg.get<string>("apiUrl"));
+  setEnvIfSet("DEEP_SEEK_MODEL", cfg.get<string>("model"));
+  setEnvIfSet("DEEP_SEEK_AUX_MODEL", cfg.get<string>("auxModel"));
+  setEnvIfSet("DEEP_SEEK_REASONING_EFFORT", cfg.get<string>("reasoningEffort"));
+  if (cfg.get<string>("thinking") === "off") process.env.DEEP_SEEK_THINKING = "0"; // 默认开；仅 off 关
+  if (cfg.get<boolean>("parallelSafeTools") === false) process.env.DEEP_SEEK_PARALLEL_SAFE_TOOLS = "0"; // 默认开；仅 false 回退串行
+  const wfc = cfg.get<number>("workflowConcurrency");
+  if (wfc && wfc > 0) process.env.DEEP_SEEK_WORKFLOW_CONCURRENCY = String(wfc);
+  const wms = cfg.get<number>("workflowMaxSteps");
+  if (wms && wms > 0) process.env.DEEP_SEEK_WORKFLOW_MAX_STEPS = String(wms);
+  const sit = cfg.get<number>("streamIdleTimeoutMs");
+  if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
   const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }] = await Promise.all([

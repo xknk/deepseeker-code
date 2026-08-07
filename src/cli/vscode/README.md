@@ -58,7 +58,17 @@ code --install-extension deepseeker-code-<version>.vsix
 |---|---|
 | `deepseekerCode.apiKey` | DeepSeek API Key。**留空**则回退读取环境变量 `DEEP_SEEK_API_KEY`。 |
 | `deepseekerCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.apiUrl` | API 基址（兼容 OpenAI 协议的代理可改）。留空回退 `DEEP_SEEK_API_URL`，再缺省 `https://api.deepseek.com`。 |
+| `deepseekerCode.auxModel` | 辅助模型（摘要等轻量任务）。留空回退 `DEEP_SEEK_AUX_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.reasoningEffort` | 推理力度：`high` / `max`（low/medium 已废弃）。留空回退环境变量，缺省 `high`。 |
+| `deepseekerCode.thinking` | 深度思考：`on` / `off`，留空默认开。选 `off` 等价 `DEEP_SEEK_THINKING=0`。 |
+| `deepseekerCode.parallelSafeTools` | 同轮 SAFE 只读工具并发（写/审批/后台仍串行）。**默认开**；关掉回退完全串行。 |
+| `deepseekerCode.workflowConcurrency` | run_workflow 子 agent 并发上限。留空(0)回退环境变量，缺省 4。 |
+| `deepseekerCode.workflowMaxSteps` | run_workflow 单次最大步骤数。留空(0)回退环境变量，缺省 8。 |
+| `deepseekerCode.streamIdleTimeoutMs` | 流式 idle 超时(ms)。留空(0)回退环境变量，缺省 120000。 |
 | `deepseekerCode.locale` | 界面/回复语言：`zh` / `en`，留空表示首次询问。 |
+
+> 优先级：**设置项 > 环境变量 > 内置默认**。留空(0/未选)的设置项不覆盖环境变量。VSCode 插件**不读取** CLI 的 `~/.deepseeker-code/config.json`——所有配置都在设置界面完成（如需跨 CLI/VSCode 共享某项，用环境变量）。
 
 ### 环境变量
 
@@ -81,7 +91,7 @@ code --install-extension deepseeker-code-<version>.vsix
 | 变量 | 作用 | 默认 |
 |---|---|---|
 | `DEEPSEEKER_CODE_DATA_DIR` | 用户数据目录（会话/skills/hooks/mcp 全在此；解决 Windows C 盘小等场景） | `~/.deepseeker-code` |
-| `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `1` 开启同轮只读工具并发 | 关（串行） |
+| `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `0` 关闭同轮只读工具并发（默认开） | 开（并发） |
 | `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
 | `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
 | `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |

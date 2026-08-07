@@ -12,11 +12,52 @@
  *     持久化——服务重启后旧任务无法再用工具管理（v1 已知限制）。
  *  3) 输出走环形缓冲（每任务上限 MAX_BUFFER_CHARS），防止 dev server 长连接日志吃爆内存。
  */
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
+import fsSync from "fs";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { createUUID, execFileSmart } from "@/common/index.ts";
+
+/**
+ * Windows 下解析 POSIX shell（Git Bash）路径，供 run_command / run_in_background 共用。模型生成的命令以 POSIX 为主
+ * （head/tail/grep/管道/`$VAR`…），而 spawn({shell:true}) 默认走 cmd.exe——用户环境常无 Git 的 usr/bin 于 PATH，
+ * 这些命令「不是内部或外部命令」，且管道里缺失命令时 cmd 退 255（反常于单独缺失命令的 1）。改用 Git Bash 后 Unix 工具与语法一律可用。
+ * 检测顺序：DSC_SHELL 环境变量（值=cmd 显式禁用 bash 回退 cmd）> 由 where git 推导（必为 Git Bash，非 WSL）>
+ *           where bash（排除 System32/WSL 入口，优先含 \Git\）> 常见安装路径。
+ * 找不到返回 null（回退 cmd.exe，保持原行为）。结果缓存，仅 win32 生效。
+ */
+let _winShellCache: string | null | undefined;
+export const resolveWinShell = (): string | null => {
+    if (process.platform !== "win32") return null;
+    if (_winShellCache !== undefined) return _winShellCache;
+    const exists = (p: string): boolean => { try { return !!p && fsSync.existsSync(p); } catch { return false; } };
+    const whereLines = (name: string): string[] => {
+        try {
+            return execFileSync("where", [name], { encoding: "utf-8", windowsHide: true })
+                .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        } catch { return []; }
+    };
+    const candidates: string[] = [];
+    const envShell = (process.env.DSC_SHELL ?? "").trim();
+    if (envShell && envShell.toLowerCase() !== "cmd") candidates.push(envShell); // "cmd"=显式禁用 bash
+    // ① 由 git 安装根推导 bash.exe（git.exe 多在 <root>/cmd | <root>/bin | <root>/mingw64/bin）
+    const gitExe = whereLines("git")[0];
+    if (gitExe) {
+        const dir = path.dirname(gitExe);
+        const root = path.dirname(dir);
+        candidates.push(path.join(root, "bin", "bash.exe"), path.join(dir, "bash.exe"), path.join(path.dirname(root), "bin", "bash.exe"));
+    }
+    // ② where bash：排除 System32（WSL 入口），优先含 \Git\ 的
+    const bashHits = whereLines("bash")
+        .filter(p => !/\\System32\\/i.test(p))
+        .sort((a, b) => Number(/\\Git\\/i.test(b)) - Number(/\\Git\\/i.test(a)));
+    candidates.push(...bashHits);
+    // ③ 常见安装路径兜底
+    candidates.push("C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe");
+    _winShellCache = candidates.find(exists) ?? null;
+    return _winShellCache;
+};
 
 interface BgTask {
     taskId: string;
@@ -108,7 +149,7 @@ export const backgroundTools: CustomTool[] = [
 
                 let proc: any;
                 try {
-                    proc = spawn(args.command, { shell: true, cwd, detached: !isWin });
+                    proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin });
                     proc.unref?.(); // 父进程（agent）不必等待它退出
                 } catch (e: any) {
                     yield `❌ [后台启动失败]：${e.message}`;
