@@ -152,4 +152,20 @@ export async function classifyToolRisk(
     }
 }
 
+/**
+ * 识别 API 返回的「上下文超长」错误（context_length_exceeded）。
+ * DeepSeek/OpenAI 兼容协议下为 400，error.code=context_length_exceeded 或 message 含相关关键词。
+ * 仅此类错误可降级（强制压缩后重试本轮）；其它 400（如 reasoning_content 缺失）不在此列，走原终止路径。
+ * 容错优先：宽匹配 status=400 + 关键词，避免因 SDK/Provider 错误体字段差异漏判（漏判=降级失效，代价高于误判）。
+ */
+export const isContextLengthError = (e: any): boolean => {
+    if (!e) return false;
+    const status = e.status ?? e.response?.status;
+    if (status !== 400) return false;
+    const code = e.error?.code ?? e.code;
+    const msg = typeof e.message === 'string' ? e.message : '';
+    return code === 'context_length_exceeded'
+        || /context_length|context length|maximum context|input length|too long|exceed/i.test(msg);
+};
+
 export default chatWithModelWithTools;

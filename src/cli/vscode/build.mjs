@@ -83,10 +83,24 @@ async function buildWebview() {
   if (watch) ctx.webview = res;
 }
 
-// —— 拷贝静态资产（style.css + core 内置 skills/agents/commands） ——
+// —— 拷贝静态资产（style.css + codicons 字体/CSS + core 内置 skills/agents/commands） ——
 async function copyAssets() {
   await mkdir(DIST, { recursive: true });
   await cp(path.join(ROOT, "src/webview/style.css"), path.join(DIST, "style.css"), { force: true }).catch(() => {});
+
+  // ★ codicons：把官方 codicon.ttf + codicon.css 拷入 dist，供 webview 经 <link> + @font-face 加载。
+  //   codicon.css 内 url("./codicon.ttf") 相对其自身在 dist/ 的位置解析；CSP font-src 放开后即可用。
+  const codiconsDist = path.join(ROOT, "node_modules/@vscode/codicons/dist");
+  if (existsSync(codiconsDist)) {
+    for (const f of ["codicon.ttf", "codicon.css"]) {
+      await cp(path.join(codiconsDist, f), path.join(DIST, f), { force: true }).catch((e) => {
+        console.warn(`⚠️ 拷贝 codicons 资产失败（${f}）：`, e?.message ?? e);
+      });
+    }
+  } else {
+    console.warn("⚠️ 未找到 @vscode/codicons（请先在 src/cli/vscode 执行 npm install）；图标将降级为方框。");
+  }
+
   if (!coreDir) return;
 
   // core 内置资产：skills/<name>/SKILL.md、<name>.agent.md、<name>.md —— 合并拷入 dist/builtin/
@@ -117,7 +131,7 @@ async function main() {
   await buildExtension();
   await buildWebview();
   await copyAssets();
-  console.log("✓ 构建完成：" + path.join(DIST, "extension.js") + " + webview.js + style.css + builtin/");
+  console.log("✓ 构建完成：" + path.join(DIST, "extension.js") + " + webview.js + style.css + codicons + builtin/");
 }
 
 main().catch((err) => {

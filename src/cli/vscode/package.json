@@ -2,7 +2,7 @@
   "name": "deepseek-code",
   "displayName": "deepSeekCode",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "publisher": "deepSeekCode",
   "license": "MIT",
   "engines": {
@@ -111,6 +111,7 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
+    "@vscode/codicons": "^0.0.36",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.25.0"
   }

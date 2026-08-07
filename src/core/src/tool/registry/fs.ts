@@ -40,6 +40,21 @@ const isSensitiveReadTarget = (rel: string): boolean => {
 };
 
 /**
+ * 剥离 read_file 输出的「<行号>: 」前缀（如 "   123: code" → "code"）。
+ * read_file 会给每行加 5 位右对齐行号 + ": "（见其 execute），模型构造 old_str 时若整段照抄会带上该前缀，
+ * 导致 edit_file 精确匹配失败。此处仅当 old_str 的【所有非空行】都匹配 /^\s*\d+:\s?/ 时才剥离——
+ * 这是"整段照抄 read_file"的强信号；只要有任一行不匹配即原样返回（保守，避免误伤合法的「数字:」内容）。
+ */
+const stripReadFileLineNumbers = (s: string): string => {
+    const lines = s.split("\n");
+    const nonEmpty = lines.filter(l => l.length > 0);
+    if (nonEmpty.length === 0) return s;
+    const re = /^\s*\d+:\s?/;
+    if (!nonEmpty.every(l => re.test(l))) return s;
+    return lines.map(l => (l.length === 0 ? l : l.replace(re, ""))).join("\n");
+};
+
+/**
  * 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥（如 config.js 里 apiKey: "sk-..."）。
  * 仅替换凭证值，保留键名与行号结构，便于模型理解上下文又不外泄机密。
  * 由 runAgent 的 applyPrivacyMasking 在 verifyResult 之后调用，仅影响"发给云端模型的视图"。
@@ -227,7 +242,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "edit_file",
-            description: "针对指定的文件进行局部精准修改。old_str 必须与原代码完全一致；默认要求在全文中唯一，若设 replace_all=true 则替换全部匹配处（适合批量重命名/统一改写）。",
+            description: "针对指定的文件进行局部精准修改。old_str 必须与文件中的原始代码逐字符一致：请去掉 read_file 返回的「<行号>: 」前缀，并保留原有缩进（Tab/空格）与行尾空白；默认要求在全文中唯一，若设 replace_all=true 则替换全部匹配处（适合批量重命名/统一改写）。",
             parameters: {
                 type: "object",
                 properties: {
@@ -248,10 +263,18 @@ export const fsTools: CustomTool[] = [
                     const rawContent = await fs.readFile(absPath, "utf-8");
                     const isCRLF = rawContent.includes("\r\n");
                     const normalizedContent = rawContent.replace(/\r\n/g, "\n");
-                    const normalizedOld = args.old_str.replace(/\r\n/g, "\n");
                     const normalizedNew = args.new_str.replace(/\r\n/g, "\n");
+                    // old_str 先 CRLF 归一；精确匹配失败时，尝试剥离 read_file 行号前缀后重试（容错最常见的"带行号照抄"）
+                    let normalizedOld = args.old_str.replace(/\r\n/g, "\n");
+                    let lineNumbersStripped = false;
                     if (!normalizedContent.includes(normalizedOld)) {
-                        return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块，请用 read_file 重新核对。`;
+                        const stripped = stripReadFileLineNumbers(normalizedOld);
+                        if (stripped !== normalizedOld && normalizedContent.includes(stripped)) {
+                            normalizedOld = stripped;
+                            lineNumbersStripped = true;
+                        } else {
+                            return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格。请用 read_file 重新核对应贴片段。`;
+                        }
                     }
                     const matchCount = normalizedContent.split(normalizedOld).length - 1;
                     // replace_all=true：放行多匹配，全量替换；默认：要求唯一，否则报冲突
@@ -263,9 +286,10 @@ export const fsTools: CustomTool[] = [
                         : normalizedContent.replace(normalizedOld, () => normalizedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
+                    const note = lineNumbersStripped ? "（已自动剥离 read_file 行号前缀）" : "";
                     return args.replace_all
-                        ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${matchCount} 处匹配。`
-                        : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成唯一性局部重构。`;
+                        ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${matchCount} 处匹配。${note}`
+                        : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成唯一性局部重构。${note}`;
                 } catch (error: any) {
                     return `操作失败: ${error.message}`;
                 }

@@ -204,15 +204,37 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
 };
 
 /**
- * 构造「精确值作用域」的 allow 规则字符串（供 allow-always 审批记忆持久化）。
- *  - 工具在 PRIMARY_ARG 有主参数映射、且本次调用提供了非空 string 值 → `ToolName(value)`（精确匹配该值，最小权限）；
- *  - 否则回退裸 `ToolName`（无主参数映射的工具本就只有按名匹配语义）。
- * 防止「始终允许 run_command(npm test)」被误写成裸 run_command，导致 rm -rf 等破坏性调用也免审。
+ * 构造 allow-always 持久化的 allow 规则字符串（对标 Claude Code 的「智能 glob 作用域」）。
+ *
+ *  ★ 关键：落「覆盖一类的 glob」而非「精确值」——否则换文件路径/换子命令即失效，导致一次对话反复审批。
+ *    glob 匹配引擎 globToRegex 已支持 `:*`（前缀边界）与 `*`（任意），此处据此生成：
+ *   - 命令类（run_command/run_in_background，argKey=command）：取首个命令 token + `:*`
+ *       `npm install axios` → `run_command(npm:*)`（覆盖所有 npm 子命令）；
+ *   - 路径类（argKey=path/src）：取顶层目录 + `*`
+ *       `src/components/Foo.tsx` → `edit_file(src/*)`（覆盖 src 下任意深度）；根级文件退化为精确值；
+ *   - 其余（url/query/pattern 等）：精确值（这类低频，glob 化收益小且易过宽）；
+ *   - 无主参数映射：裸 `ToolName`。
+ *  安全兜底不变：COMMAND_DENY 清单（auto 模式）+ PROTECTED_WRITE_DIRS 保护路径硬拒仍生效，allow 了也拦 rm -rf / 改 .git。
  */
 export const buildScopedAllowRule = (toolName: string, args: any): string => {
     const argKey = PRIMARY_ARG[toolName];
     const val = argKey ? args?.[argKey] : undefined;
-    return (argKey && typeof val === 'string' && val) ? `${toolName}(${val})` : toolName;
+    if (!argKey || typeof val !== 'string' || !val) return toolName;
+    if (argKey === 'command') {
+        const head = val.trim().split(/\s+/)[0];
+        return head ? `${toolName}(${head}:*)` : toolName;
+    }
+    if (argKey === 'path' || argKey === 'src') {
+        // 规范化：反斜杠→正斜杠、去 ./ 前缀、去 Windows 盘符（D:），取顶层目录
+        const norm = val.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[a-zA-Z]:/, '');
+        const slashIdx = norm.indexOf('/');
+        if (slashIdx > 0) {
+            const topDir = norm.slice(0, slashIdx);
+            return `${toolName}(${topDir}/*)`;
+        }
+        return `${toolName}(${val})`; // 根级文件（无目录段）：精确值兜底
+    }
+    return `${toolName}(${val})`;
 };
 
 /** 解析 settings.json 路径：global=~/.deepSeekCode，project=<cwd>/.deepSeekCode */

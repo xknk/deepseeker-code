@@ -7,6 +7,9 @@
  *     在主代码编辑区创建/聚焦常驻面板（由侧边栏视图迁移而来）。
  */
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
+import { randomUUID } from "crypto";
 // ★ type-only：host 及其 core 依赖必须在 process.chdir(workspaceRoot) 之后动态加载，
 // 否则模块加载期按「插件安装目录」cwd 初始化（createModel 等），导致读取/执行错目录。
 import type { ChatHost, ChatHostCallbacks } from "./host";
@@ -19,6 +22,9 @@ let panel: vscode.WebviewPanel | null = null;
 
 /** 初始化错误（如缺 API Key）；随 state 快照发给 webview 显示提示横幅。 */
 let initError: string | null = null;
+
+/** 当前工作区根（activate 时锁定）；图片上传存盘到此根下的 .deepSeekCode/tmp 供 agent 经 MCP 读取。 */
+let workspaceRoot: string | null = null;
 
 /** 通知前端一次状态快照（busy/模式/模型…）。 */
 function postState(): void {
@@ -47,13 +53,15 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const nonce = getNonce();
   const distUri = vscode.Uri.joinPath(extensionUri, "dist");
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(distUri, "style.css"));
+  const codiconCssUri = webview.asWebviewUri(vscode.Uri.joinPath(distUri, "codicon.css"));
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(distUri, "webview.js"));
   const csp = [
     "default-src 'none'",
     `img-src ${webview.cspSource} data:`,
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
-    "font-src 'none'",
+    // ★ codicon.ttf 经 webview URI 加载（codicon.css 内 @font-face url("./codicon.ttf")）
+    `font-src ${webview.cspSource}`,
   ].join("; ");
 
   return `<!DOCTYPE html>
@@ -63,6 +71,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="stylesheet" href="${styleUri}" />
+<link rel="stylesheet" href="${codiconCssUri}" />
 <title>DeepSeekCode</title>
 </head>
 <body>
@@ -110,6 +119,31 @@ async function sendSessions(): Promise<void> {
     if (panel) void panel.webview.postMessage({ type: "sessions", sessions });
   } catch {
     if (panel) void panel.webview.postMessage({ type: "sessions", sessions: [] });
+  }
+}
+
+/**
+ * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到工作区 .deepSeekCode/tmp/<uuid>.<ext> → 回传绝对路径。
+ * 底座 deepseek-v4 非 vision 模型，无法直接"看"图；图片落到工作区后，由 agent 调用用户配置的图像理解
+ * MCP 工具读取该路径、把图转成文字描述（走现有 mcp__* 工具链路，core 不感知二进制）。
+ */
+async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
+  if (!workspaceRoot || !panel) return;
+  const base64 = String(msg.base64 ?? "");
+  if (!base64) return;
+  const mime = String(msg.mime ?? "image/png");
+  const name = String(msg.name ?? "image");
+  // 扩展名按 mime 推断（image/png→png）；非法回退 png
+  const ext = (mime.split("/")[1] || "png").split(";")[0] || "png";
+  try {
+    const dir = path.join(workspaceRoot, ".deepSeekCode", "tmp");
+    await fs.promises.mkdir(dir, { recursive: true });
+    const filePath = path.join(dir, `${randomUUID()}.${ext}`);
+    await fs.promises.writeFile(filePath, Buffer.from(base64, "base64"));
+    panel.webview.postMessage({ type: "imageSaved", path: filePath, name });
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    panel.webview.postMessage({ type: "imageSaved", path: "", name, error: m });
   }
 }
 
@@ -176,6 +210,9 @@ function handleMessage(msg: Record<string, unknown>): void {
     case "setLocale":
       h.setLocale(msg.locale === "en" ? "en" : "zh");
       break;
+    case "uploadImage":
+      void handleUploadImage(msg);
+      break;
     default:
       break;
   }
@@ -185,7 +222,7 @@ function handleMessage(msg: Record<string, unknown>): void {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   // —— 1. 工作区校验 ——
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
   if (!workspaceRoot) {
     void vscode.window.showErrorMessage("deepSeekCode：请先打开一个项目文件夹（工作区）再使用。");
     return;

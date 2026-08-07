@@ -80,6 +80,11 @@ body {
   font-weight: 400;
 }
 
+.brand .logo.codicon {
+  font-size: 13px;
+  line-height: 1;
+}
+
 .brand-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -146,27 +151,11 @@ body {
   background: var(--hover);
 }
 
-/* SVG 线条图标按钮（新会话/历史） */
-.icon-svg {
-  background: transparent;
-  border: none;
-  padding: 3px;
-  border-radius: 4px;
-  color: var(--fg-dim);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.1s, color 0.1s;
-}
-
-.icon-svg:hover {
-  background: var(--hover);
-  color: var(--fg);
-}
-
-.icon-svg svg {
-  display: block;
+/* Codicon 图标按钮（顶栏 / 附件 / 会话面板统一基类）：透明底、14px 纤细字形 */
+.icon-btn .codicon {
+  font-size: 14px;
+  line-height: 1;
+  display: inline-block;
 }
 
 /* ———————— 消息流 ———————— */
@@ -854,6 +843,7 @@ body {
 
 /* ★ 大盒子：按规格 border/radius/padding/margin/background */
 .composer-shell {
+  position: relative;
   border: 1px solid var(--vscode-input-border);
   border-radius: 6px;
   padding: 10px;
@@ -867,27 +857,28 @@ body {
   box-shadow: 0 0 0 1px var(--vscode-focusBorder);
 }
 
-/* 上半：状态摘要（弱显，聚焦时亮一点） */
-.composer-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 2px 8px;
-  min-height: 14px;
-  font-size: 10.5px;
-  color: var(--fg-faint);
-  transition: color 0.12s;
-}
-
-.composer-shell:focus-within .composer-meta {
-  color: var(--fg-dim);
-}
-
-/* 下半：输入行（prompt + textarea + 装饰箭头） */
+/* 上：输入行（prompt + textarea），独占一整行 */
 .composer-line {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 8px;
+}
+
+/* 下：控制栏（附件靠左 / 模式胶囊+发送靠右）—— 两行式底栏 */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.composer-bar-left,
+.composer-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .composer-prompt {
@@ -916,29 +907,220 @@ body {
   color: var(--fg-faint);
 }
 
-/* Edit automatically 文本按钮（极简弱显，auto 模式开启时点亮） */
-.composer-edit-btn {
-  background: transparent;
-  border: none;
-  padding: 4px 6px;
+/* 模式切换胶囊（右下角，Edit automatically 左侧）：线条图标 + 当前模式，等宽代码字体 */
+.mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   margin-bottom: 2px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.08);
   color: var(--fg-dim);
-  font-family: inherit;
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
   font-size: 10.5px;
+  line-height: 1;
   cursor: pointer;
-  border-radius: 4px;
   white-space: nowrap;
   flex-shrink: 0;
   transition: background 0.1s, color 0.1s;
 }
 
-.composer-edit-btn:hover {
-  background: var(--hover);
+.mode-toggle:hover {
+  background: rgba(128, 128, 128, 0.16);
   color: var(--fg);
 }
 
-.composer-edit-btn.on {
+.mode-toggle.on {
   color: var(--fg);
+}
+
+.mode-toggle svg,
+.mode-toggle .codicon {
+  display: block;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 图片预览 chip 区：composer-shell 内、输入行下方；无附件时不占位 */
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.composer-attachments:empty {
+  display: none;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  padding: 3px 8px 3px 4px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.1);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.attach-chip img {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.attach-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 弹出配置面板（双层结构：Modes 单选 + 思考等级滑动开关） */
+.mode-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: 272px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editorWidget-background, var(--bg-deep));
+  box-shadow: var(--vscode-widget-shadow, 0 6px 20px rgba(0, 0, 0, 0.5));
+  z-index: 30;
+}
+
+/* —— 上半：Modes 三选一 —— */
+.mode-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mode-title {
+  padding: 2px 8px 5px;
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.mode-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.08s;
+}
+
+.mode-option:hover {
+  background: var(--vscode-list-hoverBackground, var(--hover));
+}
+
+.mode-option svg,
+.mode-option .codicon {
+  flex-shrink: 0;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.mode-option.on {
+  background: var(--vscode-list-hoverBackground, var(--hover));
+}
+
+.mode-opt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mode-opt-name {
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--fg);
+}
+
+.mode-opt-desc {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 选中对勾：未选中时隐形，选中亮白 */
+.mode-check {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: transparent;
+}
+
+.mode-option.on .mode-check {
+  color: var(--fg);
+}
+
+/* —— 分隔细线 —— */
+.mode-divider {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--vscode-panel-border, var(--border-soft));
+}
+
+/* —— 下半：思考等级滑动开关（等宽圆角分段） —— */
+.mode-think {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px 4px;
+}
+
+.think-label {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  white-space: nowrap;
+}
+
+.think-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.12);
+  flex-shrink: 0;
+}
+
+.think-opt {
+  padding: 2.5px 9px;
+  border-radius: 999px;
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fg-faint);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.think-opt:hover {
+  color: var(--fg);
+}
+
+.think-opt.on {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ffffff);
 }
 
 /* 发送/中止一体按钮（原生次要按钮灰白色，生成中变 ■） */

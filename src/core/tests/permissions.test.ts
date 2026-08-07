@@ -1,25 +1,34 @@
 /**
  * @file tests/permissions.test.ts
- * @description buildScopedAllowRule 契约单测：钉住 allow-always 审批记忆的「精确值作用域」语义。
+ * @description buildScopedAllowRule 契约单测：钉住 allow-always 审批记忆的「智能 glob 作用域」语义（对标 Claude Code）。
  *
- *  安全动机：allow-always 持久化裸工具名会让一次 run_command(npm test) 审批把所有 run_command
- *  （含 rm -rf）都免审。buildScopedAllowRule 必须产出带主参数精确值的规则字符串，
- *  无主参数映射或缺值时才回退裸名。本测试守住这条安全边界不被回退。
+ *  设计动机：allow-always 若落精确值（如 run_command(npm test)），换子命令/换文件路径即失效，
+ *  导致一次对话反复审批。故按主参数类型生成覆盖一类的 glob 规则：
+ *   - 命令类 → 首个 token + `:*`（run_command(npm:*) 覆盖所有 npm 子命令）；
+ *   - 路径类 → 顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
+ *   - 无主参数映射 / 缺值 / 非字符串 / 空串 → 回退裸 ToolName。
+ *  安全兜底不变：COMMAND_DENY 清单（auto 模式）+ PROTECTED_WRITE_DIRS 保护路径硬拒仍生效，allow 了也拦 rm -rf / 改 .git。
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildScopedAllowRule, checkPermission } from "@/tool/permissions.ts";
 
-describe("buildScopedAllowRule（allow-always 精确值作用域）", () => {
-    it("有主参数映射且提供非空值 → ToolName(value) 精确作用域", () => {
-        assert.equal(
-            buildScopedAllowRule("run_command", { command: "npm test" }),
-            "run_command(npm test)",
-        );
-        assert.equal(
-            buildScopedAllowRule("edit_file", { path: "src/config.ts" }),
-            "edit_file(src/config.ts)",
-        );
+describe("buildScopedAllowRule（allow-always 智能 glob 作用域）", () => {
+    it("命令类 → 首个 token + :*（覆盖该命令全部子命令）", () => {
+        assert.equal(buildScopedAllowRule("run_command", { command: "npm test" }), "run_command(npm:*)");
+        assert.equal(buildScopedAllowRule("run_command", { command: "git status" }), "run_command(git:*)");
+        assert.equal(buildScopedAllowRule("run_in_background", { command: "pnpm build --watch" }), "run_in_background(pnpm:*)");
+    });
+
+    it("路径类 → 顶层目录 + *（覆盖该目录任意深度）；根级文件退化为精确值", () => {
+        assert.equal(buildScopedAllowRule("edit_file", { path: "src/config.ts" }), "edit_file(src/*)");
+        assert.equal(buildScopedAllowRule("read_file", { path: "src/components/Foo.tsx" }), "read_file(src/*)");
+        // ./ 前缀应被规范化后取顶层目录
+        assert.equal(buildScopedAllowRule("create_file", { path: "./lib/util.ts" }), "create_file(lib/*)");
+        // 绝对路径（盘符去后以 / 开头、无顶层目录段）→ 退化为精确值（保守；agent 路径多为相对 workspace）
+        assert.equal(buildScopedAllowRule("write_file", { path: "D:/proj/app/main.ts" }), "write_file(D:/proj/app/main.ts)");
+        // 根级文件（无目录段）→ 精确值兜底
+        assert.equal(buildScopedAllowRule("edit_file", { path: "README.md" }), "edit_file(README.md)");
     });
 
     it("工具无主参数映射 → 回退裸 ToolName", () => {
@@ -33,13 +42,11 @@ describe("buildScopedAllowRule（allow-always 精确值作用域）", () => {
         assert.equal(buildScopedAllowRule("run_command", { command: "" }), "run_command");
     });
 
-    it("端到端：精确规则只免审该精确值，其它命令仍需审（checkPermission 语义对齐）", () => {
-        // 注：checkPermission 读运行期内存 rules；此处仅校验规则字符串可被 compileRule 解析、
-        //     且 ruleMatches 对精确值命中、对其它值不命中。通过 addPermissionRule 写入后即时生效。
-        //     直接验证规则形态足够——完整持久化链路由 guard.ts 集成覆盖。
+    it("端到端：glob 规则形态正确（覆盖一类而非精确值，裸名回退不含括号）", () => {
+        // 注：checkPermission 读运行期内存 rules；此处校验规则字符串形态（globToRegex 已支持 :* 与 *，
+        //     glob 匹配一类命令/路径的语义由 compileRule/ruleMatches 内部保证）。完整持久化链路由 guard.ts 集成覆盖。
         const rule = buildScopedAllowRule("run_command", { command: "npm test" });
-        assert.equal(rule, "run_command(npm test)");
-        // 裸名回退场景不应出现括号
+        assert.equal(rule, "run_command(npm:*)");
         const bare = buildScopedAllowRule("run_command", {});
         assert.equal(bare.includes("("), false, "回退裸名不应含括号作用域");
     });

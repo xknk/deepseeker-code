@@ -21,7 +21,7 @@
  *
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
-import chatWithModelWithTools from "@/llm/model.ts";
+import chatWithModelWithTools, { isContextLengthError } from "@/llm/model.ts";
 import OpenAI from "openai";
 import { appendMessage } from "@/session/transcript.ts";
 import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolResult } from "./truncate.ts";
@@ -218,7 +218,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const nudgeMsg = (round > 1 && round % NUDGE_EVERY === 1)
                 ? { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` }
                 : null;
-            const inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
+            // ★ let：上下文超长降级时会强制压缩 message，需重算 inferenceMessages（见下方 catch 分支）
+            let inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
             let assistantMessage: OpenAI.Chat.ChatCompletionMessage = { role: 'assistant', content: null } as OpenAI.Chat.ChatCompletionMessage;
             try {
                 events({
@@ -250,6 +251,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
                 //   （emit llm.error + yield final + return → busy 自动清零，杜绝永久卡死）。
                 const MAX_STREAM_RETRIES = 2;
+                // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
+                let compactedThisRound = false;
                 for (let streamAttempt = 0; ; streamAttempt++) {
                     try {
                         for await (const chunk of chatWithModelWithTools(inferenceMessages, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
@@ -288,7 +291,29 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                             continue;
                         }
-                        throw streamErr; // 重试耗尽 / 已有部分输出 / 非 idle 错误 → 交外层 catch 优雅收尾
+                        // ★ 上下文超长降级：API 返回 context_length_exceeded（400）且本轮尚未产出任何内容 → 强制压缩后重试本轮。
+                        //   缘由：本地 estimateTokens 对代码/JSON 严重低估（CJK 1:1、英文 ÷4.8），常出现"本地没超阈值→不压缩→API 端实际超限 400"。
+                        //         现有 ensureFitsWindow 只在推理前基于本地估算触发，与 API 实际超长错误解耦——此处补"推理时降级"路径，避免暴力终止。
+                        //   做法：复用 ensureFitsWindow（keepRecentUnits 砍半，更激进归档旧消息并生成摘要落盘），压缩后重算 inferenceMessages 续推。
+                        //   最多一次（compactedThisRound）；强制压缩自身若失败（物理熔断/超窗口）会冒泡至外层 catch 优雅收尾。
+                        if (isContextLengthError(streamErr) && noOutputYet && !compactedThisRound) {
+                            console.warn(`⚠️ 上下文超长（API 400 context_length_exceeded），强制压缩后重试本轮推理...`);
+                            await ensureFitsWindow({
+                                sessionId,
+                                messageArr: message,
+                                keepRecentUnits: Math.max(1, Math.floor((keepRecentUnits ?? 6) / 2)),
+                                compactRatio,
+                                modelWindow,
+                                events,
+                                depth,
+                                signal,
+                            });
+                            inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
+                            compactedThisRound = true;
+                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
+                            continue;
+                        }
+                        throw streamErr; // 重试耗尽 / 已有部分输出 / 非 idle/超长 错误 → 交外层 catch 优雅收尾
                     }
                 }
                 if (signal?.aborted) {

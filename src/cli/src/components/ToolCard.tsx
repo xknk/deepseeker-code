@@ -2,7 +2,7 @@
  * @file cli/src/components/ToolCard.tsx
  * @description 工具调用渲染（对齐 Claude Code，纯配色、无背景色、无动画）：
  *   头行：⏺(按安全等级着色) toolName(加粗)  <主参数暗色>  <状态图标：✓/✗，运行中省略>
- *   结果行：  ⎿  <结果首行摘要>（done）/ 运行中…（running）
+ *   结果行：  ⎿  <结果前几行摘要>（done，默认前 3 行）/ 运行中…（running）
  *   - 不用背景色：Ink 在「动态区 → Static」切换时擦不干净带底色的整行，会留错位残影。
  *   - 不用 spinner 动画：工具执行期间唯一的重绘源就是 spinner 的逐帧 setTick，Ink 擦除失准会把
  *     上一帧叠在下面（表现为同一工具出现两行不同的 ⠋/⠸）。去掉动画 → 执行期间零重绘 → 无叠帧。
@@ -39,11 +39,16 @@ export const ToolCard = ({ toolName, args, result, ok, status, progress, wrapW }
     // 主参数：先按 60 字符取预览，再按可用宽度收紧（给工具名 + 状态图标 + 留白留位）
     const hint = truncateMiddle(argHint(args, 60), Math.max(8, wrapW - strWidth(toolName) - 12));
 
-    // 结果首行摘要（单行截断）——多行结果只取首个非空行，完整内容已在 transcript
-    const outLine = (() => {
-        if (status !== "done") return "";
-        const first = resultPreview(result, 400).split("\n").find((l) => l.trim()) ?? "";
-        return truncateMiddle(first, Math.max(20, wrapW - 6));
+    // 结果摘要（多行）——done 时取前若干非空行，每行按宽度截断；完整内容仍在 transcript。
+    //  Static 区不可交互（Ink 限制，useInput 仅动态区生效），故以「默认多行」替代「点击展开」，
+    //  让历史回放能看到更多结果（read_file 多行 / run_command stdout），缓解「历史展示不全」。
+    const outLines = (() => {
+        if (status !== "done") return [] as string[];
+        return resultPreview(result, 1200).split("\n")
+            .map((l) => l.trimEnd())
+            .filter((l) => l.trim())
+            .slice(0, 3)
+            .map((l) => truncateMiddle(l, Math.max(20, wrapW - 6)));
     })();
 
     // 运行中实时进度末行（run_command 的 stdout 尾部）；无进度回退「运行中…」
@@ -62,12 +67,14 @@ export const ToolCard = ({ toolName, args, result, ok, status, progress, wrapW }
                 {hint ? <Text color={THEME.grayDim}>{`  ${hint}`}</Text> : null}
                 {statusIcon ? <Text color={statusColor}>{`  ${statusIcon}`}</Text> : null}
             </Box>
-            {/* 结果行：⎿ 连接 · 单行摘要（done）/ 运行中…（running） */}
-            {outLine ? (
-                <Box flexDirection="row" flexShrink={0}>
-                    <Text color={THEME.grayDim}>{"  ⎿  "}</Text>
-                    <Text color={ok ? THEME.gray : THEME.danger}>{outLine}</Text>
-                </Box>
+            {/* 结果行：⎿ 连接 · 多行摘要（done，前 3 行）/ 运行中…（running） */}
+            {outLines.length > 0 ? (
+                outLines.map((line, i) => (
+                    <Box key={i} flexDirection="row" flexShrink={0}>
+                        <Text color={THEME.grayDim}>{i === 0 ? "  ⎿  " : "     "}</Text>
+                        <Text color={ok ? THEME.gray : THEME.danger}>{line}</Text>
+                    </Box>
+                ))
             ) : status === "running" ? (
                 <Box flexDirection="row" flexShrink={0}>
                     <Text color={THEME.grayDim}>{"  ⎿  "}</Text>

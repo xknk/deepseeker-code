@@ -36,6 +36,10 @@ todos: [],
 roundSeq: 1,
   };
 
+  // 模式配置面板元素（buildComposer 时挂载）
+  let btnMode = null;
+  let modePopover = null;
+
   const FLUSH_MS = 60;
   let textBuf = "";
   let thinkBuf = "";
@@ -292,6 +296,22 @@ messagesEl().appendChild(wrap);
     appendRow({ key: nextKey(), kind: "info", text });
   }
 
+  // ★ 图片预览 chip：上传后、存盘回包前，在 composer 上方显示缩略图 + 文件名（data URL，CSP img-src data: 已放行）
+  function appendImagePreview(dataUrl, name) {
+    const box = $("#composer-attachments");
+    if (!box) return;
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    const img = document.createElement("img");
+    img.src = dataUrl;
+    img.alt = name;
+    const span = document.createElement("span");
+    span.textContent = name;
+    chip.appendChild(img);
+    chip.appendChild(span);
+    box.appendChild(chip);
+  }
+
   function clearMessages() {
     closeStreaming();
     state.order = [];
@@ -457,6 +477,19 @@ switch (evt.type) {
       case "sessionReset":
         clearMessages();
         break;
+      case "imageSaved": {
+        // extension 已把图片存到工作区临时目录，把路径 + 引导填入输入框
+        const p = String(msg.path ?? "");
+        const ins = $("#input");
+        if (p && ins) {
+          ins.value += `\n\n🖼 图片已上传：${p}\n如需理解图片内容，请调用已配置的图像识别 MCP 工具读取该路径并描述。\n`;
+          autoGrow(ins);
+          ins.focus();
+        } else {
+          addInfo(`🖼 图片存盘失败：${String(msg.error ?? "未知错误")}`);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -616,9 +649,9 @@ panel.className = "sessions-panel";
 panel.style.display = "none";
 panel.innerHTML = `
 <div class="sessions-search">
-<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<span class="codicon codicon-search"></span>
 <input id="sessions-filter" type="text" placeholder="Search sessions..." spellcheck="false"/>
-<button id="sessions-close" class="sessions-close" title="关闭">✕</button>
+<button id="sessions-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
 </div>
 <div class="sessions-list" id="sessions-list"></div>`;
 document.querySelector("#approval-anchor").before(panel);
@@ -682,7 +715,7 @@ return;
 box.innerHTML = filtered.map((s, i) =>
 `<div class="session-row" data-i="${i}">
 <span class="session-title">${escapeHtml(s.preview || "(空会话)")}</span>
-<span class="session-tools"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8h9M8 3.5L12.5 8 8 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+<span class="session-tools"><span class="codicon codicon-chevron-right"></span></span>
 <span class="session-meta">${escapeHtml(relTime(s.updatedAt))} · ${s.messageCount} 条</span>
 </div>`
 ).join("");
@@ -840,20 +873,63 @@ function buildComposer() {
 const c = $("#composer");
 c.innerHTML = `
 <div class="composer-shell">
-<div class="composer-meta"><span id="meta-status"></span></div>
 <div class="composer-line">
 <span class="composer-prompt">❯</span>
 <textarea id="input" rows="1" placeholder="输入消息，/ 查看命令" spellcheck="false"></textarea>
-<button class="composer-edit-btn" id="btn-auto-edit" title="自动执行编辑（切换 auto 模式）">&lt;&gt; Edit automatically</button>
+</div>
+<div class="composer-bar">
+<div class="composer-bar-left">
+<button class="icon-btn" id="btn-file" title="上传文件入库（文本，拼入消息）"><span class="codicon codicon-new-file"></span></button>
+<button class="icon-btn" id="btn-image" title="上传图片（识别需配置图像理解 MCP）"><span class="codicon codicon-file-media"></span></button>
+<input type="file" id="file-input" style="display:none" />
+<input type="file" id="image-input" accept="image/*" style="display:none" />
+</div>
+<div class="composer-bar-right">
+<button class="mode-toggle" id="btn-mode" title="模式设置">
+<span class="codicon codicon-comment"></span>
+<span class="mode-label">手动</span>
+</button>
 <button class="composer-send-btn" id="btn-send" title="发送 (Enter)">↑</button>
 </div>
+</div>
+<div class="mode-popover" id="mode-popover" style="display:none">
+<div class="mode-section">
+<div class="mode-title">Modes</div>
+<div class="mode-option" data-mode="manual">
+<span class="codicon codicon-comment"></span>
+<div class="mode-opt-text"><div class="mode-opt-name">手动</div><div class="mode-opt-desc">每次工具执行前均需你确认</div></div>
+<span class="mode-check codicon codicon-check"></span>
+</div>
+<div class="mode-option" data-mode="auto">
+<span class="codicon codicon-sync"></span>
+<div class="mode-opt-text"><div class="mode-opt-name">自动</div><div class="mode-opt-desc">自动执行编辑与工具调用</div></div>
+<span class="mode-check codicon codicon-check"></span>
+</div>
+<div class="mode-option" data-mode="plan">
+<span class="codicon codicon-list-tree"></span>
+<div class="mode-opt-text"><div class="mode-opt-name">计划</div><div class="mode-opt-desc">先产出方案，审批后再实施</div></div>
+<span class="mode-check codicon codicon-check"></span>
+</div>
+</div>
+<div class="mode-divider"></div>
+<div class="mode-think">
+<span class="think-label">思考 · Effort</span>
+<div class="think-switch" id="think-switch">
+<span class="think-opt" data-level="off">off</span>
+<span class="think-opt" data-level="high">high</span>
+<span class="think-opt" data-level="max">max</span>
+</div>
+</div>
+</div>
 <div class="slash-menu" id="slash-menu" style="display:none"></div>
+<div class="composer-attachments" id="composer-attachments"></div>
 </div>
 <div class="composer-hint">ctrl esc to focus or unfocus DeepSeek</div>`;
 const input = $("#input");
 const menu = $("#slash-menu");
 const btnSend = $("#btn-send");
-const btnAutoEdit = $("#btn-auto-edit");
+btnMode = $("#btn-mode");
+modePopover = $("#mode-popover");
 
 // 命令驱动表：全部功能经斜杠命令交互，UI 零控件
 const SLASH = [
@@ -948,14 +1024,79 @@ vscode.postMessage({ type: "abort" });
 doSend();
 }
 });
-// Edit automatically 文本按钮：切换 auto 模式
-btnAutoEdit.addEventListener("click", () => {
-state.autoMode = !state.autoMode;
-vscode.postMessage({ type: "setAutoMode", on: state.autoMode });
-addInfo(`自动模式：${state.autoMode ? "开" : "关"}`);
-syncToolbar();
+// ★ 文件入库（文本）：webview FileReader 直接读文本拼入输入框——零核心链路改动。
+//   大文件（>100KB）拒绝全量入库，引导改用 read_file（避免上下文爆炸）。
+const btnFile = $("#btn-file");
+const btnImage = $("#btn-image");
+const fileInput = $("#file-input");
+const imageInput = $("#image-input");
+btnFile.addEventListener("click", () => fileInput.click());
+btnImage.addEventListener("click", () => {
+addInfo("🖼 图片识别需配置图像理解 MCP（settings.json 的 mcpServers，如能读图返回文字描述的 server）；未配置则助手无法“看到”图片。");
+imageInput.click();
 });
-updateMetaStatus();
+fileInput.addEventListener("change", () => {
+const f = fileInput.files && fileInput.files[0];
+fileInput.value = "";
+if (!f) return;
+if (f.size > 100 * 1024) { addInfo(`📎 文件 ${f.name} 较大（>100KB），已忽略入库。建议直接在对话里让助手用 read_file 读取：${f.name}`); return; }
+const reader = new FileReader();
+reader.onload = () => {
+const content = String(reader.result ?? "");
+input.value += `\n\n📎 文件 ${f.name}：\n\`\`\`\n${content}\n\`\`\`\n`;
+autoGrow(input);
+input.focus();
+addInfo(`📎 已入库文件：${f.name}`);
+};
+reader.onerror = () => addInfo(`📎 读取文件失败：${f.name}`);
+reader.readAsText(f);
+});
+// ★ 图片上传（MCP 中转）：webview 读 base64 显示预览 → 发给 extension 存到工作区临时目录 →
+//   extension 回路径 → 把“图片路径 + 引导调图像 MCP”填入消息。底座非 vision 模型，靠 MCP 把图转文字。
+imageInput.addEventListener("change", () => {
+const f = imageInput.files && imageInput.files[0];
+imageInput.value = "";
+if (!f) return;
+if (f.size > 8 * 1024 * 1024) { addInfo(`🖼 图片 ${f.name} 过大（>8MB），已忽略`); return; }
+const reader = new FileReader();
+reader.onload = () => {
+const dataUrl = String(reader.result ?? "");
+appendImagePreview(dataUrl, f.name);
+const commaIdx = dataUrl.indexOf(",");
+const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : "";
+vscode.postMessage({ type: "uploadImage", name: f.name, mime: f.type || "image/png", base64 });
+};
+reader.onerror = () => addInfo(`🖼 读取图片失败：${f.name}`);
+reader.readAsDataURL(f);
+});
+// —— 模式胶囊按钮：切换弹出配置面板（toggle）——
+btnMode.addEventListener("click", (e) => {
+e.stopPropagation();
+toggleModePopover();
+});
+modePopover.addEventListener("click", (e) => {
+const opt = e.target.closest(".mode-option");
+if (opt) {
+const m = opt.dataset.mode;
+const planOn = m === "plan";
+const autoOn = m === "auto";
+state.planMode = planOn;
+state.autoMode = autoOn;
+vscode.postMessage({ type: "setPlanMode", on: planOn });
+vscode.postMessage({ type: "setAutoMode", on: autoOn });
+addInfo(`模式：${m === "plan" ? "计划" : m === "auto" ? "自动" : "手动"}`);
+syncToolbar();
+return;
+}
+const th = e.target.closest(".think-opt");
+if (th) {
+state.thinkingLevel = th.dataset.level;
+vscode.postMessage({ type: "setThinking", level: state.thinkingLevel });
+addInfo(`思考等级：${state.thinkingLevel}`);
+syncToolbar();
+}
+});
+updateModeToggle();
 }
 function autoGrow(el) {
     el.style.height = "auto";
@@ -966,10 +1107,10 @@ function autoGrow(el) {
   function buildToolbar() {
 const tb = $("#toolbar");
 tb.innerHTML = `
-<div class="brand"><span class="logo">✻</span> <span class="brand-name">deepSeekCode</span> <span id="busy-dot" class="dot"></span></div>
+<div class="brand"><span class="logo codicon codicon-sparkle"></span> <span class="brand-name">deepSeekCode</span> <span id="busy-dot" class="dot"></span></div>
 <div class="actions">
-<button id="btn-new" title="新会话" class="icon-svg"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
-<button id="btn-sessions" title="历史会话" class="icon-svg"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3.2l2.5 1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+<button id="btn-new" title="新会话" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
+<button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
 </div>`;
 $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
 $("#btn-sessions").addEventListener("click", () => {
@@ -987,26 +1128,46 @@ if (btnSend) {
 btnSend.textContent = state.busy ? "■" : "↑";
 btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
 }
-const btnAutoEdit = $("#btn-auto-edit");
-if (btnAutoEdit) {
-const on = state.autoMode;
-btnAutoEdit.textContent = on ? "✓ <> Edit automatically" : "<> Edit automatically";
-btnAutoEdit.classList.toggle("on", on);
-}
-updateMetaStatus();
+updateModeToggle();
 }
 
-function updateMetaStatus() {
-const el = $("#meta-status");
-if (!el) return;
-const p = [];
-p.push(state.planMode ? "plan on" : "plan off");
-p.push(state.autoMode ? "auto on" : "auto off");
-p.push("think:" + state.thinkingLevel);
-p.push(state.locale);
-if (state.model) p.push(state.model);
-el.textContent = p.join("  ");
+// —— 模式配置面板：胶囊按钮 toggle 显示/隐藏 ——
+function toggleModePopover() {
+if (!modePopover) return;
+modePopover.style.display = modePopover.style.display === "none" ? "" : "none";
 }
+// —— 同步胶囊按钮文字与面板内各模式值 ——
+function updateModeToggle() {
+if (!btnMode || !modePopover) return;
+const m = state.planMode ? "plan" : state.autoMode ? "auto" : "manual";
+const label = btnMode.querySelector(".mode-label");
+label.textContent = m === "plan" ? "计划" : m === "auto" ? "自动" : "手动";
+const ic = btnMode.querySelector(".codicon");
+if (ic) ic.className = "codicon " + (m === "plan" ? "codicon-list-tree" : m === "auto" ? "codicon-sync" : "codicon-comment");
+btnMode.classList.toggle("on", m !== "manual");
+modePopover.querySelectorAll(".mode-option").forEach((row) => {
+row.classList.toggle("on", row.dataset.mode === m);
+});
+const sw = $("#think-switch");
+if (sw) {
+sw.querySelectorAll(".think-opt").forEach((o) => {
+o.classList.toggle("on", o.dataset.level === state.thinkingLevel);
+});
+}
+}
+// —— 统一委托：胶囊按钮 toggle + 点击外部关闭（双保险，即使元素级监听失效也能响应）——
+document.addEventListener("click", (e) => {
+if (!btnMode || !modePopover) return;
+const inBtn = btnMode.contains(e.target);
+const inPop = modePopover.contains(e.target);
+if (inBtn) {
+toggleModePopover();
+return;
+}
+if (!inPop && modePopover.style.display !== "none") {
+modePopover.style.display = "none";
+}
+});
 document.addEventListener("click", (e) => {
     const a = e.target.closest?.("a");
     if (a) {

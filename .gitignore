@@ -5,3 +5,5 @@ dist/
 
 # AI 相关设计文档，不进 git（本地保留）
 .ai-docs/
+src/cli/vscode/deepseek-code-1.0.10.vsix
+src/cli/vscode/deepseek-code-1.0.10.vsix
