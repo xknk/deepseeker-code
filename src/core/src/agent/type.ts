@@ -113,6 +113,9 @@ export type AgentEvent =
     | { type: 'text.delta'; text: string }
     /** 流式思考过程增量（DeepSeek reasoning_content，前端可折叠展示）。 */
     | { type: 'thinking.delta'; text: string }
+    /** 重置已流式推送的正文/思考（流式 stall 重试前发）：通知前端丢弃本轮已累积的部分文本，
+     *  因为重试会从同一上下文重新生成，避免"让我读取 X"这类前导文案重复显示。 */
+    | { type: 'text.reset' }
     /** 单个工具调用开始（解析出名称与参数后）。 */
     | { type: 'tool.start'; toolCallId: string; toolName: string; args: any }
     /** 单个工具调用结束，携带结果与成败标记。 */

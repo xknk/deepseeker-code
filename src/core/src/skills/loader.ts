@@ -7,8 +7,8 @@
  *
  *  来源与优先级（同名后者覆盖前者）：
  *   - 内置（随包分发，最低）：src/core/src/skills/builtin/<name>/SKILL.md
- *   - 全局用户级：~/.deepSeekCode/skills/<name>/SKILL.md
- *   - 项目级（最高）：<cwd>/.deepSeekCode/skills/<name>/SKILL.md
+ *   - 全局用户级：~/.deepseeker-code/skills/<name>/SKILL.md
+ *   - 项目级（最高）：<cwd>/.deepseeker-code/skills/<name>/SKILL.md
  *
  *  注入：仅有 skill 时才把 load_skill 工具 push 进 agentTools（无 skill 不占工具位）。
  */
@@ -29,7 +29,7 @@ const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "bui
 const SOURCES: LoadSource<SkillSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "skills"), source: "global" },
-    { dir: path.join(process.cwd(), ".deepSeekCode", "skills"), source: "project" },
+    { dir: path.join(process.cwd(), ".deepseeker-code", "skills"), source: "project" },
 ];
 
 /** SKILL 正文大小上限：防异常大 SKILL.md 先整文塞进 tool result 再被压缩（Q-12）。 */

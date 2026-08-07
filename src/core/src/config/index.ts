@@ -15,7 +15,7 @@ import path from "path";
 import os from "os";
 import { createHash } from "crypto";
 import { createUUID } from "@/common/index.ts";
-const _DataDir = path.join(os.homedir(), ".deepSeekCode");
+const _DataDir = path.join(os.homedir(), ".deepseeker-code");
 /** 全局应用配置单例（详见各字段行内注释）。 */
 export const appConfig = {
     dataDir: _DataDir,

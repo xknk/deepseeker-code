@@ -32,7 +32,7 @@ export const SUBAGENT_DENYLIST = new Set(["run_command", "delete_path"]);
 export interface SubagentSpec {
     /** 交给子 agent 的具体微观任务描述。 */
     task: string;
-    /** 声明式子 Agent 名称（命中 .deepSeekCode/agents/<name>.agent.md 则套用其专长词/工具白名单/model）。 */
+    /** 声明式子 Agent 名称（命中 .deepseeker-code/agents/<name>.agent.md 则套用其专长词/工具白名单/model）。 */
     name?: string;
     /** 角色/专长补充（可选，声明式 agent 自带 role 时作补充，不覆盖 manifest.body）。 */
     role?: string;

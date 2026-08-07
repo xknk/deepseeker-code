@@ -3,7 +3,7 @@
  * @description VS Code 插件激活入口 ——【主编辑器区 Tab 架构】（对齐 Claude Code 工作区形态）：
  *  1) 读扩展配置（apiKey/model/locale）→ 注入环境变量 → chdir（必须在加载 core 之前）；
  *  2) 加载 core 模块 + 后台初始化引擎（initEngine）；
- *  3) 命令驱动：deepseekCode.openChat 等 → vscode.window.createWebviewPanel
+ *  3) 命令驱动：deepseekerCode.openChat 等 → vscode.window.createWebviewPanel
  *     在主代码编辑区创建/聚焦常驻面板（由侧边栏视图迁移而来）。
  */
 import * as vscode from "vscode";
@@ -23,8 +23,61 @@ let panel: vscode.WebviewPanel | null = null;
 /** 初始化错误（如缺 API Key）；随 state 快照发给 webview 显示提示横幅。 */
 let initError: string | null = null;
 
-/** 当前工作区根（activate 时锁定）；图片上传存盘到此根下的 .deepSeekCode/tmp 供 agent 经 MCP 读取。 */
+/** 当前工作区根；图片上传存盘到此根下的 .deepseeker-code/tmp 供 agent 经 MCP 读取。
+ *  ★ 运行期可重定向：多根工作区下，按「活动编辑器所属文件夹」解析（resolveProjectRoot），
+ *    openChat/newSession/selectProjectRoot 时若变化则 applyProjectRoot 重设 env + chdir，
+ *    core 的文件沙箱（getActiveWorkspaceRoot 实时读 env）随之跟随，无需重载窗口。 */
 let workspaceRoot: string | null = null;
+
+/**
+ * 解析 agent 应工作的项目根。优先「活动编辑器所属工作区文件夹」（多根工作区下跟随用户当前聚焦的项目），
+ * 回退 folder[0]。返回 null 表示无任何打开的文件夹。
+ * ★ 关键：用 getWorkspaceFolder(activeEditor.document.uri) 而非 workspaceFolders[0]，
+ *   否则在「dev host 自身仓库(folder0) + 用户项目(folder1)」多根场景会把 agent 锁死在 folder0。
+ */
+const resolveProjectRoot = (): string | null => {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) return null;
+  const active = vscode.window.activeTextEditor;
+  if (active) {
+    const wf = vscode.workspace.getWorkspaceFolder(active.document.uri);
+    if (wf) return wf.uri.fsPath;
+  }
+  return folders[0].uri.fsPath;
+};
+
+/**
+ * 应用项目根：更新全局态 + 注入 env + chdir（core 经 getActiveWorkspaceRoot 实时读 env，故可运行期重定向）。
+ * 返回是否成功切换；chdir 失败时保留旧根（避免半切换状态）。 */
+const applyProjectRoot = (root: string): boolean => {
+  const prev = workspaceRoot;
+  if (root === prev) return true;
+  try {
+    process.chdir(root);
+  } catch (e) {
+    void vscode.window.showErrorMessage(
+      `DeepSeeker-Code：无法切换到项目目录（${root}）：${e instanceof Error ? e.message : String(e)}`,
+    );
+    return false; // chdir 失败：保留旧根，不动 env，避免沙箱根与 cwd 错位
+  }
+  workspaceRoot = root;
+  process.env.WORKSPACE_ROOT = root;
+  return true;
+};
+
+/** 取工作区所有文件夹路径（多根沙箱注册用）。 */
+const getAllWorkspaceRoots = (): string[] =>
+  (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+
+/**
+ * 清理图片上传临时文件（<workspaceRoot>/.deepseeker-code/tmp/）。图片落盘仅因模型非视觉、需 MCP 工具读取；
+ * agent 消费后无保留价值，新会话/插件卸载时清空，避免临时文件堆积。失败静默（目录不存在等）。
+ */
+const cleanImageTmp = (): void => {
+  if (!workspaceRoot) return;
+  const dir = path.join(workspaceRoot, ".deepseeker-code", "tmp");
+  fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+};
 
 /** 通知前端一次状态快照（busy/模式/模型…）。 */
 function postState(): void {
@@ -36,6 +89,7 @@ function postState(): void {
       planMode: host.currentPlanMode,
       autoMode: host.currentAutoMode,
       initError: initError ?? "",
+      projectRoot: workspaceRoot ?? "",
     },
   });
 }
@@ -72,7 +126,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="stylesheet" href="${styleUri}" />
 <link rel="stylesheet" href="${codiconCssUri}" />
-<title>DeepSeekCode</title>
+<title>DeepSeeker-Code</title>
 </head>
 <body>
 <div id="app">
@@ -94,8 +148,8 @@ function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
     return panel;
   }
   panel = vscode.window.createWebviewPanel(
-    "deepseekCode.chat",
-    "DeepSeekCode",
+    "deepseekerCode.chat",
+    "DeepSeeker-Code",
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -103,6 +157,8 @@ function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist")],
     },
   );
+  // ★ 顶部页卡图标（dist/icon.svg）：与工具栏品牌一致的 sparkle
+  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "dist", "icon.svg");
   panel.webview.html = renderHtml(panel.webview, context.extensionUri);
   panel.webview.onDidReceiveMessage((msg) => handleMessage(msg as Record<string, unknown>));
   panel.onDidDispose(() => {
@@ -123,7 +179,7 @@ async function sendSessions(): Promise<void> {
 }
 
 /**
- * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到工作区 .deepSeekCode/tmp/<uuid>.<ext> → 回传绝对路径。
+ * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到工作区 .deepseeker-code/tmp/<uuid>.<ext> → 回传绝对路径。
  * 底座 deepseek-v4 非 vision 模型，无法直接"看"图；图片落到工作区后，由 agent 调用用户配置的图像理解
  * MCP 工具读取该路径、把图转成文字描述（走现有 mcp__* 工具链路，core 不感知二进制）。
  */
@@ -136,7 +192,7 @@ async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
   // 扩展名按 mime 推断（image/png→png）；非法回退 png
   const ext = (mime.split("/")[1] || "png").split(";")[0] || "png";
   try {
-    const dir = path.join(workspaceRoot, ".deepSeekCode", "tmp");
+    const dir = path.join(workspaceRoot, ".deepseeker-code", "tmp");
     await fs.promises.mkdir(dir, { recursive: true });
     const filePath = path.join(dir, `${randomUUID()}.${ext}`);
     await fs.promises.writeFile(filePath, Buffer.from(base64, "base64"));
@@ -158,7 +214,12 @@ function handleMessage(msg: Record<string, unknown>): void {
       break;
     case "submit": {
       const text = String(msg.text ?? "");
-      if (text.trim()) void h.submit(text);
+      if (!text.trim()) break;
+      // ★ 每次提问按当前活动编辑器所属文件夹重定向项目根（VS Code 版「cd 到项目再敲命令」）：
+      //   你看哪个项目的文件、就在哪个项目里跑。单次提问内稳定；切项目只需切到目标文件再发送。
+      const root = resolveProjectRoot();
+      if (root) applyProjectRoot(root);
+      void h.submit(text);
       break;
     }
     case "abort":
@@ -182,6 +243,7 @@ function handleMessage(msg: Record<string, unknown>): void {
       h.resolveQuestion((msg.answer ?? {}) as never);
       break;
     case "newSession":
+      cleanImageTmp(); // 清理上一会话的图片上传临时文件
       void h.newSession();
       break;
     case "listSessions":
@@ -221,43 +283,47 @@ function handleMessage(msg: Record<string, unknown>): void {
 // —— 激活 ——
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  // —— 1. 工作区校验 ——
-  workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
-  if (!workspaceRoot) {
-    void vscode.window.showErrorMessage("deepSeekCode：请先打开一个项目文件夹（工作区）再使用。");
+  // —— 1. 工作区校验 + 项目根解析（优先活动编辑器所属文件夹，回退 folder[0]）——
+  //  ★ chdir 在此完成（先于 core import）：applyProjectRoot 失败即中止激活。
+  const initialRoot = resolveProjectRoot();
+  if (!initialRoot) {
+    workspaceRoot = null;
+    void vscode.window.showErrorMessage("DeepSeeker-Code：请先打开一个项目文件夹（工作区）再使用。");
     return;
   }
+  if (!applyProjectRoot(initialRoot)) return;
 
   // —— 2. API Key / 模型配置 ——
-  const cfg = vscode.workspace.getConfiguration("deepseekCode");
+  const cfg = vscode.workspace.getConfiguration("deepseekerCode");
   const apiKey = (cfg.get<string>("apiKey") || process.env.DEEP_SEEK_API_KEY || "").trim();
   initError = null;
   if (!apiKey) {
-    initError = "未配置 DeepSeek API Key：请在设置中填写 deepseekCode.apiKey（或环境变量 DEEP_SEEK_API_KEY），保存后重载窗口。";
+    initError = "未配置 DeepSeek API Key：请在设置中填写 deepseekerCode.apiKey（或环境变量 DEEP_SEEK_API_KEY），保存后重载窗口。";
   } else {
     process.env.DEEP_SEEK_API_KEY = apiKey;
   }
 
-  // —— 3. 注入环境 + chdir ——
+  // —— 3. 注入模型配置（项目根的 env + chdir 已在 step 1 由 applyProjectRoot 完成）——
   process.env.DEEP_SEEK_API_KEY = apiKey;
   const modelCfg = (cfg.get<string>("model") || process.env.DEEP_SEEK_MODEL || "").trim();
   if (modelCfg) process.env.DEEP_SEEK_MODEL = modelCfg;
-  process.env.WORKSPACE_ROOT = workspaceRoot;
-  try {
-    process.chdir(workspaceRoot);
-  } catch (e) {
-    void vscode.window.showErrorMessage(`deepSeekCode：无法切换到工作区目录（${workspaceRoot}）：${e instanceof Error ? e.message : String(e)}`);
-    return;
-  }
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
+    import("@/tool/guard.ts"),
   ]);
 
+  // ★ 多根沙箱：注册工作区所有文件夹 → core 的 resolveSafePath 放行「落在任一文件夹内」的绝对路径，
+  //   仅拦截逃出整个工作区的路径。多根工作区下 agent 可直接读写任意项目，不再被锁死在 folder[0]。
+  setAllowedWorkspaceRoots(getAllWorkspaceRoots());
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => setAllowedWorkspaceRoots(getAllWorkspaceRoots())),
+  );
+
   // —— 5. 会话宿主（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace） ——
-  const { ChatHost } = await import("./host");
+  const { ChatHost } = await import("./host.js");
   const callbacks: ChatHostCallbacks = {
     sink: (evt) => {
       if (panel) void panel.webview.postMessage({ type: "evt", evt });
@@ -275,36 +341,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   host = new ChatHost(callbacks);
   const localeCfg = cfg.get<string>("locale");
-  if (localeCfg === "en" || localeCfg === "zh") host.setLocale(localeCfg);
+  if (localeCfg === "en" || localeCfg === "zh") host?.setLocale(localeCfg);
 
   // —— 6. 命令（主编辑器区 Tab：openChat 创建/聚焦面板） ——
+  //  ★ openChat / newSession：按当前活动编辑器重定向项目根（多根工作区下跟随聚焦项目），
+  //    applyProjectRoot 重设 env+chdir，core 文件沙箱实时跟随。selectProjectRoot 走显式选择器兜底。
   context.subscriptions.push(
-    vscode.commands.registerCommand("deepseekCode.openChat", () => {
+    vscode.commands.registerCommand("deepseekerCode.openChat", () => {
       if (!host) return;
+      const root = resolveProjectRoot();
+      if (root) applyProjectRoot(root); // 切换/保持一致（不变时 applyProjectRoot 内部短路）
       revealPanel(context);
       postState();
     }),
-    vscode.commands.registerCommand("deepseekCode.newSession", async () => {
+    vscode.commands.registerCommand("deepseekerCode.newSession", async () => {
       if (!host) return;
+      const root = resolveProjectRoot();
+      if (root) applyProjectRoot(root);
+      cleanImageTmp();
       revealPanel(context);
       await host.newSession();
       postState();
     }),
-    vscode.commands.registerCommand("deepseekCode.listSessions", async () => {
+    vscode.commands.registerCommand("deepseekerCode.selectProjectRoot", async () => {
+      if (!host) return;
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      if (folders.length === 0) {
+        void vscode.window.showErrorMessage("DeepSeeker-Code：当前没有打开的工作区文件夹。");
+        return;
+      }
+      const items = folders.map((f) => ({ label: f.name, description: f.uri.fsPath, picked: f.uri.fsPath === workspaceRoot }));
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: "选择 DeepSeeker-Code agent 工作的项目根目录",
+        title: "DeepSeeker-Code：选择项目根",
+      });
+      if (!picked) return;
+      if (applyProjectRoot(picked.description!)) {
+        revealPanel(context);
+        postState();
+        void vscode.window.showInformationMessage(`DeepSeeker-Code：项目根已切换为 ${picked.label}`);
+      }
+    }),
+    vscode.commands.registerCommand("deepseekerCode.listSessions", async () => {
       if (!host) return;
       revealPanel(context);
       await sendSessions();
     }),
-    vscode.commands.registerCommand("deepseekCode.abort", () => {
+    vscode.commands.registerCommand("deepseekerCode.abort", () => {
       host?.abort();
       postState();
     }),
-    vscode.commands.registerCommand("deepseekCode.togglePlanMode", () => {
+    vscode.commands.registerCommand("deepseekerCode.togglePlanMode", () => {
       if (!host) return;
       host.setPlanMode(!host.currentPlanMode);
       postState();
     }),
-    vscode.commands.registerCommand("deepseekCode.toggleAutoMode", () => {
+    vscode.commands.registerCommand("deepseekerCode.toggleAutoMode", () => {
       if (!host) return;
       host.setAutoMode(!host.currentAutoMode);
       postState();
@@ -312,20 +404,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   // —— 7. 后台初始化引擎（不阻塞命令注册；失败仅提示） ——
-  console.log("deepSeekCode：引擎初始化中…（MCP/skills/agents/commands 加载）");
+  console.log("DeepSeeker-Code：引擎初始化中…（MCP/skills/agents/commands 加载）");
   try {
     engineDispose = await initEngine(agentTools, { includeProject: true });
-    console.log("✓ deepSeekCode 引擎就绪（MCP/skills/agents 已注入）");
+    console.log("✓ DeepSeeker-Code 引擎就绪（MCP/skills/agents 已注入）");
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("❌ deepSeekCode 引擎初始化失败：" + msg);
-    void vscode.window.showErrorMessage(`deepSeekCode 引擎初始化失败（面板仍可用，但 MCP/skills 等工具缺失）：${msg}`);
+    console.error("❌ DeepSeeker-Code 引擎初始化失败：" + msg);
+    void vscode.window.showErrorMessage(`DeepSeeker-Code 引擎初始化失败（面板仍可用，但 MCP/skills 等工具缺失）：${msg}`);
   }
 
-  console.log("✓ deepSeekCode 插件已激活（工作区：" + workspaceRoot + "）");
+  console.log("✓ DeepSeeker-Code 插件已激活（工作区：" + workspaceRoot + "）");
 }
 
 export function deactivate(): void {
+  cleanImageTmp(); // 插件卸载/窗口关闭时清空图片上传临时文件
   try {
     engineDispose?.();
   } catch {

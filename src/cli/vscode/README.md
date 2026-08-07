@@ -1,10 +1,10 @@
-# deepSeekCode for VS Code
+# DeepSeeker-Code for VS Code
 
 DeepSeek 驱动的 AI 编程助手 **VS Code 插件入口**（当前位于 `src/cli/vscode/`，复用 `src/core/` 引擎，与 `src/cli/` 终端入口共享核心）。
 
 - **功能与 CLI 完全一致**：同一套 core agent 引擎（`handleUnifiedChat` / `agentTools` / `initEngine`），会话、流式输出、思考过程、工具调用、审批、结构化提问（ask_question）、计划模式两阶段、模型/思考等级/语言切换、历史会话续接、Undo 回退、MCP / hooks / permissions / skills / 声明式子 Agent / 项目指引全部继承。
 - **交互贴合 Claude Code 插件**：活动栏图标 → 侧边栏聊天面板；内联按钮式审批（允许本次 / 总是允许 / 拒绝）；方案卡片（接受并自动执行 / 逐步审批 / 编辑 / 拒绝）；提问选项按钮；历史会话点选续接；流式打字 + 可折叠思考块 + 工具卡。
-- **数据与 CLI 共享**：会话 transcript / Undo / trace 都落在 `~/.deepSeekCode/`（按工作区 key 分目录），同一工作区下 CLI 与插件可互续会话。
+- **数据与 CLI 共享**：会话 transcript / Undo / trace 都落在 `~/.deepseeker-code/`（按工作区 key 分目录），同一工作区下 CLI 与插件可互续会话。
 
 ---
 
@@ -34,30 +34,30 @@ npm run build
 
 ## 3. 调试（F5）
 
-用 VS Code 打开 `src/cli/vscode/` 目录，按 `F5` 启动「Run Extension (deepSeekCode)」——
+用 VS Code 打开 `src/cli/vscode/` 目录，按 `F5` 启动「Run Extension (DeepSeeker-Code)」——
 会先执行 `node build.mjs`（preLaunchTask），再打开 **Extension Development Host** 窗口。
 
 > ⚠️ F5 弹出的新窗口是 VS Code 调试扩展的固有机制（隔离运行），**不是插件的产品行为**。
 > 插件本身的形态是：**活动栏 ✻ 图标 → 当前窗口左侧边栏打开聊天面板**（与 git 历史/SCM 面板一致）。
 > 装好扩展（vsix 或「Developer: Install Extension from Location」）后在**你自己的窗口**点 ✻ 即是侧边栏聊天。
 
-调试窗口里打开任意项目文件夹 → 点击活动栏的 **✻ deepSeekCode** 图标即可聊天。
+调试窗口里打开任意项目文件夹 → 点击活动栏的 **✻ DeepSeeker-Code** 图标即可聊天。
 API Key 通过环境变量 `DEEP_SEEK_API_KEY` 传入（launch.json 已透传）。
 
 ## 4. 打包安装（vsix）
 
 ```powershell
 npm run package
-# 产物：deepseek-code-1.0.0.vsix，在 VS Code 扩展面板「从 VSIX 安装」即可
+# 产物：deepseeker-code-1.0.0.vsix，在 VS Code 扩展面板「从 VSIX 安装」即可
 ```
 
 ## 5. 配置
 
 | 设置项 | 说明 |
 |---|---|
-| `deepseekCode.apiKey` | DeepSeek API Key（优先于环境变量 `DEEP_SEEK_API_KEY`） |
-| `deepseekCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`） |
-| `deepseekCode.locale` | 界面/回复语言：`zh` / `en`（留空默认中文） |
+| `deepseekerCode.apiKey` | DeepSeek API Key（优先于环境变量 `DEEP_SEEK_API_KEY`） |
+| `deepseekerCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`） |
+| `deepseekerCode.locale` | 界面/回复语言：`zh` / `en`（留空默认中文） |
 
 也可以在聊天输入框用斜杠命令：`/plan`、`/auto`、`/model <名称>`、`/thinking <off|high|max>`、
 `/lang <zh|en>`、`/sessions`、`/clear`、`/new`、`/help`。

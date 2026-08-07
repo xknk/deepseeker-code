@@ -8,7 +8,7 @@
  *   - compileRule：把 {command, matcher, ...} 翻译成 HookRule，run 调 shellExecutor；
  *   - initHooks：供 serve 启动调用，无 into 参数（走全局 registry）。
  *
- *  配置路径（叠加语义，非 id 覆盖）：全局 ~/.deepSeekCode/settings.json + 项目级 <cwd>/.deepSeekCode/settings.json。
+ *  配置路径（叠加语义，非 id 覆盖）：全局 ~/.deepseeker-code/settings.json + 项目级 <cwd>/.deepseeker-code/settings.json。
  *  可拦截事件下任一规则 deny 即生效，故项目级拦截能覆盖全局放行。
  *
  *  配置格式：
@@ -76,7 +76,7 @@ const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig>
     const merged: RawHooksConfig = {};
     const paths = [
         path.join(appConfig.dataDir, "settings.json"),                        // 全局用户级
-        ...(includeProject ? [path.join(process.cwd(), ".deepSeekCode", "settings.json")] : []), // 项目级（叠加）；未信任时省略
+        ...(includeProject ? [path.join(process.cwd(), ".deepseeker-code", "settings.json")] : []), // 项目级（叠加）；未信任时省略
     ];
     for (const configPath of paths) {
         let raw: string;

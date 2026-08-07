@@ -5,9 +5,9 @@
  *  子 agent 在其中运行（经 ALS 隔离，改动不污染主工作区），结束 harvestDiff 收割改动，最后 remove 回收。
  *
  *  设计要点：
- *  - worktree 工作树落在仓外 <os.tmpdir()>/deepSeekCode-worktrees/<userWorkspaceDir>/<sessionId>/<stepId>/，
- *    不污染项目目录；admin 元数据由主仓 .git/worktrees/ 管理（git 原生）。置于系统临时目录而非 .deepSeekCode，
- *    避开 isProtectedWrite 的 .deepSeekCode 路径段保护（否则写入会被误杀）。
+ *  - worktree 工作树落在仓外 <os.tmpdir()>/deepseeker-code-worktrees/<userWorkspaceDir>/<sessionId>/<stepId>/，
+ *    不污染项目目录；admin 元数据由主仓 .git/worktrees/ 管理（git 原生）。置于系统临时目录而非 .deepseeker-code，
+ *    避开 isProtectedWrite 的 .deepseeker-code 路径段保护（否则写入会被误杀）。
  *  - git worktree add/remove/prune 在【主仓】执行（cwd=WORKSPACE_ROOT 常量，不走 ALS——admin 操作针对主仓）；
  *    harvestDiff 在 worktree 内执行（git -C <wt>）。
  *  - 移除前 killBackgroundTasksUnder：杀掉 cwd 落在该 worktree 的常驻进程（dev server 等），防悬空 cwd。
@@ -37,13 +37,13 @@ const runMainGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
     execFileSmart("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
 
 /**
- * worktree 根目录：<os.tmpdir()/deepSeekCode-worktrees>/<userWorkspaceDir>/（按项目隔离，sweep 按此扫）。
- * ★ 必须落在 .deepSeekCode 之外：isProtectedWrite 按「路径段」禁碰 .deepSeekCode/.git/.ssh 等，
- *   若 worktree 置于 ~/.deepSeekCode/worktrees/... 其路径段含 .deepSeekCode → 所有写入被保护规则误杀。
+ * worktree 根目录：<os.tmpdir()/deepseeker-code-worktrees>/<userWorkspaceDir>/（按项目隔离，sweep 按此扫）。
+ * ★ 必须落在 .deepseeker-code 之外：isProtectedWrite 按「路径段」禁碰 .deepseeker-code/.git/.ssh 等，
+ *   若 worktree 置于 ~/.deepseeker-code/worktrees/... 其路径段含 .deepseeker-code → 所有写入被保护规则误杀。
  *   放系统临时目录既避开保护段，又契合 worktree 的临时性（OS 定期清理 + 启动期 sweep 兜底）。
  */
 const worktreeRootDir = (): string =>
-    path.join(os.tmpdir(), "deepSeekCode-worktrees", appConfig.userWorkspaceDir);
+    path.join(os.tmpdir(), "deepseeker-code-worktrees", appConfig.userWorkspaceDir);
 
 /** 单个 worktree 目录：<worktreeRoot>/<sessionId>/<stepId>/。 */
 const worktreeDir = (sessionId: string, stepId: string): string =>

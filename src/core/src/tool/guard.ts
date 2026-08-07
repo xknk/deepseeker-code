@@ -24,8 +24,9 @@ import { dispatch } from "./hooks.ts";
 import { getSessionWorktreeRoot } from "./worktree/sessionRegistry.ts";
 
 /** 工作区根目录（全局默认）：优先取环境变量 WORKSPACE_ROOT，否则回退到进程当前目录。
- *  ★ 现为「回退默认值」——真正生效的围栏基座由 ALS（getActiveWorkspaceRoot）决定：
- *    无 store 时回退此常量（= 现状，零回归）；worktree 隔离时由 runWithWorkspaceRoot 覆盖。 */
+ *  ★ 此常量在模块加载期冻结，仅供「目标天然是激活期主仓」的消费者用（worktree manager / projectGuide loader）。
+ *    文件沙箱围栏（getActiveWorkspaceRoot / isProtectedWrite）已改为实时读 process.env.WORKSPACE_ROOT，
+ *    以支持 VS Code 多根工作区下宿主运行期重定向项目根——勿再为此处冻结值门控文件访问。 */
 export const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || process.cwd();
 
 // ============ AsyncLocalStorage：按 agent 上下文切换「活动工作区根」============
@@ -57,7 +58,10 @@ export const getActiveWorkspaceRoot = (): string => {
         const wtRoot = getSessionWorktreeRoot(store.sessionId);
         if (wtRoot) return wtRoot;
     }
-    return WORKSPACE_ROOT;
+    // ★ 实时读 env（而非模块加载期冻结的 WORKSPACE_ROOT 常量）：
+    //   VS Code 多根工作区下，宿主按「活动编辑器所属文件夹」运行期重定向（openChat/newSession 时
+    //   重设 process.env.WORKSPACE_ROOT + chdir），此处实时读可让文件沙箱围栏立即跟随新根，无需重载窗口。
+    return process.env.WORKSPACE_ROOT || process.cwd();
 };
 
 /** 显式覆盖活动根（run_workflow 的 worktree 隔离用；替换 store，不合并 sessionId——保 workflow 子 agent 用 wt.path）。 */
@@ -105,6 +109,30 @@ const ignoreCache = new Map<string, ReturnType<typeof ignore>>();
 const ignoreBuilding = new Map<string, Promise<ReturnType<typeof ignore>>>();
 
 /**
+ * 🛡️ 多根工作区允许根集合：VS Code 多根工作区下，宿主把「所有工作区文件夹」注册进来，
+ *  resolveSafePath 据此判定——绝对路径落在【任一】文件夹内即放行（相对路径仍解析到活动根），
+ *  仅拦截逃出整个工作区的路径。realpath 在 set 时一次性解析并缓存，避免每条路径重复磁盘读。
+ *  空集合 → 回退单根（getActiveWorkspaceRoot 的 realpath），向后兼容 CLI 单目录场景。
+ */
+let allowedRootsReal: string[] = [];
+export const setAllowedWorkspaceRoots = (roots: string[]): void => {
+    const real: string[] = [];
+    for (const r of roots) {
+        if (!r) continue;
+        try { real.push(fsSync.realpathSync(r)); } catch { real.push(path.resolve(r)); }
+    }
+    allowedRootsReal = Array.from(new Set(real));
+};
+/** 取已注册的允许根（realpath 后）。空 = 未注册多根（CLI 单目录场景），由调用方回退 cwd。 */
+export const getAllowedWorkspaceRoots = (): string[] => [...allowedRootsReal];
+/** 围栏判定用的根集合：有注册用注册集，否则回退单活动根（realpath，失败用原值）。 */
+const allowedBoundaryRoots = (): string[] => {
+    if (allowedRootsReal.length > 0) return allowedRootsReal;
+    const r = getActiveWorkspaceRoot();
+    try { return [fsSync.realpathSync(r)]; } catch { return [r]; }
+};
+
+/**
  * 🛡️ 物理沙箱防护锁：通过操作系统磁盘扇区原形解析，彻底掐断软链接（Symlink）跨界逃逸攻击
  */
 export const resolveSafePath = (rel: string, base?: string): string => {
@@ -127,10 +155,15 @@ export const resolveSafePath = (rel: string, base?: string): string => {
         throw new Error(`路径预解析失败，可能遭遇恶意路径安全注入: ${e.message}`);
     }
 
-    const trueWorkspaceRoot = fsSync.realpathSync(root);
-    const relativePart = path.relative(trueWorkspaceRoot, truePhysicalPath);
+    // ★ 围栏判定：base 显式传入（单测）→ 仅查该根；否则查「允许根集合」——多根工作区下绝对路径
+    //   落在任一文件夹内即放行，相对路径仍解析到活动根；只有逃出整个工作区才拦截。安全无损。
+    const boundaryRoots = base ? (() => { try { return [fsSync.realpathSync(root)]; } catch { return [root]; } })() : allowedBoundaryRoots();
+    const escaped = boundaryRoots.every(r => {
+        const rel0 = path.relative(r, truePhysicalPath);
+        return rel0.startsWith("..") || path.isAbsolute(rel0);
+    });
 
-    if (relativePart.startsWith("..") || path.isAbsolute(relativePart)) {
+    if (escaped) {
         throw new Error(`🛑 [SECURITY ALERT] 检测到恶意的物理路径跨界逃逸！拒绝访问：${rel}`);
     }
 
@@ -168,11 +201,11 @@ export const assertWithinWorkspace = (absPath: string, base?: string): void => {
 
 /**
  * 🛡️ P1-7 受保护目录清单：写/删工具无论授权与否一律禁碰，防 VCS（.git/.hg/.svn）、凭证（.ssh/.aws）、
- * 项目配置（.deepSeekCode：hooks/permissions/skills/agents，防 agent 自我篡改提权）被改。
+ * 项目配置（.deepseeker-code：hooks/permissions/skills/agents，防 agent 自我篡改提权）被改。
  * 仅作用于写工具（isUndoTrigger：edit_file/write_file/create_file/delete_path）；读不受限（模型可读 .git/.env 调试）。
  * 注：单个敏感文件（.env 等）不在此列——由 auto deny 清单（auto 模式）/ 人工审批（默认模式）处理，避免阻碍常规编辑。
  */
-export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepSeekCode'];
+export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepseeker-code'];
 
 /**
  * 路径是否落入受保护目录（含其子路径）。解析为绝对路径后按路径段匹配（小写归一），避免误判文件名巧合。
@@ -181,7 +214,7 @@ export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.de
 export const isProtectedWrite = (relOrAbs: string, cwd?: string): boolean => {
     if (!relOrAbs) return false;
     try {
-        const base = cwd || WORKSPACE_ROOT;
+        const base = cwd || process.env.WORKSPACE_ROOT || process.cwd();
         const abs = path.isAbsolute(relOrAbs) ? relOrAbs : path.resolve(base, relOrAbs);
         const lower = abs.replace(/\\/g, '/').toLowerCase();
         return PROTECTED_WRITE_DIRS.some(d => {
@@ -327,7 +360,7 @@ export const requestApproval = async (
         const ruleStr = buildScopedAllowRule(toolName, args);
         const persisted = await addPermissionRule('project', 'allow', ruleStr).catch(() => false);
         console.log(persisted
-            ? `📌 [审批记忆] 已写持久 allow 规则：${ruleStr}（项目 .deepSeekCode/settings.json），后续命中该精确值免审`
+            ? `📌 [审批记忆] 已写持久 allow 规则：${ruleStr}（项目 .deepseeker-code/settings.json），后续命中该精确值免审`
             : `♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：未信任目录或写入失败）`);
     }
     return approved;

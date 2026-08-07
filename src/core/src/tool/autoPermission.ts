@@ -43,7 +43,7 @@ const BUILTIN_AUTO_DENY: RegExp[] = [
     /(^|[\\/])\.yarnrc$/i,
     /(^|[\\/])credentials($|\.)/i,                      // credentials / credentials.json
     /(^|[\\/])id_(rsa|dsa|ecdsa|ed25519)$/i,            // SSH/PGP 私钥
-    /(^|[\\/])\.deepSeekCode[\\/]settings\.json$/i,     // 项目权限/hooks 配置（防自我篡改提权）
+    /(^|[\\/])\.deepseeker-code[\\/]settings\.json$/i,     // 项目权限/hooks 配置（防自我篡改提权）
 ];
 
 const matchBuiltinDeny = (p: string): boolean => {

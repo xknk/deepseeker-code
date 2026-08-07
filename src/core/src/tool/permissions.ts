@@ -12,7 +12,7 @@
  *  优先级（按序短路）：deny > ask > allow。
  *
  *  配置来源（叠加语义，复刻 hooks/loader.ts 的 overlay 读法）：
- *   全局 ~/.deepSeekCode/settings.json + 项目级 <cwd>/.deepSeekCode/settings.json，取 permissions.{allow,deny,ask}。
+ *   全局 ~/.deepseeker-code/settings.json + 项目级 <cwd>/.deepseeker-code/settings.json，取 permissions.{allow,deny,ask}。
  *  启动期读取并缓存编译规则（与 hooks/skills 一致）；运行期 checkPermission 纯内存查表。
  */
 import fs from "fs/promises";
@@ -111,7 +111,7 @@ const readPermissionConfig = async (includeProject: boolean): Promise<Permission
     const merged: PermissionRules = { allow: [], deny: [], ask: [] };
     const paths = [
         path.join(appConfig.dataDir, "settings.json"),                        // 全局用户级
-        ...(includeProject ? [path.join(process.cwd(), ".deepSeekCode", "settings.json")] : []), // 项目级（叠加）；未信任时省略
+        ...(includeProject ? [path.join(process.cwd(), ".deepseeker-code", "settings.json")] : []), // 项目级（叠加）；未信任时省略
     ];
     for (const configPath of paths) {
         let raw: string;
@@ -237,11 +237,11 @@ export const buildScopedAllowRule = (toolName: string, args: any): string => {
     return `${toolName}(${val})`;
 };
 
-/** 解析 settings.json 路径：global=~/.deepSeekCode，project=<cwd>/.deepSeekCode */
+/** 解析 settings.json 路径：global=~/.deepseeker-code，project=<cwd>/.deepseeker-code */
 const resolveSettingsPath = (scope: 'global' | 'project'): string =>
     scope === 'global'
         ? path.join(appConfig.dataDir, "settings.json")
-        : path.join(process.cwd(), ".deepSeekCode", "settings.json");
+        : path.join(process.cwd(), ".deepseeker-code", "settings.json");
 
 /**
  * 运行期新增一条权限规则并持久化（对标 CC 审批"总是允许"→写 allowlist）。

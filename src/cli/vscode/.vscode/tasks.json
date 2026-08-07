@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "deepseekCode: build",
+      "label": "deepseekerCode: build",
       "type": "shell",
       "command": "node build.mjs",
       "group": { "kind": "build", "isDefault": true },

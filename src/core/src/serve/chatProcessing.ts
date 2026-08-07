@@ -29,7 +29,9 @@ import { createWebRequestApproval } from "@/host/webHost.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
 import { expandSlashCommand } from "@/commands/expand.ts";
-import { runWithSessionContext } from "@/tool/guard.ts";
+import { runWithSessionContext, getAllowedWorkspaceRoots, getActiveWorkspaceRoot } from "@/tool/guard.ts";
+import path from "path";
+import fs from "fs";
 import { SYSTEM_PROMPT } from "@/agent/systemPrompt.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
@@ -114,10 +116,20 @@ export const handleUnifiedChat = async (
     }
 
     // ★ SYSTEM_PROMPT 已抽取为共享模块（@/agent/systemPrompt.ts），Web/CLI 宿主复用，避免双处维护。
+    //   多根工作区感知：注册了 >1 个项目根时（如前端+后端），把全部根注入系统提示，让 agent 开局就知道
+    //   有多个项目、可用绝对路径或 ../<兄弟目录> 跨项目读写。单根（CLI/单文件夹）不注入，零回归。
+    let sysPrompt = SYSTEM_PROMPT;
+    const roots = getAllowedWorkspaceRoots();
+    if (roots.length > 1) {
+        let activeReal = getActiveWorkspaceRoot();
+        try { activeReal = fs.realpathSync(activeReal); } catch { /* 用原值 */ }
+        const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（当前默认：相对路径与命令基准）" : ""}`);
+        sysPrompt = SYSTEM_PROMPT + `\n\n【工作区（多项目）】\n你可在以下项目根中读写文件。跨项目访问用绝对路径，或相对当前默认根的 ../<兄弟目录>:\n${lines.join("\n")}`;
+    }
     const fullMessages: Msg[] = await buildContextMessages(
         sessionId,
         { role: "user", content: inbound.content },
-        SYSTEM_PROMPT,
+        sysPrompt,
     );
     await emitTrace({
         sessionId,
@@ -146,7 +158,7 @@ export const handleUnifiedChat = async (
         modelWindow: appConfig.MAX_HISTORY_TOKENS,
         keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
         compactRatio: appConfig.COMPACT_RATIO,
-        parentSystemPrompt: SYSTEM_PROMPT,
+        parentSystemPrompt: sysPrompt,
         events: async (base: TraceBase) => {
             await emitTrace(base);          // 纯 trace 落盘，不再推前端
             opts?.onTrace?.(base);          // 透传宿主（CLI 据此读 usage 等真实计量）
@@ -167,16 +179,24 @@ export const handleUnifiedChat = async (
     //   据此经 per-session 注册表查「激活的 worktree」（enter_worktree 工具用）。ALS 跨 await 边界继承。
     //   无 session worktree 时 getActiveWorkspaceRoot/getActiveCwd 走原回退，行为零回归。
     await runWithSessionContext(sessionId, async () => {
-        for await (const event of runAgent(fullMessages, options)) {
-            if (event.type === 'text.delta') streamedAnyText = true;
-            if (event.type === 'final') {
-                replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
-                // SSE/CLI 模式：本轮已流式推送过正文 → final 仅作结束信号（text 置空，避免前端重复显示全文）；
-                //   本轮【未产出正文】（压缩超窗/模型 400/中止等首字符前终结）→ final.text 是唯一可见消息，必须原样转发。
-                sseWrite?.({ type: 'final', text: streamedAnyText ? '' : event.text });
-            } else {
-                sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
+        try {
+            for await (const event of runAgent(fullMessages, options)) {
+                if (event.type === 'text.delta') streamedAnyText = true;
+                if (event.type === 'final') {
+                    replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
+                    // SSE/CLI 模式：本轮已流式推送过正文 → final 仅作结束信号（text 置空，避免前端重复显示全文）；
+                    //   本轮【未产出正文】（压缩超窗/模型 400/中止等首字符前终结）→ final.text 是唯一可见消息，必须原样转发。
+                    sseWrite?.({ type: 'final', text: streamedAnyText ? '' : event.text });
+                } else {
+                    sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
+                }
             }
+        } catch (e) {
+            // ★ P0 兜底（双保险）：runAgent 理论上已用外层 catch 必发 final（见 runAgent 末尾），
+            //   但若 final 之前任何 setup/消费异常逃逸，此处确保也发一个 final，避免前端 busy 永不清。
+            const msg = e instanceof Error ? e.message : String(e);
+            sseWrite?.({ type: 'final', text: streamedAnyText ? '' : `（agent 异常退出：${msg}）` });
+            replyText = msg;
         }
     });
 

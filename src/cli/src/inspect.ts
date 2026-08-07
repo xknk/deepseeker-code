@@ -100,7 +100,7 @@ export const inspectPermissions = (): string => {
 /** /mcp：已连接的 MCP server + 工具数。 */
 export const inspectMcp = async (): Promise<string> => {
     const clients = await listMcpClients();
-    if (clients.length === 0) return `🔌 MCP：无已连接 server（在 ~/.deepSeekCode/mcp.json 配置）。`;
+    if (clients.length === 0) return `🔌 MCP：无已连接 server（在 ~/.deepseeker-code/mcp.json 配置）。`;
     const lines = clients.map(c => `  • ${c.serverName}（${c.toolCount >= 0 ? `${c.toolCount} 个工具` : "工具数获取失败"}）`);
     const totalTools = clients.reduce((s, c) => s + (c.toolCount > 0 ? c.toolCount : 0), 0);
     return [`🔌 MCP server（${clients.length} 个，共 ${totalTools} 个工具）`, ...lines].join("\n");
@@ -109,7 +109,7 @@ export const inspectMcp = async (): Promise<string> => {
 /** /hooks：已注册的 hook 规则。 */
 export const inspectHooks = (): string => {
     const hooks = listHooks();
-    if (hooks.length === 0) return `🪝 Hooks：无（在 ~/.deepSeekCode/settings.json 的 hooks 段配置）。`;
+    if (hooks.length === 0) return `🪝 Hooks：无（在 ~/.deepseeker-code/settings.json 的 hooks 段配置）。`;
     const byEvent = new Map<string, typeof hooks>();
     for (const h of hooks) {
         const arr = byEvent.get(h.event) ?? [];

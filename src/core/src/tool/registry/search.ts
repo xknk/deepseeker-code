@@ -13,7 +13,7 @@
  */
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { getActiveWorkspaceRoot } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
@@ -30,12 +30,13 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "search_grep",
-            description: "在工作区的所有文件中检索匹配的代码行，返回带行列号的平铺线索，用于快速定位符号定义或报错位置。默认按字面量关键词匹配；如需正则，传 is_regex=true。",
+            description: "在工作区的所有文件中检索匹配的代码行，返回带行列号的平铺线索，用于快速定位符号定义或报错位置。默认按字面量关键词匹配；如需正则，传 is_regex=true。多根工作区下可传 path 指定搜索某个项目根（绝对路径或相对当前默认根的 ../兄弟目录）。",
             parameters: {
                 type: "object",
                 properties: {
                     query: { type: "string", description: "检索内容。默认为字面量关键词（如 'function runAgent'）；is_regex=true 时按正则解析（如 'function\\s+runAgent'）。" },
-                    is_regex: { type: "boolean", description: "是否将 query 作为正则表达式解析，默认 false（字面量匹配，自动转义特殊字符）" }
+                    is_regex: { type: "boolean", description: "是否将 query 作为正则表达式解析，默认 false（字面量匹配，自动转义特殊字符）" },
+                    path: { type: "string", description: "限定搜索的目录（可选）。默认搜索当前活动项目根。多根工作区下可传另一个项目根（绝对路径，或相对当前默认根的 ../<兄弟目录>）来跨项目检索，须经工作区沙箱校验。" }
                 },
                 required: ["query"],
             },
@@ -45,7 +46,7 @@ export const searchTools: CustomTool[] = [
             maxOutputCharacters: 32000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { query: string; is_regex?: boolean }): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
+            async execute(args: { query: string; is_regex?: boolean; path?: string }): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();
                     if (!cleanQuery) return "❌ [检索失败]：传入的检索关键词不能为空。";
@@ -58,7 +59,9 @@ export const searchTools: CustomTool[] = [
                     //   Windows 下 process.cwd() 返回反斜杠（如 D:\code\自研\...），spawn/execFile 用「反斜杠+中文」
                     //   作 cwd 派生 rg 会失败（ENOENT 或无限卡死，实测 search_grep 查 import 卡 >90s）。
                     //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
-                    const searchRoot = getActiveWorkspaceRoot().replace(/\\/g, "/");
+                    // ★ 多根工作区：args.path 指定搜索目录时经 resolveSafePath 校验（须落在任一工作区根内），
+                    //   支持 ../<兄弟目录> 跨项目检索；缺省搜索当前活动根。
+                    const searchRoot = (args.path ? resolveSafePath(args.path) : getActiveWorkspaceRoot()).replace(/\\/g, "/");
                     const rgArgs = [
                         "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",

@@ -5,8 +5,8 @@
  *
  *  来源与优先级（同名后者覆盖前者，project > global > builtin）：
  *   - 内置：src/core/src/outputStyles/builtin/<name>.md
- *   - 全局：~/.deepSeekCode/output-styles/<name>.md
- *   - 项目：<cwd>/.deepSeekCode/output-styles/<name>.md
+ *   - 全局：~/.deepseeker-code/output-styles/<name>.md
+ *   - 项目：<cwd>/.deepseeker-code/output-styles/<name>.md
  */
 import fs from "fs/promises";
 import path from "path";
@@ -21,7 +21,7 @@ const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "bui
 const SOURCES: LoadSource<OutputStyleSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "output-styles"), source: "global" },
-    { dir: path.join(process.cwd(), ".deepSeekCode", "output-styles"), source: "project" },
+    { dir: path.join(process.cwd(), ".deepseeker-code", "output-styles"), source: "project" },
 ];
 
 /** 解析单个风格 .md 为 manifest；失败返回 null（warn + 跳过） */

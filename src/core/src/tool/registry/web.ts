@@ -15,7 +15,7 @@ import { appConfig } from "@/config/index.ts";
 const FETCH_TIMEOUT_MS = 15000; // 单次请求超时（ms）
 const SEARCH_TIMEOUT_MS = 20000; // 搜索请求超时（搜索通常比抓单页慢）
 const DEFAULT_MAX_CHARS = 16000; // 默认返回上限（对齐 appConfig.MAX_TOOL_RESULT_CHARS）
-const USER_AGENT = "deepSeekCode-Agent/1.0 (+web_fetch tool)";
+const USER_AGENT = "DeepSeeker-Code-Agent/1.0 (+web_fetch tool)";
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"; // 搜索引擎抓取用（框架 UA 会被反爬拦截）
 const TAVILY_ENDPOINT = "https://api.tavily.com/search";
 

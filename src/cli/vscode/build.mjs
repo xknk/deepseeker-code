@@ -88,6 +88,11 @@ async function copyAssets() {
   await mkdir(DIST, { recursive: true });
   await cp(path.join(ROOT, "src/webview/style.css"), path.join(DIST, "style.css"), { force: true }).catch(() => {});
 
+  // ★ 面板页卡图标（media/icon.svg → dist/icon.svg），供 extension.ts panel.iconPath 引用
+  await cp(path.join(ROOT, "media/icon.svg"), path.join(DIST, "icon.svg"), { force: true }).catch((e) => {
+    console.warn("⚠️ 拷贝面板图标失败（icon.svg）：", e?.message ?? e);
+  });
+
   // ★ codicons：把官方 codicon.ttf + codicon.css 拷入 dist，供 webview 经 <link> + @font-face 加载。
   //   codicon.css 内 url("./codicon.ttf") 相对其自身在 dist/ 的位置解析；CSP font-src 放开后即可用。
   const codiconsDist = path.join(ROOT, "node_modules/@vscode/codicons/dist");

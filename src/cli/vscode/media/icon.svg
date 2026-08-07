@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- 四角星 sparkle：与工具栏品牌图标（codicon-sparkle）一致，中灰在亮/暗主题均清晰 -->
+  <path fill="#7a7a7a" d="M8 0 Q8 8 16 8 Q8 8 8 16 Q8 8 0 8 Q8 8 8 0 Z"/>
+</svg>

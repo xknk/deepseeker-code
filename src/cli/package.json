@@ -1,10 +1,10 @@
 {
-    "name": "deep-code",
+    "name": "deepseeker-code",
     "version": "1.0.0",
-    "description": "deepSeekCode 终端客户端（React Ink，in-process 直驱 runAgent）",
+    "description": "DeepSeeker-Code 终端客户端（React Ink，in-process 直驱 runAgent）",
     "type": "module",
     "bin": {
-        "deep-code": "./dist/cli.mjs"
+        "deepseeker-code": "./dist/cli.mjs"
     },
     "files": [
         "dist/cli.mjs"

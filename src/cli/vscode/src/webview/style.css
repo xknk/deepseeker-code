@@ -1,4 +1,4 @@
-/* vscode/src/webview/style.css — deepSeekCode 聊天面板
+/* vscode/src/webview/style.css — DeepSeeker-Code 聊天面板
  * 设计原则：地狱级克制 · Claude Code 终端美学 · 命令驱动
  *  - 全局背景透明，直接透出 var(--vscode-sideBar-background)
  *  - 零自定义彩色，边框统一 --vscode-input-border / --vscode-panel-border
@@ -120,6 +120,39 @@ body {
   gap: 1px;
   flex-shrink: 0;
   margin-left: auto;
+}
+
+/* ———————— 项目根胶囊：显示 agent 当前工作的目录名，点击切换 ———————— */
+.project-root {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 2px 7px;
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.project-root:hover {
+  color: var(--fg);
+  border-color: var(--border);
+  background: var(--bg-hover, rgba(128, 128, 128, 0.08));
+}
+.project-root .codicon {
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+#project-root-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .icon-btn {

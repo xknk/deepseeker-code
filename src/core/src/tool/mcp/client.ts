@@ -108,11 +108,11 @@ export const joinPromptMessages = (result: any): string => {
 };
 
 /** 客户端信息（握手用），与 serverName 解耦 */
-const CLIENT_INFO = { name: "deepSeekCode", version: "1.0.0" };
+const CLIENT_INFO = { name: "DeepSeeker-Code", version: "1.0.0" };
 
 /**
  * 构造安全环境变量：仅透传白名单（PATH/HOME 等基础变量），不全量透传 process.env，
- * 防宿主 DEEPSEEK_CODE_TOKEN / API key 等机密泄露给第三方 MCP server。
+ * 防宿主 DEEPSEEKER_CODE_TOKEN / API key 等机密泄露给第三方 MCP server。
  * 白名单与 hooks/shellExecutor.ts 的 ENV_WHITELIST 保持一致。
  */
 const MCP_ENV_WHITELIST = [
@@ -202,7 +202,7 @@ export class McpStdioClient extends McpBaseClient {
         this.proc = spawn(command, args, {
             stdio: ["pipe", "pipe", "pipe"],
             // ★ 环境变量白名单透传（见 buildSafeEnv）：不全量透传 process.env，
-            //   防宿主 DEEPSEEK_CODE_TOKEN / API key 等机密泄露给第三方 MCP server
+            //   防宿主 DEEPSEEKER_CODE_TOKEN / API key 等机密泄露给第三方 MCP server
             env: { ...buildSafeEnv(), ...env },
             // Windows 下 npx 等常需 shell 才能找到；非 Win 直接执行
             shell: process.platform === "win32",

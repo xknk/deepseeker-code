@@ -285,9 +285,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         // 用户中止：model.ts 已干净 break 不会到此；防御性判断交外层 signal.aborted 分支处理
                         if (signal?.aborted) throw streamErr;
                         const isIdleTimeout = streamErr instanceof Error && streamErr.message === 'stream_idle_timeout';
+                        // ★ 放宽 stall 重试门控：原 noOutputYet 要求「完全无输出」才重试，但工具调用轮几乎总有前导文案
+                        //   （"让我读取 X…"），导致工具调用前的 stall 永不重试、等满 120s 后直接放弃（用户症状"卡了"）。
+                        //   现改为：只要【尚未拼出完整可执行的 tool_call】（arguments 不可解析 = 仍在流式中）就允许重试；
+                        //   已拼出完整 tool_call 则不重试（避免重复执行已敲定的工具）。这是用户卡死症状的直接修复。
+                        const hasCompleteToolCall = [...toolCallsBuf.values()].some(
+                            tc => { try { JSON.parse(tc.function.arguments); return true; } catch { return false; } }
+                        );
                         const noOutputYet = !contentBuf && !reasoningBuf && toolCallsBuf.size === 0;
-                        if (isIdleTimeout && noOutputYet && streamAttempt < MAX_STREAM_RETRIES) {
-                            console.warn(`⚠️ 流式 stall（idle 超时，尚无输出），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
+                        if (isIdleTimeout && (noOutputYet || !hasCompleteToolCall) && streamAttempt < MAX_STREAM_RETRIES) {
+                            // ★ 重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃这部分（重试会重新生成，避免重复显示）
+                            if (!noOutputYet) yield { type: 'text.reset' };
+                            console.warn(`⚠️ 流式 stall（idle 超时${noOutputYet ? '，尚无输出' : '，tool_call 未流完'}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
                             contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                             continue;
                         }
@@ -549,11 +558,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     const level = matchedTool.function.safetyLevel;
                     let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
                     let denied = false;
-                    // ★ P1-7 保护路径硬规则：写工具（isUndoTrigger）碰受保护目录（.git/.ssh/.aws/.deepSeekCode 等）→ 无论授权都拒
+                    // ★ P1-7 保护路径硬规则：写工具（isUndoTrigger）碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒
                     //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
                     if (isUndoTrigger(calledName) && isProtectedWrite(calledArgs?.path, toolCtx.cwd)) {
                         denied = true;
-                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepSeekCode 等 VCS/凭证/配置）：${calledArgs?.path ?? ''}。`;
+                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${calledArgs?.path ?? ''}。`;
                     }
                     // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
                     try {
@@ -757,6 +766,20 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
         }
+    } catch (toolErr) {
+        // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all
+        //   等若抛出未守护异常（磁盘 IO 失败、锁/截断边界异常等），原先会逃出 generator → 消费层 for-await
+        //   无 catch → final 永不发 → 前端 busy 永不清（永久卡死）。此处兜住，必定 yield final 收尾。
+        //   流式推理段的异常已被上方内层 catch 处理（yield final + return），不会到达此处。
+        if (signal?.aborted) {
+            yield { type: 'final', text: lastContent || "（已中止）" };
+            return;
+        }
+        const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+        console.error('❌ agent 工具执行段异常（兜底收尾）:', errMsg);
+        stopReason = 'error';
+        yield { type: 'final', text: (lastContent || "") + `\n（工具执行异常：${errMsg}）` };
+        return;
     } finally {
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。

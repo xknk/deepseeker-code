@@ -5,8 +5,8 @@
  *
  *  来源与优先级（同名后者覆盖前者，project > global > builtin）：
  *   - 内置（随包）：src/core/src/agents/builtin/<name>.agent.md
- *   - 全局用户级：~/.deepSeekCode/agents/<name>.agent.md
- *   - 项目级（最高）：<cwd>/.deepSeekCode/agents/<name>.agent.md
+ *   - 全局用户级：~/.deepseeker-code/agents/<name>.agent.md
+ *   - 项目级（最高）：<cwd>/.deepseeker-code/agents/<name>.agent.md
  *
  *  与 skills 的差异：
  *   1) 扫描扁平文件 <name>.agent.md（非 <name>/SKILL.md）；
@@ -29,7 +29,7 @@ const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "bui
 const SOURCES: LoadSource<AgentSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "agents"), source: "global" },
-    { dir: path.join(process.cwd(), ".deepSeekCode", "agents"), source: "project" },
+    { dir: path.join(process.cwd(), ".deepseeker-code", "agents"), source: "project" },
 ];
 
 /** 解析单个 .agent.md 为 manifest；失败返回 null（warn + 跳过） */
@@ -92,7 +92,7 @@ export const initAgents = async (into: CustomTool[], includeProject: boolean): P
             // ★ 项目级信任告警（镜像 hooks/loader.ts）：白名单可显式授权 run_command 等高危工具，
             //   运行期 requestApproval 审批网关仍是后盾（spawn_agent 已透传，未绕过）。
             if (source === "project") {
-                console.warn(`⚠️【安全提示】已加载项目级声明式子 Agent [${m.name}]（${file}）。其 tools 白名单可显式授权高危工具，请在信任该项目时启用；克隆未知仓库前请核查 .deepSeekCode/agents/。`);
+                console.warn(`⚠️【安全提示】已加载项目级声明式子 Agent [${m.name}]（${file}）。其 tools 白名单可显式授权高危工具，请在信任该项目时启用；克隆未知仓库前请核查 .deepseeker-code/agents/。`);
             }
             registerAgent(m);
         }

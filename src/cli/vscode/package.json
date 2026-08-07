@@ -1,82 +1,88 @@
 {
-  "name": "deepseek-code",
-  "displayName": "deepSeekCode",
+  "name": "deepseeker-code",
+  "displayName": "DeepSeeker-Code",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.11",
-  "publisher": "deepSeekCode",
+  "version": "1.0.15",
+  "publisher": "deepseeker-code",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onCommand:deepseekCode.openChat",
-    "onCommand:deepseekCode.newSession",
-    "onCommand:deepseekCode.listSessions"
+    "onCommand:deepseekerCode.openChat",
+    "onCommand:deepseekerCode.newSession",
+    "onCommand:deepseekerCode.listSessions",
+    "onCommand:deepseekerCode.selectProjectRoot"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "deepseekCode.openChat",
-        "title": "deepSeekCode: 打开聊天",
+        "command": "deepseekerCode.openChat",
+        "title": "DeepSeeker-Code: 打开聊天",
         "icon": "$(sparkle)"
       },
       {
-        "command": "deepseekCode.newSession",
-        "title": "deepSeekCode: 新会话",
+        "command": "deepseekerCode.newSession",
+        "title": "DeepSeeker-Code: 新会话",
         "icon": "$(add)"
       },
       {
-        "command": "deepseekCode.abort",
-        "title": "deepSeekCode: 中止生成"
+        "command": "deepseekerCode.abort",
+        "title": "DeepSeeker-Code: 中止生成"
       },
       {
-        "command": "deepseekCode.togglePlanMode",
-        "title": "deepSeekCode: 切换计划模式"
+        "command": "deepseekerCode.togglePlanMode",
+        "title": "DeepSeeker-Code: 切换计划模式"
       },
       {
-        "command": "deepseekCode.toggleAutoMode",
-        "title": "deepSeekCode: 切换自动模式"
+        "command": "deepseekerCode.toggleAutoMode",
+        "title": "DeepSeeker-Code: 切换自动模式"
       },
       {
-        "command": "deepseekCode.listSessions",
-        "title": "deepSeekCode: 历史会话",
+        "command": "deepseekerCode.listSessions",
+        "title": "DeepSeeker-Code: 历史会话",
         "icon": "$(history)"
+      },
+      {
+        "command": "deepseekerCode.selectProjectRoot",
+        "title": "DeepSeeker-Code: 选择项目根",
+        "icon": "$(root-folder)"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "deepseekCode.openChat",
+          "command": "deepseekerCode.openChat",
           "group": "navigation@1",
           "when": "resourceScheme != 'output'"
         },
         {
-          "command": "deepseekCode.listSessions",
+          "command": "deepseekerCode.listSessions",
           "group": "navigation@2",
           "when": "resourceScheme != 'output'"
         },
         {
-          "command": "deepseekCode.newSession",
+          "command": "deepseekerCode.newSession",
           "group": "navigation@3",
           "when": "resourceScheme != 'output'"
         }
       ]
     },
     "configuration": {
-      "title": "deepSeekCode",
+      "title": "DeepSeeker-Code",
       "properties": {
-        "deepseekCode.apiKey": {
+        "deepseekerCode.apiKey": {
           "type": "string",
           "default": "",
           "description": "DeepSeek API Key。留空时回退读取环境变量 DEEP_SEEK_API_KEY。"
         },
-        "deepseekCode.model": {
+        "deepseekerCode.model": {
           "type": "string",
           "default": "",
           "description": "默认模型（如 deepseek-v4 / deepseek-v4-flash）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
         },
-        "deepseekCode.locale": {
+        "deepseekerCode.locale": {
           "type": "string",
           "enum": [
             "",
@@ -90,7 +96,7 @@
     },
     "keybindings": [
       {
-        "command": "deepseekCode.openChat",
+        "command": "deepseekerCode.openChat",
         "key": "ctrl+esc",
         "mac": "ctrl+esc"
       }

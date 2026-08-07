@@ -16,19 +16,19 @@ import fsSync from "fs"; // 同步落盘 token（避免顶层 await）
 import type { Request, Response, NextFunction } from "express";
 
 /**
- * 鉴权 token：优先取环境变量 DEEPSEEK_CODE_TOKEN（跨重启稳定）；未设则启动期随机生成
+ * 鉴权 token：优先取环境变量 DEEPSEEKER_CODE_TOKEN（跨重启稳定）；未设则启动期随机生成
  *  32 字节 hex（每次重启变化），并打印到控制台供前端对接。
  */
 const RAW_TOKEN =
-    (process.env.DEEPSEEK_CODE_TOKEN && process.env.DEEPSEEK_CODE_TOKEN.trim()) ||
+    (process.env.DEEPSEEKER_CODE_TOKEN && process.env.DEEPSEEKER_CODE_TOKEN.trim()) ||
     crypto.randomBytes(32).toString("hex");
 
 /** 对外导出（如未来需写入文件 / 透给前端构建）。 */
 export const AUTH_TOKEN = RAW_TOKEN;
 const TOKEN_BUF = Buffer.from(RAW_TOKEN);
 
-const TOKEN_FILE = process.env.DEEPSEEK_CODE_TOKEN_FILE?.trim();
-if (!process.env.DEEPSEEK_CODE_TOKEN) {
+const TOKEN_FILE = process.env.DEEPSEEKER_CODE_TOKEN_FILE?.trim();
+if (!process.env.DEEPSEEKER_CODE_TOKEN) {
     if (TOKEN_FILE) {
         // 生产/日志敏感环境：把 token 落盘到指定文件（POSIX 0600），避免打印到被采集的 stdout
         try {
@@ -39,15 +39,15 @@ if (!process.env.DEEPSEEK_CODE_TOKEN) {
             console.log(`  AUTH TOKEN（回退）: ${RAW_TOKEN}`);
         }
     } else {
-        // 未显式配置时打印一次性 token，便于本地对接；生产环境应改用环境变量固化或 DEEPSEEK_CODE_TOKEN_FILE 落盘。
+        // 未显式配置时打印一次性 token，便于本地对接；生产环境应改用环境变量固化或 DEEPSEEKER_CODE_TOKEN_FILE 落盘。
         console.warn(
             `⚠️ [安全] AUTH TOKEN 将打印到 stdout——若 stdout 被日志采集/重定向/共享会导致 token 泄露。` +
-            `生产环境请设 DEEPSEEK_CODE_TOKEN（跨重启稳定）或 DEEPSEEK_CODE_TOKEN_FILE（落盘权限 0600）。`
+            `生产环境请设 DEEPSEEKER_CODE_TOKEN（跨重启稳定）或 DEEPSEEKER_CODE_TOKEN_FILE（落盘权限 0600）。`
         );
         console.log(
             `\n========================================\n` +
             `  🔑 AUTH TOKEN（本次运行生成，重启即变）:\n   ${RAW_TOKEN}\n` +
-            `  设环境变量 DEEPSEEK_CODE_TOKEN 可跨重启稳定。\n` +
+            `  设环境变量 DEEPSEEKER_CODE_TOKEN 可跨重启稳定。\n` +
             `========================================\n`
         );
     }

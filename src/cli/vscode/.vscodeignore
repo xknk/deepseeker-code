@@ -8,3 +8,8 @@ node_modules/.cache/**
 .gitignore
 **/smoke-*.ts
 **/测试工具.md
+# 临时调试脚本与构建产物，不打入 vsix
+.tmp*
+*.tmp*
+⏺*
+*.vsix

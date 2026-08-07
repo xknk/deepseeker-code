@@ -97,8 +97,8 @@ interface StringDict {
 
 const STRINGS: Record<Locale, StringDict> = {
     zh: {
-        brand: "deepSeekCode",
-        welcomeTitle: "✻ 欢迎使用 deepSeekCode",
+        brand: "DeepSeeker-Code",
+        welcomeTitle: "✻ 欢迎使用 DeepSeeker-Code",
         tipLine: "输入需求开始 · 输入 / 唤出命令 · Ctrl+C 退出 · Esc 中止 · Ctrl+T 折叠思考",
         emptyHints: [
             "帮我看一下这个项目的结构",
@@ -186,13 +186,13 @@ const STRINGS: Record<Locale, StringDict> = {
         langCurrent: () => `当前界面语言：中文（/lang en 切换英文）`,
         langSet: (l) => `界面语言已切换：${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `无效语言：${arg}（可选：zh 中文 / en English）`,
-        outputStyleNone: () => `未加载任何输出风格（在 ~/.deepSeekCode/output-styles/ 放 <name>.md）。`,
+        outputStyleNone: () => `未加载任何输出风格（在 ~/.deepseeker-code/output-styles/ 放 <name>.md）。`,
         outputStyleCurrent: (cur) => `当前输出风格：${cur ?? "默认（中性）"}。可用：`,
         outputStyleHint: () => `用法：/output-style <name> 选用 · /output-style off 回中性`,
         outputStyleCleared: () => `输出风格已清除，回到中性默认。`,
         outputStyleUnknown: (arg) => `未知输出风格：${arg}。可用：`,
         outputStyleSet: (name) => `输出风格已切换：${name}（下次回复生效）。`,
-        askTrust: (cwd) => `安全检查：这是你信任的项目吗？\n${cwd}\n\ndeepSeekCode 将在此目录读取、编辑和执行文件。`,
+        askTrust: (cwd) => `安全检查：这是你信任的项目吗？\n${cwd}\n\nDeepSeeker-Code 将在此目录读取、编辑和执行文件。`,
         optTrust: "信任此目录",
         optExit: "退出",
         helpText: (model, thinking, locale) => [
@@ -213,8 +213,8 @@ const STRINGS: Record<Locale, StringDict> = {
         ].join("\n"),
     },
     en: {
-        brand: "deepSeekCode",
-        welcomeTitle: "✻ Welcome to deepSeekCode",
+        brand: "DeepSeeker-Code",
+        welcomeTitle: "✻ Welcome to DeepSeeker-Code",
         tipLine: "Type a request to start · Type / for commands · Ctrl+C exit · Esc abort · Ctrl+T toggle thinking",
         emptyHints: [
             "Show me this project's structure",
@@ -301,13 +301,13 @@ const STRINGS: Record<Locale, StringDict> = {
         langCurrent: () => `Interface language: English (/lang zh for 中文)`,
         langSet: (l) => `Interface language: ${l === "zh" ? "中文" : "English"}`,
         langInvalid: (arg) => `Invalid language: ${arg} (choose zh / en)`,
-        outputStyleNone: () => `No output styles loaded (drop a <name>.md in ~/.deepSeekCode/output-styles/).`,
+        outputStyleNone: () => `No output styles loaded (drop a <name>.md in ~/.deepseeker-code/output-styles/).`,
         outputStyleCurrent: (cur) => `Current output style: ${cur ?? "default (neutral)"}. Available:`,
         outputStyleHint: () => `Usage: /output-style <name> to apply · /output-style off for neutral`,
         outputStyleCleared: () => `Output style cleared, back to neutral default.`,
         outputStyleUnknown: (arg) => `Unknown output style: ${arg}. Available:`,
         outputStyleSet: (name) => `Output style: ${name} (takes effect on next reply).`,
-        askTrust: (cwd) => `Quick safety check: is this a project you trust?\n${cwd}\n\ndeepSeekCode will read, edit, and execute files here.`,
+        askTrust: (cwd) => `Quick safety check: is this a project you trust?\n${cwd}\n\nDeepSeeker-Code will read, edit, and execute files here.`,
         optTrust: "Yes, I trust this folder",
         optExit: "No, exit",
         helpText: (model, thinking, locale) => [

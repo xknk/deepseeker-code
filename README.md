@@ -1,4 +1,4 @@
-# deepSeekCode
+# DeepSeeker-Code
 
 基于 DeepSeek V4 的 AI 编码助手（类 Claude Code 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 声明式子 Agent。HTTP server 架构，支持多并发会话 / SSE 流式 / 远程访问。
 
@@ -8,7 +8,7 @@
 npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
 ```
 
-默认监听 `127.0.0.1:3000`；鉴权 token 见启动日志（设 `DEEPSEEK_CODE_TOKEN` 可跨重启固定）。运行/调试细节见 [CLAUDE.md](./CLAUDE.md)。
+默认监听 `127.0.0.1:3000`；鉴权 token 见启动日志（设 `DEEPSEEKER_CODE_TOKEN` 可跨重启固定）。运行/调试细节见 [CLAUDE.md](./CLAUDE.md)。
 
 ## 终端 CLI（React Ink，对标 Claude Code）
 
@@ -22,14 +22,14 @@ pnpm --filter cli dev
 pnpm --filter cli build          # 产出 src/cli/dist/cli.mjs
 pnpm --filter cli start          # 运行打包产物
 
-# 全局安装（本地仓库）→ 得到 deep-code 命令
+# 全局安装（本地仓库）→ 得到 deepseeker-code 命令
 pnpm --filter cli build && npm i -g ./src/cli
-deep-code [--resume <会话id>] [--plan]
+deepseeker-code [--resume <会话id>] [--plan]
 ```
 
 快捷键：`Ctrl+C` 退出 · `Esc` 中止/清输入 · `Ctrl+G` 中止当前轮 · `Ctrl+T` 展开/收起思考 · 模态/菜单 `↑↓ Enter`。本地命令：`/help /plan /model /clear /status /exit`。能力对标 Claude Code：流式逐字 / 思考折叠 / 工具卡 / 任务面板 / 审批模态 / 计划模式两阶段 / 模型切换 / 会话恢复。
 
-> 发布到 npm：在 `src/cli/` 下执行 `npm publish`（`prepublishOnly` 会自动构建产物）。安装方 `npm i -g deep-code` 后即可运行 `deep-code`。
+> 发布到 npm：在 `src/cli/` 下执行 `npm publish`（`prepublishOnly` 会自动构建产物）。安装方 `npm i -g deepseeker-code` 后即可运行 `deepseeker-code`。
 
 
 ## 文档导航

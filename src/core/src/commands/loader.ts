@@ -7,8 +7,8 @@
  *
  *  来源与优先级（同名后者覆盖前者，与 skills 一致）：
  *   - 内置（随包分发，最低）：src/core/src/commands/builtin/<name>.md
- *   - 全局用户级：~/.deepSeekCode/commands/<name>.md
- *   - 项目级（最高）：<cwd>/.deepSeekCode/commands/<name>.md
+ *   - 全局用户级：~/.deepseeker-code/commands/<name>.md
+ *   - 项目级（最高）：<cwd>/.deepseeker-code/commands/<name>.md
  *
  *  布局：扁平 <name>.md（命令是单文件 prompt 模板无附属资源，比 <name>/COMMAND.md 更易写）。
  *  frontmatter 复用 skills/frontmatter.ts 的 parseFrontmatter（结构通用，key:value + 正文）。
@@ -29,7 +29,7 @@ const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "bui
 const SOURCES: LoadSource<CommandSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "commands"), source: "global" },
-    { dir: path.join(process.cwd(), ".deepSeekCode", "commands"), source: "project" },
+    { dir: path.join(process.cwd(), ".deepseeker-code", "commands"), source: "project" },
 ];
 
 /** 命令正文大小上限：与 skills 对齐（命令单次展开非每轮注入，可宽） */

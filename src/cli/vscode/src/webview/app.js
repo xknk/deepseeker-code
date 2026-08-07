@@ -354,6 +354,24 @@ switch (evt.type) {
         scheduleFlush();
         break;
       }
+      case "text.reset": {
+        // 流式 stall 重试前：丢弃本轮已累积的部分正文/思考，避免重试重新生成后重复显示
+        textBuf = "";
+        thinkBuf = "";
+        if (state.currentAssistant != null) {
+          const row = state.rowMap.get(state.currentAssistant);
+          if (row) {
+            row.text = "";
+            const el = messagesEl().querySelector(`[data-key="${CSS.escape(row.key)}"] .assistant-body`);
+            if (el) el.innerHTML = '<span class="cursor">▊</span>';
+          }
+        }
+        if (state.currentThinking != null) {
+          const trow = state.rowMap.get(state.currentThinking);
+          if (trow) trow.text = "";
+        }
+        break;
+      }
       case "thinking.delta": {
         ensureThinkingRow();
         thinkBuf += String(evt.text ?? "");
@@ -458,10 +476,14 @@ switch (evt.type) {
         state.busy = !!msg.state?.busy;
         state.planMode = !!msg.state?.planMode;
         state.autoMode = !!msg.state?.autoMode;
+        state.projectRoot = String(msg.state?.projectRoot ?? "");
         syncToolbar();
  renderInitError(String(msg.state?.initError ?? ""));
         break;
       }
+      case "selectProjectRoot":
+        vscode.postMessage({ type: "selectProjectRoot" });
+        break;
       case "question":
         state.pendingQuestion = msg.req || {};
         renderQuestion();
@@ -858,7 +880,7 @@ el.innerHTML = `
 <rect x="4" y="8" width="2" height="2"/><rect x="10" y="8" width="2" height="2"/>
 <rect x="3" y="10" width="2" height="2"/><rect x="11" y="10" width="2" height="2"/>
 </svg>
-<div class="empty-title">DeepSeekCode</div>
+<div class="empty-title">DeepSeeker-Code</div>
 <div class="empty-sub">You've come to the absolutely right place!</div>`;
 host.appendChild(el);
 }
@@ -1107,11 +1129,13 @@ function autoGrow(el) {
   function buildToolbar() {
 const tb = $("#toolbar");
 tb.innerHTML = `
-<div class="brand"><span class="logo codicon codicon-sparkle"></span> <span class="brand-name">deepSeekCode</span> <span id="busy-dot" class="dot"></span></div>
+<div class="brand"><span class="logo codicon codicon-sparkle"></span> <span class="brand-name">DeepSeeker-Code</span> <span id="busy-dot" class="dot"></span></div>
+<button id="btn-project-root" title="agent 当前工作的项目根（点击切换）" class="project-root"><span class="codicon codicon-root-folder"></span><span id="project-root-name">…</span></button>
 <div class="actions">
 <button id="btn-new" title="新会话" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
 <button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
 </div>`;
+$("#btn-project-root").addEventListener("click", () => vscode.postMessage({ type: "selectProjectRoot" }));
 $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
 $("#btn-sessions").addEventListener("click", () => {
 toggleSessionsPanel();
@@ -1127,6 +1151,14 @@ const btnSend = $("#btn-send");
 if (btnSend) {
 btnSend.textContent = state.busy ? "■" : "↑";
 btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
+}
+// 项目根：末段文件夹名 + 完整路径 title（让用户一眼看到 agent 工作在哪个项目）
+const rootName = $("#project-root-name");
+if (rootName) {
+const p = state.projectRoot || "";
+const seg = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "未选择";
+rootName.textContent = seg;
+rootName.parentElement.title = p ? `项目根：${p}（点击切换）` : "未选择项目根（点击选择）";
 }
 updateModeToggle();
 }

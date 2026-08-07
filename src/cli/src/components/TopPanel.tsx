@@ -1,7 +1,7 @@
 /**
  * @file cli/src/components/TopPanel.tsx
  * @description 顶部双列欢迎卡片（对齐 Claude Code）：
- *  - 信息行：* Welcome to deepSeekCode v1.0.0（橘）+ 工作目录（灰）
+ *  - 信息行：* Welcome to DeepSeeker-Code v1.0.0（橘）+ 工作目录（灰）
  *  - 双列圆角橘框：左列 Welcome back! + 像素机器人 + 快捷键；右列 Tips / 分隔线 / What's new
  *  - 中间垂直分割线由固定高度的 │ 列实现（Ink 无原生 per-side border）。
  *  作为 <Static> 首项渲染：位于最顶端、只绘制一次（零闪屏），随对话增长超过屏幕后滚走（同 CC）。

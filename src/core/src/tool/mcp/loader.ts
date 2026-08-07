@@ -12,7 +12,7 @@
  *    }
  *  }
  *  type 缺省：有 url→http，否则 stdio。
- *  配置路径：环境变量 MCP_CONFIG 指定，否则默认 ~/.deepSeekCode/mcp.json。无配置/无文件 → 返回空数组（静默跳过）。
+ *  配置路径：环境变量 MCP_CONFIG 指定，否则默认 ~/.deepseeker-code/mcp.json。无配置/无文件 → 返回空数组（静默跳过）。
  *
  *  安全：MCP server 可执行任意逻辑，包装工具默认 DANGER（每次调用需审批）。
  *  鲁棒：单个 server 连接失败不影响其它 server（仅告警 + dispose 该 client）。

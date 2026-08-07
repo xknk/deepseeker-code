@@ -1,11 +1,11 @@
 /**
  * @file statusLine/config.ts
  * @description 状态栏配置读取（P2-16，对标 Claude Code statusLine）：从 settings.json 的
- *  `statusLine` 段读 {command, padding?}。全局 ~/.deepSeekCode + 项目 <cwd>/.deepSeekCode 叠加，
+ *  `statusLine` 段读 {command, padding?}。全局 ~/.deepseeker-code + 项目 <cwd>/.deepseeker-code 叠加，
  *  项目级覆盖全局（单命令语义，非数组拼接）。镜像 hooks/loader.ts 的 settings.json 读取容错骨架。
  *
  *  配置示例（settings.json）：
- *   { "statusLine": { "command": "~/.deepSeekCode/statusline.sh", "padding": 0 } }
+ *   { "statusLine": { "command": "~/.deepseeker-code/statusline.sh", "padding": 0 } }
  *  command 以 shell 执行，harness 把上下文 JSON 灌进其 stdin，stdout 首行作为底部状态栏（见 runner.ts）。
  */
 import fs from "fs/promises";
@@ -36,7 +36,7 @@ const parseBlock = (parsed: any): StatusLineConfig | null => {
 export const readStatusLineConfig = async (includeProject: boolean): Promise<StatusLineConfig | null> => {
     const paths = [
         path.join(appConfig.dataDir, "settings.json"),                                                // 全局用户级
-        ...(includeProject ? [path.join(process.cwd(), ".deepSeekCode", "settings.json")] : []),      // 项目级（覆盖）；未信任时省略
+        ...(includeProject ? [path.join(process.cwd(), ".deepseeker-code", "settings.json")] : []),      // 项目级（覆盖）；未信任时省略
     ];
     let result: StatusLineConfig | null = null;
     for (const configPath of paths) {

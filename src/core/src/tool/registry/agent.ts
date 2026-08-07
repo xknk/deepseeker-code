@@ -12,7 +12,7 @@ import { runSubagent } from "@/agent/subagent.ts";
 /**
  * @file tool/registry/agent.ts
  * @description 子 Agent 协同工具集：提供 spawn_agent，让主 agent 把独立子任务委派给子 agent 执行。
- *  支持声明式子 Agent：spawn_agent 传 name 时，按 .deepSeekCode/agents/<name>.agent.md 声明加载
+ *  支持声明式子 Agent：spawn_agent 传 name 时，按 .deepseeker-code/agents/<name>.agent.md 声明加载
  *  系统词 / 工具白名单 / model（见 agents/loader.ts）；不传 name 走默认通用模板（向后兼容）。
  *
  *  ★ 派生/执行内核已抽至 agent/subagent.ts 的 runSubagent，本文件仅保留 spawn_agent 的「文案包装」
