@@ -40,6 +40,7 @@ import { injectSkillCatalog } from "@/skills/inject.ts";
 import { injectAgentCatalog } from "@/agents/inject.ts";
 import { injectProjectGuide } from "@/projectGuide/inject.ts";
 import { injectOutputStyle } from "@/outputStyles/inject.ts";
+import { injectMemory } from "@/memory/inject.ts";
 import { injectMarkedBlock } from "@/common/index.ts";
 import { appConfig } from "@/config/index.ts";
 import { runAutoCheck } from "@/tool/autoPermission.ts";
@@ -140,6 +141,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     injectSkillCatalog(message);
     injectAgentCatalog(message);
     injectProjectGuide(message);
+    // ★ 持久记忆：把【记忆索引】幂等注入系统提示词（仅一行/条，省 token；需要全文时模型调 memory_read）。fence 机制，不动 message 下标
+    injectMemory(message);
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';

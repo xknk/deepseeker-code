@@ -15,6 +15,7 @@ import { initAgents } from "@/agents/loader.ts";
 import { initProjectGuide } from "@/projectGuide/loader.ts";
 import { initCommands } from "@/commands/loader.ts";
 import { initOutputStyles } from "@/outputStyles/loader.ts";
+import { initMemories } from "@/memory/loader.ts";
 import { sweepOrphanedWorktrees, disposeAllSessionWorktrees } from "@/tool/worktree/manager.ts";
 
 /**
@@ -50,6 +51,8 @@ export const initEngine = async (into: CustomTool[], opts?: { includeProject?: b
     await initCommands(includeProject);
     // ★ 加载输出风格（builtin/global/project；用户经 CLI /output-style <name> 选用，runAgent 注入 persona）。未信任时跳过项目级
     await initOutputStyles(includeProject);
+    // ★ 加载持久记忆（global/project；runAgent 注入一行索引，memory_read 按需召回全文）。未信任时跳过项目级（防提示注入）
+    await initMemories(includeProject);
 
     // ★ 返回退出清理：dispose 所有 MCP 子进程 + 清理 session worktree，避免孤儿化。
     //   各宿主在 SIGINT/SIGTERM/退出钩子里调用。worktree 清理异步、best-effort（退出时可能来不及，残留由启动期 sweep 兜底）。

@@ -33,6 +33,7 @@ import { undoTools } from "./registry/undo.ts";
 import { askTools } from "./registry/ask.ts";
 import { worktreeTools } from "./registry/worktree.ts";
 import { notebookTools } from "./registry/notebook.ts";
+import { memoryTools } from "./registry/memory.ts";
 
 export * from "./type.ts";
 
@@ -62,4 +63,5 @@ agentTools.push(
     ...askTools,         // P2-12 结构化提问（ask_question：多选问用户，阻塞至作答）
     ...worktreeTools,    // P2-13 独立 worktree（enter/exit/status，会话作用域隔离）
     ...notebookTools,    // P2-10 NotebookEdit（.ipynb cell 编辑，MUTATION + undo 接线）
+    ...memoryTools,      // 持久记忆（memory_save/read/list/delete，跨会话笔记召回）
 );
