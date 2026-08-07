@@ -192,11 +192,9 @@ export class ChatHost {
     }
   }
 
-  /** 计划模式一轮：只读调研 → 取方案 → 弹方案条 → accept 则带最终方案重跑实现轮。 */
-  private async runPlanStage(researchPrompt: string): Promise<void> {
-    await this.runOnce(researchPrompt, true);
-    const plan = this.takeProposedPlan();
-    if (plan == null) return;
+  /** 取已捕获方案 → 弹方案条 → accept 则带最终方案重跑实现轮（planMode=false）。
+   *  runPlanStage（计划模式调研后）与普通轮模型直接 exit_plan_mode（系统提示词鼓励）共用本尾段。 */
+  private async presentPlanAndImplement(plan: string): Promise<void> {
     const res = await new Promise<PlanResolution>((resolve) => {
       this.pendingPlan = { resolve };
       this.callbacks.onPlan(plan);
@@ -211,6 +209,14 @@ export class ChatHost {
     }
   }
 
+  /** 计划模式一轮：只读调研 → 取方案 → 弹方案条 → accept 则带最终方案重跑实现轮。 */
+  private async runPlanStage(researchPrompt: string): Promise<void> {
+    await this.runOnce(researchPrompt, true);
+    const plan = this.takeProposedPlan();
+    if (plan == null) return;
+    await this.presentPlanAndImplement(plan);
+  }
+
   /** 提交一轮对话（UI 输入框 Enter 触发）。 */
   async submit(content: string): Promise<void> {
     const text = content.trim();
@@ -223,16 +229,23 @@ export class ChatHost {
       await this.runPlanStage(text);
     } else {
       await this.runOnce(text, false);
-      // ★ 模型自主进入计划模式：普通轮内调用 enter_plan_mode → 翻转 planMode 以只读重跑。
-      const enterReason = this.takeEnterPlanRequest();
-      if (enterReason != null) {
-        this.sink({
-          type: "info",
-          text: `📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`,
-        });
-        this.planMode = true;
-        await this.runPlanStage(ENTER_PLAN_RESEARCH_PROMPT);
-        this.planMode = false;
+      // ★ 模型在普通轮可能：(a) 调 exit_plan_mode 直接提交方案（系统提示词鼓励，自行只读调研后）；
+      //   (b) 调 enter_plan_mode 请求进入计划模式。先看方案（exit）——若已提交则直接走方案审批弹窗，
+      //   否则看是否请求进入计划模式。与 CLI useChatState 一致，避免退回纯文本方案而无按钮可点。
+      const proposed = this.takeProposedPlan();
+      if (proposed != null) {
+        await this.presentPlanAndImplement(proposed);
+      } else {
+        const enterReason = this.takeEnterPlanRequest();
+        if (enterReason != null) {
+          this.sink({
+            type: "info",
+            text: `📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`,
+          });
+          this.planMode = true;
+          await this.runPlanStage(ENTER_PLAN_RESEARCH_PROMPT);
+          this.planMode = false;
+        }
       }
     }
   }

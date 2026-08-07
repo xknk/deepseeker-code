@@ -52,8 +52,10 @@ async function buildExtension() {
     format: "cjs",
     target: "node20",
     tsconfig: path.join(ROOT, "tsconfig.json"),
-    packages: "external",
-    external: ["vscode"],
+    // ★ 瘦身：bundle 所有纯 JS 依赖（openai/undici/ignore/typescript）进 dist/extension.js，
+    //   只 external 不能 bundle 的——vscode（宿主 API）+ vscode-ripgrep（原生 rg 二进制，rgPath 指向 bin/rg）。
+    //   被bundle的包移到 devDependencies，vsce 不打包 devDep → vsix 不再携带 openai/typescript 等 node_modules。
+    external: ["vscode", "vscode-ripgrep"],
     // ★ cjs 输出下 import.meta 为空，而 core 的 skills/agents/commands/outputStyles loader
     //   用 fileURLToPath(import.meta.url) 定位 dist/builtin —— 用 define 固化为本工程真实主文件 URL。
     define: {

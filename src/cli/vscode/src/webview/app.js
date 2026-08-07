@@ -597,9 +597,9 @@ el.textContent = "⚠️ " + msg;
           }
         } else {
           const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
-          const answer = { values: [values[i] ?? label], answer: values[i] ?? label };
-          if (req.id != null) answer.id = req.id;
-          vscode.postMessage({ type: "question", answer });
+          // ★ 协议 QuestionAnswer.selected: string[]（host/type.ts）——单选回传长度 1 的 label 数组。
+          //   字段名是 selected 而非 values/answer，否则 ask.ts 判定「用户取消」、模型后续放弃结构化提问。
+          vscode.postMessage({ type: "question", answer: { selected: [values[i] ?? label] } });
           state.pendingQuestion = null;
           renderQuestion();
         }
@@ -609,9 +609,8 @@ el.textContent = "⚠️ " + msg;
     anchor.querySelector("#q-ok")?.addEventListener("click", () => {
       const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
       const picked = [...selected].map((i) => values[i] ?? String(options[i] ?? ""));
-      const answer = { values: picked, answer: picked[0] ?? "" };
-      if (req.id != null) answer.id = req.id;
-      vscode.postMessage({ type: "question", answer });
+      // ★ 协议 QuestionAnswer.selected: string[]——多选回传全部已选项 label 数组。
+      vscode.postMessage({ type: "question", answer: { selected: picked } });
       state.pendingQuestion = null;
       renderQuestion();
     });

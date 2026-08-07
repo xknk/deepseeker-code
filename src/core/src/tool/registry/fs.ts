@@ -86,6 +86,62 @@ const assertReadable = async (relForCheck: string, displayPath: string): Promise
     return null;
 };
 
+/** 去除字符串首尾的空行（不触碰行内/缩进空白）。容错模型在 old_str 首尾多带的空行。 */
+const stripEdgeBlankLines = (s: string): string => {
+    const lines = s.split("\n");
+    while (lines.length > 1 && lines[0].trim() === "") lines.shift();
+    while (lines.length > 1 && lines[lines.length - 1].trim() === "") lines.pop();
+    return lines.join("\n");
+};
+
+/**
+ * 逐行尾空白容错的块匹配（edit_file 兜底）：oldBlock 每行去尾空白后与 content 逐行整行比对，
+ * 命中的连续行块用 splice 替换为 newBlock 对应行。未命中行原样保留，绝不污染文件其余行的尾空白。
+ * 仅当 old_str 覆盖完整连续行时生效（行内局部替换走精确子串路径）。返回替换后全文或失败原因。
+ */
+const matchLineBlockTolerant = (
+    content: string, oldBlock: string, newBlock: string, replaceAll: boolean,
+): { ok: true; content: string; count: number } | { ok: false; reason: "none" | "conflict"; count: number } => {
+    const contentLines = content.split("\n");
+    const oldLines = oldBlock.split("\n");
+    const trimEnd = (l: string): string => l.replace(/[ \t]+$/, "");
+    if (oldLines.length === 0 || oldLines.length > contentLines.length) {
+        return { ok: false, reason: "none", count: 0 };
+    }
+    const hits: number[] = [];
+    for (let i = 0; i + oldLines.length <= contentLines.length; i++) {
+        let matched = true;
+        for (let j = 0; j < oldLines.length; j++) {
+            if (trimEnd(contentLines[i + j]) !== trimEnd(oldLines[j])) { matched = false; break; }
+        }
+        if (matched) hits.push(i);
+    }
+    if (hits.length === 0) return { ok: false, reason: "none", count: 0 };
+    if (!replaceAll && hits.length > 1) return { ok: false, reason: "conflict", count: hits.length };
+    const newLines = newBlock.split("\n");
+    const out = [...contentLines];
+    for (let k = hits.length - 1; k >= 0; k--) out.splice(hits[k], oldLines.length, ...newLines); // 倒序替换避免索引漂移
+    return { ok: true, content: out.join("\n"), count: hits.length };
+};
+
+/**
+ * 逐行诊断 old_str：找出第一行（去尾空白后）在文件中无任何逐字匹配的行，提示缩进/Tab/字符不一致。
+ * 让模型一次性定位错行，而非盲目重读整个文件再试（降低往返、避免反复失败）。
+ */
+const diagnoseOldStr = (content: string, oldBlock: string): string => {
+    const contentLines = content.split("\n").map(l => l.replace(/[ \t]+$/, ""));
+    const oldLines = oldBlock.split("\n");
+    for (let i = 0; i < oldLines.length; i++) {
+        const line = oldLines[i].replace(/[ \t]+$/, "");
+        if (line.trim().length === 0) continue; // 跳过空行
+        if (!contentLines.some(cl => cl.includes(line))) {
+            const preview = line.length > 60 ? line.slice(0, 60) + "…" : line;
+            return `诊断：old_str 第 ${i + 1} 行「${preview}」在文件中找不到逐字匹配（缩进 Tab/空格、尾空白、或字符本身可能不一致）。`;
+        }
+    }
+    return ""; // 各行单独都能找到 → 大概率是行序/上下文不连续或 old_str 非连续整段
+};
+
 export const fsTools: CustomTool[] = [
     {
         type: "function",
@@ -264,18 +320,44 @@ export const fsTools: CustomTool[] = [
                     const isCRLF = rawContent.includes("\r\n");
                     const normalizedContent = rawContent.replace(/\r\n/g, "\n");
                     const normalizedNew = args.new_str.replace(/\r\n/g, "\n");
-                    // old_str 先 CRLF 归一；精确匹配失败时，尝试剥离 read_file 行号前缀后重试（容错最常见的"带行号照抄"）
-                    let normalizedOld = args.old_str.replace(/\r\n/g, "\n");
-                    let lineNumbersStripped = false;
-                    if (!normalizedContent.includes(normalizedOld)) {
-                        const stripped = stripReadFileLineNumbers(normalizedOld);
-                        if (stripped !== normalizedOld && normalizedContent.includes(stripped)) {
-                            normalizedOld = stripped;
-                            lineNumbersStripped = true;
-                        } else {
-                            return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格。请用 read_file 重新核对应贴片段。`;
-                        }
+                    const normalizedOldRaw = args.old_str.replace(/\r\n/g, "\n");
+
+                    // —— 多级容错匹配（CRLF 已双向归一）。逐级尝试子串命中，命中即用其口径做替换 ——
+                    // ① 精确子串；② 剥首尾空行（模型常多带空行）；③ 剥 read_file 行号前缀（整段照抄）
+                    const lnStripped = stripReadFileLineNumbers(normalizedOldRaw);
+                    const candidates: Array<{ old: string; note: string }> = [
+                        { old: normalizedOldRaw, note: "" },
+                        { old: stripEdgeBlankLines(normalizedOldRaw), note: "（已容错首尾空行）" },
+                    ];
+                    if (lnStripped !== normalizedOldRaw) candidates.push({ old: lnStripped, note: "（已剥离 read_file 行号前缀）" });
+
+                    let normalizedOld: string | null = null;
+                    let note = "";
+                    for (const c of candidates) {
+                        if (c.old.length > 0 && normalizedContent.includes(c.old)) { normalizedOld = c.old; note = c.note; break; }
                     }
+
+                    // ④ 逐行尾空白容错：子串口径全未命中时，按行块（每行去尾空白）匹配 + splice 替换。
+                    //    行尾空白语义无关，模型丢/加行尾空格是最高频失配原因；行对齐替换不污染文件其余行。
+                    if (normalizedOld == null) {
+                        const base = lnStripped !== normalizedOldRaw ? lnStripped : normalizedOldRaw;
+                        const lm = matchLineBlockTolerant(normalizedContent, base, normalizedNew, !!args.replace_all);
+                        if (lm.ok) {
+                            assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
+                            await fs.writeFile(absPath, isCRLF ? lm.content.replace(/\n/g, "\r\n") : lm.content, "utf-8");
+                            return args.replace_all
+                                ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${lm.count} 处匹配（逐行尾空白容错）。`
+                                : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成局部重构（逐行尾空白容错）。`;
+                        }
+                        if (lm.reason === "conflict") {
+                            return `❌ [代码修补失败]：代码冲突！old_str（尾空白归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。`;
+                        }
+                        // ⑤ 全失败：逐行诊断，精确指出最先失配的行，让模型一次定位（避免盲目重读整文件反复试错）
+                        const diag = diagnoseOldStr(normalizedContent, normalizedOldRaw);
+                        return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对应贴片段。`;
+                    }
+
+                    // 精确口径：子串替换
                     const matchCount = normalizedContent.split(normalizedOld).length - 1;
                     // replace_all=true：放行多匹配，全量替换；默认：要求唯一，否则报冲突
                     if (!args.replace_all && matchCount > 1) {
@@ -286,7 +368,6 @@ export const fsTools: CustomTool[] = [
                         : normalizedContent.replace(normalizedOld, () => normalizedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
-                    const note = lineNumbersStripped ? "（已自动剥离 read_file 行号前缀）" : "";
                     return args.replace_all
                         ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${matchCount} 处匹配。${note}`
                         : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成唯一性局部重构。${note}`;
@@ -300,7 +381,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "create_file",
-            description: "在工作区内创建一个全新的文件，并写入初始内容。如果文件已存在，本工具会拒绝执行以防止源码被全量误覆盖。",
+            description: "在工作区内创建一个全新的文件，并写入初始内容。如果文件已存在，本工具会拒绝执行以防止源码被全量误覆盖。请直接写入用户指定的最终路径，勿自行发明暂存/临时目录（如 .dsc_tmp）——产物会真实落盘且对用户可见。",
             parameters: {
                 type: "object",
                 properties: {
@@ -332,6 +413,8 @@ export const fsTools: CustomTool[] = [
                     // 💡 原子写入防御（Atomic Write）：先写同目录 .tmp 再 rename 瞬间落地，
                     //   避免写中途被中断/熔断导致文件变空或受损
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（rename 前夕再 realpath）
+                    // 与 write_file 对齐：自动创建多层父目录，避免父目录缺失时原子写 tmp 抛 ENOENT。
+                    await fs.mkdir(path.dirname(absPath), { recursive: true });
                     tmpPath = makeTmpPath(absPath);
                     await fs.writeFile(tmpPath, content, "utf-8");
                     await fs.rename(tmpPath, absPath); // 操作系统层面的原子覆盖

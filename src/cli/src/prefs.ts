@@ -1,7 +1,7 @@
 /**
  * @file cli/src/prefs.ts
  * @description 用户界面偏好持久化（当前仅 locale）。存 ~/.deepseeker-code/prefs.json，复用 core 的 readJSONFile/atomicWriteJSON。
- *  与 settings.json 分离：settings.json 是 engine 声明式配置（hooks/permissions/mcpServers），prefs 是 UI 偏好。
+ *  与 settings.json 分离：settings.json 是 engine 声明式配置（engine/hooks/permissions/statusLine），prefs 是 UI 偏好。
  */
 import path from "path";
 import fs from "fs/promises";

@@ -13,9 +13,15 @@
  */
 import path from "path";
 import os from "os";
+import { readFileSync } from "fs";
 import { createHash } from "crypto";
 import { createUUID } from "@/common/index.ts";
-const _DataDir = path.join(os.homedir(), ".deepseeker-code");
+
+/** 用户数据目录：环境变量 DEEPSEEKER_CODE_DATA_DIR 优先（解决 Windows C 盘空间不足等场景），缺省 ~/.deepseeker-code。
+ *  ★ 走 env 而非 settings.json：settings.json 本身位于 dataDir 内（鸡生蛋），dataDir 必须在读 settings.json 之前定。 */
+const _DataDir = process.env.DEEPSEEKER_CODE_DATA_DIR
+    ? path.resolve(process.env.DEEPSEEKER_CODE_DATA_DIR)
+    : path.join(os.homedir(), ".deepseeker-code");
 /** 全局应用配置单例（详见各字段行内注释）。 */
 export const appConfig = {
     dataDir: _DataDir,
@@ -85,4 +91,66 @@ export const appConfig = {
     /** P0-3 run_workflow 单个子 agent 结果的字符预算：超出按头尾截断，避免单个巨型结果挤占聚合输出。
      *  最终聚合再受工具 maxOutputCharacters 兜底。 */
     workflowPerStepChars: 6000,
-}
+};
+
+// —— 用户可配置覆盖（settings.json 的 engine 段，白名单合并进 appConfig） ——
+
+/**
+ * settings.json 的 engine 段可覆盖的 appConfig 字段白名单 + 校验器。
+ *  ★ 刻意只放「用户偏好类、低风险」字段；精调过的引擎参数（MAX_HISTORY_TOKENS / COMPACT_RATIO /
+ *    maxReasoningRounds / KEEP_RECENT_UNITS / workflowPerStepChars）不在此列——暴露它们只会让用户越过
+ *    已针对 DeepSeek-V4 调好的甜点区，造成可归因到产品的精度/延迟劣化。如需调整那些，改源码重编。
+ *  ★ 白名单字段均为「行为偏好」（Undo 开关 / 隐私策略 / 保留天数 / 工具结果截断长度），无任意命令执行或
+ *    自动放行能力，故 applyEngineOverrides 不经 includeProject 信任闸门——项目级 engine 段可直接生效
+ *    （与 hooks/permissions 不同：后者涉及命令执行 / 权限放行，故必须 trust-gated）。
+ *  校验器返回非 undefined 即采纳（含 boolean false），undefined 即非法（warn 后忽略）。
+ */
+const ENGINE_OVERRIDE_VALIDATORS: Record<string, (v: unknown) => unknown> = {
+    undoEnabled: (v) => (typeof v === "boolean" ? v : undefined),
+    undoBackupSensitive: (v) => (v === "skip" || v === "deny" || v === "allow" ? v : undefined),
+    undoRetentionDays: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? v : undefined),
+    traceRetentionDays: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? v : undefined),
+    MAX_TOOL_RESULT_CHARS: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? Math.floor(v) : undefined),
+};
+/** engine 段可覆盖的字段名（导出供可观测 / 文档校对）。 */
+export const ENGINE_OVERRIDE_KEYS = Object.keys(ENGINE_OVERRIDE_VALIDATORS);
+
+/**
+ * 同步读取 settings.json 的 engine 段，把白名单字段合并进 appConfig（项目级覆盖全局）。
+ *  ★ 在 config/index.ts 模块加载期执行——早于任何 import appConfig 的模块，故所有消费方拿到的都是合并后的值。
+ *  容错：文件缺失静默跳过；解析 / 校验失败仅 warn，绝不抛（config 是最底层模块，抛了会全局崩）。
+ */
+const applyEngineOverrides = (cfg: typeof appConfig): void => {
+    const paths = [
+        path.join(cfg.dataDir, "settings.json"), // 全局用户级
+        path.join(process.cwd(), ".deepseeker-code", "settings.json"), // 项目级（覆盖全局）
+    ];
+    for (const configPath of paths) {
+        let raw: string;
+        try {
+            raw = readFileSync(configPath, "utf-8");
+        } catch {
+            continue; // 文件不存在 → 静默跳过
+        }
+        let parsed: any;
+        try {
+            parsed = JSON.parse(raw);
+        } catch (e: any) {
+            console.warn(`⚠️ [engine] 配置解析失败（${configPath}）: ${e?.message ?? e}`);
+            continue;
+        }
+        const engine = parsed?.engine;
+        if (!engine || typeof engine !== "object") continue;
+        for (const [key, validate] of Object.entries(ENGINE_OVERRIDE_VALIDATORS)) {
+            if (!(key in engine)) continue;
+            const valid = validate((engine as Record<string, unknown>)[key]);
+            if (valid === undefined) {
+                console.warn(`⚠️ [engine] ${key} 的值非法（${configPath}），已忽略`);
+                continue;
+            }
+            (cfg as Record<string, unknown>)[key] = valid;
+        }
+    }
+};
+
+applyEngineOverrides(appConfig);

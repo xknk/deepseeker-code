@@ -29,6 +29,10 @@ let initError: string | null = null;
  *    core 的文件沙箱（getActiveWorkspaceRoot 实时读 env）随之跟随，无需重载窗口。 */
 let workspaceRoot: string | null = null;
 
+/** 最近一次聚焦的文本编辑器所属工作区文件夹。多根工作区下聊天面板聚焦时 activeTextEditor 为空，
+ *  resolveProjectRoot 回退到此记忆值，而非无脑 folder[0]——避免把 agent 锁死在 folder[0]。 */
+let lastEditorFolder: string | null = null;
+
 /**
  * 解析 agent 应工作的项目根。优先「活动编辑器所属工作区文件夹」（多根工作区下跟随用户当前聚焦的项目），
  * 回退 folder[0]。返回 null 表示无任何打开的文件夹。
@@ -38,12 +42,27 @@ let workspaceRoot: string | null = null;
 const resolveProjectRoot = (): string | null => {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) return null;
+  // 优先「活动编辑器所属文件夹」（多根工作区跟随用户当前聚焦项目）
   const active = vscode.window.activeTextEditor;
   if (active) {
     const wf = vscode.workspace.getWorkspaceFolder(active.document.uri);
     if (wf) return wf.uri.fsPath;
   }
+  // ★ 聊天面板聚焦时 activeTextEditor 为空（面板非文本编辑器）：回退「最近聚焦过的文本编辑器所属文件夹」，
+  //   而非无脑 folder[0]。若该 folder 已被移出工作区则忽略，最终才回退 folder[0]。
+  //   （原回退 folder[0] 会把 agent 锁死在排序首位的文件夹——如 dev host 仓库自身。）
+  if (lastEditorFolder && folders.some((f) => f.uri.fsPath === lastEditorFolder)) {
+    return lastEditorFolder;
+  }
   return folders[0].uri.fsPath;
+};
+
+/** 记忆最近聚焦的文本编辑器所属文件夹（onDidChangeActiveTextEditor 回调；忽略 undefined 编辑器，
+ *  故切到聊天面板不会清空记忆）。供 resolveProjectRoot 在面板聚焦时回退。 */
+const rememberEditorFolder = (editor: vscode.TextEditor | undefined): void => {
+  if (!editor) return;
+  const wf = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  if (wf) lastEditorFolder = wf.uri.fsPath;
 };
 
 /**
@@ -320,6 +339,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   setAllowedWorkspaceRoots(getAllWorkspaceRoots());
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => setAllowedWorkspaceRoots(getAllWorkspaceRoots())),
+  );
+
+  // ★ 记忆最近聚焦的文本编辑器所属 folder：聊天面板聚焦时 activeTextEditor 为空，resolveProjectRoot
+  //   据此回退到用户真正在工作的项目（而非 folder[0]）。用当前活动编辑器播种。
+  rememberEditorFolder(vscode.window.activeTextEditor);
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(rememberEditorFolder),
   );
 
   // —— 5. 会话宿主（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace） ——

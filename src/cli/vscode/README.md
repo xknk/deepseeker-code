@@ -1,97 +1,248 @@
-# DeepSeeker-Code for VS Code
+# DeepSeeker-Code for Visual Studio Code
 
-DeepSeek 驱动的 AI 编程助手 **VS Code 插件入口**（当前位于 `src/cli/vscode/`，复用 `src/core/` 引擎，与 `src/cli/` 终端入口共享核心）。
+> DeepSeek 驱动的终端级 AI 编程助手，架构对齐 Claude Code：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 计划模式 + Undo 回退。
 
-- **功能与 CLI 完全一致**：同一套 core agent 引擎（`handleUnifiedChat` / `agentTools` / `initEngine`），会话、流式输出、思考过程、工具调用、审批、结构化提问（ask_question）、计划模式两阶段、模型/思考等级/语言切换、历史会话续接、Undo 回退、MCP / hooks / permissions / skills / 声明式子 Agent / 项目指引全部继承。
-- **交互贴合 Claude Code 插件**：活动栏图标 → 侧边栏聊天面板；内联按钮式审批（允许本次 / 总是允许 / 拒绝）；方案卡片（接受并自动执行 / 逐步审批 / 编辑 / 拒绝）；提问选项按钮；历史会话点选续接；流式打字 + 可折叠思考块 + 工具卡。
-- **数据与 CLI 共享**：会话 transcript / Undo / trace 都落在 `~/.deepseeker-code/`（按工作区 key 分目录），同一工作区下 CLI 与插件可互续会话。
+DeepSeeker-Code 把一个完整的 agent 编码引擎塞进 VS Code 的一个聊天面板：流式逐字输出、可折叠思考过程、工具调用卡、内联审批、两阶段计划模式、历史会话续接、文件级 Undo 回退，以及对 MCP / Hooks / Skills / 声明式子 Agent 的全套支持。
+
+- **自包含，无需另装 CLI**：整个 core 引擎已内联进插件，只需填一个 DeepSeek API Key 即可用。
+- **与终端版 CLI 同源**：两者共享同一套 core 引擎和 `~/.deepseeker-code/` 数据目录，同一项目下会话可互续。
 
 ---
 
-## 1. 目录位置（两种均可，无需迁移）
+## 安装
 
-本工程支持两个位置，`tsconfig` 的 `@/* → core` 别名与 `build.mjs` 均已双候选兼容：
+### 方式一：VS Code 扩展市场（推荐）
 
-- **`src/cli/vscode/`（当前推荐）**：无需迁移，直接在 `vscode/` 目录 `npm install && npm run build` 即可；
-- `src/vscode/`（与 `cli`、`core` 平级）：同样直接构建。
+> *（上架后补充市场链接）*
 
-## 2. 安装与构建
+### 方式二：从 .vsix 安装
 
-```powershell
-cd D:/code/自研/deepSeekCode/src/cli/vscode
-npm install
-npm run build
+```bash
+# 在 VS Code 命令面板（Ctrl+Shift+P）执行：
+# Developer: Install Extension from Location...  →  指向本目录
+# 或命令行：
+code --install-extension deepseeker-code-<version>.vsix
 ```
 
-产物（`dist/`）：
+---
 
-| 文件 | 说明 |
-|---|---|
-| `dist/extension.js` | 扩展主进程（extension + host + **core 全部源码内联**；external `vscode` 与 node_modules） |
-| `dist/webview.js` | webview 前端（零依赖，IIFE） |
-| `dist/style.css` | 聊天面板样式 |
-| `dist/builtin/` | core 内置 skills / agents / commands 资产（自动拷贝自 `../core/src/*/builtin`） |
+## 快速开始
 
-## 3. 调试（F5）
+1. **配置 API Key**：打开 VS Code 设置，搜索 `deepseekerCode`，在 **API Key** 填入你的 DeepSeek API Key（也可改用环境变量，见下）。
+2. **打开聊天面板**：命令面板执行 `DeepSeeker-Code: 打开聊天`，或快捷键 `Ctrl+Esc`。
+3. **开始对话**：在输入框提问即可。agent 会自主读文件、改代码、跑命令，危险操作会弹审批条。
 
-用 VS Code 打开 `src/cli/vscode/` 目录，按 `F5` 启动「Run Extension (DeepSeeker-Code)」——
-会先执行 `node build.mjs`（preLaunchTask），再打开 **Extension Development Host** 窗口。
+---
 
-> ⚠️ F5 弹出的新窗口是 VS Code 调试扩展的固有机制（隔离运行），**不是插件的产品行为**。
-> 插件本身的形态是：**活动栏 ✻ 图标 → 当前窗口左侧边栏打开聊天面板**（与 git 历史/SCM 面板一致）。
-> 装好扩展（vsix 或「Developer: Install Extension from Location」）后在**你自己的窗口**点 ✻ 即是侧边栏聊天。
+## 功能特性
 
-调试窗口里打开任意项目文件夹 → 点击活动栏的 **✻ DeepSeeker-Code** 图标即可聊天。
-API Key 通过环境变量 `DEEP_SEEK_API_KEY` 传入（launch.json 已透传）。
+- **流式输出**：逐字打字效果 + 可折叠的思考过程块。
+- **工具调用**：读/写/编辑文件、运行命令、搜索（内置 ripgrep）、网页抓取与搜索，每步以工具卡展示。
+- **审批网关**：写操作 / 危险命令弹内联审批（允许本次 / 总是允许 / 拒绝）；「总是允许」会智能落成 glob 规则持久化。
+- **两阶段计划模式**：先只读调研出方案 → 你审阅（接受并自动执行 / 逐步审批 / 编辑 / 拒绝）→ 再落地实现。
+- **结构化提问**：agent 需要澄清时以选项按钮提问，而非盲猜。
+- **历史会话**：`/sessions` 点选续接过往会话；同一项目目录的会话在 CLI 与插件间互通。
+- **Undo 回退**：每次写操作前自动备份，可按操作回退文件变更。
+- **多根工作区**：agent 跟随「当前活动编辑器所属文件夹」工作，无需手动切目录。
+- **MCP / Hooks / Skills / 子 Agent**：完整的声明式扩展机制（见下「可扩展配置」）。
 
-## 4. 打包安装（vsix）
+---
 
-```powershell
-npm run package
-# 产物：deepseeker-code-1.0.0.vsix，在 VS Code 扩展面板「从 VSIX 安装」即可
-```
+## 配置
 
-## 5. 配置
+### VS Code 设置项
+
+命令面板 → `Preferences: Open Settings` → 搜索 `deepseekerCode`：
 
 | 设置项 | 说明 |
 |---|---|
-| `deepseekerCode.apiKey` | DeepSeek API Key（优先于环境变量 `DEEP_SEEK_API_KEY`） |
-| `deepseekerCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`） |
-| `deepseekerCode.locale` | 界面/回复语言：`zh` / `en`（留空默认中文） |
+| `deepseekerCode.apiKey` | DeepSeek API Key。**留空**则回退读取环境变量 `DEEP_SEEK_API_KEY`。 |
+| `deepseekerCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.locale` | 界面/回复语言：`zh` / `en`，留空表示首次询问。 |
 
-也可以在聊天输入框用斜杠命令：`/plan`、`/auto`、`/model <名称>`、`/thinking <off|high|max>`、
-`/lang <zh|en>`、`/sessions`、`/clear`、`/new`、`/help`。
+### 环境变量
 
-## 6. 架构
+> VS Code 里设置环境变量的方式：在系统环境变量里配置，然后**重启 VS Code**（插件激活时读取，激活后改环境变量无效）。
 
+#### 模型 / API（`DEEP_SEEK_*` — 指向 DeepSeek 厂商）
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `DEEP_SEEK_API_KEY` | DeepSeek API Key（与 `deepseekerCode.apiKey` 二选一，必填） | — |
+| `DEEP_SEEK_API_URL` | API 基址（兼容 OpenAI 协议的代理可用此项改） | `https://api.deepseek.com` |
+| `DEEP_SEEK_MODEL` | 主模型 | `deepseek-v4-flash` |
+| `DEEP_SEEK_AUX_MODEL` | 辅助模型（摘要 / 风险分类） | `deepseek-v4-flash` |
+| `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max`（`low`/`medium` 已废弃） | `high` |
+| `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
+| `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |
+
+#### 产品行为（`DEEPSEEKER_CODE_*` / `DEEP_SEEK_*`）
+
+| 变量 | 作用 | 默认 |
+|---|---|---|
+| `DEEPSEEKER_CODE_DATA_DIR` | 用户数据目录（会话/skills/hooks/mcp 全在此；解决 Windows C 盘小等场景） | `~/.deepseeker-code` |
+| `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `1` 开启同轮只读工具并发 | 关（串行） |
+| `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
+| `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
+| `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |
+| `TAVILY_API_KEY` | Tavily 搜索密钥 | — |
+| `WEB_FETCH_ALLOW_PRIVATE` | 设 `1` 放行 web_fetch 访问内网/回环（云元数据端点仍硬拦） | 关（SSRF 安全） |
+| `MCP_CONFIG` | MCP 配置文件路径 | `<数据目录>/mcp.json` |
+
+### 引擎偏好（`settings.json` 的 `engine` 段）
+
+少数用户偏好类参数可在 settings.json 里调（CLI 与插件共享）。在数据目录下编辑 `settings.json`：
+
+```jsonc
+// ~/.deepseeker-code/settings.json （或 DEEPSEEKER_CODE_DATA_DIR 指向的目录）
+{
+  "engine": {
+    "undoEnabled": true,              // Undo 总开关：false 跳过所有写前备份（紧急降级）
+    "undoBackupSensitive": "skip",    // 敏感文件(.env/私钥)备份策略：skip|deny|allow
+    "undoRetentionDays": 7,           // Undo 备份保留天数
+    "traceRetentionDays": 7,          // trace 诊断日志保留天数
+    "MAX_TOOL_RESULT_CHARS": 16000    // 单次工具结果截断长度（读大日志可放宽）
+  }
+}
 ```
+
+> 项目级 `<项目>/.deepseeker-code/settings.json` 的 `engine` 段会**覆盖**全局。非法值会被忽略并告警。
+>
+> ⚠️ **不可调**：上下文窗口（`MAX_HISTORY_TOKENS`）、压缩阈值（`COMPACT_RATIO`）、推理轮数等是针对 DeepSeek-V4 精调过的引擎参数，刻意不开放——调高反而越过精度甜点区。如确需改，改源码重编。
+
+---
+
+## 聊天内命令
+
+在输入框以 `/` 开头：
+
+| 命令 | 作用 |
+|---|---|
+| `/plan` | 切换计划模式（只读调研 → 方案 → 实现） |
+| `/auto` | 切换自动模式（按权限规则自动执行，少打断） |
+| `/model <名称>` | 切换模型 |
+| `/thinking <off\|high\|max>` | 切换思考强度 |
+| `/lang <zh\|en>` | 切换语言 |
+| `/sessions` | 列出并续接历史会话 |
+| `/clear`、`/new` | 新会话 |
+| `/help` | 帮助 |
+
+快捷键：`Ctrl+Esc` 打开聊天面板。
+
+---
+
+## 可扩展配置（声明式）
+
+下列配置对 CLI 与 VS Code 插件**完全一致**，都从 `~/.deepseeker-code/`（全局）+ `<项目>/.deepseeker-code/`（项目，需信任该目录）读取：
+
+| 配置 | 位置 | 作用 |
+|---|---|---|
+| **Hooks** | `settings.json` 的 `hooks` 段 | 6 类生命周期事件（PreToolUse/PostToolUse/UserPromptSubmit/Stop 等）触发命令/http/注入/子 agent |
+| **权限规则** | `settings.json` 的 `permissions` 段 | `allow`/`deny`/`ask` 细粒度工具放行（如 `run_command(npm:*)`） |
+| **状态栏** | `settings.json` 的 `statusLine` 段 | 自定义底部状态栏命令（CLI 专用，插件不消费） |
+| **MCP** | `mcp.json`（独立文件，**非** settings.json） | 接入外部 MCP server 工具 |
+| **Skills** | `skills/<name>/SKILL.md` | 可被 agent 按需加载的技能包 |
+| **子 Agent** | `agents/<name>.agent.md` | 声明式子 agent 角色 |
+| **斜杠命令** | `commands/<name>.md` | 自定义 `/命令` |
+| **输出风格** | `output-styles/<name>.md` | 自定义回复人格 |
+
+settings.json 完整示例（代码真正消费的字段）：
+
+```jsonc
+{
+  "engine": { /* 见上 */ },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "run_command", "command": "./audit.sh", "denyOnNonZero": true }
+    ],
+    "UserPromptSubmit": [
+      { "type": "prompt", "text": "涉及数据库时先确认备份策略。" }
+    ]
+  },
+  "permissions": {
+    "allow": ["run_command(npm:*)", "read_file(src/*)"],
+    "deny":  ["read_file(.env)", "run_command(rm:*)"],
+    "ask":   ["web_fetch(*)"]
+  }
+}
+```
+
+MCP 配置（`mcp.json`，独立文件）：
+
+```jsonc
+{
+  "mcpServers": {
+    "local":  { "command": "npx", "args": ["-y", "@xxx/server"], "env": { "KEY": "..." } },
+    "remote": { "type": "http", "url": "https://.../mcp", "headers": { "Authorization": "Bearer ..." } }
+  }
+}
+```
+
+---
+
+## 数据目录
+
+默认 `~/.deepseeker-code/`（可用 `DEEPSEEKER_CODE_DATA_DIR` 改位置）。布局：
+
+```text
+~/.deepseeker-code/
+├── settings.json          # 声明式配置（engine/hooks/permissions/statusLine）
+├── mcp.json               # MCP server 配置（独立文件）
+├── prefs.json             # UI 偏好（语言等）
+├── skills/                # 全局 skills
+├── agents/                # 全局子 agent
+├── commands/              # 全局斜杠命令
+├── output-styles/         # 全局输出风格
+└── <工作区key>/           # 按工作区隔离的会话 transcript / trace / undo 备份
+```
+
+> 工作区 key 由项目绝对路径的 sha256 短哈希派生，故**同一项目在 CLI 和 VS Code 打开会命中同一份会话历史**。
+
+---
+
+## 架构
+
+```text
 ┌─────────────────────────────┐        ┌──────────────────────────────┐
 │  webview（前端，零依赖 DOM）  │  ◄──►  │  extension host（Node 进程）  │
-│  聊天流 / 审批条 / 方案卡 /     │ 消息   │  panel.ts 消息路由            │
-│  提问 / 工具栏 / 历史会话       │ 协议   │  host.ts 会话编排（≈CLI 的     │
-└─────────────────────────────┘        │  useChatState 非 React 版）    │
-                                       │  extension.ts 激活/chdir/env  │
-                                       └──────────────┬───────────────┘
+│  聊天流 / 审批条 / 方案卡 /     │ 消息   │  extension.ts 激活/chdir/env  │
+│  提问 / 工具栏 / 历史会话       │ 协议   │  host.ts 会话编排             │
+└─────────────────────────────┘        └──────────────┬───────────────┘
                                                       │ handleUnifiedChat / agentTools / initEngine
                                               ┌───────▼───────┐
-                                              │  core（复用）  │  runAgent / MCP / hooks / undo / skills…
+                                              │  core（内联）  │  runAgent / MCP / hooks / undo / skills…
                                               └───────────────┘
 ```
 
-关键机制：
+- **配置注入通道**：插件激活时把 `apiKey`/`model` 写入 `process.env`、`chdir` 到工作区，**之后**才动态 import core；core 的 `appConfig` 与文件沙箱随之就位。
+- **审批**：core 的 `createWebRequestApproval` 把 `approval_request` 发给前端 → 前端弹按钮 → `resolveUserApprovalLock` 解锁挂起的工具调用。
+- **多根工作区**：按「活动编辑器所属文件夹」解析项目根，每次提问自动跟随，无需重载窗口。
 
-- **审批**：core 为异步 UI 宿主内置的 `createWebRequestApproval` 会把 `approval_request` 事件发给前端，
-  前端弹按钮条，点按后 `resolveUserApprovalLock(sessionId, toolsId, decision)` 解锁挂起的工具调用。
-- **cwd 注入**：`handleUnifiedChat` 与 `appConfig.userWorkspaceDir` 都基于 `process.cwd()`，因此扩展在
-  **动态 import core 之前**先 `process.chdir(workspaceRoot)`、注入 `WORKSPACE_ROOT` 与 `DEEP_SEEK_API_KEY`。
-- **计划两阶段**：`plan.proposed` 事件 → 前端方案卡 → 「接受并自动执行」走 `allow-once` 免审批实现轮，
-  「接受并逐步审批」带最终方案重跑实现轮（编辑后的方案全文塞入实现轮 prompt，与 CLI 一致）。
+---
 
-## 7. 已知限制
+## 开发与调试
 
-- 多根工作区（multi-root）取 `workspaceFolders[0]` 为 agent 工作区。
+> 以下面向贡献者。普通用户无需关心。
+
+```bash
+cd src/cli/vscode
+npm install
+npm run build      # 产出 dist/（extension.js 内联 core 全部源码 + webview.js + 资产）
+npm run dev        # 监听模式
+npm run package    # 打 .vsix（esbuild 瘦身：纯 JS 依赖全 bundle，只 external vscode + vscode-ripgrep）
+```
+
+- **F5 调试**：用 VS Code 打开 `src/cli/vscode/`，F5 启动「Run Extension (DeepSeeker-Code)」（preLaunchTask 自动 `node build.mjs`），会弹出 Extension Development Host 新窗口。
+- **打包瘦身约定**：`build.mjs` 把 openai/undici/ignore/typescript 等纯 JS 依赖 bundle 进 `dist/extension.js`，`dependencies` 只留 `vscode-ripgrep`（原生 rg 二进制），故 vsix ~3.8MB。新增运行时依赖默认进 `devDependencies`（会被 bundle），只有原生二进制才进 `dependencies`。
+
+---
+
+## 已知限制
+
 - webview 前端零依赖，markdown 为最小渲染器（代码块/行内码/粗体/列表/链接/标题）。
-- 打包 vsix 会携带 `vscode-ripgrep` 等运行时依赖，体积偏大属正常；调试模式无影响。
-- 关闭侧边栏时若仍有挂起的审批/提问，重开面板后需重新触发（与 CLI 关闭中断等价）。
-- F5 调试会弹出 Extension Development Host 新窗口（VS Code 机制）；正式使用请打包 vsix 或
-  「Developer: Install Extension from Location」装入当前窗口后，点活动栏 ✻ 在左侧边栏使用。
+- 插件激活后修改环境变量需重启 VS Code 方能生效（core 模块加载期冻结）。
+- 关闭面板时若仍有挂起的审批/提问，重开后需重新触发。
+
+## License
+
+MIT

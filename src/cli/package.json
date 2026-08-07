@@ -2,6 +2,15 @@
     "name": "deepseeker-code",
     "version": "1.0.0",
     "description": "DeepSeeker-Code 终端客户端（React Ink，in-process 直驱 runAgent）",
+    "homepage": "https://github.com/xknk/deepSeekCode#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/xknk/deepSeekCode.git",
+        "directory": "src/cli"
+    },
+    "bugs": {
+        "url": "https://github.com/xknk/deepSeekCode/issues"
+    },
     "type": "module",
     "bin": {
         "deepseeker-code": "./dist/cli.mjs"

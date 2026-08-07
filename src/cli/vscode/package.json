@@ -2,19 +2,25 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.15",
+  "version": "1.0.0",
   "publisher": "deepseeker-code",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "categories": ["Machine Learning", "Other"],
+  "keywords": ["ai", "deepseek", "coding-assistant", "agent", "chat", "claude-code"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xknk/deepSeekCode.git",
+    "directory": "src/cli/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/xknk/deepSeekCode/issues"
+  },
+  "homepage": "https://github.com/xknk/deepSeekCode/blob/main/src/cli/vscode/README.md",
   "engines": {
     "vscode": "^1.90.0"
   },
   "main": "./dist/extension.js",
-  "activationEvents": [
-    "onCommand:deepseekerCode.openChat",
-    "onCommand:deepseekerCode.newSession",
-    "onCommand:deepseekerCode.listSessions",
-    "onCommand:deepseekerCode.selectProjectRoot"
-  ],
   "contributes": {
     "commands": [
       {
@@ -105,20 +111,20 @@
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
-    "package": "npm run build && vsce package --allow-missing-repository",
+    "package": "npm run build && vsce package",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "ignore": "^7.0.5",
-    "openai": "^6.42.0",
-    "undici": "^8.8.0",
-    "vscode-ripgrep": "^1.13.2",
-    "typescript": "^6.0.3"
+    "vscode-ripgrep": "^1.13.2"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
     "@vscode/codicons": "^0.0.36",
     "@vscode/vsce": "^3.2.1",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.25.0",
+    "ignore": "^7.0.5",
+    "openai": "^6.42.0",
+    "undici": "^8.8.0",
+    "typescript": "^6.0.3"
   }
 }

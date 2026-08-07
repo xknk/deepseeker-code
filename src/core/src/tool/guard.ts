@@ -192,9 +192,15 @@ export const assertWithinWorkspace = (absPath: string, base?: string): void => {
     } catch (e: any) {
         throw new Error(`路径二次解析失败（疑似软链接逃逸）: ${e.message}`);
     }
-    const trueWorkspaceRoot = fsSync.realpathSync(root);
-    const relativePart = path.relative(trueWorkspaceRoot, truePhysicalPath);
-    if (relativePart.startsWith("..") || path.isAbsolute(relativePart)) {
+    // ★ 围栏判定：base 显式入参（单测/worktree 隔离）→ 仅查该根；否则查「允许根集合」——与 resolveSafePath
+    //   完全对齐：多根工作区下路径落在【任一】注册文件夹内即放行，仅拦截逃出整个工作区的路径。
+    //   （原实现仅对比单个活动根，多根场景下落在 folder[1] 的跨项目写会被误判越界 → undo 备份安全熔断误触发。）
+    const boundaryRoots = base ? (() => { try { return [fsSync.realpathSync(root)]; } catch { return [root]; } })() : allowedBoundaryRoots();
+    const escaped = boundaryRoots.every(r => {
+        const rel0 = path.relative(r, truePhysicalPath);
+        return rel0.startsWith("..") || path.isAbsolute(rel0);
+    });
+    if (escaped) {
         throw new Error(`🛑 [SECURITY ALERT] 二次围栏复检发现越界（疑似 TOCTOU 软链接逃逸）：${absPath}`);
     }
 };
