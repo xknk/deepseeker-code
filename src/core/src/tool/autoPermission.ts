@@ -93,6 +93,88 @@ export const matchCommandDeny = (cmd: string): boolean => {
     return COMMAND_DENY.some(re => re.test(cmd));
 };
 
+/**
+ * shell 元字符/链式/重定向/命令替换检测：命令串含 `;` `&` `|` `<` `>` 反引号 `$(` 换行任一即 true。
+ * ★ 只读命令免审的安全基石——杜绝 `git status; rm -rf /`、`ls | evil`、`cat x > y`、`$(evil)`、`` `evil` ``
+ *   式注入/链式/管道/重定向/命令替换。只读免审仅在「无元字符」时生效：此时命令是单条简单命令，
+ *   其余 token 都是该命令的参数，无法拼接第二条命令。
+ * 刻意不区分引号内外（保守）：`echo "a && b"` 也判为含元字符 → 不免审、交人工。宁可多问，绝不静默放行。
+ */
+export const hasShellMetachars = (cmd: string): boolean => {
+    if (!cmd) return false;
+    return /[;&|<>`]|\$\(|\n/.test(cmd);
+};
+
+/**
+ * 只读命令头清单（平衡档）：命中即视为只读、默认模式下免审批。
+ * ★ 前提——hasShellMetachars 已先过滤掉一切链式/管道/重定向/替换，故本清单只需锚定「命令头 + 已知只读
+ *   子命令」，其后 token 一律按该命令的参数对待（无第二条命令的拼接空间）。
+ * ★ 刻意不放行：可读密钥的 cat/head/tail/type（应走 read_file 的敏感防护）、npm install/publish、
+ *   curl/wget、git 写子命令（add/commit/push/checkout/reset/mv/rm 等）、rm/mv/cp/mkdir/touch 等任何写/外传操作。
+ *   收紧/放宽：在 settings.json 配 permissions.ask/allow（checkPermission 优先级始终高于本判定）。
+ */
+const READONLY_HEADS: RegExp[] = [
+    // —— git 只读子命令（写子命令 add/commit/push/checkout/reset/mv/rm 一律不在内）——
+    /^git status\b/, /^git log\b/, /^git diff\b/, /^git show\b/, /^git blame\b/,
+    /^git rev-parse\b/, /^git ls-files\b/, /^git describe\b/,
+    /^git remote(?:\s+-v)?\s*$/,            // 仅 `git remote` / `git remote -v`（add/remove 是写，不匹配）
+    /^git stash list\b/,
+    /^git config --get\b/,                  // 仅 --get（读取）；`git config k v` 是写，不匹配
+    /^git branch(?:\s+(-a|-r|-v|-vv|--list|--all|--remotes|--verbose))*\s*$/, // 仅列举形态；-d/-D/-m 是写，不匹配
+    // —— 纯查看 ——
+    /^ls\b/, /^pwd\b/, /^echo\b/, /^whoami\b/, /^hostname\b/, /^date\b/,
+    // —— 文件查看/检索（hasShellMetachars 已确保无 ;|><` 等，单条命令；读敏感文件由 hasSensitiveFileArg 拦、
+    //    写选项由 hasWriteModifier 拦，两道闸门之后才放行，避免 grep/cat 读密钥、find -delete 销毁）——
+    /^wc\b/,                                     // 计数（无文件内容输出，无密钥风险）
+    /^head\b/, /^tail\b/, /^cat\b/,              // 查看内容（敏感文件由 hasSensitiveFileArg 拦）
+    /^find\b/,                                   // 列路径（-delete/-exec/-ok 由 hasWriteModifier 拦）
+    /^grep\b/, /^egrep\b/, /^fgrep\b/, /^rg\b/,  // 内容检索（敏感文件由 hasSensitiveFileArg 拦）
+    /^sed\b/,                                    // 默认/-n 打印到 stdout 即只读（-i 由 hasWriteModifier 拦）
+    // —— 版本号 ——
+    /^(node|npm|pnpm|npx|git|tsc|python|python3)\s+(-v|-V|--version)\b/,
+    // —— 验证类（跑项目代码但不改源码）——
+    /^npm test\b/,
+    /^npm run (test|lint|typecheck|type-check)\b/,
+    /^pnpm (test|lint|typecheck)\b/,
+    /^npx (vitest|jest|eslint|tsc)\b/,
+    /^tsc --noEmit\b/,
+];
+
+/**
+ * 只读命令的写选项检测：sed 的 -i（原地写）、find 的 -delete/-exec/-ok（销毁/执行子句）是写操作，命中即不免审。
+ * ★ hasShellMetachars 已挡住 `;`/`|`/`$(` 等，故此处只做 token 级匹配（find -exec cmd \; 的 \; 本就含 `;`，已被前置挡）。
+ *   -i 检测仅对 sed 头限定，避免误杀 ls -i（显示 inode）等无关 -i flag。
+ */
+export const hasWriteModifier = (cmd: string): boolean => {
+    if (!cmd) return false;
+    if (/^sed\b/.test(cmd) && /(^|\s)-i\b/.test(cmd)) return true;   // sed -i（原地写）
+    return /(^|\s)--?(delete|exec|ok)\b/.test(cmd);                  // find -delete / -exec / -ok
+};
+
+/**
+ * 命令串是否引用敏感文件（.env / 私钥 / 凭证等）：命中即不免审——
+ * grep/cat/head/tail/sed 等会把文件内容回灌云端模型，读走密钥。与 BUILTIN_AUTO_DENY 的文件名模式同源。
+ * 刻意宽松匹配（误命中只是多审批一次转人工，绝不静默放行）。
+ */
+const SENSITIVE_FILE_ARG_RE = /\.env\b|\.pem\b|\.pfx\b|\.p12\b|\.keystore\b|\.jks\b|\.key\b|id_(rsa|dsa|ecdsa|ed25519)\b|credentials?\.(json|ya?ml|toml|ini|conf)|secrets?\.(json|ya?ml|toml|ini|conf)|\.npmrc\b/i;
+export const hasSensitiveFileArg = (cmd: string): boolean => {
+    if (!cmd) return false;
+    return SENSITIVE_FILE_ARG_RE.test(cmd);
+};
+
+/**
+ * 只读命令判定（默认模式 run_command 免审用）：无 shell 元字符 + 命令头命中只读清单 + 无写选项 + 不读敏感文件 → true。
+ * 任意一项不满足（含元字符 / 不在清单 / 含写选项 / 读敏感文件）→ false，落入常规审批流。
+ */
+export const isReadOnlyCommand = (cmd: string): boolean => {
+    const c = (cmd || "").trim();
+    if (!c || hasShellMetachars(c)) return false;          // 前置：链式/管道/重定向/替换仍挡
+    if (!READONLY_HEADS.some(re => re.test(c))) return false;
+    if (hasWriteModifier(c)) return false;                 // find -delete / sed -i
+    if (hasSensitiveFileArg(c)) return false;              // grep .env / cat id_rsa
+    return true;
+};
+
 /** path 是否在 cwd 工作区内（含 cwd 自身）。非字符串/无法解析 → false（转人工）。 */
 const isWithinWorkspace = (p: string, cwd?: string): boolean => {
     if (!p || !cwd) return false;

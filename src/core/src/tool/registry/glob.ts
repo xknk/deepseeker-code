@@ -6,7 +6,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
 
 /** 简易 glob → regex（支持 ** / * / ?），无新依赖 */
@@ -37,12 +37,15 @@ export const globTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { pattern: string; path?: string }): Promise<string> { // 💡 优化 1：约束明确的返回值类型
+            async execute(args: { pattern: string; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：约束明确的返回值类型
                 try {
                     const cleanPattern = (args.pattern || "").trim();
                     if (!cleanPattern) return "❌ [Glob失败]：传入的检索 pattern 不能为空。";
 
-                    const root = args.path ? resolveSafePath(args.path) : getActiveWorkspaceRoot();
+                    // ★ 显式根（与 run_command/fs 工具签名统一）：优先 ctx.cwd（已与 ALS 同源），否则回退 ALS 活动根。
+                    //   消除对全局 ALS 的隐式依赖，使工具更可测、可覆盖（ctx.cwd 与 getActiveWorkspaceRoot() 等价）。
+                    const activeRoot = ctx?.cwd ?? getActiveWorkspaceRoot();
+                    const root = args.path ? resolveSafePath(args.path) : activeRoot;
                     const re = globToRegex(cleanPattern);
                     await initializeWorkspaceIgnore();
 
@@ -59,7 +62,7 @@ export const globTools: CustomTool[] = [
                         // 过滤掉被忽略的实体
                         const validEntries = entries.filter(e => {
                             const full = path.join(dir, e.name);
-                            const rel = path.relative(getActiveWorkspaceRoot(), full).replace(/\\/g, "/");
+                            const rel = path.relative(activeRoot, full).replace(/\\/g, "/");
                             return !checkIsPathIgnored(e.isDirectory() ? `${rel}/` : rel);
                         });
 
@@ -72,7 +75,7 @@ export const globTools: CustomTool[] = [
                             if (e.isSymbolicLink()) continue;
 
                             const full = path.join(dir, e.name);
-                            const rel = path.relative(getActiveWorkspaceRoot(), full).replace(/\\/g, "/");
+                            const rel = path.relative(activeRoot, full).replace(/\\/g, "/");
 
                             if (e.isDirectory()) {
                                 // 💡 优化 4：精准匹配，如果大模型只想找文件，避免把中间每一层父级文件夹都塞进结果集

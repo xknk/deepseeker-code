@@ -12,7 +12,7 @@
  *  返回带行列号的匹配行；支持字面量（默认自动转义）与正则两种模式。与 glob（按文件名）互补。
  */
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
@@ -46,7 +46,7 @@ export const searchTools: CustomTool[] = [
             maxOutputCharacters: 32000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { query: string; is_regex?: boolean; path?: string }): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
+            async execute(args: { query: string; is_regex?: boolean; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();
                     if (!cleanQuery) return "❌ [检索失败]：传入的检索关键词不能为空。";
@@ -61,7 +61,7 @@ export const searchTools: CustomTool[] = [
                     //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
                     // ★ 多根工作区：args.path 指定搜索目录时经 resolveSafePath 校验（须落在任一工作区根内），
                     //   支持 ../<兄弟目录> 跨项目检索；缺省搜索当前活动根。
-                    const searchRoot = (args.path ? resolveSafePath(args.path) : getActiveWorkspaceRoot()).replace(/\\/g, "/");
+                    const searchRoot = (args.path ? resolveSafePath(args.path) : (ctx?.cwd ?? getActiveWorkspaceRoot())).replace(/\\/g, "/");
                     const rgArgs = [
                         "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",

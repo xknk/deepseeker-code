@@ -149,16 +149,20 @@ const stripEdgeBlankLines = (s: string): string => {
 };
 
 /**
- * 逐行尾空白容错的块匹配（edit_file 兜底）：oldBlock 每行去尾空白后与 content 逐行整行比对，
- * 命中的连续行块用 splice 替换为 newBlock 对应行。未命中行原样保留，绝不污染文件其余行的尾空白。
- * 仅当 old_str 覆盖完整连续行时生效（行内局部替换走精确子串路径）。返回替换后全文或失败原因。
+ * 逐行容错的块匹配（edit_file 兜底）：按 `norm` 归一化每行后逐行整行比对，命中的连续行块用 splice
+ * 替换为 newBlock 对应行。未命中行原样保留，绝不污染文件其余行的空白。仅当 old_str 覆盖完整连续行时
+ * 生效（行内局部替换走精确子串路径）。返回替换后全文或失败原因。
+ * @param norm 单行归一函数：
+ *   - 行尾空白（`l => l.replace(/[ \t]+$/, "")`）：保前导缩进精确，仅兜模型丢/加行尾空格——最高频、最安全；
+ *   - 全空白（`l => l.trim()`）：连前导空白一并归一，兜"前导 tab↔空格"失配——模型复现代码时第二高频的缩进差异。
+ *     作为行尾空白归一失败后的下一档（更宽容）；冲突检测不放松（多处命中且非 replace_all → 报冲突，防误改）。
  */
-const matchLineBlockTolerant = (
+const matchLineBlockWith = (
     content: string, oldBlock: string, newBlock: string, replaceAll: boolean,
+    norm: (l: string) => string,
 ): { ok: true; content: string; count: number } | { ok: false; reason: "none" | "conflict"; count: number } => {
     const contentLines = content.split("\n");
     const oldLines = oldBlock.split("\n");
-    const trimEnd = (l: string): string => l.replace(/[ \t]+$/, "");
     if (oldLines.length === 0 || oldLines.length > contentLines.length) {
         return { ok: false, reason: "none", count: 0 };
     }
@@ -166,7 +170,7 @@ const matchLineBlockTolerant = (
     for (let i = 0; i + oldLines.length <= contentLines.length; i++) {
         let matched = true;
         for (let j = 0; j < oldLines.length; j++) {
-            if (trimEnd(contentLines[i + j]) !== trimEnd(oldLines[j])) { matched = false; break; }
+            if (norm(contentLines[i + j]) !== norm(oldLines[j])) { matched = false; break; }
         }
         if (matched) hits.push(i);
     }
@@ -391,24 +395,31 @@ export const fsTools: CustomTool[] = [
                         if (c.old.length > 0 && normalizedContent.includes(c.old)) { normalizedOld = c.old; note = c.note; break; }
                     }
 
-                    // ④ 逐行尾空白容错：子串口径全未命中时，按行块（每行去尾空白）匹配 + splice 替换。
-                    //    行尾空白语义无关，模型丢/加行尾空格是最高频失配原因；行对齐替换不污染文件其余行。
+                    // ④ 逐行容错（子串口径全未命中时）：按行块匹配 + splice 替换。先「行尾空白」归一（保前导
+                    //    缩进精确），再「全空白」归一（含前导 tab↔空格）兜模型复现代码时最高频的缩进差异。
+                    //    行对齐替换不污染文件其余行；冲突检测不放松（多处命中且非 replace_all → 报冲突，防误改）。
                     if (normalizedOld == null) {
                         const base = lnStripped !== normalizedOldRaw ? lnStripped : normalizedOldRaw;
-                        const lm = matchLineBlockTolerant(normalizedContent, base, normalizedNew, !!args.replace_all);
-                        if (lm.ok) {
-                            assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
-                            await fs.writeFile(absPath, isCRLF ? lm.content.replace(/\n/g, "\r\n") : lm.content, "utf-8");
-                            return args.replace_all
-                                ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${lm.count} 处匹配（逐行尾空白容错）。`
-                                : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成局部重构（逐行尾空白容错）。`;
-                        }
-                        if (lm.reason === "conflict") {
-                            return `❌ [代码修补失败]：代码冲突！old_str（尾空白归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。`;
+                        const norms: Array<{ norm: (l: string) => string; tag: string }> = [
+                            { norm: (l: string): string => l.replace(/[ \t]+$/, ""), tag: "逐行尾空白容错" },
+                            { norm: (l: string): string => l.trim(), tag: "逐行全空白容错（前导 Tab/空格）" },
+                        ];
+                        for (const { norm, tag } of norms) {
+                            const lm = matchLineBlockWith(normalizedContent, base, normalizedNew, !!args.replace_all, norm);
+                            if (lm.ok) {
+                                assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
+                                await fs.writeFile(absPath, isCRLF ? lm.content.replace(/\n/g, "\r\n") : lm.content, "utf-8");
+                                return args.replace_all
+                                    ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${lm.count} 处匹配（${tag}）。`
+                                    : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成局部重构（${tag}）。`;
+                            }
+                            if (lm.reason === "conflict") {
+                                return `❌ [代码修补失败]：代码冲突！old_str（${tag}归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。`;
+                            }
                         }
                         // ⑤ 全失败：逐行诊断，精确指出最先失配的行，让模型一次定位（避免盲目重读整文件反复试错）
                         const diag = diagnoseOldStr(normalizedContent, normalizedOldRaw);
-                        return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对应贴片段。`;
+                        return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对应贴片段。⚠️ 严禁改用 run_command 调用 python/node/sed/awk 等脚本绕过本工具修改文件——请用 read_file 重新读取目标片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进），再次调用 edit_file 重试。`;
                     }
 
                     // 精确口径：子串替换

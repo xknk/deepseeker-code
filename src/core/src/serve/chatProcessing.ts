@@ -33,7 +33,8 @@ import { expandSlashCommand } from "@/commands/expand.ts";
 import { runWithSessionContext, getAllowedWorkspaceRoots, getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import path from "path";
 import fs from "fs";
-import { SYSTEM_PROMPT } from "@/agent/systemPrompt.ts";
+import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
+import { activeProvider } from "@/llm/model.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -117,15 +118,16 @@ export const handleUnifiedChat = async (
     }
 
     // ★ SYSTEM_PROMPT 已抽取为共享模块（@/agent/systemPrompt.ts），Web/CLI 宿主复用，避免双处维护。
+    //   身份段（agent 名 / 模型族）由 activeProvider 注入——厂商中立，换 provider 即换身份（Step 10）。
     //   多根工作区感知：注册了 >1 个项目根时（如前端+后端），把全部根注入系统提示，让 agent 开局就知道
     //   有多个项目、可用绝对路径或 ../<兄弟目录> 跨项目读写。单根（CLI/单文件夹）不注入，零回归。
-    let sysPrompt = SYSTEM_PROMPT;
+    let sysPrompt = buildSystemPrompt(activeProvider);
     const roots = getAllowedWorkspaceRoots();
     if (roots.length > 1) {
         let activeReal = getActiveWorkspaceRoot();
         try { activeReal = fs.realpathSync(activeReal); } catch { /* 用原值 */ }
         const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（当前默认：相对路径与命令基准）" : ""}`);
-        sysPrompt = SYSTEM_PROMPT + `\n\n【工作区（多项目）】\n你可在以下项目根中读写文件。跨项目访问用绝对路径，或相对当前默认根的 ../<兄弟目录>:\n${lines.join("\n")}`;
+        sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n你可在以下项目根中读写文件。跨项目访问用绝对路径，或相对当前默认根的 ../<兄弟目录>:\n${lines.join("\n")}`;
     }
     let replyText = "";
     try {

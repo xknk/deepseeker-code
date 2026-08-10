@@ -339,7 +339,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { isTrustedDir, trustDir, readTrustedDirs, untrustDir }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
@@ -460,26 +460,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // —— 7. 信任文件夹闸门：resolved projectRoot 未信任时弹 Modal 选择（仅问一次，对当前 resolved 根） ——
-  //   信任→持久化（下次不再问）；跳过→includeProject=false（agent 仍可用，仅无项目级配置）。
-  //   ★ 此时 webview 尚未创建，必须走原生 vscode.window UI（非 webview 消息通道）。
-  //   多根工作区：只对 resolveProjectRoot() 解析出的单个根问一次（与「每次启动一个信任快照」语义一致）。
-  //   TODO（已知局限）：initEngine 仅 activate 跑一次；中途 selectProjectRoot/切编辑器改根不会重跑闸门或重载项目级配置——如需加载新项目配置请重载窗口。
+  // —— 7. 项目级配置加载：本地单人工具，默认信任并加载当前工作区的项目级配置（.deepseeker-code/），不再弹窗确认。
+  //   trustDir 内部去重（已信任则不重复写）；持久化后本地 serve 入口（isTrustedDir）也能一致启用。
+  //   TODO（已知局限）：initEngine 仅 activate 跑一次；中途 selectProjectRoot/切编辑器改根不会重载项目级配置——如需加载新项目配置请重载窗口。
   let includeProject = false;
   if (workspaceRoot) {
-    includeProject = await isTrustedDir(workspaceRoot);
-    if (!includeProject) {
-      const choice = await vscode.window.showWarningMessage(
-        `是否信任此项目并加载其项目级配置（.deepseeker-code/）？\n${workspaceRoot}\n\n项目级配置含 hooks（将以 shell 执行命令）、CLAUDE.md、permissions、skills 等，仅在信任该项目时启用。`,
-        { modal: true },
-        "信任并启用项目配置",
-        "跳过（安全模式）",
-      );
-      if (choice === "信任并启用项目配置") {
-        await trustDir(workspaceRoot);
-        includeProject = true;
-      }
-    }
+    await trustDir(workspaceRoot);
+    includeProject = true;
   }
 
   // —— 8. 后台初始化引擎（不阻塞命令注册；失败仅提示） ——

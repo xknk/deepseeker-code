@@ -9,7 +9,7 @@ cd 你的项目
 deepseeker-code
 ```
 
-DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、可折叠思考过程、工具调用卡、审批模态、两阶段计划模式、会话恢复，全套对标 Claude Code。**in-process 直驱引擎**——不走 HTTP/端口，工具审批走 Ink 原生模态。
+DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、可折叠思考过程、工具调用卡、审批模态、两阶段计划模式、会话恢复。**in-process 直驱引擎**——不走 HTTP/端口，工具审批走 Ink 原生模态。
 
 > 另有 **VS Code 插件**版本（同名 `deepseeker-code`），与终端版同源共享 core 引擎和 `~/.deepseeker-code/` 数据目录，同一项目下会话可互续。
 

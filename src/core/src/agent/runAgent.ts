@@ -21,70 +21,16 @@
  *
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
-import chatWithModelWithTools, { isContextLengthError, isTransientApiError } from "@/llm/model.ts";
 import OpenAI from "openai";
 import { appendMessage } from "@/session/transcript.ts";
-import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolResult } from "./truncate.ts";
+import { ensureFitsWindow } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions } from "./type.ts";
-import { estimateTokens } from "@/session/contextCore.ts";
-import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
-import { requestApproval, isProtectedWrite, getActiveCwd } from "@/tool/guard.ts";
-import { checkPermission } from "@/tool/permissions.ts";
-import { filterToolsForPlanMode, appendPlanControlTools } from "./planMode.ts";
-import { runPreHooks, runPostHooks, dispatch } from "@/tool/hooks.ts";
-import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
-import { runBackgroundTool } from "./backgroundTool.ts";
-import { filterByEnvironment } from "./toolFilter.ts";
-import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
-import { injectSkillCatalog } from "@/skills/inject.ts";
-import { injectAgentCatalog } from "@/agents/inject.ts";
-import { injectProjectGuide } from "@/projectGuide/inject.ts";
-import { injectOutputStyle } from "@/outputStyles/inject.ts";
-import { injectMemory } from "@/memory/inject.ts";
-import { injectMarkedBlock } from "@/common/index.ts";
-import { appConfig } from "@/config/index.ts";
-import { runAutoCheck, matchCommandDeny } from "@/tool/autoPermission.ts";
-
-/**
- * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
- *  - RegExp[]：逐条全局替换为 [MASKED_SECRET]；
- *  - 函数：交由工具自定义脱敏（可结合 args 动态决策）。
- * 容错优先：脱敏异常返回原文，绝不阻断工具结果回灌。
- */
-const applyPrivacyMasking = (
-    rules: RegExp[] | ((args: any, rawOutput: string) => string) | undefined,
-    args: any,
-    output: string,
-): string => {
-    if (!rules) return output;
-    try {
-        if (typeof rules === 'function') return rules(args, output);
-        let masked = output;
-        for (const re of rules) {
-            const flags = re.flags.includes('g') ? re.flags : re.flags + 'g';
-            masked = masked.replace(new RegExp(re.source, flags), '[MASKED_SECRET]');
-        }
-        return masked;
-    } catch {
-        return output;
-    }
-};
-
-/**
- * P0-1 单个 tool_call 的处理结果（processToolCall 返回）。纯数据——副作用（yield tool.end / message.push /
- * appendMessage）由分波调度层统一 flush，使 processToolCall 可被 Promise.all 并发调用。
- */
-type ToolCallOutcome = {
-    toolCallId: string;
-    calledName: string;
-    calledArgs: any;
-    resultForModel: string;
-    resultForUser: string;
-    ok: boolean;
-    aborted?: boolean;
-    terminal?: { kind: 'exit_plan_mode' | 'enter_plan_mode'; plan?: string; reason?: string };
-};
-
+import { dispatch } from "@/tool/hooks.ts";
+import { ToolCallContext } from "./toolExecution.ts";
+import { createRepeatBreaker } from "./repeatBreaker.ts";
+import { prepareToolsAndInjections } from "./systemInjections.ts";
+import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
+import { streamInference, InferenceResult } from "./streamInference.ts";
 
 // ============ 主流程 ============
 /**
@@ -99,13 +45,10 @@ type ToolCallOutcome = {
  * @yields AgentEvent  round.start / text.delta / thinking.delta / tool.start / tool.end / final
  */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
-    const rawToolsAll = options.toolSchemas ?? [];   // ← 不再默认 agentTools，避免循环依赖
-    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode；非计划模式：注入 enter_plan_mode + exit_plan_mode 供模型自主进入计划/提交方案（见 agent/planMode.ts）
-    const rawToolsPreEnv = options.planMode ? filterToolsForPlanMode(rawToolsAll) : appendPlanControlTools(rawToolsAll);
     const sessionId = options.sessionId; // 本次会话id
     // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
     //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
-    //   全部 11 处埋点点位自动获得该保护，无需逐个 await/.catch。
+    //   全部埋点点位自动获得该保护，无需逐个 await/.catch。
     const rawEvents = options.events; // 原始回调方法
     const events: typeof rawEvents = async (base) => {
         try { await rawEvents(base); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
@@ -118,38 +61,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const keepRecentUnits = options.keepRecentUnits
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
-    // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
-    const validationCtx: ToolContext = { sessionId, cwd, abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion };
-    const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
-    // 格式化工具消息
-    const cleanedToolSchemas = rawTools.map((t: any) => ({
-        type: t.type,
-        function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters }
-    }));
-    // 预留系统提示词和摘要存放区域
-    ensureSummarySlot(message);
-    // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]
-    //   （改写会破坏 DeepSeek 隐式前缀缓存）。真正的模式强制仍由 filterToolsForPlanMode（限制工具表）保证。
-    // 回复语言：按 locale 幂等注入「用中文/英文回复」引导（fence 机制，会话内不变 → 不破坏前缀缓存）
-    if (options.locale) {
-        const hint = options.locale === "zh" ? "请始终用中文回复用户。" : "Always reply to the user in English.";
-        injectMarkedBlock(message, "⟦DSC:LOCALE⟧", hint);
-    }
-    // ★ P2-16 输出风格：按 outputStyle 幂等注入 persona 正文（fence 机制，会话内不变 → 不破坏前缀缓存）
-    injectOutputStyle(message, options.outputStyle);
-    // ★ Skills：把【可用技能目录】幂等注入系统提示词（fence 机制，不动 message 下标）
-    injectSkillCatalog(message);
-    injectAgentCatalog(message);
-    injectProjectGuide(message);
-    // ★ 持久记忆：把【记忆索引】幂等注入系统提示词（仅一行/条，省 token；需要全文时模型调 memory_read）。fence 机制，不动 message 下标
-    injectMemory(message);
+    // ★ setup：工具表裁剪（planMode/env）+ schema 清洗 + 摘要槽 + fence 注入（locale/outputStyle/skills/
+    //   agents/projectGuide/memory）。抽出到 systemInjections.ts；validationCtx 在其内部构造。
+    //   fence 注入幂等、不动 message 下标——保 DeepSeek 隐式前缀缓存（P0-4）。
+    const { rawTools, cleanedToolSchemas } = await prepareToolsAndInjections(message, options, events);
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
-    const recentSignatures: string[] = [];
-    // ★ 工具名序列兜底：完整签名（含 arguments）随参数微变永不重复，补一条"仅工具名"序列，
-    //   连续较多轮相同 → 参数微变死循环熔断（给分页等合理连续同工具调用留 8 轮空间，不误杀）。
-    const recentNameSignatures: string[] = [];
     // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
     //  主机制：每 NUDGE_EVERY 轮向系统提示词注入一次自评提醒，由模型自己决定"收尾给答案"还是"继续推进"
     //         （对标 Claude Code：不在低轮数硬停，靠模型自收敛 + 用户中止）。
@@ -157,10 +75,21 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const NUDGE_EVERY = 40;
     const NUDGE_FENCE = "⟦DSC:NUDGE⟧";
     const MAX_AGENT_ROUNDS = 500;
+    // ★ 空响应守护（P1-9）：DeepSeek 偶发"空包/提前收尾"——既无实质 content 又无 tool_calls。
+    //   注入一次性 PHANTOM nudge 重试（上限 PHANTOM_RETRY_MAX），而非直接 yield final 收尾。
+    //   走现有 ephemeral NUDGE 通道（不进 message 数组/transcript，保 message[0] 前缀稳定）；
+    //   有实质文本的真实回答不受影响（系统提示词的完成准则已约束别假报完成）。
+    const PHANTOM_FENCE = "⟦DSC:PHANTOM⟧";
+    const PHANTOM_RETRY_MAX = 2;
+    let phantomRetries = 0;
+    let phantomPending: { role: 'system'; content: string } | null = null;
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
     const startTime = performance.now();
+    // ★ 重复工具调用熔断器（完整签名 3 次 / 工具名序列 8 次）：跨轮有状态，每轮推理后 check()。
+    //   从 runAgent 抽出到 repeatBreaker.ts；breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
+    const breaker = createRepeatBreaker({ sessionId, depth, llmDecisionSource, startTime, events });
     try {
         while (true) {
             round++;
@@ -216,236 +145,50 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return
             }
 
-            // ★ P0-4 前缀稳定性：NUDGE 轮数自评改为「推理时附加尾部副本」——不进 message 数组/transcript/压缩，
-            //   保 message[0] 前缀绝对稳定 → DeepSeek 隐式缓存跨轮命中。机制不变（每 NUDGE_EVERY 轮模型自决收尾）。
-            const nudgeMsg = (round > 1 && round % NUDGE_EVERY === 1)
-                ? { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` }
-                : null;
-            // ★ let：上下文超长降级时会强制压缩 message，需重算 inferenceMessages（见下方 catch 分支）
-            let inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
-            let assistantMessage: OpenAI.Chat.ChatCompletionMessage = { role: 'assistant', content: null } as OpenAI.Chat.ChatCompletionMessage;
-            try {
-                events({
-                    sessionId: sessionId,
-                    eventType: 'llm.request',
-                    metadata: {
-                        depth: depth,
-                        decisionSource: userDecisionSource,
-                        ok: true,
-                        durationMs: performance.now() - startTime,
-                        round
-                    },
-                    usage: {
-                        prompt_tokens: estimateTokens(inferenceMessages),
-                    },
-                    payload: {
-                        input: message[message.length - 1].content as string,
-                    }
-                })
-                console.log(`🔄 代理推理第 ${round} 轮（流式）...`);
-
-                // ★ 流式消费：累积 content（边收边 yield text.delta）+ 按 index 拼接 tool_calls 分片 + 收 usage
-                let contentBuf = "";
-                let reasoningBuf = ""; // DeepSeek reasoning_content 累积：工具调用轮后续必须回传给 API（见下方 assistantMessage）
-                const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
-                let lastUsage: OpenAI.Chat.Completions.ChatCompletionChunk['usage'] | undefined;
-                // ★ 流式 stall 有限重试：model.ts 的 idle 超时会抛 stream_idle_timeout。仅当本回合【尚未产出任何内容】
-                //   （三个 buffer 全空 = stall 发生在首 chunk 之前，最常见的连接级 stall）时重试，避免已 yield 给前端的
-                //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
-                //   （emit llm.error + yield final + return → busy 自动清零，杜绝永久卡死）。
-                const MAX_STREAM_RETRIES = 2;
-                // ★ API 瞬时错误（429/5xx/网络复位）的有限重试预算（上线前 P0-2）：与 idle 重试独立计数，
-                //   互不挤占。每轮重置，避免一次长任务被偶发限流永久中断。
-                const MAX_API_RETRIES = 2;
-                let apiRetries = 0;
-                // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
-                let compactedThisRound = false;
-                for (let streamAttempt = 0; ; streamAttempt++) {
-                    try {
-                        for await (const chunk of chatWithModelWithTools(inferenceMessages, cleanedToolSchemas, { signal, model: options.model, thinkingLevel: options.thinkingLevel })) {
-                            if (signal?.aborted) break;
-                            const delta = chunk.choices?.[0]?.delta;
-                            if (delta) {
-                                if (delta.content) {
-                                    contentBuf += delta.content;
-                                    yield { type: 'text.delta', text: delta.content };
-                                }
-                                // DeepSeek reasoning 流式：reasoning_content 是 DeepSeek 对 OpenAI delta 的扩展（标准类型未定义），用窄化类型读取而非 any
-                                const reasoning = (delta as { reasoning_content?: string }).reasoning_content;
-                                if (reasoning) { reasoningBuf += reasoning; yield { type: 'thinking.delta', text: reasoning }; }
-                                if (delta.tool_calls) {
-                                    for (const tc of delta.tool_calls) {
-                                        const idx = tc.index ?? 0;
-                                        let buf = toolCallsBuf.get(idx);
-                                        if (!buf) { buf = { function: { name: "", arguments: "" } }; toolCallsBuf.set(idx, buf); }
-                                        if (tc.id) buf.id = tc.id;
-                                        if (tc.type) buf.type = tc.type;
-                                        if (tc.function?.name) buf.function.name += tc.function.name;
-                                        if (tc.function?.arguments) buf.function.arguments += tc.function.arguments;
-                                    }
-                                }
-                            }
-                            if (chunk.usage) lastUsage = chunk.usage;
-                        }
-                        break; // 流正常结束（含用户中止经 model.ts 干净 break）→ 跳出重试循环
-                    } catch (streamErr) {
-                        // 用户中止：model.ts 已干净 break 不会到此；防御性判断交外层 signal.aborted 分支处理
-                        if (signal?.aborted) throw streamErr;
-                        const isIdleTimeout = streamErr instanceof Error && streamErr.message === 'stream_idle_timeout';
-                        // ★ 放宽 stall 重试门控：原 noOutputYet 要求「完全无输出」才重试，但工具调用轮几乎总有前导文案
-                        //   （"让我读取 X…"），导致工具调用前的 stall 永不重试、等满 120s 后直接放弃（用户症状"卡了"）。
-                        //   现改为：只要【尚未拼出完整可执行的 tool_call】（arguments 不可解析 = 仍在流式中）就允许重试；
-                        //   已拼出完整 tool_call 则不重试（避免重复执行已敲定的工具）。这是用户卡死症状的直接修复。
-                        const hasCompleteToolCall = [...toolCallsBuf.values()].some(
-                            tc => { try { JSON.parse(tc.function.arguments); return true; } catch { return false; } }
-                        );
-                        const noOutputYet = !contentBuf && !reasoningBuf && toolCallsBuf.size === 0;
-                        if (isIdleTimeout && (noOutputYet || !hasCompleteToolCall) && streamAttempt < MAX_STREAM_RETRIES) {
-                            // ★ 重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃这部分（重试会重新生成，避免重复显示）
-                            if (!noOutputYet) yield { type: 'text.reset' };
-                            console.warn(`⚠️ 流式 stall（idle 超时${noOutputYet ? '，尚无输出' : '，tool_call 未流完'}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
-                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
-                            continue;
-                        }
-                        // ★ API 瞬时错误重试（上线前 P0-2）：429 限流 / 5xx 服务端错误 / 连接级网络复位 → 原请求重试 + 指数退避。
-                        //   缘由：原逻辑对这类错误直接 throw → 外层 catch final 终结整轮，单用户依赖云端模型场景下，一次偶发
-                        //   限流/抖动就中断长 coding 任务且不可自动恢复（只能手动续接）。现补有限重试（默认 2 次，1s→2s 指数退避），
-                        //   与 idle 重试独立计数（apiRetries）。重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃，
-                        //   避免重试重新生成时重复显示（与 idle 重试同处理）。退避 sleep 期间用户中止 → sleep reject →
-                        //   冒泡至外层 catch 的 signal.aborted 分支优雅收尾（partial 文本落盘 + final）。
-                        //   （Retry-After 头解析为后续增强项，当前固定指数退避已覆盖绝大多数瞬时抖动。）
-                        if (isTransientApiError(streamErr) && apiRetries < MAX_API_RETRIES && !signal?.aborted) {
-                            apiRetries++;
-                            const backoffMs = 1000 * Math.pow(2, apiRetries - 1); // 第 1 次 1s、第 2 次 2s
-                            if (!noOutputYet) yield { type: 'text.reset' };
-                            const statusHint = (streamErr as any)?.status ? `${(streamErr as any).status} ` : '';
-                            console.warn(`⚠️ API 瞬时错误（${statusHint}${streamErr instanceof Error ? streamErr.message : String(streamErr)}），${backoffMs}ms 后第 ${apiRetries}/${MAX_API_RETRIES} 次重试...`);
-                            await new Promise<void>((resolve, reject) => {
-                                const t = setTimeout(resolve, backoffMs);
-                                signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
-                            });
-                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
-                            continue;
-                        }
-                        // ★ 上下文超长降级：API 返回 context_length_exceeded（400）且本轮尚未产出任何内容 → 强制压缩后重试本轮。
-                        //   缘由：本地 estimateTokens 对代码/JSON 严重低估（CJK 1:1、英文 ÷4.8），常出现"本地没超阈值→不压缩→API 端实际超限 400"。
-                        //         现有 ensureFitsWindow 只在推理前基于本地估算触发，与 API 实际超长错误解耦——此处补"推理时降级"路径，避免暴力终止。
-                        //   做法：复用 ensureFitsWindow（keepRecentUnits 砍半，更激进归档旧消息并生成摘要落盘），压缩后重算 inferenceMessages 续推。
-                        //   最多一次（compactedThisRound）；强制压缩自身若失败（物理熔断/超窗口）会冒泡至外层 catch 优雅收尾。
-                        if (isContextLengthError(streamErr) && noOutputYet && !compactedThisRound) {
-                            console.warn(`⚠️ 上下文超长（API 400 context_length_exceeded），强制压缩后重试本轮推理...`);
-                            await ensureFitsWindow({
-                                sessionId,
-                                messageArr: message,
-                                keepRecentUnits: Math.max(1, Math.floor((keepRecentUnits ?? 6) / 2)),
-                                compactRatio,
-                                modelWindow,
-                                events,
-                                depth,
-                                signal,
-                            });
-                            inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
-                            compactedThisRound = true;
-                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
-                            continue;
-                        }
-                        throw streamErr; // 重试耗尽 / 已有部分输出 / 非 idle/超长 错误 → 交外层 catch 优雅收尾
-                    }
+            // ★ P0-4 前缀稳定性：NUDGE / PHANTOM 自评均走「推理时附加尾部副本」——不进 message 数组/transcript/
+            //   压缩，保 message[0] 前缀绝对稳定 → DeepSeek 隐式缓存跨轮命中。
+            //   - NUDGE：每 NUDGE_EVERY 轮提醒模型自决收尾（对标 CC：靠模型自收敛 + 用户中止）。
+            //   - PHANTOM：上一轮空响应守护触发的重试提示（phantomPending 一次性消费，优先级高于 NUDGE）。
+            const nudgeMsg: { role: 'system'; content: string } | null = (() => {
+                if (phantomPending) {
+                    const m = { role: 'system' as const, content: `${PHANTOM_FENCE}\n你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。` };
+                    phantomPending = null;
+                    return m;
                 }
-                if (signal?.aborted) {
-                    // ★ 中止落盘：仅有文本、无半截 tool_call 时，把用户已看到的 partial assistant 文本落盘，
-                    //   恢复会话后仍可见；若有半截 tool_call（不可保留半工具），整体丢弃。
-                    if (contentBuf && toolCallsBuf.size === 0) {
-                        message.push({ role: 'assistant', content: contentBuf });
-                        await appendMessage({ sessionId, role: 'assistant', content: contentBuf });
-                    }
-                    yield { type: 'final', text: contentBuf || lastContent || "（已中止）" };
-                    return;
+                if (round > 1 && round % NUDGE_EVERY === 1) {
+                    return { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` };
                 }
-
-                // 流式拼接出 assistantMessage
-                // ★ 回传 reasoning_content：DeepSeek 思考模式下，进行了工具调用的轮次在后续所有请求中必须完整回传
-                //   reasoning_content，否则 API 返回 400（官方 thinking_mode 文档）。非工具调用轮传了会被忽略，故一律附上即可。
-                assistantMessage = {
-                    role: 'assistant',
-                    content: contentBuf || null,
-                    ...(reasoningBuf ? { reasoning_content: reasoningBuf } : {}),
-                    ...(toolCallsBuf.size > 0 ? {
-                        tool_calls: Array.from(toolCallsBuf.entries())
-                            .sort((a, b) => a[0] - b[0])
-                            .map(([idx, tc]) => ({ id: tc.id ?? `call_${round}_${idx}`, type: tc.type || 'function', function: tc.function }))
-                    } : {}),
-                } as unknown as OpenAI.Chat.ChatCompletionMessage;
-
-                events({
-                    sessionId: sessionId,
-                    eventType: 'llm.response',
-                    metadata: {
-                        depth: depth,
-                        decisionSource: llmDecisionSource,
-                        ok: true,
-                        durationMs: performance.now() - startTime,
-                        round
-                    },
-                    usage: {
-                        prompt_tokens: lastUsage?.prompt_tokens,
-                        completion_tokens: lastUsage?.completion_tokens,
-                        total_tokens: lastUsage?.total_tokens,
-                        prompt_cache_hit_tokens: lastUsage?.prompt_tokens_details?.cached_tokens,
-                        prompt_cache_miss_tokens: (lastUsage?.prompt_tokens || 0) - (lastUsage?.prompt_tokens_details?.cached_tokens || 0)
-                    },
-                    payload: {
-                        input: message[message.length - 1].content as string,
-                    }
-                })
-            } catch (error) {
-                if (signal?.aborted) {
-                    yield { type: 'final', text: lastContent || "（已中止）" };
-                    return;
-                }
-                const err = error instanceof Error ? error : new Error(String(error));
+                return null;
+            })();
+            // ★ 流式推理抽出到 streamInference.ts：yield text.delta/thinking.delta/text.reset，return InferenceResult。
+            //   yield* 委托透传流式事件并取 return value（内含 idle/API/context_length 三道有限重试、abort partial 落盘、
+            //   llm.request/response/error 埋点、assistantMessage 拼装）。final 永远在此处 yield，streamInference 不 yield final。
+            const infResult: InferenceResult = yield* streamInference({
+                message, nudgeMsg, sessionId, depth, round, startTime,
+                userDecisionSource, llmDecisionSource, signal,
+                cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
+                events, keepRecentUnits, compactRatio, modelWindow,
+            });
+            if (infResult.kind === 'aborted') {
+                // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
+                yield { type: 'final', text: infResult.partialText || lastContent || "（已中止）" };
+                return;
+            }
+            if (infResult.kind === 'error') {
                 stopReason = 'error';
-                events({
-                    sessionId: sessionId,
-                    eventType: 'llm.error',
-                    metadata: {
-                        depth: depth,
-                        decisionSource: llmDecisionSource,
-                        ok: false,
-                        durationMs: performance.now() - startTime,
-                        attempt: round,
-                    },
-                    payload: {
-                        input: message[message.length - 1].content as string,
-                        output: err.message,
-                    }
-                })
                 yield { type: 'final', text: lastContent || "（发生错误）" };
                 return;
             }
-
-            // assistantMessage 已在上方流式消费中拼接完成
-            // 存入本次对话上下文中
-            // ★ F-1 修复：回传 reasoning_content。DeepSeek 思考模式下，含工具调用的轮次必须在后续请求中
-            //   完整回传 reasoning_content，否则 API 返回 400（见上方 L255 注释）。原 push 重建对象时漏掉了它，
-            //   导致默认思考模式开启时第一次工具调用后即 400 崩溃。reasoning_content 为 DeepSeek 对 OpenAI
-            //   消息的扩展字段，标准类型未定义，用窄化读取（reasoningBuf 作用域仅在内层 try，此处不可达）。
-            const reasoningContent = (assistantMessage as any).reasoning_content as string | undefined;
-            message.push({
-                role: 'assistant',
-                content: assistantMessage.content || null,
-                tool_calls: assistantMessage.tool_calls as any,
-                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
-            } as any);
-            // 存入本地上下文会话中（同步携带 reasoning_content：cleanMsg/appendMessage 均 ...rest 透传，
-            //   保证会话恢复后 buildContextMessages 重建的上下文仍带该字段，回传链不中断）
-            await appendMessage({
-                sessionId,
-                role: 'assistant',
-                content: assistantMessage.content || null,
-                tool_calls: assistantMessage.tool_calls as any,
-                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
-            } as any);
+            // assistantMessage 已由 streamInference 委托 provider.buildAssistantMessage 构造完成（含厂商扩展字段，
+            //   如 DeepSeek 的 reasoning_content）。此处整体落盘 + ...spread 透传，杜绝手工列举字段名漏挂——
+            //   DeepSeek 思考模式下含工具调用的轮次必须回传 reasoning_content，否则 API 返回 400；
+            //   cleanMsg / appendMessage 均 ...rest 透传，保证会话恢复后 buildContextMessages 重建的上下文
+            //   仍带该字段，回传链不中断。
+            // as any：Msg(ChatCompletionMessageParam) 是联合类型，.content/.tool_calls 不在所有成员上，
+            //   直接访问触发「不存在属性」；此处一律按 any 窄化访问（与原 .tool_calls as any 同惯法）。
+            const assistantMessage = infResult.assistantMessage as any;
+            message.push(assistantMessage);
+            await appendMessage({ ...assistantMessage, sessionId } as any);
             // 存储最后一条消息，以供后面返回使用
             if (assistantMessage.content) {
                 lastContent = assistantMessage.content;
@@ -453,359 +196,53 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
 
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+                const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
+                // ★ 空响应守护（P1-9）：既无实质文本、又无工具调用 → DeepSeek 空包/提前收尾。注入 PHANTOM nudge
+                //   重试（上限 PHANTOM_RETRY_MAX），而非直接收尾。有实质文本的真实回答照常 yield final。
+                if (finalText.trim() === "" && phantomRetries < PHANTOM_RETRY_MAX) {
+                    phantomRetries++;
+                    phantomPending = { role: 'system', content: `${PHANTOM_FENCE}\n你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。` };
+                    continue; // 进入下一轮推理（nudgeMsg 会消费 phantomPending 作为尾部副本）
+                }
                 // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
-                yield { type: 'final', text: assistantMessage.content || lastContent || "" };
+                yield { type: 'final', text: finalText || lastContent || "" };
                 return;
             }
-            // 2、检测是否一直重复调用同一个工具，如果超过3次，则主动跳出循环
-            const sig = assistantMessage.tool_calls.map((t: any) => `${t.function.name}:${t.function.arguments}`).join("|");
-            const tooName = assistantMessage.tool_calls.map((t: any) => `${t.function.name}`).join("|");
-
-            recentSignatures.push(sig);
-            if (recentSignatures.length > 6) recentSignatures.shift(); // F-8：定长裁剪，防长会话无限增长占内存
-            const last3 = recentSignatures.slice(-3);
-            if (last3.length === 3 && last3.every(s => s === last3[0])) {
+            // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包，避免长任务被误熔断）
+            phantomRetries = 0;
+            // 2、重复工具调用熔断（完整签名 3 次 / 工具名序列 8 次）：委托 repeatBreaker。
+            //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
+            const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
+            if (repeatVerdict.tripped) {
                 stopReason = 'repeat';
-                events({
-                    sessionId: sessionId,
-                    eventType: 'tool.repeat_break',
-                    metadata: {
-                        depth: depth,
-                        decisionSource: llmDecisionSource,
-                        durationMs: performance.now() - startTime,
-                        round,
-                        toolName: tooName,
-                        toolSource: 'builtin',
-                        ok: false,
-                        attempt: round
-                    },
-                    payload: {
-                        output: (lastContent || "") + "\n（检测到重复工具调用，已停止）",
-                    }
-                })
-                yield { type: 'final', text: (lastContent || "") + "\n（检测到重复工具调用，已停止）" };
+                yield { type: 'final', text: repeatVerdict.text };
                 return;
             }
-            // ★ 参数微变死循环兜底：完整签名随时间戳/游标等动态参数变化永不重复，
-            //   补"仅工具名"序列检测——连续 8 轮同一组工具名（参数可能每轮微变）即熔断，
-            //   给分页读取等合理的连续同工具调用留出空间。
-            recentNameSignatures.push(tooName);
-            if (recentNameSignatures.length > 16) recentNameSignatures.shift();
-            const last8 = recentNameSignatures.slice(-8);
-            if (last8.length === 8 && last8.every(s => s === last8[0])) {
-                stopReason = 'repeat';
-                events({
-                    sessionId: sessionId,
-                    eventType: 'tool.repeat_break',
-                    metadata: {
-                        depth: depth,
-                        decisionSource: llmDecisionSource,
-                        durationMs: performance.now() - startTime,
-                        round,
-                        toolName: tooName,
-                        toolSource: 'builtin',
-                        ok: false,
-                        attempt: round
-                    },
-                    payload: {
-                        output: (lastContent || "") + "\n（检测到工具名序列持续重复（参数可能微变），已停止）",
-                    }
-                })
-                yield { type: 'final', text: (lastContent || "") + "\n（检测到工具名序列持续重复（参数可能微变），已停止）" };
-                return;
-            }
-            events({
-                sessionId: sessionId,
-                eventType: 'tool.resolve',
-                metadata: {
-                    depth: depth,
-                    decisionSource: llmDecisionSource,
-                    durationMs: performance.now() - startTime,
-                    round,
-                    toolName: tooName,
-                    toolSource: 'builtin',
-                },
-                payload: {
-                    output: sig,
-                }
-            })
-            // 执行工具（abort 占位 + 截断 + 实时落盘 + 事件）
-            let abortedDuringTools = false;
-            // ★ 终结类工具（enter/exit_plan_mode）拦截返回前，为本条 assistant 消息中【其后】的并行 tool_call
-            //   补占位 tool result，避免留下孤儿 tool_call_id——否则会话恢复重建上下文时 API 因配对缺失返回 400。
-            //   （修复前依赖「终结工具必单独调用/排在末位」这一模型未保证的前提。）
-            const fillRestPlaceholders = async (fromIdx: number) => {
-                const tcs = assistantMessage.tool_calls!;
-                for (let j = fromIdx + 1; j < tcs.length; j++) {
-                    const ph = "（已跳过：终结类工具 enter/exit_plan_mode 之后的并行调用未执行）";
-                    message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
-                }
+            // ★ 工具执行上下文：每轮推理后构造一次，透传给 scheduleToolCalls→processToolCall。
+            //   round 取当前轮值（每轮递增）；逐字段比对 ToolCallContext，避免漏传 onUIEvent/requestApproval/
+            //   requestQuestion/permissionMode（subagent 透传给子 agent toolCtx，漏传则审批死锁）。
+            const toolCallCtx: ToolCallContext = {
+                sessionId, cwd, depth, round, startTime, llmDecisionSource,
+                signal, rawTools, events,
+                permissionMode: options.permissionMode,
+                onUIEvent: options.onUIEvent,
+                requestApproval: options.requestApproval,
+                requestQuestion: options.requestQuestion,
+                keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt,
             };
-            // ★ P0-1 processToolCall：单个 tool_call 的完整处理（解析→终结/abort 判定→匹配→权限→锁→审批→
-            //   pre-hook→undo 备份→execute→verify→post-hook→脱敏→截断→outputFilter）。
-            //   纯函数——不 yield / 不 message.push / 不 appendMessage（副作用统一由调度层 flush），便于并发 Promise.all。
-            //   逻辑与原串行循环体逐行等价，仅把 yield tool.start/tool.end、message.push、appendMessage、return
-            //   换成「写入 outcome 后返回」；终结类与 abort 也以 outcome 表达。
-            const processToolCall = async (toolCall: any): Promise<ToolCallOutcome> => {
-                let calledName = "";
-                let calledArgs: any = {};
-                let parseFailed = false;
-                if (toolCall.type === 'function') {
-                    calledName = toolCall.function.name;
-                    try { calledArgs = JSON.parse(toolCall.function.arguments || "{}"); }
-                    catch { parseFailed = true; }
-                    console.log(`🤖 模型请求调用工具: ${calledName}，参数:`, calledArgs);
-                }
-                // ★ 终结类（优先于 abort：模型已提交的方案/进入请求应呈现给用户，不被中止吞掉——「计划先于执行」）
-                if (calledName === "exit_plan_mode") {
-                    const plan = typeof calledArgs?.plan === "string" ? calledArgs.plan : "";
-                    const note = "✅ [计划模式] 实现方案已提交，等待用户审批后进入实现阶段。";
-                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'exit_plan_mode', plan } };
-                }
-                if (calledName === "enter_plan_mode") {
-                    const reason = typeof calledArgs?.reason === "string" ? calledArgs.reason : "";
-                    const note = "📋 [进入计划模式] 模型请求先以只读方式调研并规划方案，已切换至计划模式。";
-                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'enter_plan_mode', reason } };
-                }
-                // abort 占位（调度层据此设 abortedDuringTools 并为剩余 tool_call 补占位）
-                if (signal?.aborted) {
-                    const placeholder = "（已中止，未执行）";
-                    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
-                }
-                const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
-                const toolCtx: ToolContext = { sessionId, cwd: getActiveCwd(cwd), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent: options.onUIEvent, requestApproval: options.requestApproval, requestQuestion: options.requestQuestion, emitProgress: (m: string) => options.onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode: options.permissionMode };
-                let result = "";
-                let explicitOk: boolean | null = null;
-                if (parseFailed) {
-                    result = `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`;
-                    events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
-                } else if (matchedTool && typeof matchedTool.function.execute === 'function') {
-                    // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前请求用户审批
-                    const level = matchedTool.function.safetyLevel;
-                    let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
-                    let denied = false;
-                    // ★ P1-7 / P0-3 保护路径硬规则：写工具碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒。
-                    //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
-                    //   P0-3：与 isUndoTrigger 解耦——move_file 不在 Undo 名单（双路径超 schema），但同样必须拦截，
-                    //     否则可 move 进 .git/hooks/、.deepseeker-code/settings.json 实现持久化 RCE / 配置注入。
-                    const protectedPaths = calledName === 'move_file'
-                        ? [calledArgs?.source, calledArgs?.destination]
-                        : (isUndoTrigger(calledName) ? [calledArgs?.path] : []);
-                    const hitProtected = protectedPaths.find(p => typeof p === 'string' && isProtectedWrite(p, toolCtx.cwd));
-                    if (hitProtected) {
-                        denied = true;
-                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${hitProtected}。`;
-                    }
-                    // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
-                    try {
-                        const perm = checkPermission(calledName, calledArgs);
-                        if (perm === 'deny') { denied = true; result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`; }
-                        else if (perm === 'allow') { needApproval = false; }
-                        else if (perm === 'ask') { needApproval = true; }
-                    } catch { /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
-                    // ★ P0-2 灾难命令硬闸门：与 needApproval / allow 规则解耦——堵住「裸 allow 规则让
-                    //   checkPermission='allow' 跳过 runAutoCheck（含 COMMAND_DENY）」的审批绕过路径。
-                    //   即使用户 allow 了 run_command，rm -rf /、curl|sh、外传密钥等灾难命令仍硬拒。
-                    if ((calledName === 'run_command' || calledName === 'run_in_background')
-                        && matchCommandDeny(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
-                        denied = true;
-                        result = `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`;
-                    }
-                    // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
-                    const isBgTool = matchedTool.function.isSync === false;
-                    const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;
-                    if (lockKey && isLockHeld(lockKey)) {
-                        denied = true;
-                        result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
-                    }
-                    // ★ 分类器审批（P1-6，2026-08-06 两档）：
-                    //   default（permissionMode!=='auto'）：仅文件增删改（edit/write/create/delete_path）跑分类器——高频且均有
-                    //     undo 备份兜底（凡改必可回退），默认自动化减少审批疲劳。
-                    //   /auto（permissionMode==='auto'）：额外覆盖命令/网络/后台/MCP/git_commit——显式 opt-in 的激进档；这些无 undo
-                    //     兜底且是 prompt injection 重灾区，故加 COMMAND_DENY 清单（rm -rf /、curl|sh、外传敏感…）硬拒兜底分类器误判。
-                    //   两档共用：safe→免审放行、risky/异常/超时→转人工、敏感文件/高危命令 deny 清单→硬拒（fail-closed，绝不静默放行）。
-                    //   想对某项目/工具强制人工：配 permissions.ask（优先级高于分类器）。
-                    //   优先级：保护路径 > checkPermission 显式规则（上方已判）> deny 清单 > 分类器 > requestApproval 人工。
-                    if (needApproval && !denied) {
-                        const auto = await runAutoCheck(calledName, calledArgs, toolCtx, options.permissionMode === 'auto');
-                        if (auto === 'allow') { needApproval = false; }
-                        else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
-                        // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
-                    }
-                    if (needApproval && !denied) {
-                        const ra = matchedTool.function.requireApproval;
-                        let detail = `申请执行高危工具 [${calledName}]`;
-                        try { if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra; }
-                        catch (e: any) { denied = true; result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
-                        if (!denied) {
-                            let approved = false;
-                            try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs); }
-                            catch (e: any) { denied = true; result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
-                            if (!approved && !denied) { denied = true; result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`; }
-                        }
-                    }
-                    // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截，异常 fail-closed）
-                    if (!denied) {
-                        let veto: { deny: boolean; reason?: string };
-                        try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
-                        catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
-                        if (veto.deny) { denied = true; result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`; }
-                    }
-                    // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前快照原文件/目录（凡改必可回退，失败则阻断写入）
-                    if (!denied && isUndoTrigger(calledName)) {
-                        try { await beforeMutationBackup(calledName, calledArgs, toolCall.id, sessionId); }
-                        catch (e: any) { denied = true; result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`; }
-                    }
-                    if (!denied) {
-                        try {
-                            events({ sessionId, eventType: 'tool.execute.start', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin' }, payload: { output: JSON.stringify(calledArgs) } });
-                            // 执行工具（取消由 ctx.abortSignal 驱动；长任务走 isSync:false 后台模式，不挂固定 timeout）
-                            const execRet = matchedTool.function.execute(calledArgs, toolCtx);
-                            if (isBgTool) {
-                                // 后台工具：取首个 yield 为即时结果，剩余后台排空，锁在任务结束时释放
-                                result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
-                            } else {
-                                // 流式工具：逐块 yield → emitProgress → tool.progress UIEvent（运行期间逐行可见）
-                                result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk), signal);
-                            }
-                            // verifyResult 判定：FAILED 时前置警告（防模型对报错产生"成功"幻觉）
-                            if (matchedTool.function.verifyResult) {
-                                const verdict = matchedTool.function.verifyResult(result, toolCtx);
-                                if (verdict.status === ToolExecutionResultStatus.FAILED) {
-                                    result = `【系统判定：执行失败】${verdict.summary ?? ''}\n请正视下方输出，不要乐观假设成功。\n\n${result}`;
-                                }
-                            }
-                            events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: result } });
-                        } catch (err) {
-                            console.error(`❌ 执行工具 ${calledName} 时发生错误:`, err);
-                            result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
-                            events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
-                        }
-                        // post-hooks：执行后观察（不拦截，自身异常仅告警）
-                        await runPostHooks(calledName, calledArgs, result, toolCtx).catch((e: any) => {
-                            console.warn(`⚠️ post-hook [${calledName}] 异常（已忽略）:`, e?.message ?? e);
-                        });
-                    }
-                } else {
-                    result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
-                    explicitOk = false; // 未知工具显式失败，避免前缀嗅探误判为成功
-                    events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
-                }
-                // 脱敏（verifyResult 之后、truncate 之前；只影响发往云端模型的视图）
-                result = applyPrivacyMasking(matchedTool?.function?.privacyMaskingRules, calledArgs, result);
-                result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters);
-                const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
-                const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
-                // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
-                let resultForModel = result;
-                let resultForUser = result;
-                if (matchedTool?.function?.outputFilter) {
-                    try {
-                        const split = matchedTool.function.outputFilter(result);
-                        resultForModel = split.toModel;
-                        resultForUser = split.toUser;
-                    } catch { /* 容错：outputFilter 异常则两者均用原 result */ }
-                }
-                return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok };
-            };
-            // ★ P0-1 分波调度：开启 parallelSafeTools 时，连续的 SAFE 只读工具并发执行（Promise.all）；
-            //   写工具 / ask / deny / 后台 / 终结类 / parseFailed / unknown 一律串行（= 现状，零回归）。
-            //   屏障：写工具走串行（其前并发批次已 await 完成 → undo 备份读到未改原文件）；appendMessage 始终
-            //   串行 flush（JSONL append 非并发安全）；tool.end / message.push 按请求序，使模型行为确定。
-            const parallelSafeToolsEnabled = appConfig.parallelSafeTools;
-            const parseTc = (tc: any): { name: string; args: any; parseFailed: boolean } => {
-                if (tc.type !== 'function') return { name: "", args: {}, parseFailed: true };
-                let args: any = {}; let parseFailed = false;
-                try { args = JSON.parse(tc.function.arguments || "{}"); } catch { parseFailed = true; }
-                return { name: tc.function.name, args, parseFailed };
-            };
-            const canParallelize = (name: string, args: any, parseFailed: boolean): boolean => {
-                if (!parallelSafeToolsEnabled || parseFailed || signal?.aborted) return false;
-                if (name === 'exit_plan_mode' || name === 'enter_plan_mode' || name === 'ask_question') return false;
-                if (isUndoTrigger(name)) return false;
-                const matched = rawTools.find((t: any) => t.function.name === name);
-                if (!matched) return false;
-                if (matched.function.safetyLevel !== ToolSafetyLevel.SAFE) return false;
-                if (matched.function.isSync === false) return false;
-                try {
-                    const perm = checkPermission(name, args);
-                    if (perm === 'ask' || perm === 'deny') return false;
-                } catch { return false; }
-                return true;
-            };
-            const tcs = assistantMessage.tool_calls!;
-            let idx = 0;
-            while (idx < tcs.length) {
-                // 上一工具已中止 → 剩余全部补占位并退出（终结类不受影响：其 processToolCall 终结判定先于 abort）
-                if (abortedDuringTools) {
-                    for (let j = idx; j < tcs.length; j++) {
-                        const ph = "（已中止，未执行）";
-                        message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
-                        await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
-                    }
-                    break;
-                }
-                const tc = tcs[idx];
-                const { name: pname, args: pargs, parseFailed: pparseFailed } = parseTc(tc);
-                if (canParallelize(pname, pargs, pparseFailed)) {
-                    // 收集连续可并发段
-                    const batch: any[] = [];
-                    while (idx < tcs.length) {
-                        const btc = tcs[idx];
-                        const bp = parseTc(btc);
-                        if (!canParallelize(bp.name, bp.args, bp.parseFailed)) break;
-                        batch.push(btc);
-                        idx++;
-                    }
-                    // 先发所有 tool.start（请求序）
-                    for (const btc of batch) {
-                        const bp = parseTc(btc);
-                        yield { type: 'tool.start', toolCallId: btc.id, toolName: bp.name, args: bp.args };
-                    }
-                    // 并发执行
-                    const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc)));
-                    // 串行 flush（请求序）
-                    for (const oc of outcomes) {
-                        yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
-                        message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                        await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                        if (oc.aborted) abortedDuringTools = true;
-                    }
-                } else {
-                    // 串行分支（屏障工具 / 开关关 / 终结类 / 后台 / parseFailed / unknown / ask / deny）
-                    yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };
-                    const oc = await processToolCall(tc);
-                    if (oc.terminal) {
-                        // 终结类：push 本条 result + 补其后占位 + yield tool.end + yield plan.* + yield final + 结束 runAgent
-                        message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                        await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                        await fillRestPlaceholders(idx);
-                        // ★ 补 tool.end：终结类上方已 yield tool.start，但原逻辑直接跳 plan.*/final 未 yield tool.end，
-                        //   导致 CLI 的 ToolCard 永远停在「运行中…」（status 恒 running、滞留动态区），表现为 enter_plan_mode 卡死。
-                        //   工具实际已成功完成（用户已看到方案/进入请求），补发 tool.end 让前端把卡片标记 done 并移出动态区。
-                        yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
-                        if (oc.terminal.kind === 'exit_plan_mode') {
-                            yield { type: 'plan.proposed', plan: oc.terminal.plan || '' };
-                            yield { type: 'final', text: oc.terminal.plan || oc.resultForUser };
-                        } else {
-                            yield { type: 'plan.enterRequested', reason: oc.terminal.reason || '' };
-                            yield { type: 'final', text: oc.terminal.reason ? `📋 模型请求进入计划模式：${oc.terminal.reason}` : oc.resultForUser };
-                        }
-                        return;
-                    }
-                    yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
-                    message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                    if (oc.aborted) abortedDuringTools = true;
-                    idx++;
-                }
-            }
-            // 主动停止返回最终消息
-            if (abortedDuringTools) {
+            // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
+            //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
+            //   调度内部异常不自理，上抛至此处外层 catch(toolErr) 兜底 yield final（与原内联实现一致）。
+            const scheduleResult: ScheduleResult = yield* scheduleToolCalls(assistantMessage, message, toolCallCtx);
+            if (scheduleResult.kind === 'aborted') {
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
             }
+            if (scheduleResult.kind === 'terminal') {
+                yield { type: 'final', text: scheduleResult.terminalText };
+                return;
+            }
+            // completed：继续下一轮推理
         }
     } catch (toolErr) {
         // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all
