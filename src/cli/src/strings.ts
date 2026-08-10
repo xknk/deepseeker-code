@@ -69,6 +69,7 @@ interface StringDict {
     cmdPermissions: string;
     cmdMcp: string;
     cmdHooks: string;
+    cmdTrust: string;
     cmdDebug: string;
     /** /sessions 选择器与 --continue */
     sessionsTitle: string;
@@ -165,6 +166,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdPermissions: "查看已加载的权限规则（allow/ask/deny）",
         cmdMcp: "查看已连接的 MCP server 与工具数",
         cmdHooks: "查看已注册的 hook 规则",
+        cmdTrust: "管理已信任目录（列出 / 撤销）",
         cmdDebug: "排障快照（session/cwd/模型/配置/环境）",
         sessionsTitle: "📪 历史会话（↑↓ 选择 · Enter 载入续接）",
         sessionsPrompt: "↑↓ 选择 · Enter 载入 · Esc 取消",
@@ -202,6 +204,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
+            "/trust  — 管理已信任目录（项目级 hooks/skills 等仅在信任目录加载；CI 用 --trust 显式信任）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
         ].join("\n"),
         statusText: (model, thinking, planOn, locale, cwd) => [
@@ -280,6 +283,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdPermissions: "Show loaded permission rules (allow/ask/deny)",
         cmdMcp: "Show connected MCP servers and tool counts",
         cmdHooks: "Show registered hook rules",
+        cmdTrust: "Manage trusted dirs (list / revoke)",
         cmdDebug: "Debug snapshot (session/cwd/model/config/env)",
         sessionsTitle: "📪 Past sessions (↑↓ to pick · Enter to resume)",
         sessionsPrompt: "↑↓ pick · Enter resume · Esc cancel",
@@ -317,6 +321,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",
+            "/trust  — Manage trusted dirs (project hooks/skills load only when trusted; CI uses --trust)",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
         ].join("\n"),
         statusText: (model, thinking, planOn, locale, cwd) => [
@@ -342,4 +347,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "usage", "context", "permissions", "mcp", "hooks", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;

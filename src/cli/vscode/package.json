@@ -54,6 +54,10 @@
         "command": "deepseekerCode.selectProjectRoot",
         "title": "DeepSeeker-Code: 选择项目根",
         "icon": "$(root-folder)"
+      },
+      {
+        "command": "deepseekerCode.manageTrust",
+        "title": "DeepSeeker-Code: 管理信任目录"
       }
     ],
     "menus": {
@@ -81,7 +85,8 @@
         "deepseekerCode.apiKey": {
           "type": "string",
           "default": "",
-          "description": "DeepSeek API Key。留空时回退读取环境变量 DEEP_SEEK_API_KEY。"
+          "scope": "machine",
+          "markdownDescription": "DeepSeek API Key。**推荐留空**，改为设环境变量 `DEEP_SEEK_API_KEY`（密钥不落 settings.json、不随机器迁移）。留空时自动回退读取该环境变量。此配置 scope 为 `machine`，不会被 Settings Sync 同步到云端。"
         },
         "deepseekerCode.model": {
           "type": "string",

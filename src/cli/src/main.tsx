@@ -20,15 +20,16 @@ import { readLocale, writeLocale } from "./prefs.ts";
 import { isTrustedDir, trustDir } from "@/trust/index.ts";
 import type { Locale } from "@/common/index.ts";
 
-/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c。 */
-const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean } => {
-    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean } = {};
+/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c、--trust。 */
+const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean } => {
+    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean } = {};
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--resume" || a === "-r") out.resume = argv[++i];
         else if (a === "--plan" || a === "-p") out.plan = true;
         else if (a === "--auto" || a === "-a") out.auto = true;
         else if (a === "--continue" || a === "-c") out.continue = true;
+        else if (a === "--trust") out.trust = true; // 非 TTY 显式信任（CI/脚本启用项目级配置）
     }
     return out;
 };
@@ -131,17 +132,26 @@ const main = async (): Promise<void> => {
     }
 
     const cwd = process.cwd();
-    // ★ 信任文件夹闸门（仅交互式 TTY；非 TTY/CI 默认信任加载，不阻断）。
-    //   未信任目录的项目级配置（hooks 会 spawn 执行命令 / CLAUDE.md 注入 system prompt /
-    //   permissions 可自动放行）可能被恶意目录利用，故首次进入须用户显式确认。
-    if (process.stdin.isTTY === true && !(await isTrustedDir(cwd))) {
-        const choice = await askChoice(
-            S.askTrust(cwd),
-            [{ key: "trust", label: S.optTrust }, { key: "exit", label: S.optExit }],
-            "trust",
-        );
-        if (choice === "exit") process.exit(0);
+    // ★ 信任文件夹闸门：未信任目录不加载项目级配置（hooks 会 spawn 执行命令 / CLAUDE.md 注入 system prompt /
+    //   permissions 可自动放行）。includeProject 由 isTrustedDir 驱动，复用各 loader 已就绪的裁剪路径。
+    let includeProject = await isTrustedDir(cwd);
+    if (process.stdin.isTTY === true) {
+        // TTY：交互式确认（保留 askChoice 流程）。
+        if (!includeProject) {
+            const choice = await askChoice(
+                S.askTrust(cwd),
+                [{ key: "trust", label: S.optTrust }, { key: "exit", label: S.optExit }],
+                "trust",
+            );
+            if (choice === "exit") process.exit(0);
+            await trustDir(cwd);
+            includeProject = true;
+        }
+    } else if (args.trust && !includeProject) {
+        // ★ 非 TTY（CI/脚本/管道）显式信任：--trust 持久化信任并启用项目级配置。
+        //   默认（无 --trust）不加载项目级配置、不写入信任列表——安全默认，堵住「克隆即中招」。
         await trustDir(cwd);
+        includeProject = true;
     }
 
     // 延迟加载核心与 App（避免无 key 时 createModel 在静态 import 期抛错）。
@@ -153,8 +163,8 @@ const main = async (): Promise<void> => {
     ]);
 
     // ★ 初始化引擎（MCP/hooks/permissions/skills/agents/projectGuide/commands），返回 dispose。
-    //   信任流程后至此目录均已信任 → includeProject=true（加载项目级配置）。
-    const dispose = await initEngine(agentTools, { includeProject: true });
+    //   includeProject 由信任闸门决定：已信任/已确认 → 加载项目级配置；未信任 → 跳过（安全默认）。
+    const dispose = await initEngine(agentTools, { includeProject });
     const onExit = (): void => { dispose(); };
     process.on("SIGINT", () => { onExit(); process.exit(0); });
     process.on("SIGTERM", () => { onExit(); process.exit(0); });
@@ -181,7 +191,7 @@ const main = async (): Promise<void> => {
     }
 
     const { waitUntilExit } = render(
-        <App resumeSessionId={resumeId} initialPlanMode={args.plan} initialAutoMode={args.auto} />,
+        <App resumeSessionId={resumeId} initialPlanMode={args.plan} initialAutoMode={args.auto} initialIncludeProject={includeProject} />,
         // exitOnCtrlC:false：Ctrl+C 交由 App useInput 处理（统一退出/中止语义）；
         // patchConsole:false：避免 console 劫持与全屏重绘叠加闪屏。
         { exitOnCtrlC: false, patchConsole: false },

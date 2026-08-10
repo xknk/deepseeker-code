@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { StatusLineConfig } from "./config.ts";
+import { scrubCommandEnv } from "@/tool/guard.ts";
 
 /** 灌进 statusLine.command stdin 的上下文（对标 CC 字段名）。 */
 export interface StatusLineContext {
@@ -64,7 +65,7 @@ export const runStatusLine = (cfg: StatusLineConfig, ctx: StatusLineContext): Pr
         const payload = JSON.stringify({ ...ctx, version: cachedVersion }); // version 为 undefined 时 JSON.stringify 自动省略该键
         let child;
         try {
-            child = spawn(cfg.command, { shell: true, cwd: ctx.cwd });
+            child = spawn(cfg.command, { shell: true, cwd: ctx.cwd, env: scrubCommandEnv() });
         } catch {
             resolve("");
             return;

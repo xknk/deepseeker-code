@@ -16,7 +16,7 @@ import { spawn, execFileSync } from "child_process";
 import fsSync from "fs";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
 import { createUUID, execFileSmart } from "@/common/index.ts";
 
 /**
@@ -149,7 +149,7 @@ export const backgroundTools: CustomTool[] = [
 
                 let proc: any;
                 try {
-                    proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin });
+                    proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin, env: scrubCommandEnv() });
                     proc.unref?.(); // 父进程（agent）不必等待它退出
                 } catch (e: any) {
                     yield `❌ [后台启动失败]：${e.message}`;

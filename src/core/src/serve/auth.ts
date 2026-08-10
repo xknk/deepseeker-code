@@ -13,7 +13,9 @@
  */
 import crypto from "crypto";
 import fsSync from "fs"; // 同步落盘 token（避免顶层 await）
+import path from "path";
 import type { Request, Response, NextFunction } from "express";
+import { appConfig } from "@/config/index.ts";
 
 /**
  * 鉴权 token：优先取环境变量 DEEPSEEKER_CODE_TOKEN（跨重启稳定）；未设则启动期随机生成
@@ -38,11 +40,11 @@ if (!process.env.DEEPSEEKER_CODE_TOKEN) {
             console.error(`🚮 写入 token 文件失败 (${TOKEN_FILE})：${e.message}，回退打印：`);
             console.log(`  AUTH TOKEN（回退）: ${RAW_TOKEN}`);
         }
-    } else {
-        // 未显式配置时打印一次性 token，便于本地对接；生产环境应改用环境变量固化或 DEEPSEEKER_CODE_TOKEN_FILE 落盘。
+    } else if (process.stdout.isTTY === true) {
+        // 交互式 TTY：终端 stdout 不会被日志采集器持久化，可打印一次性 token 便于本地对接。
         console.warn(
-            `⚠️ [安全] AUTH TOKEN 将打印到 stdout——若 stdout 被日志采集/重定向/共享会导致 token 泄露。` +
-            `生产环境请设 DEEPSEEKER_CODE_TOKEN（跨重启稳定）或 DEEPSEEKER_CODE_TOKEN_FILE（落盘权限 0600）。`
+            `⚠️ [安全] AUTH TOKEN 将打印到 stdout——若 stdout 被重定向/共享会导致 token 泄露。` +
+            `生产环境请改用环境变量 DEEPSEEKER_CODE_TOKEN（跨重启稳定）或 DEEPSEEKER_CODE_TOKEN_FILE（落盘权限 0600）。`
         );
         console.log(
             `\n========================================\n` +
@@ -50,6 +52,20 @@ if (!process.env.DEEPSEEKER_CODE_TOKEN) {
             `  设环境变量 DEEPSEEKER_CODE_TOKEN 可跨重启稳定。\n` +
             `========================================\n`
         );
+    } else {
+        // 非 TTY（服务管理器 / Docker / CI / 管道）：stdout 常被日志采集，绝不打印 token。
+        //   默认落盘到 dataDir/serve-token（POSIX 0600），仅打印文件路径；取用方式与 DEEPSEEKER_CODE_TOKEN_FILE 一致。
+        const defaultTokenFile = path.join(appConfig.dataDir, "serve-token");
+        try {
+            fsSync.mkdirSync(appConfig.dataDir, { recursive: true });
+            fsSync.writeFileSync(defaultTokenFile, RAW_TOKEN + "\n", { mode: 0o600 });
+            console.log(`🔑 AUTH TOKEN 已落盘到 ${defaultTokenFile}（权限 0600），未打印到 stdout。`);
+            console.log(`  生产环境推荐设环境变量 DEEPSEEKER_CODE_TOKEN（跨重启稳定）或 DEEPSEEKER_CODE_TOKEN_FILE 指定路径。`);
+        } catch (e: any) {
+            // 兜底：落盘失败也必须让用户拿到 token——此时回退打印并强警告（尽快改用环境变量）。
+            console.error(`🚮 落盘 token 失败（${defaultTokenFile}）：${e.message}，回退打印到 stdout（请尽快改用 DEEPSEEKER_CODE_TOKEN）：`);
+            console.log(`  AUTH TOKEN（回退）: ${RAW_TOKEN}`);
+        }
     }
 }
 

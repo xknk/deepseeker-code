@@ -216,6 +216,20 @@ export const assertWithinWorkspace = (absPath: string, base?: string): void => {
 export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepseeker-code'];
 
 /**
+ * 命令执行子进程的凭证剔除清单：run_command / run_in_background 的 spawn env 剔除这些 agent 自身凭证，
+ * 防 LLM 经 `env`/`printenv`/`/proc/self/environ` 读取后外泄。仅剔除 agent 基础设施密钥——
+ * 用户应用所需凭证（PATH/HOME/业务密钥等）保留，部署/发布等显式命令仍可用其自有密钥。
+ */
+const COMMAND_ENV_DENYLIST = ["DEEP_SEEK_API_KEY", "DEEPSEEKER_CODE_TOKEN", "TAVILY_API_KEY"];
+
+/** 复制 env 并剔除 agent 自身凭证；默认基于 process.env。供 run_command / run_in_background 共用。 */
+export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+    const next: NodeJS.ProcessEnv = { ...env };
+    for (const k of COMMAND_ENV_DENYLIST) delete next[k];
+    return next;
+};
+
+/**
  * 路径是否落入受保护目录（含其子路径）。解析为绝对路径后按路径段匹配（小写归一），避免误判文件名巧合。
  * 异常/空路径 → false（不阻断，交由既有 resolveSafePath 围栏 + 审批）。
  */
@@ -363,13 +377,19 @@ export const requestApproval = async (
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
     } else if (decision === 'allow-always') {
-        // ★ 持久化「精确值作用域」allow 规则（如 run_command(npm test)）：下次 checkPermission 命中该精确值免审。
-        //   避免写裸工具名导致 rm -rf 等破坏性调用也被静默放行。项目级未信任目录时降级为"仅本次放行"。
+        // ★ 持久化 allow 规则（M5 加固）：buildScopedAllowRule 返回保守作用域——命令类落精确串（run_command(npm test)）、
+        //   路径类落顶层目录（edit_file(src/*)）；无法安全作用域（无主参数映射 / MCP / 缺值）时返回 null → 不持久化，
+        //   降级为 allow-once（旧版回退裸工具名会把该工具所有后续调用静默放行，对 MCP DANGER 工具尤其危险）。
+        //   项目级未信任目录时 addPermissionRule 内部降级（不落盘，仅本次生效）。
         const ruleStr = buildScopedAllowRule(toolName, args);
-        const persisted = await addPermissionRule('project', 'allow', ruleStr).catch(() => false);
-        console.log(persisted
-            ? `📌 [审批记忆] 已写持久 allow 规则：${ruleStr}（项目 .deepseeker-code/settings.json），后续命中该精确值免审`
-            : `♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：未信任目录或写入失败）`);
+        if (ruleStr) {
+            const persisted = await addPermissionRule('project', 'allow', ruleStr).catch(() => false);
+            console.log(persisted
+                ? `📌 [审批记忆] 已写持久 allow 规则：${ruleStr}（项目 .deepseeker-code/settings.json），后续命中该作用域免审`
+                : `♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：未信任目录或写入失败）`);
+        } else {
+            console.log(`♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未持久化：无法安全生成作用域，避免裸工具名静默放行全部调用）`);
+        }
     }
     return approved;
 };

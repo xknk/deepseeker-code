@@ -46,3 +46,13 @@ export const trustDir = async (dir: string): Promise<void> => {
     await fs.mkdir(appConfig.dataDir, { recursive: true });
     await atomicWriteJSON(TRUSTED_FILE, trusted);
 };
+
+/** 撤销目录信任（移除 + 原子写）；不在列表返回 false（无操作）。与 trustDir 对称，供「管理信任目录」命令回滚误信任。 */
+export const untrustDir = async (dir: string): Promise<boolean> => {
+    const norm = normalizeDir(dir);
+    const trusted = await readTrustedDirs();
+    const next = trusted.filter((d) => d !== norm);
+    if (next.length === trusted.length) return false; // 不在信任列表
+    await atomicWriteJSON(TRUSTED_FILE, next);
+    return true;
+};

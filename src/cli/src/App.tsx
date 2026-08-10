@@ -12,6 +12,7 @@ import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import { listCommands } from "@/commands/registry.ts";
 import { listOutputStyles } from "@/outputStyles/registry.ts";
 import { readStatusLineConfig, type StatusLineConfig } from "@/statusLine/config.ts";
+import { readTrustedDirs, untrustDir } from "@/trust/index.ts";
 import { runStatusLine, type StatusLineContext } from "@/statusLine/runner.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
@@ -65,7 +66,7 @@ const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "tool" && r.status === "running") ||
     (r.kind === "todos" && !!r.active);
 
-export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean }): React.ReactElement => {
+export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initialIncludeProject }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean; initialIncludeProject?: boolean }): React.ReactElement => {
     const state = useChatState(resumeSessionId, initialPlanMode, initialAutoMode);
     const { exit } = useApp();
     const { stdout } = useStdout();
@@ -139,7 +140,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
     // 挂载时加载配置并首刷
     useEffect(() => {
         void (async () => {
-            statusLineCfgRef.current = await readStatusLineConfig(true); // CLI 渲染前信任流程已完成 → includeProject=true
+            statusLineCfgRef.current = await readStatusLineConfig(initialIncludeProject ?? false); // 信任闸门：未信任时不读项目级 statusLine（其 command 以 shell 执行）
             await refreshStatusLineRef.current();
         })();
     }, []);
@@ -177,6 +178,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
                 case "permissions": return S.cmdPermissions;
                 case "mcp": return S.cmdMcp;
                 case "hooks": return S.cmdHooks;
+                case "trust": return S.cmdTrust;
                 case "debug": return S.cmdDebug;
                 case "clear": return S.cmdClear;
                 case "exit": return S.cmdExit;
@@ -242,6 +244,20 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode }: { res
             case "/hooks":
                 state.pushInfo(inspectHooks());
                 return true;
+            case "/trust": {
+                const trusted = await readTrustedDirs();
+                if (!arg) {
+                    if (trusted.length === 0) { state.pushInfo("已信任目录：（无）。首次进入某目录时会询问是否信任。"); return true; }
+                    const list = trusted.map((d, i) => `  [${i}] ${d}`).join("\n");
+                    state.pushInfo(`已信任目录（撤销用 /trust <序号 或 路径>）：\n${list}\n\n撤销后需重启 CLI 生效（项目级配置仅在启动时加载）。`);
+                    return true;
+                }
+                const idx = Number(arg);
+                const target = Number.isInteger(idx) && idx >= 0 && idx < trusted.length ? trusted[idx] : arg;
+                const removed = await untrustDir(target);
+                state.pushInfo(removed ? `已撤销信任：${target}\n（重启 CLI 后生效——项目级配置仅在启动时加载）` : `未找到该信任目录：${target}`);
+                return true;
+            }
             case "/debug":
                 state.pushInfo(inspectDebug(state.sessionIdRef.current ?? ""));
                 return true;

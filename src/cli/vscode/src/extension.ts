@@ -339,10 +339,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { isTrustedDir, trustDir, readTrustedDirs, untrustDir }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
+    import("@/trust/index.ts"),
   ]);
 
   // ★ 多根沙箱：注册工作区所有文件夹 → core 的 resolveSafePath 放行「落在任一文件夹内」的绝对路径，
@@ -438,12 +439,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       host.setAutoMode(!host.currentAutoMode);
       postState();
     }),
+    vscode.commands.registerCommand("deepseekerCode.manageTrust", async () => {
+      const trusted = await readTrustedDirs();
+      if (trusted.length === 0) {
+        void vscode.window.showInformationMessage("DeepSeeker-Code：暂无已信任目录。");
+        return;
+      }
+      const items = trusted.map((d) => ({ label: d }));
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: "选择要撤销信任的目录（按 Esc 取消）",
+        title: "DeepSeeker-Code：管理信任目录",
+      });
+      if (!picked) return;
+      const removed = await untrustDir(picked.label);
+      void vscode.window.showInformationMessage(
+        removed
+          ? `DeepSeeker-Code：已撤销信任 ${picked.label}（重载窗口后生效）`
+          : "DeepSeeker-Code：该目录不在信任列表。",
+      );
+    }),
   );
 
-  // —— 7. 后台初始化引擎（不阻塞命令注册；失败仅提示） ——
+  // —— 7. 信任文件夹闸门：resolved projectRoot 未信任时弹 Modal 选择（仅问一次，对当前 resolved 根） ——
+  //   信任→持久化（下次不再问）；跳过→includeProject=false（agent 仍可用，仅无项目级配置）。
+  //   ★ 此时 webview 尚未创建，必须走原生 vscode.window UI（非 webview 消息通道）。
+  //   多根工作区：只对 resolveProjectRoot() 解析出的单个根问一次（与「每次启动一个信任快照」语义一致）。
+  //   TODO（已知局限）：initEngine 仅 activate 跑一次；中途 selectProjectRoot/切编辑器改根不会重跑闸门或重载项目级配置——如需加载新项目配置请重载窗口。
+  let includeProject = false;
+  if (workspaceRoot) {
+    includeProject = await isTrustedDir(workspaceRoot);
+    if (!includeProject) {
+      const choice = await vscode.window.showWarningMessage(
+        `是否信任此项目并加载其项目级配置（.deepseeker-code/）？\n${workspaceRoot}\n\n项目级配置含 hooks（将以 shell 执行命令）、CLAUDE.md、permissions、skills 等，仅在信任该项目时启用。`,
+        { modal: true },
+        "信任并启用项目配置",
+        "跳过（安全模式）",
+      );
+      if (choice === "信任并启用项目配置") {
+        await trustDir(workspaceRoot);
+        includeProject = true;
+      }
+    }
+  }
+
+  // —— 8. 后台初始化引擎（不阻塞命令注册；失败仅提示） ——
   console.log("DeepSeeker-Code：引擎初始化中…（MCP/skills/agents/commands 加载）");
   try {
-    engineDispose = await initEngine(agentTools, { includeProject: true });
+    engineDispose = await initEngine(agentTools, { includeProject });
     console.log("✓ DeepSeeker-Code 引擎就绪（MCP/skills/agents 已注入）");
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -204,25 +204,28 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
 };
 
 /**
- * 构造 allow-always 持久化的 allow 规则字符串（对标 Claude Code 的「智能 glob 作用域」）。
+ * 构造 allow-always 持久化的 allow 规则字符串；返回 null 表示「无法安全生成作用域，不应持久化」。
  *
- *  ★ 关键：落「覆盖一类的 glob」而非「精确值」——否则换文件路径/换子命令即失效，导致一次对话反复审批。
- *    glob 匹配引擎 globToRegex 已支持 `:*`（前缀边界）与 `*`（任意），此处据此生成：
- *   - 命令类（run_command/run_in_background，argKey=command）：取首个命令 token + `:*`
- *       `npm install axios` → `run_command(npm:*)`（覆盖所有 npm 子命令）；
- *   - 路径类（argKey=path/src）：取顶层目录 + `*`
- *       `src/components/Foo.tsx` → `edit_file(src/*)`（覆盖 src 下任意深度）；根级文件退化为精确值；
- *   - 其余（url/query/pattern 等）：精确值（这类低频，glob 化收益小且易过宽）；
- *   - 无主参数映射：裸 `ToolName`。
+ *  ★ 安全优先（M5 加固）：自动生成的 allow 规则宁可窄不可宽。allow-always = 「以后这类别再问就免审」，
+ *    作用域过宽 = 把 prompt 注入驱动的危险变体也静默放行（checkPermission='allow' → needApproval=false）。
+ *   - 命令类（run_command/run_in_background，argKey=command）：落【精确命令串】（如 run_command(npm test)）。
+ *       旧版取首 token + `:*` 写成 run_command(npm:*)，会把 `npm install <恶意包>` / `npm publish` / 链式
+ *       `npm test; evil` 一并静默放行——shell 执行类工具的 allow-always 必须精确，杜绝 payload 空间。
+ *       同命令带不同 flag/子命令的变体会重新审批（shell 工具的正确安全姿态）；用户若确需「一族命令免审」，
+ *       可手动在 settings.json 写 run_command(npm test:*) 显式声明（globToRegex 仍支持 :*）。
+ *   - 路径类（argKey=path/src）：顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
+ *   - 其余（url/query/pattern 等）：精确值；
+ *   - 无主参数映射 / 缺值 / 非字符串 / 空串 → 返回 null（不可安全作用域 → 不持久化，降级 allow-once；
+ *       旧版回退裸 ToolName 会把该工具【所有】后续调用静默放行，对 MCP/未映射的 DANGER 工具尤其危险）。
  *  安全兜底不变：COMMAND_DENY 清单（auto 模式）+ PROTECTED_WRITE_DIRS 保护路径硬拒仍生效，allow 了也拦 rm -rf / 改 .git。
  */
-export const buildScopedAllowRule = (toolName: string, args: any): string => {
+export const buildScopedAllowRule = (toolName: string, args: any): string | null => {
     const argKey = PRIMARY_ARG[toolName];
     const val = argKey ? args?.[argKey] : undefined;
-    if (!argKey || typeof val !== 'string' || !val) return toolName;
+    if (!argKey || typeof val !== 'string' || !val) return null;
     if (argKey === 'command') {
-        const head = val.trim().split(/\s+/)[0];
-        return head ? `${toolName}(${head}:*)` : toolName;
+        const cmd = val.trim();
+        return cmd ? `${toolName}(${cmd})` : null; // 精确命令串：杜绝跨子命令 / 链式注入的静默放行
     }
     if (argKey === 'path' || argKey === 'src') {
         // 规范化：反斜杠→正斜杠、去 ./ 前缀、去 Windows 盘符（D:），取顶层目录

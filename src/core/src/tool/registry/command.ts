@@ -6,7 +6,7 @@
  */
 import { spawn } from "child_process";
 import { CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
 import { killTree, resolveWinShell } from "./background.ts";
 
 /**
@@ -98,6 +98,7 @@ export const commandTools: CustomTool[] = [
                         shell: isWin ? (resolveWinShell() ?? true) : true, // ★ Win 优先 Git Bash（POSIX）：cmd.exe 缺 head/tail 等，管道缺失命令会退 255
                         cwd,
                         detached: !isWin, // 非 Win 下支持整个进程组独立
+                        env: scrubCommandEnv(), // ★ 剔除 agent 自身凭证（LLM key / 服务端 token / 搜索 key），防 LLM 经 env/printenv 读取外泄
                         signal: ctx?.abortSignal,
                     });
                 } catch (e: any) {

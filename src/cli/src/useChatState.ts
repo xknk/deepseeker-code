@@ -14,12 +14,13 @@ import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/sessi
 import { readMessages } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
-import type { ApprovalDecision, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
+import type { ApprovalDecision, ApprovalMeta, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
+import { ToolSafetyLevel } from "@/tool/index.ts";
 import { createCliRequestApproval, createCliRequestQuestion } from "./cliHost.ts";
 import { S, getLocale } from "./strings.ts";
-import { truncateMiddle } from "./util.ts";
+import { truncateMiddle, findTool } from "./util.ts";
 import { buildReplayRows, type ChatRow } from "./replay.ts";
 
 /** 一行转录（线性消息流）。定义在纯模块 replay.ts（便于脱离 React/Ink 单测）。 */
@@ -49,10 +50,6 @@ const FLUSH_MS = 120;
  *  强制复位 busy/aborting，避免 CLI 被永久卡死（表现：卡住后再次对话无任何输出——busy 恒 true，submit 被 `if(busy) return` 静默吞掉）。
  *  正常中止在 <1s 内完成（stream 经 signal 立即 break）→ 宽限期内清表，不触发强制复位。 */
 const ABORT_GRACE_MS = 8000;
-
-/** 自动执行审批钩子：全部 allow-once 放行（不持久化），用于计划「接受并自动执行」。
- *  安全边界仍生效：checkPermission 的 deny 规则、环境断言、verifyResult 均先于/独立于此，不被绕过。 */
-const autoRequestApproval = async (): Promise<ApprovalDecision> => 'allow-once';
 
 /** 模型自主进入计划模式后，重跑计划阶段发给模型的引导语（用户原文已入 transcript，勿重复）。 */
 const ENTER_PLAN_RESEARCH_PROMPT = "（已进入计划模式。请以只读方式完成调研，然后调用 exit_plan_mode 提交完整实现方案。）";
@@ -346,6 +343,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const resolveApproval = useCallback((v: ApprovalDecision) => {
         setPendingApproval((prev) => { prev?.resolve(v); return null; });
     }, []);
+    /** 自动执行审批钩子（计划「接受并自动执行」）：仅自动放行 SAFE/MUTATION；
+     *  DANGER 工具（run_command/delete_path/web_fetch/MCP 等）与未知工具仍走真实人工审批，
+     *  防 prompt 注入借道自动执行跑任意命令。deny 规则/环境断言/verifyResult/受保护路径均先于此生效。 */
+    const autoRequestApproval = useCallback(async (_detail: string, meta: ApprovalMeta): Promise<ApprovalDecision> => {
+        const t = findTool(meta.toolName);
+        if (!t || t.function.safetyLevel === ToolSafetyLevel.DANGER) return askApproval(_detail, meta.toolName);
+        return 'allow-once';
+    }, [askApproval]);
 
     // —— 结构化提问（RequestQuestionFn → Ink 提问模态） ——
     const askQuestion = useCallback((req: QuestionRequest): Promise<QuestionAnswer> =>
@@ -422,7 +427,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 if (abortGuardRef.current) { clearTimeout(abortGuardRef.current); abortGuardRef.current = null; }
             }
         }
-    }, [askApproval, flush, onTrace, pushEvent]);
+    }, [askApproval, autoRequestApproval, flush, onTrace, pushEvent]);
 
     /** 方案审批 + 实现：弹出方案审批模态，接受则按方案实现（autoExecute=实现阶段免审批）。 */
     const approveAndImplement = useCallback(async (sid: string, plan: string) => {

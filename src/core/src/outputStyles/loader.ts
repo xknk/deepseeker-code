@@ -18,6 +18,9 @@ import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
 
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "builtin");
 
+/** 风格正文大小上限（镜像 skills 的 MAX_SKILL_BODY_BYTES）：防异常大正文在 /output-style 激活时整段灌入 system prompt。 */
+const MAX_STYLE_BODY_BYTES = 64 * 1024;
+
 const SOURCES: LoadSource<OutputStyleSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
     { dir: path.join(appConfig.dataDir, "output-styles"), source: "global" },
@@ -51,7 +54,13 @@ const parseStyleAt = async (file: string, _dir: string, source: OutputStyleSourc
         console.warn(`⚠️ [output-styles] 正文为空（${file}），已跳过`);
         return null;
     }
-    return { name, description, body: parsed.body.trim(), source };
+    // 加载期即限定正文大小：风格经 /output-style 激活后 body 会整段注入 system prompt，
+    //   超大正文（异常/恶意 global 风格）会无谓挤占上下文。镜像 skills 的截断策略。
+    const trimmedBody = parsed.body.trim();
+    const body = trimmedBody.length > MAX_STYLE_BODY_BYTES
+        ? trimmedBody.slice(0, MAX_STYLE_BODY_BYTES) + `\n\n…[输出风格正文超 ${MAX_STYLE_BODY_BYTES} 字节，已截断]`
+        : trimmedBody;
+    return { name, description, body, source };
 };
 
 /** 扫描并注册全部风格（按优先级顺序）；返回去重后数量。 */
