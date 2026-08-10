@@ -31,6 +31,7 @@ import { createRepeatBreaker } from "./repeatBreaker.ts";
 import { prepareToolsAndInjections } from "./systemInjections.ts";
 import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
+import { createNudgeScheduler } from "./agentNudges.ts";
 
 // ============ 主流程 ============
 /**
@@ -69,32 +70,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
     // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
-    //  主机制：每 NUDGE_EVERY 轮向系统提示词注入一次自评提醒，由模型自己决定"收尾给答案"还是"继续推进"
-    //         （对标 Claude Code：不在低轮数硬停，靠模型自收敛 + 用户中止）。
+    //  主机制：周期性 ephemeral nudge（NUDGE 周期自评 / PHANTOM 空 content / EARLY_FINAL 早收尾）由模型自决
+    //         "收尾给答案"还是"继续推进"（对标 CC：不在低轮数硬停，靠模型自收敛 + 用户中止）。
+    //         文案/阈值/触发/预算/死循环保险统一抽到 agentNudges.ts；此处仅持实例 + 薄调用，控制流与提示词解耦。
     //  兜底：MAX_AGENT_ROUNDS 极高（500），仅防失控烧 token 的病理死循环；正常任务不会触及，触及亦 graceful（可"继续"接续）。
-    const NUDGE_EVERY = 40;
-    const NUDGE_FENCE = "⟦DSC:NUDGE⟧";
     const MAX_AGENT_ROUNDS = 500;
-    // ★ 空响应守护（P1-9）：DeepSeek 偶发"空包/提前收尾"——既无实质 content 又无 tool_calls。
-    //   注入一次性 PHANTOM nudge 重试（上限 PHANTOM_RETRY_MAX），而非直接 yield final 收尾。
-    //   走现有 ephemeral NUDGE 通道（不进 message 数组/transcript，保 message[0] 前缀稳定）；
-    //   有实质文本的真实回答不受影响（系统提示词的完成准则已约束别假报完成）。
-    const PHANTOM_FENCE = "⟦DSC:PHANTOM⟧";
-    const PHANTOM_RETRY_MAX = 2;
-    let phantomRetries = 0;
-    let phantomPending: { role: 'system'; content: string } | null = null;
-    // ★ 早收尾守护（EARLY_FINAL）：模型在极少轮次内、且回答无明确完成声明就准备收尾（典型：调 1 个检索工具
-    //   就拿部分结果用自然语言总结收尾，而改造/多步任务根本没落地）。注入一次性 nudge 推一轮让其自检。
-    //   与 PHANTOM 同走 ephemeral nudge 通道；预算全局 EARLY_FINAL_MAX 次、不随工具调用重置 → 绝不死循环。
-    //   （PHANTOM 救"空 content"，EARLY_FINAL 救"有 content 的过早收尾"，二者互斥。）
-    const EARLY_FINAL_FENCE = "⟦DSC:EARLY_FINAL⟧";
-    const EARLY_FINAL_TURN_THRESHOLD = 2;   // round ≤ 此值且无完成声明 → 视为过早收尾
-    const EARLY_FINAL_MAX = 1;              // 整个 run 最多推 1 次（硬死循环保险）
-    let earlyFinalNudges = 0;
-    let earlyFinalPending: { role: 'system'; content: string } | null = null;
-    // finalText 含明确"完成/收尾"声明 → 放行收尾（相信模型真做完了）；命中即不推 EARLY_FINAL。
-    const looksComplete = (text: string): boolean =>
-        /已完成|已修改|已创建|已删除|已重构|已实现|已修复|已替换|已更新|已配置|已验证|已提交|已全部|全部完成|改造完成|修改完成|实现完成|测试通过|总结(一下)?|以上就是|done|finished|completed/i.test(text || "");
+    const nudges = createNudgeScheduler();
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -157,26 +138,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return
             }
 
-            // ★ P0-4 前缀稳定性：NUDGE / PHANTOM 自评均走「推理时附加尾部副本」——不进 message 数组/transcript/
-            //   压缩，保 message[0] 前缀绝对稳定 → DeepSeek 隐式缓存跨轮命中。
-            //   - NUDGE：每 NUDGE_EVERY 轮提醒模型自决收尾（对标 CC：靠模型自收敛 + 用户中止）。
-            //   - PHANTOM：上一轮空响应守护触发的重试提示（phantomPending 一次性消费，优先级高于 NUDGE）。
-            const nudgeMsg: { role: 'system'; content: string } | null = (() => {
-                if (phantomPending) {
-                    const m = { role: 'system' as const, content: `${PHANTOM_FENCE}\n你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。` };
-                    phantomPending = null;
-                    return m;
-                }
-                if (earlyFinalPending) {
-                    const m = earlyFinalPending;   // content 已在收尾分支构造好（带 EARLY_FINAL_FENCE）
-                    earlyFinalPending = null;
-                    return m;
-                }
-                if (round > 1 && round % NUDGE_EVERY === 1) {
-                    return { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` };
-                }
-                return null;
-            })();
+            // ★ ephemeral nudge（NUDGE/PHANTOM/EARLY_FINAL 三类）：走「推理时附加尾部副本」，不进 message 数组/
+            //   transcript/压缩 → 保 message[0] 前缀绝对稳定，DeepSeek 隐式缓存跨轮命中。优先级与文案见 agentNudges.ts。
+            const nudgeMsg = nudges.pickNudge(round);
             // ★ 流式推理抽出到 streamInference.ts：yield text.delta/thinking.delta/text.reset，return InferenceResult。
             //   yield* 委托透传流式事件并取 return value（内含 idle/API/context_length 三道有限重试、abort partial 落盘、
             //   llm.request/response/error 埋点、assistantMessage 拼装）。final 永远在此处 yield，streamInference 不 yield final。
@@ -214,28 +178,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
-                // ★ 空响应守护（P1-9）：既无实质文本、又无工具调用 → DeepSeek 空包/提前收尾。注入 PHANTOM nudge
-                //   重试（上限 PHANTOM_RETRY_MAX），而非直接收尾。有实质文本的真实回答照常 yield final。
-                if (finalText.trim() === "" && phantomRetries < PHANTOM_RETRY_MAX) {
-                    phantomRetries++;
-                    phantomPending = { role: 'system', content: `${PHANTOM_FENCE}\n你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。` };
-                    continue; // 进入下一轮推理（nudgeMsg 会消费 phantomPending 作为尾部副本）
-                }
-                // ★ 早收尾守护：有实质文本、但轮次极少（≤ EARLY_FINAL_TURN_THRESHOLD）且无明确完成声明 →
-                //   疑似拿部分结果草率收尾。注入一次性 nudge 推一轮让其自检全部子目标是否落地；
-                //   预算用尽 / 已声明完成 / 超过阈值轮次 → 放行真实收尾。
-                if (finalText.trim() !== "" && round <= EARLY_FINAL_TURN_THRESHOLD
-                    && earlyFinalNudges < EARLY_FINAL_MAX && !looksComplete(finalText)) {
-                    earlyFinalNudges++;
-                    earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n你仅进行了 ${round} 轮工具调用就准备收尾，且回答中没有明确的完成声明。请严格自检：用户的每一个子目标是否都已真正落地（所需信息已获取 / 该改的文件已改完 / 已验证通过）？若确实全部完成，请明确回复"已完成"并简述成果；若还有任何未落地的子目标，立即继续调用工具推进，不要用自然语言草率总结收尾。` };
-                    continue; // 进入下一轮推理（nudgeMsg 会消费 earlyFinalPending 作为尾部副本）
-                }
+                // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
+                //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
+                if (nudges.interceptFinal(finalText, round)) continue;
                 // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
                 yield { type: 'final', text: finalText || lastContent || "" };
                 return;
             }
-            // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包，避免长任务被误熔断）
-            phantomRetries = 0;
+            // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
+            nudges.noteToolCall();
             // 2、重复工具调用熔断（完整签名 3 次 / 工具名序列 8 次）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
