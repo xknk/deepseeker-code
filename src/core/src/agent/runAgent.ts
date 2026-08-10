@@ -83,6 +83,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const PHANTOM_RETRY_MAX = 2;
     let phantomRetries = 0;
     let phantomPending: { role: 'system'; content: string } | null = null;
+    // ★ 早收尾守护（EARLY_FINAL）：模型在极少轮次内、且回答无明确完成声明就准备收尾（典型：调 1 个检索工具
+    //   就拿部分结果用自然语言总结收尾，而改造/多步任务根本没落地）。注入一次性 nudge 推一轮让其自检。
+    //   与 PHANTOM 同走 ephemeral nudge 通道；预算全局 EARLY_FINAL_MAX 次、不随工具调用重置 → 绝不死循环。
+    //   （PHANTOM 救"空 content"，EARLY_FINAL 救"有 content 的过早收尾"，二者互斥。）
+    const EARLY_FINAL_FENCE = "⟦DSC:EARLY_FINAL⟧";
+    const EARLY_FINAL_TURN_THRESHOLD = 2;   // round ≤ 此值且无完成声明 → 视为过早收尾
+    const EARLY_FINAL_MAX = 1;              // 整个 run 最多推 1 次（硬死循环保险）
+    let earlyFinalNudges = 0;
+    let earlyFinalPending: { role: 'system'; content: string } | null = null;
+    // finalText 含明确"完成/收尾"声明 → 放行收尾（相信模型真做完了）；命中即不推 EARLY_FINAL。
+    const looksComplete = (text: string): boolean =>
+        /已完成|已修改|已创建|已删除|已重构|已实现|已修复|已替换|已更新|已配置|已验证|已提交|已全部|全部完成|改造完成|修改完成|实现完成|测试通过|总结(一下)?|以上就是|done|finished|completed/i.test(text || "");
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -155,6 +167,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     phantomPending = null;
                     return m;
                 }
+                if (earlyFinalPending) {
+                    const m = earlyFinalPending;   // content 已在收尾分支构造好（带 EARLY_FINAL_FENCE）
+                    earlyFinalPending = null;
+                    return m;
+                }
                 if (round > 1 && round % NUDGE_EVERY === 1) {
                     return { role: 'system' as const, content: `${NUDGE_FENCE}\n你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。` };
                 }
@@ -203,6 +220,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     phantomRetries++;
                     phantomPending = { role: 'system', content: `${PHANTOM_FENCE}\n你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。` };
                     continue; // 进入下一轮推理（nudgeMsg 会消费 phantomPending 作为尾部副本）
+                }
+                // ★ 早收尾守护：有实质文本、但轮次极少（≤ EARLY_FINAL_TURN_THRESHOLD）且无明确完成声明 →
+                //   疑似拿部分结果草率收尾。注入一次性 nudge 推一轮让其自检全部子目标是否落地；
+                //   预算用尽 / 已声明完成 / 超过阈值轮次 → 放行真实收尾。
+                if (finalText.trim() !== "" && round <= EARLY_FINAL_TURN_THRESHOLD
+                    && earlyFinalNudges < EARLY_FINAL_MAX && !looksComplete(finalText)) {
+                    earlyFinalNudges++;
+                    earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n你仅进行了 ${round} 轮工具调用就准备收尾，且回答中没有明确的完成声明。请严格自检：用户的每一个子目标是否都已真正落地（所需信息已获取 / 该改的文件已改完 / 已验证通过）？若确实全部完成，请明确回复"已完成"并简述成果；若还有任何未落地的子目标，立即继续调用工具推进，不要用自然语言草率总结收尾。` };
+                    continue; // 进入下一轮推理（nudgeMsg 会消费 earlyFinalPending 作为尾部副本）
                 }
                 // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
                 yield { type: 'final', text: finalText || lastContent || "" };
