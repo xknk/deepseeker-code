@@ -9,14 +9,24 @@ import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
 
-/** 简易 glob → regex（支持 ** / * / ?），无新依赖 */
+/**
+ * glob → regex（支持 ** 与 * 与 ?），无新依赖。
+ * ★ 单次字符级遍历：早期实现用链式 .replace，后插入的非捕获分组里自带的 ? 和 *
+ *   会被后续 replace 二次破坏（? 被改成点号、* 被改成非斜杠通配），导致「双星 + 斜杠」
+ *   这类深层模式永远匹配失败（实际编译成乱码正则）。单次遍历一次性消费 glob 元字符，杜绝二次替换污染。
+ */
 const globToRegex = (pattern: string): RegExp => {
-    const re = pattern
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")   // 转义 regex 特殊字符
-        .replace(/\*\*\//g, "(?:.*/)?")          // **/ 零或多层目录
-        .replace(/\*\*/g, ".*")                  // 剩余 ** 任意字符
-        .replace(/\*/g, "[^/]*")                 // * 单层（不含分隔符）
-        .replace(/\?/g, ".");                    // ? 单字符
+    let re = "";
+    let i = 0;
+    while (i < pattern.length) {
+        const c = pattern[i];
+        if (c === "*" && pattern[i + 1] === "*") {
+            if (pattern[i + 2] === "/") { re += "(?:.*/)?"; i += 3; }   // **/ 零或多层目录（可选）
+            else { re += ".*"; i += 2; }                                 // ** 任意字符（含分隔符）
+        } else if (c === "*") { re += "[^/]*"; i++; }                    // * 单层（不含分隔符）
+        else if (c === "?") { re += "."; i++; }                          // ? 单字符
+        else { re += /[.+^${}()|[\]\\]/.test(c) ? "\\" + c : c; i++; }   // 普通字符（含中文）：转义 regex 特殊字符
+    }
     return new RegExp(`^${re}$`);
 };
 
