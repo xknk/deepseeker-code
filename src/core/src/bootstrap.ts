@@ -17,6 +17,7 @@ import { initCommands } from "@/commands/loader.ts";
 import { initOutputStyles } from "@/outputStyles/loader.ts";
 import { initMemories } from "@/memory/loader.ts";
 import { sweepOrphanedWorktrees, disposeAllSessionWorktrees } from "@/tool/worktree/manager.ts";
+import { killAllBackgroundTasks } from "@/tool/registry/background.ts";
 
 /**
  * 初始化引擎：Node 版本特性检测 + 7 步声明式加载。
@@ -59,5 +60,7 @@ export const initEngine = async (into: CustomTool[], opts?: { includeProject?: b
     return () => {
         try { disposeAllMcpClients(); } catch { /* ignore */ }
         try { void disposeAllSessionWorktrees(); } catch { /* ignore */ }
+        // ★ B-2：终止所有运行中后台任务（dev server / watch 等 detached+unref 进程，不显式杀会在宿主退出后孤儿常驻）
+        try { void killAllBackgroundTasks(); } catch { /* ignore */ }
     };
 };

@@ -312,3 +312,22 @@ export async function killBackgroundTasksUnder(dirPath: string): Promise<number>
     }
     return killed;
 }
+
+/**
+ * 终止所有运行中的后台任务（连同进程树）。宿主退出时调用——run_in_background 的 proc 经 unref/detached
+ * 独立于父进程存活，不显式终止会在宿主退出后成为孤儿常驻进程（dev server / watch 等）。
+ * best-effort：单个 killTree 失败不阻断其余；与 disposeAllSessionWorktrees 同为退出期 fire-and-forget 清理。
+ * killTree 内部 spawn taskkill / process.kill 是同步发起，即便宿主随后退出，已发出的 kill 仍生效。
+ * @returns 被终止的任务数
+ */
+export const killAllBackgroundTasks = async (): Promise<number> => {
+    let killed = 0;
+    for (const task of registry.values()) {
+        if (task.status !== "running") continue;
+        task.exitCode = task.exitCode ?? -1;
+        await killTree(task.proc).catch(() => { /* 进程可能已退出 */ });
+        task.status = "killed";
+        killed++;
+    }
+    return killed;
+};

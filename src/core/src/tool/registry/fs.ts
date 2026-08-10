@@ -7,9 +7,21 @@
  *  所有路径经 resolveSafePath 校验，防止工作区越界 / 软链接逃逸。
  */
 import fs from "fs/promises";
-import * as ts from "typescript";
+import type * as ts from "typescript";   // P0-1：type-only——esbuild 编译期剥离，运行时不 resolve（CLI 不发布 typescript）
 import path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
+
+// P0-1：typescript 仅 view_symbol_outline 的 AST 符号大纲用到。惰性动态加载——
+//   CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩（Cannot find module）。
+//   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
+let _ts: typeof import('typescript') | null = null;
+let _tsTried = false;
+const getTs = async (): Promise<typeof import('typescript') | null> => {
+    if (_tsTried) return _ts;
+    _tsTried = true;
+    try { _ts = await import('typescript'); } catch { _ts = null; }
+    return _ts;
+};
 import {
     getActiveWorkspaceRoot,
     resolveSafePath,
@@ -634,59 +646,65 @@ export const fsTools: CustomTool[] = [
                     }
                     const fileContent = await fs.readFile(absPath, "utf-8");
 
+                    // P0-1：typescript 惰性加载（CLI 发布版未内联 typescript）。缺失则降级提示，不阻塞模块加载。
+                    const TS = await getTs();
+                    if (!TS) {
+                        return `⚠️ [符号大纲不可用]：typescript 模块未安装（CLI 发布版未内联）。请改用 read_file 查看文件内容。`;
+                    }
+
                     // 1. 创建内存中的 TypeScript 虚拟源文件
-                    const sourceFile = ts.createSourceFile(
+                    const sourceFile = TS.createSourceFile(
                         absPath,
                         fileContent,
-                        ts.ScriptTarget.Latest,
+                        TS.ScriptTarget.Latest,
                         true // 保持位置信息
                     );
 
                     const outlineLines: string[] = [];
 
-                    // 2. 递归遍历 AST 节点的函数
+                    // 2. 递归遍历 AST 节点的函数（node: ts.Node 是类型注解，由上方 type-only import 提供）
                     const visit = (node: ts.Node, depth = 0) => {
                         const indent = "  ".repeat(depth);
-                        const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
-                        const isExported = modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ? "export " : "";
+                        const modifiers = TS.canHaveModifiers(node) ? TS.getModifiers(node) : undefined;
+                        const isExported = modifiers?.some(m => m.kind === TS.SyntaxKind.ExportKeyword) ? "export " : "";
 
                         // 提取接口 (Interface)
-                        if (ts.isInterfaceDeclaration(node)) {
+                        if (TS.isInterfaceDeclaration(node)) {
                             outlineLines.push(`${indent}├── [Interface] ${isExported}${node.name.text}`);
                         }
                         // 提取类 (Class)
-                        else if (ts.isClassDeclaration(node)) {
+                        else if (TS.isClassDeclaration(node)) {
                             const className = node.name ? node.name.text : "AnonymousClass";
                             outlineLines.push(`${indent}├── [Class] ${isExported}${className}`);
                             // 深入一层的类成员（方法、构造函数）
                             node.members.forEach(member => {
-                                const memberModifiers = ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined;
-                                const isPrivate = memberModifiers?.some(m => m.kind === ts.SyntaxKind.PrivateKeyword) ? "private " : "";
+                                const memberModifiers = TS.canHaveModifiers(member) ? TS.getModifiers(member) : undefined;
+                                const isPrivate = memberModifiers?.some(m => m.kind === TS.SyntaxKind.PrivateKeyword) ? "private " : "";
 
-                                if (ts.isMethodDeclaration(member) && member.name) {
+                                if (TS.isMethodDeclaration(member) && member.name) {
                                     const params = member.parameters.map(p => `${p.name.getText()}: ${p.type ? p.type.getText() : "any"}`).join(", ");
                                     outlineLines.push(`${indent}│   ├── [Method] ${isPrivate}${member.name.getText()}(${params})`);
-                                } else if (ts.isConstructorDeclaration(member)) {
+                                } else if (TS.isConstructorDeclaration(member)) {
                                     outlineLines.push(`${indent}│   ├── [Constructor] constructor()`);
                                 }
                             });
                         }
                         // 提取独立函数 (Function)
-                        else if (ts.isFunctionDeclaration(node) && node.name) {
+                        else if (TS.isFunctionDeclaration(node) && node.name) {
                             const params = node.parameters.map(p => `${p.name.getText()}: ${p.type ? p.type.getText() : "any"}`).join(", ");
                             outlineLines.push(`${indent}├── [Function] ${isExported}${node.name.text}(${params})`);
                         }
                         // 提取导出的常量变量声明（如导出的箭头函数等）
-                        else if (ts.isVariableStatement(node) && isExported) {
+                        else if (TS.isVariableStatement(node) && isExported) {
                             node.declarationList.declarations.forEach(decl => {
-                                if (decl.name && ts.isIdentifier(decl.name)) {
+                                if (decl.name && TS.isIdentifier(decl.name)) {
                                     outlineLines.push(`${indent}├── [Variable/Export] ${isExported}${decl.name.text}`);
                                 }
                             });
                         }
 
                         // 继续遍历子节点
-                        ts.forEachChild(node, (child) => visit(child, depth + 1));
+                        TS.forEachChild(node, (child) => visit(child, depth + 1));
                     };
 
                     // 3. 启动遍历

@@ -84,8 +84,14 @@ const globToRegex = (glob: string): RegExp => {
     return re;
 };
 
-/** 规则字符串解析：`ToolName(argGlob)` 或裸 `ToolName`；非法返回 null（warn） */
-const compileRule = (raw: string, src: string): CompiledRule | null => {
+/** DANGER 级命令执行工具：裸名 allow 规则过危险（恶意仓库投递 "run_command" 即让全部命令免审），必须带作用域。 */
+const DANGER_COMMAND_TOOLS = new Set(['run_command', 'run_in_background']);
+
+/**
+ * 规则字符串解析：`ToolName(argGlob)` 或裸 `ToolName`；非法返回 null（warn）。
+ * @param kind 规则类别；allow + 裸名 DANGER 命令工具 → 拒绝（要求带作用域，堵供应链投递）。
+ */
+export const compileRule = (raw: string, src: string, kind?: 'allow' | 'deny' | 'ask'): CompiledRule | null => {
     const trimmed = raw.trim();
     if (!trimmed) return null;
     const m = trimmed.match(/^([a-zA-Z0-9_]+)\((.*)\)$/);
@@ -100,6 +106,11 @@ const compileRule = (raw: string, src: string): CompiledRule | null => {
     // 裸工具名：支持含 __ 的 MCP 名 + 末尾 * 通配（如 mcp__github__* 匹配该 server 所有工具）。
     //   末尾 * 作前缀通配（ruleMatches 内 toolNameMatches 处理）；含 * 但非末尾的归入括号写法 ToolName(argGlob)。
     if (/^[a-zA-Z0-9_]+\*?$/.test(trimmed)) {
+        // ★ P0-2：裸名 allow 对 DANGER 命令工具过危险（恶意仓库投递即让全部命令免审）→ 强制带作用域
+        if (kind === 'allow' && DANGER_COMMAND_TOOLS.has(trimmed.replace(/\*$/, ''))) {
+            console.warn(`⚠️ [permissions] 拒绝裸名 allow 规则 "${raw}"（${src}）：DANGER 命令工具必须带作用域，如 run_command(npm test:*)。`);
+            return null;
+        }
         return { toolName: trimmed, argRegex: null, raw };
     }
     console.warn(`⚠️ [permissions] 规则 "${raw}" 格式非法（应为 ToolName / ToolName* / ToolName(argGlob)，${src}），已跳过`);
@@ -134,7 +145,7 @@ const readPermissionConfig = async (includeProject: boolean): Promise<Permission
             if (!Array.isArray(list)) continue;
             for (const item of list) {
                 if (typeof item !== "string") continue;
-                const compiled = compileRule(item, configPath);
+                const compiled = compileRule(item, configPath, key);
                 if (compiled) merged[key].push(compiled);
             }
         }
@@ -217,7 +228,8 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *   - 其余（url/query/pattern 等）：精确值；
  *   - 无主参数映射 / 缺值 / 非字符串 / 空串 → 返回 null（不可安全作用域 → 不持久化，降级 allow-once；
  *       旧版回退裸 ToolName 会把该工具【所有】后续调用静默放行，对 MCP/未映射的 DANGER 工具尤其危险）。
- *  安全兜底不变：COMMAND_DENY 清单（auto 模式）+ PROTECTED_WRITE_DIRS 保护路径硬拒仍生效，allow 了也拦 rm -rf / 改 .git。
+ *  安全兜底：COMMAND_DENY 独立硬闸门（run_command/run_in_background，不依赖 allow）+ PROTECTED_WRITE_DIRS 保护路径硬拒，
+ *    allow 了也拦 rm -rf / 改 .git。
  */
 export const buildScopedAllowRule = (toolName: string, args: any): string | null => {
     const argKey = PRIMARY_ARG[toolName];
@@ -260,7 +272,7 @@ export const addPermissionRule = async (
     ruleStr: string,
 ): Promise<boolean> => {
     if (scope === 'project' && !trustedProject) return false; // 未信任目录：项目级写入降级
-    const compiled = compileRule(ruleStr, `runtime:addPermissionRule(${scope})`);
+    const compiled = compileRule(ruleStr, `runtime:addPermissionRule(${scope})`, kind);
     if (!compiled) return false; // 非法格式：不入盘不入内存（compileRule 内部已 warn）
     try {
         const file = resolveSettingsPath(scope);

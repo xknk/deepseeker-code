@@ -16,7 +16,8 @@
         "deepseeker-code": "./dist/cli.mjs"
     },
     "files": [
-        "dist/cli.mjs"
+        "dist/cli.mjs",
+        "dist/builtin"
     ],
     "scripts": {
         "dev": "tsx --tsconfig ./tsconfig.json ./src/main.tsx",

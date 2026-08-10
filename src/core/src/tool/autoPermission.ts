@@ -57,17 +57,38 @@ const matchBuiltinDeny = (p: string): boolean => {
  * 刻意不拦「写系统目录」等宽泛模式（会误杀 cat /etc/hosts 等只读），交给分类器判读/写。
  */
 const COMMAND_DENY: RegExp[] = [
-    /rm\s+-[a-z]*r[a-z]*f?\s+(\/|~|\*)/i,            // rm -rf / | ~ | *（递归删根/家/通配）
-    /\bmkfs(\.\w+)?\b/i,                              // 格式化 mkfs / mkfs.ext4
-    /:\s*\(\s*\)\s*\{\s*:\s*\|/,                      // fork bomb :(){:|:&};:
-    /\bdd\b.*of=\/dev\//i,                            // dd 写裸设备
+    // 1. rm -rf / | ~ | *
+    // 增强：加上 s 修饰符，防止利用多行或反斜杠换行绕过空格匹配
+    /rm\s+-[a-z]*r[a-z]*f?\s+([\s\S]*\s+)?(\/|~|\*)/is,            
+
+    // 2. 格式化命令（原版已足够，保持不变）
+    /\bmkfs(\.\w+)?\b/i,                              
+
+    // 3. 叉子炸弹（原版已足够，保持不变）
+    /:\s*\(\s*\)\s*\{\s*:\s*\|/,                      
+
+    // 4. dd 写裸设备
+    // 增强：将 .* 改为 [\s\S]*，防止 if=xxx 换行后接 of=/dev/xxx 绕过
+    /\bdd\b[\s\S]*of=\/dev\//i,                            
+
+    // 5. 关机/重启命令（原版已足够，保持不变）
     /\b(shutdown|reboot|halt|poweroff)\b/i,
-    /\bchmod\s+[-+]?[0-7]*77[0-7]\b/i,                // chmod 777 / 0777 / -R 777
-    /\b(curl|wget)\b[^|]*\|\s*(sh|bash|zsh)\b/i,      // curl … | sh 远程执行
-    /\b(curl|wget)\b[^;]*\.(env|pem|key|pfx|keystore)\b/i, // 外传敏感文件（.env/私钥/证书）
+
+    // 6. chmod 777
+    // 增强：加上 s 修饰符，防止参数与数字之间换行绕过
+    /\bchmod\s+[-+]?[0-7]*77[0-7]\b/is,                
+
+    // 7. curl ... | sh 远程执行
+    // 增强：将 [^|]* 改为 [^|]* 并配合 s 修饰符（或用 [^|]* 的跨行变体），防止 curl 换行后接管道符
+    /\b(curl|wget)\b[^|]*\|\s*(sh|bash|zsh)\b/is,      
+
+    // 8. 外传敏感文件
+    // 增强：将 [^;]* 改为 [^;]* 并配合 s 修饰符，防止换行后拼接敏感文件名
+    /\b(curl|wget)\b[^;]*\.(env|pem|key|pfx|keystore)\b/is, 
 ];
 
-const matchCommandDeny = (cmd: string): boolean => {
+
+export const matchCommandDeny = (cmd: string): boolean => {
     if (!cmd) return false;
     return COMMAND_DENY.some(re => re.test(cmd));
 };

@@ -32,7 +32,7 @@ export const getUndoBackupRoot = (mainSessionId: string): string =>
 
 /** 确保某会话的 undo 归档目录存在。 */
 export const ensureUndoDir = async (mainSessionId: string): Promise<void> => {
-    await fs.mkdir(getUndoDirPath(mainSessionId), { recursive: true });
+    await fs.mkdir(getUndoDirPath(mainSessionId), { recursive: true, mode: 0o700 }); // ★ S-4：undo 归档目录限 0700（备份含源码/可能含密钥内容）
 };
 
 /**
@@ -43,7 +43,7 @@ export const getUndoIndexPath = async (mainSessionId: string): Promise<string> =
     const rootId = getFileName(mainSessionId);
     assertSafeSessionId(rootId, "undoSessionId");
     const dir = getUndoDirPath(mainSessionId);
-    await fs.mkdir(dir, { recursive: true });
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 }); // ★ S-4：undo 归档目录限 0700
     const files = await fs.readdir(dir);
     const existedFile = files.find(f => f.endsWith(`__${rootId}.jsonl`));
     const fileName = existedFile ?? `undo-${getTodayDateString()}__${rootId}.jsonl`;

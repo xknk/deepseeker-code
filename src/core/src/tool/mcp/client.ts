@@ -14,6 +14,8 @@
 import { spawn, ChildProcess } from "child_process";
 import { createInterface } from "readline";
 import { fetch as undiciFetch } from "undici";
+import { killTree } from "../registry/background.ts";
+import { appConfig } from "@/config/index.ts";
 
 /** MCP server 配置：type 决定 transport（缺省按 command/url 推断） */
 export interface McpServerConfig {
@@ -57,9 +59,21 @@ const REQUEST_TIMEOUT_MS = 30000;
 const PROTOCOL_VERSION_STDIO = "2024-11-05";   // stdio 保持旧版本，不破坏既有本地 server
 const PROTOCOL_VERSION_HTTP = "2025-03-26";    // streamable-http / SSE 需较新协议版本
 
+/** MCP 单行 JSON-RPC 上限（S-2）：防异常/恶意 server 吐单行巨型 JSON，readline 已缓冲进内存，
+ *  handleLine 据此阻止 JSON.parse 把巨型串放大成深对象树（OOM/CPU 飙升）。2MB 覆盖合理大响应。 */
+const MCP_MAX_LINE_CHARS = 2 * 1024 * 1024;
+/** MCP 工具/资源结果文本上限（S-2）：与 appConfig.MAX_TOOL_RESULT_CHARS 对齐，注入 agent 上下文前预截断，
+ *  防 server 返回超大内容（读大文件等）撑爆 token。外层 collectToolResult 仍会兜底截断。 */
+const MCP_MAX_RESULT_CHARS = appConfig.MAX_TOOL_RESULT_CHARS;
+const capResultText = (text: string): string =>
+    text.length > MCP_MAX_RESULT_CHARS
+        ? text.slice(0, MCP_MAX_RESULT_CHARS) + `\n\n[... MCP 结果过长，已截断 ${text.length - MCP_MAX_RESULT_CHARS} 字符 ...]`
+        : text;
+
 /**
  * 统一的 tools/call 结果 → 文本拼接（stdio/http/sse 共用，避免重复）。
  * isError=true 时前置错误标记（防模型把报错当成功）。
+ * ★ S-2：拼接后经 capResultText 预截断，防超大内容注入上下文。
  */
 const joinContentText = (result: any): string => {
     const content = Array.isArray(result?.content) ? result.content : [];
@@ -67,10 +81,11 @@ const joinContentText = (result: any): string => {
         .filter((c: any) => c?.type === "text" && typeof c.text === "string")
         .map((c: any) => c.text)
         .join("\n");
+    const capped = capResultText(text);
     if (result?.isError) {
-        return `❌ [MCP 工具报错]\n${text || JSON.stringify(result)}`;
+        return `❌ [MCP 工具报错]\n${capped || JSON.stringify(result)}`;
     }
-    return text || JSON.stringify(result);
+    return capped || JSON.stringify(result);
 };
 
 /**
@@ -85,7 +100,7 @@ export const joinResourceContents = (result: any): string => {
         if (c?.blob) return `[二进制资源 ${c?.uri ?? ""}（mimeType=${c?.mimeType ?? "未知"}），已省略 base64 内容]`;
         return "";
     }).filter(Boolean);
-    return parts.length > 0 ? parts.join("\n\n") : "(资源无文本内容)";
+    return capResultText(parts.length > 0 ? parts.join("\n\n") : "(资源无文本内容)");
 };
 
 /**
@@ -104,7 +119,7 @@ export const joinPromptMessages = (result: any): string => {
         if (content?.type === "text" && typeof content.text === "string") return content.text;
         return "";
     }).filter(Boolean);
-    return parts.length > 0 ? parts.join("\n\n") : "(prompt 无文本内容)";
+    return capResultText(parts.length > 0 ? parts.join("\n\n") : "(prompt 无文本内容)");
 };
 
 /** 客户端信息（握手用），与 serverName 解耦 */
@@ -206,6 +221,9 @@ export class McpStdioClient extends McpBaseClient {
             env: { ...buildSafeEnv(), ...env },
             // Windows 下 npx 等常需 shell 才能找到；非 Win 直接执行
             shell: process.platform === "win32",
+            // ★ S-3：非 Win 独立进程组——dispose 时 killTree 用 process.kill(-pid) 杀整个进程树
+            //   （MCP server 常再 spawn worker，仅 kill 主进程会孤儿化子进程；Win 靠 taskkill /T/F 杀树，不依赖 detached）
+            detached: process.platform !== "win32",
         });
         if (!this.proc.stdin || !this.proc.stdout) {
             throw new Error("MCP server 未提供可用的 stdin/stdout");
@@ -254,6 +272,12 @@ export class McpStdioClient extends McpBaseClient {
     private handleLine(line: string): void {
         const trimmed = line.trim();
         if (!trimmed) return;
+        // ★ S-2：行长硬限——防异常/恶意 MCP server 吐单行巨型 JSON-RPC（readline 已缓冲进内存，
+        //   此处阻止 JSON.parse 把巨型串放大成深对象树致 OOM/CPU 飙升）。超限丢弃该行并告警。
+        if (trimmed.length > MCP_MAX_LINE_CHARS) {
+            console.warn(`⚠️ [MCP] 丢弃超长 JSON-RPC 行（${trimmed.length} 字符 > 上限 ${MCP_MAX_LINE_CHARS}），server=${this.serverName}`);
+            return;
+        }
         let msg: any;
         try { msg = JSON.parse(trimmed); } catch { return; }
         if (msg?.id === undefined) return; // notification / server→client request，v1 不处理
@@ -298,7 +322,11 @@ export class McpStdioClient extends McpBaseClient {
     dispose(): void {
         try { this.rl?.close(); } catch { /* ignore */ }
         try { this.proc?.stdin?.end(); } catch { /* ignore */ }
-        try { this.proc?.kill(); } catch { /* ignore */ }
+        // ★ S-3：杀整个进程树（MCP server 常再 spawn worker 子进程，仅 kill 主进程会孤儿化）——
+        //   Win taskkill /T/F、非 Win kill 进程组（spawn 时 detached）。fire-and-forget：killTree 内部
+        //   taskkill/process.kill 同步发起，即便 dispose 返回后已发出的 kill 仍生效。
+        const proc = this.proc;
+        if (proc) void killTree(proc);
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("client disposed")); }
         this.pending.clear();
         this.proc = null;

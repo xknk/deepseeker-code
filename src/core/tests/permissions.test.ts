@@ -9,11 +9,12 @@
  *   - 路径类 → 顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
  *   - 无主参数映射 / 缺值 / 非字符串 / 空串 → 返回 null（不持久化，降级 allow-once；旧版回退裸 ToolName 会把
  *     该工具所有后续调用静默放行，对 MCP/未映射的 DANGER 工具尤其危险）。
- *  安全兜底不变：COMMAND_DENY 清单（auto 模式）+ PROTECTED_WRITE_DIRS 保护路径硬拒仍生效，allow 了也拦 rm -rf / 改 .git。
+ *  安全兜底：COMMAND_DENY 独立硬闸门（run_command/run_in_background，不依赖 allow）+ PROTECTED_WRITE_DIRS 保护路径硬拒，
+ *    allow 了也拦 rm -rf / 改 .git。
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildScopedAllowRule, checkPermission } from "@/tool/permissions.ts";
+import { buildScopedAllowRule, checkPermission, compileRule } from "@/tool/permissions.ts";
 
 describe("buildScopedAllowRule（allow-always 安全保守作用域）", () => {
     it("命令类 → 精确命令串（杜绝跨子命令 / 链式注入的静默放行）", () => {
@@ -66,5 +67,32 @@ describe("checkPermission 空规则集默认放行（回归基线）", () => {
         // 默认加载的 rules 可能为空或含项目规则；此处仅断言不抛错且返回合法 verdict
         const v = checkPermission("__nonexistent_tool__", {});
         assert.ok(v === null || v === "allow" || v === "deny" || v === "ask");
+    });
+});
+
+describe("compileRule：DANGER 命令工具裸名 allow 拒绝（P0-2 供应链防护）", () => {
+    it("裸名 allow run_command / run_in_background → 拒绝（返回 null）", () => {
+        // 恶意仓库投递 "run_command" 即让全部命令免审——必须拒绝，强制带作用域
+        assert.equal(compileRule("run_command", "test", "allow"), null);
+        assert.equal(compileRule("run_in_background", "test", "allow"), null);
+    });
+
+    it("裸名 deny / ask run_command → 允许（用户可整体 deny/ask 命令工具，合理意图）", () => {
+        assert.ok(compileRule("run_command", "test", "deny"));
+        assert.ok(compileRule("run_command", "test", "ask"));
+    });
+
+    it("带作用域 allow（精确串 / glob）→ 允许（合法的安全配置）", () => {
+        assert.ok(compileRule("run_command(npm test)", "test", "allow"));
+        assert.ok(compileRule("run_command(npm test:*)", "test", "allow"));
+    });
+
+    it("非 DANGER 工具裸名 allow → 允许（read_file / edit_file 等）", () => {
+        assert.ok(compileRule("read_file", "test", "allow"));
+        assert.ok(compileRule("edit_file", "test", "allow"));
+    });
+
+    it("末尾 * 通配的 DANGER 工具 allow → 拒绝（run_command* 同样过宽）", () => {
+        assert.equal(compileRule("run_command*", "test", "allow"), null);
     });
 });

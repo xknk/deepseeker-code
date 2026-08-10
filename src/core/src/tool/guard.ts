@@ -216,16 +216,25 @@ export const assertWithinWorkspace = (absPath: string, base?: string): void => {
 export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepseeker-code'];
 
 /**
- * 命令执行子进程的凭证剔除清单：run_command / run_in_background 的 spawn env 剔除这些 agent 自身凭证，
- * 防 LLM 经 `env`/`printenv`/`/proc/self/environ` 读取后外泄。仅剔除 agent 基础设施密钥——
- * 用户应用所需凭证（PATH/HOME/业务密钥等）保留，部署/发布等显式命令仍可用其自有密钥。
+ * 命令执行子进程的凭证剔除：run_command / run_in_background 的 spawn env 剔除敏感变量，防 LLM 经
+ * `env` / `printenv` / `/proc/self/environ` 读取后外泄到云端模型。两道防线：
+ *  1) 硬编码 denylist：agent 自身基础设施密钥（必剔）。
+ *  2) 敏感模式匹配：key 名含 KEY/TOKEN/SECRET/PASSWORD/PASSPHRASE/CREDENTIAL/PRIVATE/AUTH 的变量一律剔除
+ *     （S-1：覆盖 GITHUB_TOKEN / NPM_TOKEN / AWS_SECRET_ACCESS_KEY 等第三方凭证——旧版只剔 3 个 agent 密钥，
+ *      其余宿主凭证全量透传，可被 prompt injection 经 printenv 外泄）。
+ * 保留 PATH/HOME/USER/SHELL/LANG/TERM 等基础变量——部署/构建命令仍可用其自有 PATH。
  */
 const COMMAND_ENV_DENYLIST = ["DEEP_SEEK_API_KEY", "DEEPSEEKER_CODE_TOKEN", "TAVILY_API_KEY"];
+const SENSITIVE_ENV_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL|PRIVATE|AUTH)/i;
 
-/** 复制 env 并剔除 agent 自身凭证；默认基于 process.env。供 run_command / run_in_background 共用。 */
+/** 复制 env 并剔除敏感凭证；默认基于 process.env。供 run_command / run_in_background 共用。 */
 export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
-    const next: NodeJS.ProcessEnv = { ...env };
-    for (const k of COMMAND_ENV_DENYLIST) delete next[k];
+    const next: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(env)) {
+        if (COMMAND_ENV_DENYLIST.includes(k)) continue;     // 显式 denylist
+        if (SENSITIVE_ENV_PATTERN.test(k)) continue;        // 敏感模式匹配（第三方凭证）
+        next[k] = v;
+    }
     return next;
 };
 

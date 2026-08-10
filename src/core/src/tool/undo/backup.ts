@@ -157,7 +157,7 @@ async function backupFileOverwrite(common: CommonFields, undoDir: string, args: 
     const content = await fs.readFile(absPath);
     await fs.mkdir(undoDir, { recursive: true, mode: 0o700 }); // 同机用户隔离
     const contentPath = path.join(undoDir, 'content');
-    await fs.writeFile(contentPath, content); // 原样字节备份，保留 CRLF
+    await fs.writeFile(contentPath, content, { mode: 0o600 }); // ★ S-4：字节级备份限 0600（源码/可能含密钥，防同机其他用户读）
     return {
         ...common,
         backupKind: 'file_content',
@@ -251,7 +251,7 @@ async function backupDelete(common: CommonFields, undoDir: string, relativePath:
     }
     const content = await fs.readFile(absPath);
     const contentPath = path.join(undoDir, 'content');
-    await fs.writeFile(contentPath, content);
+    await fs.writeFile(contentPath, content, { mode: 0o600 }); // ★ S-4：字节级备份限 0600
     return {
         ...common,
         backupKind: 'file_content',

@@ -127,81 +127,92 @@ export const handleUnifiedChat = async (
         const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（当前默认：相对路径与命令基准）" : ""}`);
         sysPrompt = SYSTEM_PROMPT + `\n\n【工作区（多项目）】\n你可在以下项目根中读写文件。跨项目访问用绝对路径，或相对当前默认根的 ../<兄弟目录>:\n${lines.join("\n")}`;
     }
-    const fullMessages: Msg[] = await buildContextMessages(
-        sessionId,
-        { role: "user", content: inbound.content },
-        sysPrompt,
-    );
-    await emitTrace({
-        sessionId,
-        eventType: 'session.start',
-        metadata: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
-        payload: { input: inbound.content }
-    })
-    // ★ SessionStart hook（观察；不可拦截）。dispatch 内部已容错，外层 catch 双保险。
-    await dispatch('SessionStart', { sessionId, cwd: process.cwd() }).catch(() => { });
-    // ★ 清扫泄漏的原子写 .tmp（进程被杀 / 超时熔断残留在项目内的临时文件）。fire-and-forget，绝不阻塞会话启动。
-    void sweepStaleAtomicTmp().catch(() => { });
-    await appendMessage({ sessionId, role: 'user', content: inbound.content })
-
     let replyText = "";
-    // ★ 本轮是否已流式产出正文（text.delta）。若否，final.text 是压缩超窗/模型 400/中止等「首字符前终结」
-    //   路径下唯一的用户可见消息载体——转发时不可清空，否则 CLI 静默无输出（"卡住后再次对话无任何输出"）。
-    let streamedAnyText = false;
-    // ★ 宿主注入：CLI 等可传自己的 requestApproval/onUIEvent；缺省回退 Web 宿主（SSE + approvalGate）。
-    //   serve 调用点不传 opts → 走 Web 宿主，行为与重构前完全一致。
-    const onUIEvent = opts?.onUIEvent ?? ((evt: UIEvent) => sseWrite?.(evt));
-    const requestApproval = opts?.requestApproval
-        ?? createWebRequestApproval((evt: UIEvent) => sseWrite?.(evt), abortSignal);
-    const options: RunAgentOptions = {
-        sessionId,
-        cwd: process.cwd(),
-        toolSchemas: agentTools,
-        abortSignal,                        // ← 透传中止信号
-        modelWindow: appConfig.MAX_HISTORY_TOKENS,
-        keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
-        compactRatio: appConfig.COMPACT_RATIO,
-        parentSystemPrompt: sysPrompt,
-        events: async (base: TraceBase) => {
-            await emitTrace(base);          // 纯 trace 落盘，不再推前端
-            opts?.onTrace?.(base);          // 透传宿主（CLI 据此读 usage 等真实计量）
-        },
-        onUIEvent,
-        requestApproval,
-        requestQuestion: opts?.requestQuestion,
-        // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
-        planMode: opts?.planMode,
-        permissionMode: opts?.permissionMode,
-        model: opts?.model,
-        thinkingLevel: opts?.thinkingLevel,
-        locale: opts?.locale,
-        outputStyle: opts?.outputStyle,
-    }
+    try {
+        // ★ R-1：setup（buildContextMessages / appendMessage 等）原在 runWithSessionContext 的 try 之外，
+        //   磁盘 EACCES/EIO 等会逃逸到 createServer 外层 catch（发 eventType:'error' 而非 type:'final'），
+        //   致前端永久卡 busy。现统一纳入 try，异常时补发 final。
+        const fullMessages: Msg[] = await buildContextMessages(
+            sessionId,
+            { role: "user", content: inbound.content },
+            sysPrompt,
+        );
+        await emitTrace({
+            sessionId,
+            eventType: 'session.start',
+            metadata: { depth: 0, decisionSource: 'user', durationMs: performance.now() - startTime },
+            payload: { input: inbound.content }
+        })
+        // ★ SessionStart hook（观察；不可拦截）。dispatch 内部已容错，外层 catch 双保险。
+        await dispatch('SessionStart', { sessionId, cwd: process.cwd() }).catch(() => { });
+        // ★ 清扫泄漏的原子写 .tmp（进程被杀 / 超时熔断残留在项目内的临时文件）。fire-and-forget，绝不阻塞会话启动。
+        void sweepStaleAtomicTmp().catch(() => { });
+        await appendMessage({ sessionId, role: 'user', content: inbound.content })
 
-    // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）
-    //   据此经 per-session 注册表查「激活的 worktree」（enter_worktree 工具用）。ALS 跨 await 边界继承。
-    //   无 session worktree 时 getActiveWorkspaceRoot/getActiveCwd 走原回退，行为零回归。
-    await runWithSessionContext(sessionId, async () => {
-        try {
-            for await (const event of runAgent(fullMessages, options)) {
-                if (event.type === 'text.delta') streamedAnyText = true;
-                if (event.type === 'final') {
-                    replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
-                    // SSE/CLI 模式：本轮已流式推送过正文 → final 仅作结束信号（text 置空，避免前端重复显示全文）；
-                    //   本轮【未产出正文】（压缩超窗/模型 400/中止等首字符前终结）→ final.text 是唯一可见消息，必须原样转发。
-                    sseWrite?.({ type: 'final', text: streamedAnyText ? '' : event.text });
-                } else {
-                    sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
-                }
-            }
-        } catch (e) {
-            // ★ P0 兜底（双保险）：runAgent 理论上已用外层 catch 必发 final（见 runAgent 末尾），
-            //   但若 final 之前任何 setup/消费异常逃逸，此处确保也发一个 final，避免前端 busy 永不清。
-            const msg = e instanceof Error ? e.message : String(e);
-            sseWrite?.({ type: 'final', text: streamedAnyText ? '' : `（agent 异常退出：${msg}）` });
-            replyText = msg;
+        // ★ 本轮是否已流式产出正文（text.delta）。若否，final.text 是压缩超窗/模型 400/中止等「首字符前终结」
+        //   路径下唯一的用户可见消息载体——转发时不可清空，否则 CLI 静默无输出（"卡住后再次对话无任何输出"）。
+        let streamedAnyText = false;
+        // ★ 宿主注入：CLI 等可传自己的 requestApproval/onUIEvent；缺省回退 Web 宿主（SSE + approvalGate）。
+        //   serve 调用点不传 opts → 走 Web 宿主，行为与重构前完全一致。
+        const onUIEvent = opts?.onUIEvent ?? ((evt: UIEvent) => sseWrite?.(evt));
+        const requestApproval = opts?.requestApproval
+            ?? createWebRequestApproval((evt: UIEvent) => sseWrite?.(evt), abortSignal);
+        const options: RunAgentOptions = {
+            sessionId,
+            cwd: process.cwd(),
+            toolSchemas: agentTools,
+            abortSignal,                        // ← 透传中止信号
+            modelWindow: appConfig.MAX_HISTORY_TOKENS,
+            keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
+            compactRatio: appConfig.COMPACT_RATIO,
+            parentSystemPrompt: sysPrompt,
+            events: async (base: TraceBase) => {
+                await emitTrace(base);          // 纯 trace 落盘，不再推前端
+                opts?.onTrace?.(base);          // 透传宿主（CLI 据此读 usage 等真实计量）
+            },
+            onUIEvent,
+            requestApproval,
+            requestQuestion: opts?.requestQuestion,
+            // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
+            planMode: opts?.planMode,
+            permissionMode: opts?.permissionMode,
+            model: opts?.model,
+            thinkingLevel: opts?.thinkingLevel,
+            locale: opts?.locale,
+            outputStyle: opts?.outputStyle,
         }
-    });
+
+        // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）
+        //   据此经 per-session 注册表查「激活的 worktree」（enter_worktree 工具用）。ALS 跨 await 边界继承。
+        //   无 session worktree 时 getActiveWorkspaceRoot/getActiveCwd 走原回退，行为零回归。
+        await runWithSessionContext(sessionId, async () => {
+            try {
+                for await (const event of runAgent(fullMessages, options)) {
+                    if (event.type === 'text.delta') streamedAnyText = true;
+                    if (event.type === 'final') {
+                        replyText = event.text;        // 非 SSE 渠道靠 final 拿全文
+                        // SSE/CLI 模式：本轮已流式推送过正文 → final 仅作结束信号（text 置空，避免前端重复显示全文）；
+                        //   本轮【未产出正文】（压缩超窗/模型 400/中止等首字符前终结）→ final.text 是唯一可见消息，必须原样转发。
+                        sseWrite?.({ type: 'final', text: streamedAnyText ? '' : event.text });
+                    } else {
+                        sseWrite?.(event);             // text.delta / tool.start / tool.end 实时推
+                    }
+                }
+            } catch (e) {
+                // ★ P0 兜底（双保险）：runAgent 理论上已用外层 catch 必发 final（见 runAgent 末尾），
+                //   但若 final 之前任何 setup/消费异常逃逸，此处确保也发一个 final，避免前端 busy 永不清。
+                const msg = e instanceof Error ? e.message : String(e);
+                sseWrite?.({ type: 'final', text: streamedAnyText ? '' : `（agent 异常退出：${msg}）` });
+                replyText = msg;
+            }
+        });
+    } catch (e) {
+        // ★ R-1：setup 阶段异常（buildContextMessages / appendMessage 等，runWithSessionContext 内层 try 之外）
+        //   补发 type:'final'，防磁盘 EACCES/EIO 等导致前端永久卡 busy（原走 createServer 外层 catch 发 eventType:'error'）。
+        const msg = e instanceof Error ? e.message : String(e);
+        sseWrite?.({ type: 'final', text: `（会话初始化失败：${msg}）` });
+        replyText = msg;
+    }
 
     // ★ SessionEnd hook（观察）。store 与 transcript 已物理隔离（<id>.state.json / <id>.jsonl），
     //   hook 现在可安全持久化到 state.json；transcript 永远只追加、不被覆盖。

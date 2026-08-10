@@ -43,7 +43,7 @@ import { injectOutputStyle } from "@/outputStyles/inject.ts";
 import { injectMemory } from "@/memory/inject.ts";
 import { injectMarkedBlock } from "@/common/index.ts";
 import { appConfig } from "@/config/index.ts";
-import { runAutoCheck } from "@/tool/autoPermission.ts";
+import { runAutoCheck, matchCommandDeny } from "@/tool/autoPermission.ts";
 
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
@@ -561,11 +561,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     const level = matchedTool.function.safetyLevel;
                     let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
                     let denied = false;
-                    // ★ P1-7 保护路径硬规则：写工具（isUndoTrigger）碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒
+                    // ★ P1-7 / P0-3 保护路径硬规则：写工具碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒。
                     //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
-                    if (isUndoTrigger(calledName) && isProtectedWrite(calledArgs?.path, toolCtx.cwd)) {
+                    //   P0-3：与 isUndoTrigger 解耦——move_file 不在 Undo 名单（双路径超 schema），但同样必须拦截，
+                    //     否则可 move 进 .git/hooks/、.deepseeker-code/settings.json 实现持久化 RCE / 配置注入。
+                    const protectedPaths = calledName === 'move_file'
+                        ? [calledArgs?.source, calledArgs?.destination]
+                        : (isUndoTrigger(calledName) ? [calledArgs?.path] : []);
+                    const hitProtected = protectedPaths.find(p => typeof p === 'string' && isProtectedWrite(p, toolCtx.cwd));
+                    if (hitProtected) {
                         denied = true;
-                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${calledArgs?.path ?? ''}。`;
+                        result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${hitProtected}。`;
                     }
                     // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
                     try {
@@ -574,6 +580,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         else if (perm === 'allow') { needApproval = false; }
                         else if (perm === 'ask') { needApproval = true; }
                     } catch { /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
+                    // ★ P0-2 灾难命令硬闸门：与 needApproval / allow 规则解耦——堵住「裸 allow 规则让
+                    //   checkPermission='allow' 跳过 runAutoCheck（含 COMMAND_DENY）」的审批绕过路径。
+                    //   即使用户 allow 了 run_command，rm -rf /、curl|sh、外传密钥等灾难命令仍硬拒。
+                    if ((calledName === 'run_command' || calledName === 'run_in_background')
+                        && matchCommandDeny(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
+                        denied = true;
+                        result = `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`;
+                    }
                     // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
                     const isBgTool = matchedTool.function.isSync === false;
                     const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;

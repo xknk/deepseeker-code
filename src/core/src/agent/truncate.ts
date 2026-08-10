@@ -352,7 +352,31 @@ export const collectToolResult = async (
 ): Promise<string> => {
     if (isAsyncGenerator(ret)) {
         let full = '';
-        for await (const chunk of ret) { full += chunk; onChunk?.(chunk); }
+        // ★ R-2：idle 超时熔断——非后台流式工具两个 chunk 间超过阈值无产出，判定 generator 卡死
+        //   （外部流 hang 等），返回已收集内容 + 超时提示，防 agent 循环永久阻塞。
+        //   复用 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS（与 model.ts 的 LLM 流式 idle 同 env：VSCode/CLI 的
+        //   streamIdleTimeoutMs 配置统一控制 LLM 与工具两层流式 idle）。后台工具不走此路径（runBackgroundTool + MAX_BACKGROUND_TOOL_MS）。
+        const idleMs = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
+        while (true) {
+            let timer: NodeJS.Timeout | undefined;
+            const outcome = await Promise.race<
+                { timedOut: true } | { timedOut: false; step: IteratorResult<string> }
+            >([
+                ret.next().then((step) => ({ timedOut: false as const, step })),
+                new Promise<{ timedOut: true }>((resolve) => {
+                    timer = setTimeout(() => resolve({ timedOut: true }), idleMs);
+                }),
+            ]);
+            if (timer) clearTimeout(timer);
+            if (outcome.timedOut) {
+                full += `\n\n[⏳ 工具流式输出 idle 超时（${Math.round(idleMs / 1000)}s 无新块），已熔断返回已收集内容]`;
+                try { await ret.return(undefined); } catch { /* 尽力释放 generator（触发其 finally 清理资源） */ }
+                break;
+            }
+            if (outcome.step.done) break;
+            full += outcome.step.value;
+            onChunk?.(outcome.step.value);
+        }
         return full;
     }
     const v = await ret;

@@ -74,6 +74,13 @@ export const searchTools: CustomTool[] = [
                         "--glob", "!.git/**",
                         "--glob", "!.next/**",
                         "--glob", "!build/**",
+                        // S-5：与 read_file 的 isSensitiveReadTarget 对齐——即便未被 .gitignore 收录，
+                        //   也排除凭证/私钥类文件，防 grep 把密钥回灌模型上下文（maskSecretsInContent 不覆盖连接串）。
+                        "--glob", "!.env*",
+                        "--glob", "!*.pem",
+                        "--glob", "!*.key",
+                        "--glob", "!*credentials*",
+                        "--glob", "!id_rsa*",
                         "-e", pattern,
                         searchRoot,
                     ];

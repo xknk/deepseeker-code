@@ -41,7 +41,7 @@ export const appendUndoRecord = async (record: UndoRecord, sessionId: string): P
         };
         const p = await getUndoIndexPath(sessionId);
         const line = JSON.stringify(enriched) + "\n";
-        await fs.appendFile(p, line, "utf-8");
+        await fs.appendFile(p, line, { encoding: "utf-8", mode: 0o600 }); // ★ S-4：undo 索引限 0600（含文件路径等结构信息）
     });
 };
 
@@ -107,7 +107,7 @@ export const markRestored = async (sessionId: string, undoId: string, reverseUnd
                 // 避免 fs.writeFile 覆写中途崩溃/断电留下半截损坏 jsonl，导致整份会话索引不可读（readUndoIndex 会跳过损坏行）。
                 const content = lines.join("\n").replace(/\n*$/, "\n"); // 显式补末尾换行，避免首条追加与原末行粘连
                 const tmp = fp + ".tmp";
-                await fs.writeFile(tmp, content, "utf-8");
+                await fs.writeFile(tmp, content, { encoding: "utf-8", mode: 0o600 }); // ★ S-4：undo 索引限 0600
                 await fs.rename(tmp, fp);
             }
         }
