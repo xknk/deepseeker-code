@@ -144,6 +144,11 @@
           "type": "number",
           "default": 0,
           "description": "流式 idle 超时(ms)。留空(0)回退 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS，缺省 120000。"
+        },
+        "deepseekerCode.openBeside": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开聊天面板时自动并排到当前编辑器右侧（ViewColumn.Beside）。关掉则回到第一列。"
         }
       }
     },

@@ -166,10 +166,16 @@ function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
     panel.reveal(panel.viewColumn ?? vscode.ViewColumn.One, true);
     return panel;
   }
+  // ★ 新建：默认落到活动编辑器右侧列（Beside），与代码并排。无活动编辑器时 Beside 自动退化为 One。
+  //   chat tab 本就是普通编辑器 tab，落到右侧后可自由拖拽/拆分（VSCode 原生）；此处只决定首次落点。
+  const openBeside = vscode.workspace
+    .getConfiguration("deepseekerCode")
+    .get<boolean>("openBeside", true);
+  const col = openBeside ? vscode.ViewColumn.Beside : vscode.ViewColumn.One;
   panel = vscode.window.createWebviewPanel(
     "deepseekerCode.chat",
     "DeepSeeker-Code",
-    vscode.ViewColumn.One,
+    col,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
