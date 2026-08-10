@@ -4,6 +4,10 @@
 
 DeepSeeker-Code 是一套自研的 agentic 编码引擎，外加三个共享同一 core 的入口。core 是一个流式 agent 主循环，配备完整的工具链（读写文件 / 跑命令 / 搜索 / 网页抓取）、审批网关、上下文压缩、会话持久化，以及 MCP / Hooks / Skills / 子 Agent 四套扩展机制。三个入口——VS Code 插件、终端 CLI、HTTP 服务——共享同一引擎和 `~/.deepseeker-code/` 数据目录，同一项目下会话可互续。
 
+## 产品定位
+
+DeepSeeker-Code 是 **单人本地 AI coding 工具**——运行在开发者本机、由 DeepSeek 驱动，不面向公网部署或多租户场景。下方「HTTP 服务」仅作为本地程序化 API（默认 `127.0.0.1`），不作为多用户服务端。
+
 ---
 
 ## 三种使用方式

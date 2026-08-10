@@ -21,7 +21,7 @@
  *
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
-import chatWithModelWithTools, { isContextLengthError } from "@/llm/model.ts";
+import chatWithModelWithTools, { isContextLengthError, isTransientApiError } from "@/llm/model.ts";
 import OpenAI from "openai";
 import { appendMessage } from "@/session/transcript.ts";
 import { collectToolResult, ensureFitsWindow, ensureSummarySlot, truncateToolResult } from "./truncate.ts";
@@ -254,6 +254,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
                 //   （emit llm.error + yield final + return → busy 自动清零，杜绝永久卡死）。
                 const MAX_STREAM_RETRIES = 2;
+                // ★ API 瞬时错误（429/5xx/网络复位）的有限重试预算（上线前 P0-2）：与 idle 重试独立计数，
+                //   互不挤占。每轮重置，避免一次长任务被偶发限流永久中断。
+                const MAX_API_RETRIES = 2;
+                let apiRetries = 0;
                 // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
                 let compactedThisRound = false;
                 for (let streamAttempt = 0; ; streamAttempt++) {
@@ -300,6 +304,26 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                             // ★ 重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃这部分（重试会重新生成，避免重复显示）
                             if (!noOutputYet) yield { type: 'text.reset' };
                             console.warn(`⚠️ 流式 stall（idle 超时${noOutputYet ? '，尚无输出' : '，tool_call 未流完'}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
+                            contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
+                            continue;
+                        }
+                        // ★ API 瞬时错误重试（上线前 P0-2）：429 限流 / 5xx 服务端错误 / 连接级网络复位 → 原请求重试 + 指数退避。
+                        //   缘由：原逻辑对这类错误直接 throw → 外层 catch final 终结整轮，单用户依赖云端模型场景下，一次偶发
+                        //   限流/抖动就中断长 coding 任务且不可自动恢复（只能手动续接）。现补有限重试（默认 2 次，1s→2s 指数退避），
+                        //   与 idle 重试独立计数（apiRetries）。重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃，
+                        //   避免重试重新生成时重复显示（与 idle 重试同处理）。退避 sleep 期间用户中止 → sleep reject →
+                        //   冒泡至外层 catch 的 signal.aborted 分支优雅收尾（partial 文本落盘 + final）。
+                        //   （Retry-After 头解析为后续增强项，当前固定指数退避已覆盖绝大多数瞬时抖动。）
+                        if (isTransientApiError(streamErr) && apiRetries < MAX_API_RETRIES && !signal?.aborted) {
+                            apiRetries++;
+                            const backoffMs = 1000 * Math.pow(2, apiRetries - 1); // 第 1 次 1s、第 2 次 2s
+                            if (!noOutputYet) yield { type: 'text.reset' };
+                            const statusHint = (streamErr as any)?.status ? `${(streamErr as any).status} ` : '';
+                            console.warn(`⚠️ API 瞬时错误（${statusHint}${streamErr instanceof Error ? streamErr.message : String(streamErr)}），${backoffMs}ms 后第 ${apiRetries}/${MAX_API_RETRIES} 次重试...`);
+                            await new Promise<void>((resolve, reject) => {
+                                const t = setTimeout(resolve, backoffMs);
+                                signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+                            });
                             contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                             continue;
                         }
@@ -643,7 +667,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                                 result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
                             } else {
                                 // 流式工具：逐块 yield → emitProgress → tool.progress UIEvent（运行期间逐行可见）
-                                result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk));
+                                result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk), signal);
                             }
                             // verifyResult 判定：FAILED 时前置警告（防模型对报错产生"成功"幻觉）
                             if (matchedTool.function.verifyResult) {

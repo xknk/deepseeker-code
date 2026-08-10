@@ -1,6 +1,24 @@
+<!--
+ * @Author: fanqianliang 2438756801@qq.com
+ * @Date: 2026-08-10 12:35:39
+ * @LastEditors: fanqianliang 2438756801@qq.com
+ * @LastEditTime: 2026-08-10 14:05:10
+ * @FilePath: \deepSeekCode\CLAUDE.md
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-->
 # DeepSeeker-Code
 
 基于 DeepSeek 的 AI 编码助手（类 Claude Code 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills。
+
+## 产品定位（评估 / 规划基准）
+
+DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek 大模型驱动，供开发者在自己的机器上完成编码工作。
+
+**明确不做**（非本项目范围，评估/对标时勿当缺口）：
+- 不做公网部署 / 多租户 / SaaS / 团队协作服务端。
+- 不追求强制 TLS、多租户隔离、OS 级沙箱、多进程锁协调、headless 自动审批防护等服务端或重型产品才需要的特性。
+
+**评估准则**：判断"是否满足上线 / 发布"时，以「**单人本地能否稳定完成 AI coding**」为唯一标准，勿套用公网 SaaS 产品的安全 / 规模标准——那是不同产品形态的门槛，不属于本项目。HTTP 服务（`src/core/src/serve/`）仅作为**本地程序化 API 入口**保留（默认 `127.0.0.1`），不是多用户服务端。
 
 ## 开发规则
 
@@ -23,4 +41,4 @@
   - Hooks：`src/core/src/hooks/`，6 类生命周期事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd），声明式配置 + 程序化注册。
   - Skills：`src/core/src/skills/`，目录发现（builtin/global/project）+ `load_skill` 按需加载；内置 skill 放 `skills/builtin/<name>/SKILL.md`。
   - MCP：`src/core/src/tool/mcp/`，动态发现外部工具。
-- **文档索引**：架构与计划见 `.ai-docs/`（对标分析 / 工具扩充 / API 契约 / 验证修复）+ `src/core/方案/`（持久化方案）。
+- **文档索引**：架构与计划见 `.ai-docs/`（对标分析 / 工具扩充 / API 契约 / 验证修复 / 下一步计划）+ `src/core/src/memory/`（持久记忆系统：loader/inject/registry）。

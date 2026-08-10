@@ -168,4 +168,23 @@ export const isContextLengthError = (e: any): boolean => {
         || /context_length|context length|maximum context|input length|too long|exceed/i.test(msg);
 };
 
+/**
+ * 识别 API「瞬时」错误（可安全原样重试）：429 限流、5xx 服务端错误、连接级网络复位/超时。
+ *  与 {@link isContextLengthError} 互补——后者需「降级（强制压缩）后重试」，本函数是「原请求重试」。
+ *  漏判代价 = 用户被一次偶发限流/抖动中断长任务（高），误判代价 = 多一次廉价重试（低），故取宽匹配。
+ *  ★ 对标「上线前 P0-2」：原 runAgent 对这类错误直接 throw → 外层 catch final 终结整轮，单用户依赖云端
+ *    模型场景下，偶发 429/网络抖动会中断长 coding 任务且不可自动恢复。runAgent 内层 catch 据此判定
+ *    + 指数退避有限重试。
+ *  注：用户中止（abortSignal）产生的 AbortError 不在此列——内层 catch 首句已 `if (signal?.aborted) throw`
+ *      提前分流，不会误判为可重试。
+ */
+export const isTransientApiError = (e: any): boolean => {
+    if (!e) return false;
+    const status = e.status ?? e.response?.status;
+    if (status === 429 || (status >= 500 && status <= 599)) return true;
+    const msg = typeof e.message === 'string' ? e.message : '';
+    // 连接级瞬时错误（SDK / Node fetch 上抛）：复位、超时、瞬时 DNS、socket 挂起、连接拒绝、对端关闭
+    return /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|socket hang up|fetch failed|network error|write EPIPE|other side closed/i.test(msg);
+};
+
 export default chatWithModelWithTools;

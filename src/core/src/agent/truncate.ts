@@ -344,11 +344,13 @@ function isAsyncGenerator(x: any): x is AsyncGenerator<string> {
  *  对流式结果逐块拼接（可选回调 onChunk 实时透出），对非字符串结果 JSON.stringify。
  * @param ret 工具返回值
  * @param onChunk 流式分块回调（可选）
+ * @param signal 主动中止信号（可选）：用户中止时即时打断 await，冒泡走工具 catch → 主循环 aborted 收尾
  * @return 归一化后的字符串结果
  */
 export const collectToolResult = async (
     ret: Promise<string> | AsyncGenerator<string>,
     onChunk?: (s: string) => void,
+    signal?: AbortSignal,
 ): Promise<string> => {
     if (isAsyncGenerator(ret)) {
         let full = '';
@@ -379,6 +381,36 @@ export const collectToolResult = async (
         }
         return full;
     }
-    const v = await ret;
-    return typeof v === 'string' ? v : JSON.stringify(v);
+    // ★ 非流式（Promise<string>）安全网超时（上线前 P0-1 修复）：
+    //   流式分支有 idle 超时（见上）、后台工具有 30min 兜底（MAX_BACKGROUND_TOOL_MS），唯独本路径曾直接
+    //   `await ret` 无任何熔断——若某工具（典型：网络型 MCP）hang 且不响应 abortSignal，会永久阻塞 agent
+    //   主循环（await 不返回，连用户中止都难救）。此处复用 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS（与 LLM/工具流式
+    //   idle 同 env，统一可调）作安全网：到点未完成 → 返回超时提示（不抛错，模型据此自行决策下一步）；
+    //   同时把 abortSignal race 进来，让用户中止能即时打断 await（abort → 抛错走工具 catch → 主循环 aborted 收尾）。
+    //   取舍：超时返回后底层 promise 仍可能 pending（JS 无强制取消 Promise 之能力），属可接受孤儿，最终 GC。
+    //   刻意不消费 CustomTool.timeoutMs（对标 Claude Code：取消由 abortSignal 驱动、长任务走后台 isSync:false），
+    //   此处仅作「兜底熔断」，非 per-tool 业务超时。
+    const timeoutMs = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
+    let timer: NodeJS.Timeout | undefined;
+    const raced = await Promise.race<{
+        kind: 'ok'; value: string;
+    } | {
+        kind: 'timeout';
+    } | {
+        kind: 'abort';
+    }>([
+        Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: typeof v === 'string' ? v : JSON.stringify(v) })),
+        new Promise<{ kind: 'timeout' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs); }),
+        ...(signal ? [new Promise<{ kind: 'abort' }>((resolve) => {
+            signal.addEventListener('abort', () => resolve({ kind: 'abort' }), { once: true });
+        })] : []),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (raced.kind === 'timeout') {
+        return `[⏳ 工具执行超时（${Math.round(timeoutMs / 1000)}s 未返回），已熔断跳过。该工具可能 hang 或不响应中止信号。]`;
+    }
+    if (raced.kind === 'abort') {
+        throw new Error('aborted');
+    }
+    return raced.value;
 }

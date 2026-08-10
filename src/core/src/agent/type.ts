@@ -37,8 +37,6 @@ export interface RunAgentOptions {
     toolSchemas?: any[];
     /** 主动中止信号，前端可触发以停止当前推理 / 工具执行。 */
     abortSignal?: AbortSignal;
-    /** （已废弃）文本增量回调，现由 AgentEvent.text.delta 承载，保留以兼容旧调用方。 */
-    onAssistantTextDelta?: (delta: string) => void;
     /** 本次会话唯一 ID，用于持久化、埋点与会话隔离。 */
     sessionId: string;
     /** 本次会话的工作目录（hook 子进程 cwd / 工具相对路径基准）；缺省取 process.cwd()。spawn_agent 透传以保持父子一致。 */
@@ -109,7 +107,7 @@ export interface ensureOptions  {
 export type AgentEvent =
     /** 一轮推理开始（round 从 1 递增）。 */
     | { type: 'round.start'; round: number }
-    /** 流式正式回复文本增量（替代 onAssistantTextDelta）。 */
+    /** 流式正式回复文本增量。 */
     | { type: 'text.delta'; text: string }
     /** 流式思考过程增量（DeepSeek reasoning_content，前端可折叠展示）。 */
     | { type: 'thinking.delta'; text: string }
