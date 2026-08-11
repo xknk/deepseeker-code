@@ -30,6 +30,7 @@ const EARLY_FINAL_MAX = 1;               // 整个 run 最多推 1 次（硬死�
 const TOOL_DIGEST_FENCE = "⟦DSC:TOOL_DIGEST⟧";
 const TOOL_DIGEST_MAX = 2;               // 「工具消化收尾」守护：刚执行完工具就草草收尾时最多推 2 次
 const TOOL_DIGEST_WINDOW = 2;            // 距上次工具调用 ≤ 此轮数才视为「工具消化期内」
+const TOOL_DIGEST_TEXT_MAX_LEN = 30;     // ★ 只拦「空手收尾」：finalText 去空白后短于此才视为没给实质回应；长总结绝不拦（防「连续 final、中间无 user」）
 const PLAN_FIRST_FENCE = "⟦DSC:PLAN_FIRST⟧";
 
 // —— 文案（集中于此，调措辞不动控制流）——
@@ -102,10 +103,15 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
         },
         interceptFinal(finalText, round) {
             const text = (finalText || "").trim();
-            // TOOL_DIGEST：刚执行完工具（消化期内）就草草收尾，且无明确完成声明——
-            //   典型如轮询后台任务拿到「仍在编译」就空手收尾、或拿到结果不给总结。任意 round 生效（补 EARLY_FINAL 够不着的长轮询场景）。
+            // TOOL_DIGEST：刚执行完工具（消化期内）却「空手收尾」——finalText 空/极短且无完成声明。
+            //   ★ 必须限长（< TOOL_DIGEST_TEXT_MAX_LEN）：只拦「拿到结果一句话不说/只蹦几个字就走」，
+            //   绝不能拦「实质总结」。否则总结轮被 continue，每轮正文各落一条 assistant 消息 →
+            //   出现「连续多个 final、中间无 user」的"没有结尾"症状（2026-08-11 复现于长轮询会话：
+            //   looksComplete 漏判"已简化完成/都已就位/核对完毕"等合法收尾，误拦后连发 2~3 个总结）。
+            //   looksComplete 关键词太窄不可靠，故以「文本长度」为准判定是否给了实质回应。
             if (lastToolCallRound > 0 && round - lastToolCallRound <= TOOL_DIGEST_WINDOW
-                && toolDigestNudges < TOOL_DIGEST_MAX && !looksComplete(finalText)) {
+                && toolDigestNudges < TOOL_DIGEST_MAX
+                && text.length < TOOL_DIGEST_TEXT_MAX_LEN && !looksComplete(finalText)) {
                 toolDigestNudges++;
                 toolDigestPending = { role: 'system', content: `${TOOL_DIGEST_FENCE}\n${TOOL_DIGEST_TEXT}` };
                 return true;

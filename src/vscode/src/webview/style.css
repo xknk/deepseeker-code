@@ -669,6 +669,56 @@ body {
   white-space: normal;
 }
 
+/* 计划标题可点击折叠条（▼/▶ 切换正文显示） */
+.plan-toggle {
+  cursor: pointer;
+  user-select: none;
+  margin: 0 0 6px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+.plan-toggle:hover {
+  background: var(--hover);
+}
+
+.plan-caret {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.plan-collapsed-hint {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-left: 4px;
+}
+
+/* 长 assistant 行（实现方案/计划）可折叠头部 */
+.assistant-head {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  transition: background 0.1s;
+}
+
+.assistant-head:hover {
+  background: var(--hover);
+}
+
+.assistant-caret {
+  font-size: 10px;
+}
+
 .modal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -755,7 +805,7 @@ body {
 
 #plan-edit {
   width: 100%;
-  min-height: 60px;
+  min-height: 180px;
   background: var(--input-bg);
   color: var(--input-fg);
   border: 1px solid var(--input-border);

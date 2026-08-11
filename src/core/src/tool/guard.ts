@@ -127,6 +127,25 @@ export const setAllowedWorkspaceRoots = (roots: string[]): void => {
 };
 /** 取已注册的允许根（realpath 后）。空 = 未注册多根（CLI 单目录场景），由调用方回退 cwd。 */
 export const getAllowedWorkspaceRoots = (): string[] => [...allowedRootsReal];
+
+/**
+ * 给定绝对路径，返回它【所属】的允许根（多根工作区下落在某文件夹内即返回该文件夹；不在任一根内回退活动根）。
+ * 用于「需要按文件所属根算相对路径 / 取对应 gitignore 引擎」的场景（read_file / view_symbol_outline 的忽略判定）。
+ * ★ 不用本函数、直接拿活动根算相对路径时，跨根文件会得到 `../兄弟项目/...`，
+ *   ① 触发 ignore 包 `.ignores()` 对含 `..` 路径抛 RangeError（"path should be a path.relative()d string"）；
+ *   ② 即便不抛，也是用活动根的 gitignore 引擎去判兄弟根文件——引擎用错。
+ * 取最长（最具体）匹配根，处理一个根嵌套在另一个根内的边界情况。
+ */
+export const getContainingRoot = (absPath: string): string => {
+    let best: string | undefined;
+    for (const r of allowedBoundaryRoots()) {
+        const rel = path.relative(r, absPath);
+        if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
+            if (!best || r.length > best.length) best = r;
+        }
+    }
+    return best ?? getActiveWorkspaceRoot();
+};
 /** 围栏判定用的根集合：有注册用注册集，否则回退单活动根（realpath，失败用原值）。 */
 const allowedBoundaryRoots = (): string[] => {
     if (allowedRootsReal.length > 0) return allowedRootsReal;
@@ -337,7 +356,11 @@ export const initializeWorkspaceIgnore = async (base?: string): Promise<void> =>
 export const checkIsPathIgnored = (checkPath: string, base?: string): boolean => {
     const root = base ?? getActiveWorkspaceRoot();
     const engine = ignoreCache.get(root);
-    return engine ? engine.ignores(checkPath) : false;
+    if (!engine) return false;
+    // ★ 防性 fail-open：ignore 包对含 `..` / 绝对路径的入参会抛 RangeError。文档承诺「未构建则不误判忽略」，
+    //   此处把抛错也归一为 false（放行），与 fail-open 契约一致，杜绝上游误传跨根路径时整个 read_file 崩。
+    //   调用方（read_file/view_symbol_outline）应先用 getContainingRoot 算对相对路径，本 catch 仅作兜底。
+    try { return engine.ignores(checkPath); } catch { return false; }
 };
 
 /**

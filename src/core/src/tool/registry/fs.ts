@@ -24,6 +24,7 @@ const getTs = async (): Promise<typeof import('typescript') | null> => {
 };
 import {
     getActiveWorkspaceRoot,
+    getContainingRoot,
     resolveSafePath,
     assertWithinWorkspace,
     initializeWorkspaceIgnore,
@@ -127,14 +128,17 @@ export const sweepStaleAtomicTmp = async (root?: string, staleSeconds = 60): Pro
 
 /**
  * 读保护闸门：敏感凭证文件拒读 + .gitignore/通用忽略跳过。read_file / view_symbol_outline 共用。
+ * @param relForCheck 相对【文件所属根】的路径（多根下不能写死相对活动根，否则跨根得 `..` → ignore 包抛错）
+ * @param displayPath 展示给用户/模型的原始路径
+ * @param base 该文件所属根（取对应根的 gitignore 引擎；缺省=活动根，向后兼容单根）
  * @returns 拦截时返回提示字符串（直接 return 给模型）；放行返回 null。
  */
-const assertReadable = async (relForCheck: string, displayPath: string): Promise<string | null> => {
+const assertReadable = async (relForCheck: string, displayPath: string, base?: string): Promise<string | null> => {
     if (isSensitiveReadTarget(relForCheck)) {
         return `🔒 [安全拦截]：[${displayPath}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝读取以防机密外泄。如确需查看请人工处理。`;
     }
-    await initializeWorkspaceIgnore();
-    if (checkIsPathIgnored(relForCheck)) {
+    await initializeWorkspaceIgnore(base);
+    if (checkIsPathIgnored(relForCheck, base)) {
         return `🚫 [忽略规则]：[${displayPath}] 命中 .gitignore / 通用忽略规则，已跳过。`;
     }
     return null;
@@ -200,6 +204,38 @@ const diagnoseOldStr = (content: string, oldBlock: string): string => {
     return ""; // 各行单独都能找到 → 大概率是行序/上下文不连续或 old_str 非连续整段
 };
 
+/**
+ * edit_file 写入前的「缩进基线对齐」：以 old_str 在文件里的真实缩进为基线，重新对齐 new_str。
+ *
+ * 解决痛点：模型给的 new_str 常丢失基础缩进（本该 2 层缩进却写成顶格），工具原样写入 → 代码顶格、与上下文错位。
+ * 算法：去掉 new_str 所有非空行的「公共前导空白」（dedent，保留内部相对层级），再统一补上真实基线 baseIndent。
+ *   - new_str 缩进本来就正确：公共前导恰好等于基线，dedent 后补回 → 原样不破坏；
+ *   - new_str 丢了基线（顶格 / 基线偏浅）：dedent 去残基 + 补真实基线 → 修复顶格。
+ * 不做 tab↔空格深度折算（避免猜 tabSize 改坏代码），仅对齐基线；内部增量若与基线单位不同可能略歪，但绝不顶格。
+ *
+ * @param newStr    模型给的 new_str（已去 CRLF）
+ * @param baseIndent old_str 第一非空行在文件里的真实前导空白（缩进基线，如 "\t\t" / "    "）
+ */
+const reindentToBase = (newStr: string, baseIndent: string): string => {
+    const lines = newStr.split("\n");
+    const nonBlank = lines.filter(l => l.trim() !== "");
+    if (nonBlank.length === 0) return newStr; // 全空行，不动
+    // 求所有非空行前导空白的最长公共前缀（字符级，不折算 tab 宽度）
+    let common = nonBlank[0].match(/^[ \t]*/)?.[0] ?? "";
+    for (const l of nonBlank) {
+        const lead = l.match(/^[ \t]*/)?.[0] ?? "";
+        let i = 0;
+        while (i < common.length && i < lead.length && common[i] === lead[i]) i++;
+        common = common.slice(0, i);
+        if (common === "") break;
+    }
+    // dedent 去掉公共前导，再统一补真实基线；空行原样（不补前导，避免无意义尾随空白）
+    return lines.map(l => {
+        if (l.trim() === "") return l;
+        return baseIndent + (l.startsWith(common) ? l.slice(common.length) : l);
+    }).join("\n");
+};
+
 export const fsTools: CustomTool[] = [
     {
         type: "function",
@@ -229,8 +265,11 @@ export const fsTools: CustomTool[] = [
                     // ★ 读保护三道闸（防密钥外泄到云端模型）：
                     //   1) 敏感凭证文件硬黑名单 → 直接拒读；
                     //   2) .gitignore / 通用忽略规则 → 跳过（与 list_dir 同口径，避免读到 .env 等被忽略产物）。
-                    const relForCheck = path.relative(getActiveWorkspaceRoot(), absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path);
+                    // ★ 多根：相对路径 + 引擎都按【文件所属根】算，而非活动根——否则跨根文件得 `../兄弟项目/...`，
+                    //   既触发 ignore 包抛 RangeError、又是用错根的 gitignore 引擎在判。
+                    const checkBase = getContainingRoot(absPath);
+                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
+                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
                     if (readBlock) return readBlock;
 
                     // 1. 先用最轻量的方式获取文件总行数（可选，若不需要显示 totalLines，甚至可以省略这一步以追求极致性能）
@@ -428,9 +467,14 @@ export const fsTools: CustomTool[] = [
                     if (!args.replace_all && matchCount > 1) {
                         return `❌ [代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改，或显式设 replace_all=true 批量替换。`;
                     }
+                    // ★ 缩进基线对齐：以 old_str 在文件里的真实缩进为基线重排 new_str，修模型丢基础缩进（顶格）。
+                    //   baseIndent = old_str 第一非空行的真实前导；为空（old 本身顶格）则跳过、原样写入。
+                    const oldFirstNonBlank = normalizedOld.split("\n").find(l => l.trim() !== "") ?? "";
+                    const baseIndent = oldFirstNonBlank.match(/^[ \t]*/)?.[0] ?? "";
+                    const alignedNew = baseIndent ? reindentToBase(normalizedNew, baseIndent) : normalizedNew;
                     const updatedContent = args.replace_all
-                        ? normalizedContent.split(normalizedOld).join(normalizedNew) // 字面量全量替换（不受正则元字符影响）
-                        : normalizedContent.replace(normalizedOld, () => normalizedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
+                        ? normalizedContent.split(normalizedOld).join(alignedNew) // 字面量全量替换（不受正则元字符影响）
+                        : normalizedContent.replace(normalizedOld, () => alignedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
                     await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
                     return args.replace_all
@@ -646,8 +690,10 @@ export const fsTools: CustomTool[] = [
                 try {
                     const absPath = resolveSafePath(args.path);
                     // ★ 读保护三道闸（与 read_file 对称）：敏感凭证文件拒读 + .gitignore 忽略跳过
-                    const relForCheck = path.relative(getActiveWorkspaceRoot(), absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path);
+                    // ★ 多根：按【文件所属根】算相对路径 + 取对应引擎（同 read_file，否则跨根 `..` 让 ignore 抛错）
+                    const checkBase = getContainingRoot(absPath);
+                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
+                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
                     if (readBlock) return readBlock;
                     // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，
                     //   read_file 已分片，本工具补同口径防护（1MB 上限）。

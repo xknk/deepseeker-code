@@ -22,7 +22,7 @@
  */
 import { appConfig } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
-import { estimateTokens, Msg, splitUntils } from "@/session/contextCore.ts";
+import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
@@ -168,17 +168,24 @@ export const compactToLine = async (toCompact: Msg[], _modelWindow: number, sign
     //   一批过大，摘要模型在超长输入下注意力稀释、丢细节——而摘要恰是用来保细节的。16K 保摘要质量，
     //   批次数通常 1–3。（_modelWindow 保留入参位置以兼容调用方，批次大小不再依赖它。）
     const MAX_BATCH_TOKENS = 16000;
+    // ★ 按对话单元（assistant(tool_calls)+紧跟的 tool 结果 = 不可分割）封批：原逐条按 token 封批，
+    //   批次边界会落在 tool_calls 与 tool 结果之间，产生两类 400——
+    //   "tool_calls must be followed by tool messages" / "tool must follow a tool_calls"——
+    //   多批同时失败 → Promise.all reject → 连续失败计数 → 物理熔断，agent 直接死。
+    //   复用 splitUntils 同款 groupUnits，保证一个工具调用回合永不跨批。
+    const units = groupUnits(toCompact);
     const batches: Msg[][] = [];
     let batch: Msg[] = []; // 当前累积的待压缩批次
     let batchTokens = 0;
-    for (const msg of toCompact) {
-        const size = estimateTokens([msg]); // 单条 token 数
+    for (const unit of units) {
+        const size = estimateTokens(unit);
+        // 当前批放不下该单元且已非空 → 先封批；若单元自身超预算，只能独占一批（不可拆，拆即破坏配对）
         if (batchTokens + size > MAX_BATCH_TOKENS && batch.length > 0) {
             batches.push(batch); // 封批
             batch = [];
             batchTokens = 0;
         }
-        batch.push(msg);
+        batch.push(...unit);
         batchTokens += size;
     }
     if (batch.length > 0) batches.push(batch);

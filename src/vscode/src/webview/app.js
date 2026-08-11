@@ -35,6 +35,8 @@ questionPicked: [],
 pendingPlan: null,
 planSel: 1,
 planEditing: false,
+planCollapsed: false, // 计划正文折叠态（点击标题切换）
+replaying: false, // 回放中：抑制逐条滚动，replayDone 一次性落底
 sessions: [],
 showTodos: false,
 todos: [],
@@ -103,10 +105,22 @@ turnHeaderBySeq: new Map(),
     return el.scrollHeight - el.scrollTop - el.clientHeight < 100;
   }
 
-  function scrollToBottom() {
+  function scrollToBottom(instant = false) {
     const el = messagesEl();
-    el.scrollTop = el.scrollHeight;
+    if (instant) {
+      // 瞬时跳底：临时关 CSS smooth，避免回放落底变成可见的平滑滚动动画
+      const prev = el.style.scrollBehavior;
+      el.style.scrollBehavior = "auto";
+      el.scrollTop = el.scrollHeight;
+      el.style.scrollBehavior = prev;
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
   }
+
+  // 长 assistant 文本（实现方案/计划等）可折叠——实时与历史回放一致，不依赖后端标记
+  const isLongAssistant = (t) => { const s = t || ""; return s.split("\n").length > 5 || s.length > 300; };
+  const firstLine = (t) => truncate((String(t || "").split("\n").map((x) => x.trim()).find(Boolean)) || "(内容)", 60);
 
   function buildRowEl(row) {
     const wrap = document.createElement("div");
@@ -120,7 +134,19 @@ turnHeaderBySeq: new Map(),
       }
       case "assistant": {
         const html = mdToHtml(row.text);
-        wrap.innerHTML = `<div class="assistant-body">${html}${row.streaming ? '<span class="cursor">▊</span>' : ""}</div>`;
+        if (!row.streaming && isLongAssistant(row.text)) {
+          // 长回复（计划/方案）默认展开，点头部折叠——历史回放同样可折
+          const collapsed = !!row.collapsed;
+          wrap.innerHTML =
+            `<div class="assistant-head" title="点击折叠/展开"><span class="assistant-caret">${collapsed ? "▸" : "▾"}</span>${escapeHtml(firstLine(row.text))}</div>` +
+            `<div class="assistant-content" style="${collapsed ? "display:none" : ""}">${html}</div>`;
+          wrap.querySelector(".assistant-head")?.addEventListener("click", () => {
+            row.collapsed = !row.collapsed;
+            rebuildRow(row);
+          });
+        } else {
+          wrap.innerHTML = `<div class="assistant-body">${html}${row.streaming ? '<span class="cursor">▊</span>' : ""}</div>`;
+        }
         break;
       }
       case "thinking": {
@@ -254,7 +280,7 @@ case "info":
       wrap.style.display = "none";
     }
     messagesEl().appendChild(wrap);
-    if (nearBottom()) scrollToBottom();
+    if (!state.replaying && nearBottom()) scrollToBottom(); // 回放中不逐条跟随，replayDone 统一落底
     updateEmptyState();
   }
 
@@ -263,7 +289,7 @@ case "info":
     if (!row) return;
     Object.assign(row, patch);
     rebuildRow(row);
-    if (nearBottom()) scrollToBottom();
+    if (!state.replaying && nearBottom()) scrollToBottom();
   }
 
   function closeStreaming() {
@@ -475,7 +501,8 @@ switch (evt.type) {
       case "replayDone":
         // ★ 回放结束（host 经 sink 包成 evt 发来，故在此处理而非 onMessage）：所有历史行已入 DOM，
         //   强制滚到底展示最新对话。rAF 等一帧布局再量 scrollHeight，避免异步渲染/图片高度未定导致量到旧值。
-        requestAnimationFrame(() => scrollToBottom());
+        state.replaying = false; // 关闭回放抑制
+        requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom(true)));
         break;
       case "todo.update": {
         state.todos = Array.isArray(evt.todos) ? evt.todos : [];
@@ -548,6 +575,7 @@ switch (evt.type) {
         state.pendingPlan = { plan: String(msg.plan ?? "") };
         state.planSel = 1;
         state.planEditing = false;
+        state.planCollapsed = false; // 每条新计划默认展开
         renderPlan();
         break;
       case "sessions":
@@ -813,6 +841,7 @@ el.textContent = "⚠️ " + msg;
     }
     const plan = state.pendingPlan.plan;
     const editing = state.planEditing;
+    const collapsed = state.planCollapsed; // 折叠态（编辑态正文为空，折叠无视觉差异）
     const sel = state.planSel ?? 1;
     const opts = [
       { d: "acceptAuto", cls: "ok", label: "⚡ 接受并自动执行" },
@@ -823,14 +852,21 @@ el.textContent = "⚠️ " + msg;
     const buttons = opts.map((o, i) =>
       `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
     ).join("");
+    const hideText = editing || collapsed; // 编辑态正文为空 / 折叠态用户收起 —— 都不占位，把空间让给 textarea
     anchor.innerHTML = `
       <div class="modal plan">
-        <div class="modal-title">✅ 实现方案（计划模式）</div>
-        <div class="modal-detail plan-text">${editing ? "" : mdToHtml(plan)}</div>
+        <div class="modal-title plan-toggle" title="点击折叠/展开">
+          <span class="plan-caret">${collapsed ? "▶" : "▼"}</span>✅ 实现方案（计划模式）${collapsed ? `<span class="plan-collapsed-hint">（已折叠，点击展开）</span>` : ""}
+        </div>
+        <div class="modal-detail plan-text" style="${hideText ? "display:none" : ""}">${editing ? "" : mdToHtml(plan)}</div>
         <textarea id="plan-edit" spellcheck="false" style="${editing ? "" : "display:none"}">${escapeHtml(plan)}</textarea>
         <div class="modal-actions plan-actions">${buttons}</div>
-        <div class="modal-hint">${editing ? "Ctrl+Enter 按编辑后方案执行 · Esc 退出编辑" : "↑↓ 选择 · Enter 确认 · Esc 拒绝"}</div>
+        <div class="modal-hint">${editing ? "Ctrl+Enter 按编辑后方案执行 · Esc 退出编辑" : "↑↓ 选择 · Enter 确认 · Esc 拒绝 · 点击标题折叠"}</div>
       </div>`;
+    anchor.querySelector(".plan-toggle")?.addEventListener("click", () => {
+      state.planCollapsed = !state.planCollapsed;
+      renderPlan();
+    });
     anchor.querySelectorAll(".plan-actions .btn").forEach((b) => {
       b.addEventListener("click", () => applyPlanDecision(b.dataset.d));
     });
@@ -987,6 +1023,7 @@ if (e.target.closest(".session-rename, .session-delete")) return;
 const s = filtered[Number(el.dataset.i)];
 if (!s) return;
 vscode.postMessage({ type: "loadSession", id: s.sessionId });
+state.replaying = true; // 抑制回放期间逐条滚动，replayDone 一次性落底
 closeSessionsPanel();
 });
 });
