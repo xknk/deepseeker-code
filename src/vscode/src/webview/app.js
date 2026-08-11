@@ -28,8 +28,13 @@ thinkingLevel: "high",
 locale: "zh",
 model: "",
 pendingApproval: null,
+approvalSel: 0,
 pendingQuestion: null,
+questionSel: 0,
+questionPicked: [],
 pendingPlan: null,
+planSel: 1,
+planEditing: false,
 sessions: [],
 showTodos: false,
 todos: [],
@@ -441,6 +446,7 @@ switch (evt.type) {
       }
       case "approval_request": {
         closeStreaming();
+        state.approvalSel = 0;
         state.pendingApproval = {
           sessionId: String(evt.sessionId ?? ""),
           toolsId: String(evt.toolsId ?? ""),
@@ -491,10 +497,14 @@ switch (evt.type) {
         break;
       case "question":
         state.pendingQuestion = msg.req || {};
+        state.questionSel = 0;
+        state.questionPicked = [];
         renderQuestion();
         break;
       case "plan":
         state.pendingPlan = { plan: String(msg.plan ?? "") };
+        state.planSel = 1;
+        state.planEditing = false;
         renderPlan();
         break;
       case "sessions":
@@ -539,6 +549,37 @@ el.textContent = "⚠️ " + msg;
 }
 
   // ———————— 审批条 ————————
+  const APPROVAL_DECISIONS = ["allow-once", "allow-always", "deny"];
+  let approvalKeydownBound = false;
+  /** 注册一次审批键盘导航（↑↓ 切换 / Enter 确认 / Esc 拒绝），首次渲染审批条时绑定。 */
+  function bindApprovalKeydown() {
+    if (approvalKeydownBound) return;
+    approvalKeydownBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (!state.pendingApproval) return;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const n = APPROVAL_DECISIONS.length;
+        state.approvalSel = e.key === "ArrowUp"
+          ? ((state.approvalSel ?? 0) <= 0 ? n - 1 : (state.approvalSel ?? 0) - 1)
+          : ((state.approvalSel ?? 0) + 1) % n;
+        renderApproval();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        sendApproval(APPROVAL_DECISIONS[state.approvalSel ?? 0]);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        sendApproval("deny");
+      }
+    });
+  }
+  function sendApproval(decision) {
+    const p = state.pendingApproval;
+    if (!p) return;
+    vscode.postMessage({ type: "approval", sessionId: p.sessionId, toolsId: p.toolsId, decision });
+    state.pendingApproval = null;
+    renderApproval();
+  }
   function renderApproval() {
     const anchor = $("#approval-anchor");
     if (!state.pendingApproval) {
@@ -546,26 +587,90 @@ el.textContent = "⚠️ " + msg;
       return;
     }
     const p = state.pendingApproval;
+    const sel = state.approvalSel ?? 0;
+    const opts = [
+      { d: "allow-once", cls: "ok", label: "✅ 允许本次" },
+      { d: "allow-always", cls: "warn", label: "♻️ 总是允许" },
+      { d: "deny", cls: "danger", label: "🚫 拒绝" },
+    ];
+    const buttons = opts.map((o, i) =>
+      `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
+    ).join("");
     anchor.innerHTML = `
       <div class="modal approval">
         <div class="modal-title">🔐 操作审批 · ${escapeHtml(p.toolName)}</div>
         <pre class="modal-detail">${escapeHtml(p.detail || "(无说明)")}</pre>
-        <div class="modal-actions">
-          <button class="btn ok" data-d="allow-once">✅ 允许本次</button>
-          <button class="btn warn" data-d="allow-always">♻️ 总是允许</button>
-          <button class="btn danger" data-d="deny">🚫 拒绝</button>
-        </div>
+        <div class="modal-actions">${buttons}</div>
+        <div class="modal-hint">↑↓ 选择 · Enter 确认 · Esc 拒绝</div>
       </div>`;
     anchor.querySelectorAll(".modal-actions .btn").forEach((b) => {
-      b.addEventListener("click", () => {
-        vscode.postMessage({ type: "approval", sessionId: p.sessionId, toolsId: p.toolsId, decision: b.dataset.d });
-        state.pendingApproval = null;
-        renderApproval();
-      });
+      b.addEventListener("click", () => sendApproval(b.dataset.d));
     });
+    bindApprovalKeydown();
   }
 
   // ———————— 提问条 ————————
+  // ———————— 提问条（键盘化：↑↓ 移动 · 单选 Enter 提交 · 多选 Space 勾选/Enter 确定 · Esc 取消） ————————
+  function sendQuestion(answer) {
+    vscode.postMessage({ type: "question", answer });
+    state.pendingQuestion = null;
+    state.questionPicked = [];
+    renderQuestion();
+  }
+  function submitQuestionOne(i) {
+    const req = state.pendingQuestion;
+    if (!req) return;
+    const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
+    const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
+    const label = typeof options[i] === "string" ? options[i] : (options[i]?.value ?? options[i]?.label ?? "");
+    // ★ 协议 QuestionAnswer.selected: string[]（host/type.ts）——字段名必须是 selected，
+    //   否则 ask.ts 判定「用户取消」、模型后续放弃结构化提问。
+    sendQuestion({ selected: [values[i] ?? label ?? ""] });
+  }
+  function submitQuestionMulti() {
+    const req = state.pendingQuestion;
+    if (!req) return;
+    const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
+    const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
+    sendQuestion({ selected: state.questionPicked.map((i) => values[i] ?? String(options[i] ?? "")) });
+  }
+  function toggleQuestionPick(i) {
+    const idx = state.questionPicked.indexOf(i);
+    if (idx >= 0) state.questionPicked.splice(idx, 1);
+    else state.questionPicked.push(i);
+    renderQuestion();
+  }
+  let questionKeydownBound = false;
+  /** 注册一次提问键盘导航：↑↓ 移动高亮、Space 多选勾选、Enter 提交、Esc 取消（空 selected）。 */
+  function bindQuestionKeydown() {
+    if (questionKeydownBound) return;
+    questionKeydownBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (!state.pendingQuestion) return;
+      const req = state.pendingQuestion;
+      const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
+      const multi = !!(req.multiSelect ?? req.multiple ?? false);
+      const n = options.length || 1;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        state.questionSel = e.key === "ArrowUp"
+          ? (state.questionSel <= 0 ? n - 1 : state.questionSel - 1)
+          : (state.questionSel + 1) % n;
+        renderQuestion();
+      } else if (e.key === " " && multi) {
+        e.preventDefault();
+        toggleQuestionPick(state.questionSel);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (multi) submitQuestionMulti();
+        else submitQuestionOne(state.questionSel);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        // 空 selected → ask.ts 判定「用户取消」，模型按默认继续，不阻断。
+        sendQuestion({ selected: [] });
+      }
+    });
+  }
   function renderQuestion() {
     const anchor = $("#approval-anchor");
     if (!state.pendingQuestion) {
@@ -576,52 +681,87 @@ el.textContent = "⚠️ " + msg;
     const prompt = String(req.prompt ?? req.question ?? req.message ?? "请选择：");
     const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
     const multi = !!(req.multiSelect ?? req.multiple ?? false);
-    const selected = new Set();
+    const sel = Math.min(state.questionSel ?? 0, (options.length || 1) - 1);
     anchor.innerHTML = `
       <div class="modal question">
         <div class="modal-title">❓ 请选择</div>
         <div class="modal-detail q-prompt">${escapeHtml(prompt)}</div>
         <div class="modal-options"></div>
-        <div class="modal-actions"><button class="btn ok" id="q-ok">确定</button></div>
+        <div class="modal-actions"><button class="btn ${multi ? "ok" : "info"}" id="q-ok">${multi ? "✅ 确定" : "✋ 取消"}</button></div>
+        <div class="modal-hint">${multi ? "↑↓ 选择 · Space 勾选 · Enter 确定 · Esc 取消" : "↑↓ 选择 · Enter 确认 · Esc 取消"}</div>
       </div>`;
     const optBox = anchor.querySelector(".modal-options");
     options.forEach((opt, i) => {
       const label = typeof opt === "string" ? opt : String(opt.label ?? opt.title ?? `选项 ${i + 1}`);
       const desc = typeof opt === "object" ? opt.description : undefined;
+      const picked = multi && state.questionPicked.includes(i);
       const btn = document.createElement("button");
-      btn.className = "btn opt";
-      btn.innerHTML = `${escapeHtml(label)}${desc ? `<span class="opt-desc">${escapeHtml(desc)}</span>` : ""}`;
+      btn.className = ["btn", "opt", i === sel && "selected", picked && "picked"].filter(Boolean).join(" ");
+      const mark = multi ? (picked ? "☑ " : "☐ ") : "";
+      btn.innerHTML = `${mark}${escapeHtml(label)}${desc ? `<span class="opt-desc">${escapeHtml(desc)}</span>` : ""}`;
       btn.addEventListener("click", () => {
-        if (multi) {
-          if (selected.has(i)) {
-            selected.delete(i);
-            btn.classList.remove("picked");
-          } else {
-            selected.add(i);
-            btn.classList.add("picked");
-          }
-        } else {
-          const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
-          // ★ 协议 QuestionAnswer.selected: string[]（host/type.ts）——单选回传长度 1 的 label 数组。
-          //   字段名是 selected 而非 values/answer，否则 ask.ts 判定「用户取消」、模型后续放弃结构化提问。
-          vscode.postMessage({ type: "question", answer: { selected: [values[i] ?? label] } });
-          state.pendingQuestion = null;
-          renderQuestion();
-        }
+        if (multi) toggleQuestionPick(i);
+        else submitQuestionOne(i);
       });
       optBox.appendChild(btn);
     });
     anchor.querySelector("#q-ok")?.addEventListener("click", () => {
-      const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
-      const picked = [...selected].map((i) => values[i] ?? String(options[i] ?? ""));
-      // ★ 协议 QuestionAnswer.selected: string[]——多选回传全部已选项 label 数组。
-      vscode.postMessage({ type: "question", answer: { selected: picked } });
-      state.pendingQuestion = null;
-      renderQuestion();
+      // 多选 = 确定（提交已选）；单选 = 取消（空 selected，ask.ts 判定用户取消）。
+      if (multi) submitQuestionMulti();
+      else sendQuestion({ selected: [] });
     });
+    bindQuestionKeydown();
   }
 
   // ———————— 计划方案条 ————————
+  // ———————— 计划方案条（键盘化：↑↓ 选择 · Enter 确认 · Esc 拒绝 · 编辑态 Ctrl+Enter 提交） ————————
+  const PLAN_DECISIONS = ["acceptAuto", "accept", "edit", "reject"];
+  function sendPlan(payload) {
+    vscode.postMessage({ type: "plan", ...payload });
+    state.pendingPlan = null;
+    state.planEditing = false;
+    renderPlan();
+  }
+  function applyPlanDecision(d) {
+    if (d === "edit") {
+      // 进入编辑态：展开 textarea 接管键盘（document keydown 让位），Ctrl+Enter 提交、Esc 退出。
+      state.planEditing = true;
+      renderPlan();
+      $("#plan-edit")?.focus();
+      return;
+    }
+    if (d === "acceptEdited") {
+      const edited = $("#plan-edit")?.value ?? state.pendingPlan?.plan ?? "";
+      sendPlan({ decision: "acceptEdited", plan: edited });
+      return;
+    }
+    sendPlan({ decision: d });
+  }
+  let planKeydownBound = false;
+  /** 注册一次计划键盘导航：↑↓ 移动、Enter 触发选中项、Esc 拒绝；编辑态让位 textarea。 */
+  function bindPlanKeydown() {
+    if (planKeydownBound) return;
+    planKeydownBound = true;
+    document.addEventListener("keydown", (e) => {
+      const tag = String(e.target?.tagName ?? "").toLowerCase();
+      if (tag === "textarea" || tag === "input") return;  // 编辑态 textarea 按键不拦截（Ctrl+Enter/Esc 由其自身处理，避免冒泡误触发 reject）
+      if (!state.pendingPlan || state.planEditing) return;
+      const n = PLAN_DECISIONS.length;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        state.planSel = e.key === "ArrowUp"
+          ? (state.planSel <= 0 ? n - 1 : state.planSel - 1)
+          : (state.planSel + 1) % n;
+        renderPlan();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        applyPlanDecision(PLAN_DECISIONS[state.planSel]);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        sendPlan({ decision: "reject" });
+      }
+    });
+  }
   function renderPlan() {
     const anchor = $("#approval-anchor");
     if (!state.pendingPlan) {
@@ -629,43 +769,53 @@ el.textContent = "⚠️ " + msg;
       return;
     }
     const plan = state.pendingPlan.plan;
+    const editing = state.planEditing;
+    const sel = state.planSel ?? 1;
+    const opts = [
+      { d: "acceptAuto", cls: "ok", label: "⚡ 接受并自动执行" },
+      { d: "accept", cls: "warn", label: "接受并逐步审批" },
+      { d: editing ? "acceptEdited" : "edit", cls: "info", label: editing ? "✔️ 按编辑后方案执行" : "✏️ 编辑" },
+      { d: "reject", cls: "danger", label: "拒绝" },
+    ];
+    const buttons = opts.map((o, i) =>
+      `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
+    ).join("");
     anchor.innerHTML = `
       <div class="modal plan">
         <div class="modal-title">✅ 实现方案（计划模式）</div>
-        <div class="modal-detail plan-text">${mdToHtml(plan)}</div>
-        <textarea id="plan-edit" style="display:none" spellcheck="false"></textarea>
-        <div class="modal-actions plan-actions">
-          <button class="btn ok" data-d="acceptAuto">⚡ 接受并自动执行</button>
-          <button class="btn warn" data-d="accept">接受并逐步审批</button>
-          <button class="btn info" data-d="edit">✏️ 编辑</button>
-          <button class="btn danger" data-d="reject">拒绝</button>
-        </div>
+        <div class="modal-detail plan-text">${editing ? "" : mdToHtml(plan)}</div>
+        <textarea id="plan-edit" spellcheck="false" style="${editing ? "" : "display:none"}">${escapeHtml(plan)}</textarea>
+        <div class="modal-actions plan-actions">${buttons}</div>
+        <div class="modal-hint">${editing ? "Ctrl+Enter 按编辑后方案执行 · Esc 退出编辑" : "↑↓ 选择 · Enter 确认 · Esc 拒绝"}</div>
       </div>`;
-    const editBox = anchor.querySelector("#plan-edit");
     anchor.querySelectorAll(".plan-actions .btn").forEach((b) => {
-      b.addEventListener("click", () => {
-        const d = b.dataset.d;
-        if (d === "edit") {
-          editBox.style.display = "";
-          editBox.value = plan;
-          editBox.focus();
-          b.textContent = "✔️ 按编辑后方案执行";
-          b.dataset.d = "acceptEdited";
-          return;
-        }
-        if (d === "acceptEdited") {
-          vscode.postMessage({ type: "plan", decision: "acceptEdited", plan: editBox.value });
-        } else {
-          vscode.postMessage({ type: "plan", decision: d });
-        }
-        state.pendingPlan = null;
-        renderPlan();
-      });
+      b.addEventListener("click", () => applyPlanDecision(b.dataset.d));
     });
+    if (editing) {
+      const editBox = anchor.querySelector("#plan-edit");
+      // 编辑态：textarea content 已是 plan（.value 经实体解码回原文）；Enter 换行不提交，
+      //   Ctrl+Enter 才提交编辑后方案，Esc 退出编辑态回导航。
+      editBox?.focus();
+      editBox?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          applyPlanDecision("acceptEdited");
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          state.planEditing = false;
+          renderPlan();
+        }
+      });
+    }
+    bindPlanKeydown();
   }
 
   // ———————— 历史会话面板（终端风格：搜索 + 单行列表） ————————
 let sessionsFilter = "";
+// 会话行 inline 操作态（重命名编辑 / 删除二次确认）——模块级，跨 renderSessionsPanel 重绘保持。
+let editingSessionId = null;
+let confirmingDeleteId = null;
+let confirmDeleteTimer = null;
 
 function buildSessionsPanel() {
 if ($("#sessions-panel")) return;
@@ -725,32 +875,135 @@ function closeSessionsPanel() {
 const p = $("#sessions-panel");
 if (p) p.style.display = "none";
 sessionsFilter = "";
+// 关闭面板时取消任何进行中的编辑/确认态，避免再次打开面板时残留。
+editingSessionId = null;
+confirmingDeleteId = null;
+clearTimeout(confirmDeleteTimer);
 }
 
+function dedupBySessionId(arr) {
+const best = new Map();
+for (const s of arr) {
+const id = s.sessionId;
+if (!id) continue;
+const prev = best.get(id);
+if (!prev || String(s.updatedAt ?? "") > String(prev.updatedAt ?? "")) best.set(id, s);
+}
+return [...best.values()];
+}
 function renderSessionsPanel() {
 const panel = $("#sessions-panel");
 if (!panel || panel.style.display === "none") return;
-const list = state.sessions;
+const list = dedupBySessionId(state.sessions);
 const q = sessionsFilter;
-const filtered = q ? list.filter((s) => String(s.preview || "").toLowerCase().includes(q)) : list;
+const filtered = q ? list.filter((s) => String(s.title || s.preview || "").toLowerCase().includes(q)) : list;
 const box = $("#sessions-list");
 if (!filtered.length) {
 box.innerHTML = `<div class="sessions-empty">${q ? "无匹配会话" : "暂无历史会话"}</div>`;
 return;
 }
-box.innerHTML = filtered.map((s, i) =>
-`<div class="session-row" data-i="${i}">
-<span class="session-title">${escapeHtml(s.preview || "(空会话)")}</span>
-<span class="session-tools"><span class="codicon codicon-chevron-right"></span></span>
+box.innerHTML = filtered.map((s, i) => renderSessionRow(s, i)).join("");
+bindSessionRows(filtered);
+}
+
+/** 单行渲染：普通态 / 重命名编辑态 / 删除确认态三选一。 */
+function renderSessionRow(s, i) {
+const title = s.title || s.preview || "(空会话)";
+if (editingSessionId === s.sessionId) {
+return `<div class="session-row editing" data-i="${i}">
+<input class="session-rename-input" data-i="${i}" value="${escapeHtml(s.title || s.preview || "")}" spellcheck="false"/>
+<span class="session-meta">Enter 确认 · Esc 取消</span>
+</div>`;
+}
+if (confirmingDeleteId === s.sessionId) {
+return `<div class="session-row confirming" data-i="${i}">
+<span class="session-title">🗑️ 确认删除「${escapeHtml(title)}」？</span>
+<span class="session-tools">
+<button class="session-del-ok" data-i="${i}">确认删除</button>
+<button class="session-del-cancel" data-i="${i}">取消</button>
+</span>
+</div>`;
+}
+return `<div class="session-row" data-i="${i}">
+<span class="session-title">${escapeHtml(title)}</span>
+<span class="session-tools">
+<span class="codicon codicon-edit session-rename" data-i="${i}" title="重命名"></span>
+<span class="codicon codicon-trash session-delete" data-i="${i}" title="删除"></span>
+</span>
 <span class="session-meta">${escapeHtml(relTime(s.updatedAt))} · ${s.messageCount} 条</span>
-</div>`
-).join("");
-box.querySelectorAll(".session-row").forEach((el) => {
-el.addEventListener("click", () => {
+</div>`;
+}
+
+/** 绑定行交互：点击行加载会话 / ✏️ 重命名 / 🗑️ 删除 / 编辑键盘 / 确认按钮。 */
+function bindSessionRows(filtered) {
+const box = $("#sessions-list");
+// 普通行：点击 = 加载该会话（操作按钮 stopPropagation，不触发行加载）
+box.querySelectorAll(".session-row:not(.editing):not(.confirming)").forEach((el) => {
+el.addEventListener("click", (e) => {
+if (e.target.closest(".session-rename, .session-delete")) return;
 const s = filtered[Number(el.dataset.i)];
 if (!s) return;
 vscode.postMessage({ type: "loadSession", id: s.sessionId });
 closeSessionsPanel();
+});
+});
+box.querySelectorAll(".session-rename").forEach((el) => {
+el.addEventListener("click", (e) => {
+e.stopPropagation();
+const s = filtered[Number(el.dataset.i)];
+if (!s) return;
+editingSessionId = s.sessionId;
+renderSessionsPanel();
+const inp = box.querySelector(".session-rename-input");
+if (inp) { inp.focus(); inp.select(); }
+});
+});
+box.querySelectorAll(".session-delete").forEach((el) => {
+el.addEventListener("click", (e) => {
+e.stopPropagation();
+const s = filtered[Number(el.dataset.i)];
+if (!s) return;
+confirmingDeleteId = s.sessionId;
+renderSessionsPanel();
+clearTimeout(confirmDeleteTimer);
+confirmDeleteTimer = setTimeout(() => {
+if (confirmingDeleteId === s.sessionId) { confirmingDeleteId = null; renderSessionsPanel(); }
+}, 4000);
+});
+});
+const renameInput = box.querySelector(".session-rename-input");
+if (renameInput) {
+const commitRename = () => {
+const s = filtered[Number(renameInput.dataset.i)];
+const val = String(renameInput.value ?? "").trim();
+if (s && val && editingSessionId === s.sessionId) {
+vscode.postMessage({ type: "renameSession", id: s.sessionId, title: val });
+}
+editingSessionId = null;
+renderSessionsPanel();
+};
+renameInput.addEventListener("keydown", (e) => {
+if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+else if (e.key === "Escape") { e.preventDefault(); editingSessionId = null; renderSessionsPanel(); }
+});
+renameInput.addEventListener("blur", commitRename);
+}
+box.querySelectorAll(".session-del-ok").forEach((el) => {
+el.addEventListener("click", (e) => {
+e.stopPropagation();
+const s = filtered[Number(el.dataset.i)];
+clearTimeout(confirmDeleteTimer);
+confirmingDeleteId = null;
+if (s) vscode.postMessage({ type: "deleteSession", id: s.sessionId });
+// 列表刷新由后端 sendSessions 推送触发；先清确认态防重复点击。
+});
+});
+box.querySelectorAll(".session-del-cancel").forEach((el) => {
+el.addEventListener("click", (e) => {
+e.stopPropagation();
+clearTimeout(confirmDeleteTimer);
+confirmingDeleteId = null;
+renderSessionsPanel();
 });
 });
 }

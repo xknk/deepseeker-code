@@ -10,7 +10,7 @@
  *  - 计划两阶段：plan.proposed 存方案 → runOnce 返回后弹方案条 → accept 后带最终方案重跑实现轮。
  */
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
-import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/session/store.ts";
+import { getOrCreateSessionId, listSessions, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
@@ -30,6 +30,9 @@ export interface ChatHostCallbacks {
   onPlan: (plan: string) => void;
   /** 会话重置（新会话/切换历史）→ UI 清屏。 */
   onSessionReset: () => void;
+  /** 持久化活动会话 id（workspaceState）：重载后恢复，杜绝重载新建碎片 session。 */
+  getPersistedSessionId?: () => string | undefined;
+  setPersistedSessionId?: (id: string | null) => void;
 }
 
 /** 计划审批决策（与 CLI PlanResolution 同构）。 */
@@ -123,8 +126,15 @@ export class ChatHost {
   private enterPlanReason: string | null = null;
   private pendingQuestion: { resolve: (a: QuestionAnswer) => void } | null = null;
   private pendingPlan: { resolve: (r: PlanResolution) => void } | null = null;
+  /** 重载恢复来的会话待回放（webview ready 后 replayIfRestored 消费一次即清）。 */
+  private needsReplay = false;
 
-  constructor(private callbacks: ChatHostCallbacks) {}
+  constructor(private callbacks: ChatHostCallbacks) {
+    // ★ 重载恢复：从 workspaceState 取回上次活动会话 id，避免重载后新建碎片 session；
+    //   needsReplay 标记「恢复来的会话，webview ready 后回放历史」实现无缝续接。
+    const persisted = callbacks.getPersistedSessionId?.();
+    if (persisted) { this.sessionId = persisted; this.needsReplay = true; }
+  }
 
   get isBusy(): boolean {
     return this.busy;
@@ -222,7 +232,7 @@ export class ChatHost {
     const text = content.trim();
     if (!text || this.busy) return;
     if (this.sessionId == null) {
-      this.sessionId = await getOrCreateSessionId(undefined);
+      this.setSessionId(await getOrCreateSessionId(undefined));
     }
     this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}` });
     if (this.planMode) {
@@ -258,13 +268,13 @@ export class ChatHost {
   /** 新会话：id 置空 + UI 清屏（下次 submit 生成新会话）。 */
   async newSession(): Promise<void> {
     if (this.busy) return;
-    this.sessionId = null;
+    this.setSessionId(null);
     this.callbacks.onSessionReset();
   }
 
   /** 载入历史会话续接：切换 id + 回放 transcript。 */
   async loadSession(id: string): Promise<void> {
-    this.sessionId = id;
+    this.setSessionId(id);
     this.callbacks.onSessionReset();
     try {
       const msgs = (await readMessages(id)) as unknown as Array<Record<string, unknown>>;
@@ -278,9 +288,36 @@ export class ChatHost {
     this.callbacks.sink({ type: "replayDone" });
   }
 
+  /** 更新活动会话 id 并持久化（重载后可恢复，杜绝碎片化新会话）。 */
+  private setSessionId(id: string | null): void {
+    this.sessionId = id;
+    this.callbacks.setPersistedSessionId?.(id);
+  }
+
+  /** webview ready 后调用：若 sessionId 是重载恢复来的，回放历史实现无缝续接（仅一次）。 */
+  async replayIfRestored(): Promise<void> {
+    if (!this.needsReplay) return;
+    this.needsReplay = false;
+    if (this.sessionId) await this.loadSession(this.sessionId);
+  }
+
   /** 枚举本工作区历史会话（供 UI 会话选择器）。 */
   async listSessions(): Promise<SessionSummary[]> {
     return listSessions();
+  }
+
+  /** 重命名会话：写 state.title（不动 sessionId/文件夹，transcript 路径稳定）。 */
+  async renameSession(id: string, title: string): Promise<void> {
+    await persistRenameSession(id, title);
+  }
+
+  /** 删除会话：递归删文件夹；若删的正是当前活动会话则置空 + 清屏，避免下次 submit 复活同 id 空会话。 */
+  async deleteSession(id: string): Promise<void> {
+    await persistDeleteSession(id);
+    if (this.sessionId === id) {
+      this.setSessionId(null);
+      this.callbacks.onSessionReset();
+    }
   }
 
   // —— 决策回传（panel → host） ——

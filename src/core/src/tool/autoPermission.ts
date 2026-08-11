@@ -3,16 +3,16 @@
  * @description 工具调用的分类器审批封装：决定放行 / 硬拒 / 转人工。
  *
  *  两档（runAgent processToolCall 在 checkPermission 之后、requestApproval 之前调用 runAutoCheck）：
- *   - default（aggressive=false）：文件增删改移（edit/write/create/delete_path/move_file）进分类器——高频。
- *     edit/write/create/delete 有 undo 备份兜底（backupDelete 整树快照 + 失败阻断写入）；move_file 虽无 undo，
- *     但走双路径围栏（source+destination 均须在工作区内）+ 敏感文件 deny，爆炸半径小于销毁（可手动移回）。
- *   - /auto（aggressive=true）：额外覆盖命令/网络/后台/MCP/git_commit。这些无 undo 兜底、且是 prompt injection
- *     重灾区，故仅作显式 opt-in；并加命令 deny 清单对灾难性命令硬拒兜底（分类器是 flash 启发式，非安全边界）。
+ *   - default（aggressive=false）：文件增删改移（edit/write/create/delete_path/move_file）+ 命令执行
+ *     （run_command/run_in_background）进分类器——高频。文件类有 undo 备份兜底；命令类在分类器前有 COMMAND_DENY 硬闸
+ *     + 只读免审兜底，分类器只兜「非只读但安全」的构建/检查命令（build/lint/tsc…），safe 免审、risky 转人工。
+ *   - /auto（aggressive=true）：相对 default 再覆盖 web_fetch/web_search、git_commit、MCP（mcp__*）——外向/不可 undo/黑盒，
+ *     prompt injection 重灾区，故仅作显式 opt-in（命令 deny 清单对灾难命令硬拒兜底始终生效，与档位无关）。
  *
  *  分层判定：
- *   1) 范围：default 仅 AUTO_SCOPE；aggressive 额外含 AUTO_AGGRESSIVE_EXTRA + mcp__*。
+ *   1) 范围：default = AUTO_SCOPE + AUTO_DEFAULT_EXTRA（命令）；aggressive 再加 AUTO_AGGRESSIVE_EXTRA + mcp__*。
  *   2) 文件类：工作区围栏（path 不在工作区内→ask）+ 敏感文件 deny 清单（.env/.git/.ssh/密钥→deny）。
- *   3) 命令类（aggressive）：高危命令 deny 清单（rm -rf /、格式化、curl|sh、外传敏感、shutdown…→deny）。
+ *   3) 命令类（default 起即覆盖）：高危命令 deny 清单（rm -rf /、格式化、curl|sh、外传敏感、shutdown…→deny）。
  *   4) 辅助模型分类器：safe→allow；risky/异常/超时→ask（fail-closed，绝不静默放行）。
  *
  *  ★ 安全定位：分类器是「减少打扰的启发式」，非安全边界——既有后盾（checkPermission 规则、guard 审批网关、
@@ -26,8 +26,14 @@ export type AutoVerdict = 'allow' | 'deny' | 'ask';
 
 /** default 档覆盖：工作区内文件增删改移。move_file 虽无 undo，但有双路径围栏 + 可手动移回。 */
 const AUTO_SCOPE = new Set(['edit_file', 'write_file', 'create_file', 'delete_path', 'move_file']);
-/** /auto（aggressive）档额外覆盖：命令/网络/后台/git_commit。MCP 工具（mcp__ 前缀）由 isMcpTool 判定纳入。 */
-const AUTO_AGGRESSIVE_EXTRA = new Set(['run_command', 'run_in_background', 'web_fetch', 'web_search', 'git_commit']);
+/** default 档额外覆盖：命令执行类（一次性 run_command + 常驻 run_in_background）。
+ *  分类器对命令串判 safe/risky——safe 免审减少审批疲劳，risky/异常转人工（fail-closed）。
+ *  ★ 安全不变：COMMAND_DENY 硬闸门 + 只读免审 + checkPermission 规则均在分类器之前/独立执行，
+ *    分类器只是「减少打扰的启发式」，非安全边界。 */
+const AUTO_DEFAULT_EXTRA = new Set(['run_command', 'run_in_background']);
+/** /auto（aggressive）档相对 default 再覆盖：网络外发 / 版本库提交——prompt injection 重灾区或不可 undo，需显式 opt-in。
+ *  MCP 工具（mcp__ 前缀）由 isMcpTool 判定，亦仅 aggressive 档纳入（黑盒，分类器保守判 risky）。 */
+const AUTO_AGGRESSIVE_EXTRA = new Set(['web_fetch', 'web_search', 'git_commit']);
 const isMcpTool = (name: string): boolean => name.startsWith('mcp__');
 
 /**
@@ -191,9 +197,10 @@ const isWithinWorkspace = (p: string, cwd?: string): boolean => {
  * 静默 fail-closed：分类器异常/超时 → ask（绝不静默放行）。
  */
 export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, aggressive = false): Promise<AutoVerdict> => {
-    // 1) 范围：default 仅文件增删改；aggressive 额外含命令/网络/后台/git_commit + MCP
+    // 1) 范围：default = 文件增删改移 + 命令执行（run_command/run_in_background）；
+    //         aggressive 再加网络（web_fetch/web_search）/ git_commit + MCP
     const isFileTool = AUTO_SCOPE.has(name);
-    const inScope = isFileTool || (aggressive && (AUTO_AGGRESSIVE_EXTRA.has(name) || isMcpTool(name)));
+    const inScope = isFileTool || AUTO_DEFAULT_EXTRA.has(name) || (aggressive && (AUTO_AGGRESSIVE_EXTRA.has(name) || isMcpTool(name)));
     if (!inScope) return 'ask';
     // 2) 文件类：工作区围栏 + 敏感文件 deny。move_file 双路径（source+destination），其余单 path
     if (isFileTool) {

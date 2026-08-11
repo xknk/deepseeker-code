@@ -234,8 +234,9 @@ function handleMessage(msg: Record<string, unknown>): void {
   if (!h) return;
   switch (type) {
     case "ready":
-      // 前端就绪：广播一次状态快照
+      // 前端就绪：广播一次状态快照 + 若有重载恢复来的会话则回放历史（无缝续接）
       postState();
+      void h.replayIfRestored();
       break;
     case "submit": {
       const text = String(msg.text ?? "");
@@ -276,6 +277,20 @@ function handleMessage(msg: Record<string, unknown>): void {
       break;
     case "loadSession":
       void h.loadSession(String(msg.id ?? ""));
+      break;
+    case "renameSession":
+      void (async () => {
+        try { await h.renameSession(String(msg.id ?? ""), String(msg.title ?? "")); }
+        catch (e) { void vscode.window.showErrorMessage(`重命名失败：${e instanceof Error ? e.message : String(e)}`); }
+        finally { await sendSessions(); }
+      })();
+      break;
+    case "deleteSession":
+      void (async () => {
+        try { await h.deleteSession(String(msg.id ?? "")); }
+        catch (e) { void vscode.window.showErrorMessage(`删除失败：${e instanceof Error ? e.message : String(e)}`); }
+        finally { await sendSessions(); }
+      })();
       break;
     case "clear":
       void h.newSession();
@@ -382,6 +397,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onSessionReset: () => {
       if (panel) void panel.webview.postMessage({ type: "sessionReset" });
     },
+    // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：重载后恢复，杜绝碎片化新会话。
+    getPersistedSessionId: () => context.workspaceState.get<string | undefined>("deepseekerCode.activeSessionId"),
+    setPersistedSessionId: (id) => { void context.workspaceState.update("deepseekerCode.activeSessionId", id ?? undefined); },
   };
   host = new ChatHost(callbacks);
   const localeCfg = cfg.get<string>("locale");

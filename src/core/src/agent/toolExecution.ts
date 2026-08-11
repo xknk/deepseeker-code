@@ -187,10 +187,11 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
         }
         // ★ 分类器审批（P1-6，2026-08-06 两档）：
-        //   default（permissionMode!=='auto'）：仅文件增删改（edit/write/create/delete_path）跑分类器——高频且均有
-        //     undo 备份兜底（凡改必可回退），默认自动化减少审批疲劳。
-        //   /auto（permissionMode==='auto'）：额外覆盖命令/网络/后台/MCP/git_commit——显式 opt-in 的激进档；这些无 undo
-        //     兜底且是 prompt injection 重灾区，故加 COMMAND_DENY 清单（rm -rf /、curl|sh、外传敏感…）硬拒兜底分类器误判。
+        //   default（permissionMode!=='auto'）：文件增删改 + 命令执行（run_command/run_in_background）跑分类器——高频。
+        //     文件类有 undo 备份兜底；命令类有「只读免审 + COMMAND_DENY 硬闸」在前，分类器只兜非只读的安全命令（build/lint…），
+        //     safe 免审、risky 转人工，减少审批疲劳。
+        //   /auto（permissionMode==='auto'）：相对 default 再覆盖 web_fetch/web_search、git_commit、MCP——显式 opt-in 的激进档；
+        //     外向/不可 undo/黑盒，prompt injection 重灾区。COMMAND_DENY 清单（rm -rf /、curl|sh、外传敏感…）硬拒始终生效。
         //   两档共用：safe→免审放行、risky/异常/超时→转人工、敏感文件/高危命令 deny 清单→硬拒（fail-closed，绝不静默放行）。
         //   想对某项目/工具强制人工：配 permissions.ask（优先级高于分类器）。
         //   优先级：保护路径 > checkPermission 显式规则（上方已判）> deny 清单 > 分类器 > requestApproval 人工。

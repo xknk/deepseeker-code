@@ -254,6 +254,8 @@ export async function setTodos(sessionId: string, todos: Todo[]): Promise<void> 
 /** 历史会话摘要（供 UI 选择器展示）。 */
 export type SessionSummary = {
     sessionId: string;
+    /** 用户自定义名称（重命名写入 state.title）；缺省时 UI 回退到 preview。 */
+    title?: string;
     createAt?: string;
     updatedAt?: string;
     messageCount: number;
@@ -317,6 +319,7 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
         }
         summaries.push({
             sessionId,
+            title: typeof state?.title === "string" ? state.title : undefined,
             createAt: state?.createAt,
             updatedAt,
             messageCount,
@@ -335,4 +338,29 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
 export const getMostRecentSessionId = async (): Promise<string | null> => {
     const list = await listSessions();
     return list.length > 0 ? list[0].sessionId : null;
+};
+
+/**
+ * 重命名会话：把自定义标题写入 <id>.state.json 的 title 字段（不动 sessionId/文件夹名，
+ * 保证 transcript/state 路径稳定）。限长 200 字符防滥用。经会话写锁串行化，不与摘要/todo 写冲突。
+ */
+export const renameSession = async (sessionId: string, title: string): Promise<void> => {
+    assertSafeSessionId(sessionId); // 路径穿越硬守
+    const clean = String(title ?? "").trim().slice(0, 200);
+    return withStoreLock(sessionId, async () => {
+        const store = await readStore(sessionId);
+        store.title = clean;
+        store.updatedAt = new Date().toISOString();
+        await writeStore(sessionId, store);
+    });
+};
+
+/**
+ * 删除会话：递归移除整个会话文件夹（state + transcript + 子 agent 折叠文件）。
+ * 仅 fs.rm 失败时抛错；文件夹不存在（force:true）静默成功。调用方负责在删除活动会话后置空 sessionId。
+ */
+export const deleteSession = async (sessionId: string): Promise<void> => {
+    assertSafeSessionId(sessionId); // 路径穿越硬守——拒绝 '..'/'/' 等非法 id 误删其他目录
+    const dir = getSessionsDirPath(sessionId);
+    await fs.rm(dir, { recursive: true, force: true });
 };

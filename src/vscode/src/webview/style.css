@@ -668,6 +668,21 @@ body {
   background: color-mix(in srgb, var(--error) 12%, transparent);
 }
 
+/* 审批键盘选中态（↑↓ 切换高亮：复用 list-hover 色板 + focus 描边，比纯 hover 更醒目） */
+.btn.selected {
+  border-color: var(--fg-dim);
+  background: var(--vscode-list-hoverBackground, var(--hover));
+  box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--fg-dim));
+}
+
+/* 审批操作提示行 */
+.modal-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+
 /* 提问选项 */
 .modal-options {
   display: flex;
@@ -822,6 +837,58 @@ body {
   color: var(--vscode-descriptionForeground);
   font-size: 11px;
 }
+
+/* 会话行操作图标（✏️ 重命名 / 🗑️ 删除）：随 .session-tools 在行 hover 时浮现 */
+.session-rename, .session-delete {
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+.session-rename:hover { color: var(--fg); background: var(--hover); }
+.session-delete:hover { color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); }
+
+/* 重命名编辑态：input 撑满标题区 */
+.session-row.editing {
+  background: var(--vscode-list-hoverBackground, var(--hover));
+}
+.session-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-input-background, var(--bg-deep));
+  color: var(--vscode-input-foreground, var(--fg));
+  border: 1px solid var(--vscode-focusBorder, var(--fg-dim));
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+/* 删除确认态：警示背景 + 标题标红 + 常显按钮（不依赖行 hover） */
+.session-row.confirming {
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+.session-row.confirming .session-title {
+  color: var(--error);
+  font-weight: 600;
+}
+.session-row.confirming .session-tools { opacity: 1; }
+.session-del-ok, .session-del-cancel {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg);
+  background: transparent;
+}
+.session-del-ok {
+  color: var(--error);
+  border-color: var(--error);
+}
+.session-del-ok:hover { background: color-mix(in srgb, var(--error) 18%, transparent); }
+.session-del-cancel:hover { background: var(--hover); }
 
 .sessions-empty {
   padding: 16px 12px;
