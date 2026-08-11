@@ -7,9 +7,11 @@
  *     此处 DEFAULT_TIMEOUT_MS 仅作未指定时的最终兜底；硬顶 300s，超时 SIGKILL，绝不让 hook 挂死主流程；
  *   - 环境变量净化：仅透传白名单 + 调用方额外 env，不全量透传 process.env（防泄密）；
  *   - stdout/stderr 截断到 ~4KB，避免大输出污染上下文；
- *   - 结构化 JSON 经 stdin 传入，关键字段另同步到 HOOK_* 环境变量（兼顾不读 stdin 的简单脚本）。
+ *   - 结构化 JSON 经 stdin 传入，关键字段另同步到 HOOK_* 环境变量（HOOK_SESSION_ID / HOOK_TOOL_NAME /
+ *     HOOK_PROMPT，工具事件额外 HOOK_FILE_PATH——目标文件绝对路径，供 PostToolUse 格式化直接使用）。
  */
 import { spawn, type ChildProcess } from "child_process";
+import path from "path";
 import { killTree } from "@/tool/registry/background.ts";
 
 // 4KB 的输出截断足够了，防止大模型上下文爆掉，这个不需要动
@@ -68,6 +70,21 @@ const capFieldStrings = (v: any): any => {
 };
 
 /**
+ * 从 hook 上下文提取工具操作的目标文件路径（args.path / args.file_path / args.filePath），resolve 成绝对路径。
+ * 供工具事件的 PostToolUse/PreToolUse 命令直接用 $HOOK_FILE_PATH（如 `npx prettier --write "$HOOK_FILE_PATH"`）。
+ * 无路径字段（非文件类工具）返回 undefined。base 优先 ctx.cwd，回退 WORKSPACE_ROOT/cwd；绝对路径透传。
+ */
+const extractFilePath = (p: any): string | undefined => {
+    if (!p || typeof p !== "object") return undefined;
+    const args = p.args;
+    if (!args || typeof args !== "object") return undefined;
+    const rel = args.path ?? args.file_path ?? args.filePath;
+    if (typeof rel !== "string" || !rel.trim()) return undefined;
+    const base = (typeof p.cwd === "string" && p.cwd) || process.env.WORKSPACE_ROOT || process.cwd();
+    try { return path.resolve(base, rel); } catch { return undefined; }
+};
+
+/**
  * 执行声明式 hook 命令。
  * spawn 失败 / 超时均不抛错（resolve 带错误信息），由调用方按 denyOnNonZero 决策。
  */
@@ -88,6 +105,9 @@ export const executeHookCommand = (input: HookExecInput): Promise<HookExecResult
             if (typeof p.sessionId === "string") childEnv.HOOK_SESSION_ID = p.sessionId;
             if (typeof p.toolName === "string") childEnv.HOOK_TOOL_NAME = p.toolName;
             if (typeof p.prompt === "string") childEnv.HOOK_PROMPT = p.prompt.slice(0, 1024);
+            // ★ 目标文件路径（工具事件）：PostToolUse 格式化等场景直接 $HOOK_FILE_PATH 使用。
+            const fp = extractFilePath(p);
+            if (fp) childEnv.HOOK_FILE_PATH = fp;
         }
 
         let stdout = "";

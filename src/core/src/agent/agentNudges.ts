@@ -27,12 +27,16 @@ const PHANTOM_RETRY_MAX = 2;             // 空响应最多重试次数
 const EARLY_FINAL_FENCE = "⟦DSC:EARLY_FINAL⟧";
 const EARLY_FINAL_TURN_THRESHOLD = 2;    // round ≤ 此值且无完成声明 → 视为过早收尾
 const EARLY_FINAL_MAX = 1;               // 整个 run 最多推 1 次（硬死循环保险）
+const TOOL_DIGEST_FENCE = "⟦DSC:TOOL_DIGEST⟧";
+const TOOL_DIGEST_MAX = 2;               // 「工具消化收尾」守护：刚执行完工具就草草收尾时最多推 2 次
+const TOOL_DIGEST_WINDOW = 2;            // 距上次工具调用 ≤ 此轮数才视为「工具消化期内」
 const PLAN_FIRST_FENCE = "⟦DSC:PLAN_FIRST⟧";
 
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
 const EARLY_FINAL_TEXT = (round: number): string =>
     `你仅进行了 ${round} 轮工具调用就准备收尾，且回答中没有明确的完成声明。请严格自检：用户的每一个子目标是否都已真正落地（所需信息已获取 / 该改的文件已改完 / 已验证通过）？若确实全部完成，请明确回复"已完成"并简述成果；若还有任何未落地的子目标，立即继续调用工具推进，不要用自然语言草率总结收尾。`;
+const TOOL_DIGEST_TEXT = "你刚执行完工具拿到结果，却未基于该结果给出实质回应就准备收尾。请结合工具返回结果继续推进；若结果表明任务尚未完成（如仍在编译/运行、需继续轮询），立即采取下一步行动，不要空手收尾。若确已全部完成，请明确回复「已完成」并简述成果。";
 const NUDGE_TEXT = (round: number): string =>
     `你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
 
@@ -67,7 +71,7 @@ const looksComplete = (text: string): boolean =>
 export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: boolean } = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
-    noteToolCall: () => void;
+    noteToolCall: (round: number) => void;
 } => {
     const firstPrompt = opts.firstPrompt ?? "";
     const planMode = !!opts.planMode;
@@ -75,6 +79,9 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
     let phantomPending: NudgeMsg | null = null;
     let earlyFinalNudges = 0;
     let earlyFinalPending: NudgeMsg | null = null;
+    let toolDigestNudges = 0;
+    let toolDigestPending: NudgeMsg | null = null;
+    let lastToolCallRound = 0;
     let planFirstSent = false;
 
     return {
@@ -84,7 +91,8 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
                 planFirstSent = true;
                 return { role: 'system', content: `${PLAN_FIRST_FENCE}\n${PLAN_FIRST_TEXT}` };
             }
-            // 优先级：phantom（空回复）> early_final（早收尾）> 周期 nudge；前两者一次性消费
+            // 优先级：tool_digest（工具消化收尾）> phantom（空回复）> early_final（早收尾）> 周期 nudge；前三者一次性消费
+            if (toolDigestPending) { const m = toolDigestPending; toolDigestPending = null; return m; }
             if (phantomPending) { const m = phantomPending; phantomPending = null; return m; }
             if (earlyFinalPending) { const m = earlyFinalPending; earlyFinalPending = null; return m; }
             if (round > 1 && round % NUDGE_EVERY === 1) {
@@ -94,6 +102,14 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
         },
         interceptFinal(finalText, round) {
             const text = (finalText || "").trim();
+            // TOOL_DIGEST：刚执行完工具（消化期内）就草草收尾，且无明确完成声明——
+            //   典型如轮询后台任务拿到「仍在编译」就空手收尾、或拿到结果不给总结。任意 round 生效（补 EARLY_FINAL 够不着的长轮询场景）。
+            if (lastToolCallRound > 0 && round - lastToolCallRound <= TOOL_DIGEST_WINDOW
+                && toolDigestNudges < TOOL_DIGEST_MAX && !looksComplete(finalText)) {
+                toolDigestNudges++;
+                toolDigestPending = { role: 'system', content: `${TOOL_DIGEST_FENCE}\n${TOOL_DIGEST_TEXT}` };
+                return true;
+            }
             // PHANTOM：空 content（空包/纯崩溃）
             if (text === "" && phantomRetries < PHANTOM_RETRY_MAX) {
                 phantomRetries++;
@@ -109,9 +125,12 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
             }
             return false;
         },
-        noteToolCall() {
-            // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包，避免长任务被误熔断）
+        noteToolCall(round) {
+            // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包）+ 工具消化预算（下次消化又给新鲜预算）
+            //   + 记录本轮号供 TOOL_DIGEST 判定「消化期内」
             phantomRetries = 0;
+            toolDigestNudges = 0;
+            lastToolCallRound = round;
         },
     };
 };

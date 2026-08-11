@@ -15,7 +15,8 @@
  *  {
  *    "hooks": {
  *      "PreToolUse":   [{ "matcher": "run_command", "command": "./pre.sh", "timeoutMs": 5000 }],
- *      "PostToolUse":  [{ "matcher": "edit_file", "command": "npx prettier --write ${FILE_PATH}" }],
+ *      "PostToolUse":  [{ "matcher": "edit_file", "command": "npx prettier --write \"$HOOK_FILE_PATH\"" }],
+ *                       ↑ $HOOK_FILE_PATH：工具事件的目标文件绝对路径，由 shellExecutor 自动注入（详见 hooks/shellExecutor.ts）。
  *      "UserPromptSubmit": [{ "command": "node ./audit.js", "denyOnNonZero": true }],
  *      "PreToolUse":   [{ "matcher": "edit_file", "type": "http", "url": "https://audit.corp/hook", "denyOnNonZero": true }],
  *      "UserPromptSubmit": [{ "type": "prompt", "text": "本次任务如涉及数据库，务必先确认备份策略。" }]

@@ -120,14 +120,15 @@ export const handleUnifiedChat = async (
     // ★ SYSTEM_PROMPT 已抽取为共享模块（@/agent/systemPrompt.ts），Web/CLI 宿主复用，避免双处维护。
     //   身份段（agent 名 / 模型族）由 activeProvider 注入——厂商中立，换 provider 即换身份（Step 10）。
     //   多根工作区感知：注册了 >1 个项目根时（如前端+后端），把全部根注入系统提示，让 agent 开局就知道
-    //   有多个项目、可用绝对路径或 ../<兄弟目录> 跨项目读写。单根（CLI/单文件夹）不注入，零回归。
+    //   有多个项目、可用绝对路径跨项目读写——无需切换项目。单根（CLI/单文件夹）不注入，零回归。
     let sysPrompt = buildSystemPrompt(activeProvider);
     const roots = getAllowedWorkspaceRoots();
     if (roots.length > 1) {
         let activeReal = getActiveWorkspaceRoot();
         try { activeReal = fs.realpathSync(activeReal); } catch { /* 用原值 */ }
-        const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（当前默认：相对路径与命令基准）" : ""}`);
-        sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n你可在以下项目根中读写文件。跨项目访问用绝对路径，或相对当前默认根的 ../<兄弟目录>:\n${lines.join("\n")}`;
+        const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（默认根：相对路径/命令基准）" : "（可直接读写）"}`);
+        // ★ 点明项目级配置仅主根生效（多根 trustDir/initEngine 二期再放开），免 agent 误用其他根配置。
+        sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n无需切换项目，以下所有根都可直接用绝对路径访问；跨项目用绝对路径或相对默认根的 ../<兄弟目录>:\n${lines.join("\n")}\n注意：项目级配置（.deepseeker-code/）仅在默认根 ${path.basename(activeReal) || activeReal} 生效。`;
     }
     let replyText = "";
     try {

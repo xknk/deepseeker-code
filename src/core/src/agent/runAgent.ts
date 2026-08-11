@@ -210,7 +210,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
             // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
-            nudges.noteToolCall();
+            nudges.noteToolCall(round);
             // 2、重复工具调用熔断（完整签名 3 次 / 后台轮询同任务 4 次）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);

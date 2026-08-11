@@ -23,46 +23,27 @@ let panel: vscode.WebviewPanel | null = null;
 /** 初始化错误（如缺 API Key）；随 state 快照发给 webview 显示提示横幅。 */
 let initError: string | null = null;
 
-/** 当前工作区根；图片上传存盘到此根下的 .deepseeker-code/tmp 供 agent 经 MCP 读取。
- *  ★ 运行期可重定向：多根工作区下，按「活动编辑器所属文件夹」解析（resolveProjectRoot），
- *    openChat/newSession/selectProjectRoot 时若变化则 applyProjectRoot 重设 env + chdir，
- *    core 的文件沙箱（getActiveWorkspaceRoot 实时读 env）随之跟随，无需重载窗口。 */
+/** 主根（相对路径/命令基准 + 图片上传落盘根）。多根工作区下 agent 仍可经绝对路径访问所有 folder
+ *  （沙箱 setAllowedWorkspaceRoots 放行），主根仅作默认锚——「无切换·全可见」模型。
+ *  ★ activate 时一次性确定并持久化（workspaceState），运行期稳定——不再随活动编辑器跳变；
+ *    selectProjectRoot 可显式切换。core 文件沙箱（getActiveWorkspaceRoot 实时读 env）据此跟随。 */
 let workspaceRoot: string | null = null;
 
-/** 最近一次聚焦的文本编辑器所属工作区文件夹。多根工作区下聊天面板聚焦时 activeTextEditor 为空，
- *  resolveProjectRoot 回退到此记忆值，而非无脑 folder[0]——避免把 agent 锁死在 folder[0]。 */
-let lastEditorFolder: string | null = null;
-
 /**
- * 解析 agent 应工作的项目根。优先「活动编辑器所属工作区文件夹」（多根工作区下跟随用户当前聚焦的项目），
+ * 解析主根：优先「活动编辑器所属工作区文件夹」（activate 时若用户正看着某项目，就以其为主根），
  * 回退 folder[0]。返回 null 表示无任何打开的文件夹。
- * ★ 关键：用 getWorkspaceFolder(activeEditor.document.uri) 而非 workspaceFolders[0]，
- *   否则在「dev host 自身仓库(folder0) + 用户项目(folder1)」多根场景会把 agent 锁死在 folder0。
+ * ★ 仅在 activate 初始解析 + selectProjectRoot 用——运行期不再随活动编辑器跳变。
+ *   用 getWorkspaceFolder(activeEditor.document.uri) 而非 workspaceFolders[0]，避免多根下无脑取排序首位。
  */
 const resolveProjectRoot = (): string | null => {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) return null;
-  // 优先「活动编辑器所属文件夹」（多根工作区跟随用户当前聚焦项目）
   const active = vscode.window.activeTextEditor;
   if (active) {
     const wf = vscode.workspace.getWorkspaceFolder(active.document.uri);
     if (wf) return wf.uri.fsPath;
   }
-  // ★ 聊天面板聚焦时 activeTextEditor 为空（面板非文本编辑器）：回退「最近聚焦过的文本编辑器所属文件夹」，
-  //   而非无脑 folder[0]。若该 folder 已被移出工作区则忽略，最终才回退 folder[0]。
-  //   （原回退 folder[0] 会把 agent 锁死在排序首位的文件夹——如 dev host 仓库自身。）
-  if (lastEditorFolder && folders.some((f) => f.uri.fsPath === lastEditorFolder)) {
-    return lastEditorFolder;
-  }
   return folders[0].uri.fsPath;
-};
-
-/** 记忆最近聚焦的文本编辑器所属文件夹（onDidChangeActiveTextEditor 回调；忽略 undefined 编辑器，
- *  故切到聊天面板不会清空记忆）。供 resolveProjectRoot 在面板聚焦时回退。 */
-const rememberEditorFolder = (editor: vscode.TextEditor | undefined): void => {
-  if (!editor) return;
-  const wf = vscode.workspace.getWorkspaceFolder(editor.document.uri);
-  if (wf) lastEditorFolder = wf.uri.fsPath;
 };
 
 /**
@@ -274,10 +255,8 @@ function handleMessage(msg: Record<string, unknown>): void {
     case "submit": {
       const text = String(msg.text ?? "");
       if (!text.trim()) break;
-      // ★ 每次提问按当前活动编辑器所属文件夹重定向项目根（VS Code 版「cd 到项目再敲命令」）：
-      //   你看哪个项目的文件、就在哪个项目里跑。单次提问内稳定；切项目只需切到目标文件再发送。
-      const root = resolveProjectRoot();
-      if (root) applyProjectRoot(root);
+      // ★ 无切换·全可见：不按活动编辑器切根。主根 activate 时定（selectProjectRoot 可显式切换），
+      //   agent 经绝对路径访问所有 folder；切项目无需切编辑器/关对话。
       void h.submit(text);
       break;
     }
@@ -356,15 +335,20 @@ function handleMessage(msg: Record<string, unknown>): void {
 // —— 激活 ——
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  // —— 1. 工作区校验 + 项目根解析（优先活动编辑器所属文件夹，回退 folder[0]）——
+  // —— 1. 工作区校验 + 主根解析（持久化优先，否则按活动编辑器/folder[0] 解析）——
   //  ★ chdir 在此完成（先于 core import）：applyProjectRoot 失败即中止激活。
-  const initialRoot = resolveProjectRoot();
+  //  ★ 主根持久化（workspaceState）：Reload Window 后 activeTextEditor 常为空、会回退 folder[0]，
+  //    致主根漂移、历史对话相对路径与 undo 基准错位。故优先恢复上次主根（且校验仍在工作区内）。
+  const folderPaths = new Set((vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath));
+  const persistedRoot = context.workspaceState.get<string | undefined>("deepseekerCode.activeProjectRoot");
+  const initialRoot = persistedRoot && folderPaths.has(persistedRoot) ? persistedRoot : resolveProjectRoot();
   if (!initialRoot) {
     workspaceRoot = null;
     void vscode.window.showErrorMessage("DeepSeeker-Code：请先打开一个项目文件夹（工作区）再使用。");
     return;
   }
   if (!applyProjectRoot(initialRoot)) return;
+  void context.workspaceState.update("deepseekerCode.activeProjectRoot", initialRoot);
 
   // —— 2. API Key 校验 + 注入（★ 必须在 step 4 动态 import core 之前——core 加载期即把 env 拍成定值）——
   const cfg = vscode.workspace.getConfiguration("deepseekerCode");
@@ -407,13 +391,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidChangeWorkspaceFolders(() => setAllowedWorkspaceRoots(getAllWorkspaceRoots())),
   );
 
-  // ★ 记忆最近聚焦的文本编辑器所属 folder：聊天面板聚焦时 activeTextEditor 为空，resolveProjectRoot
-  //   据此回退到用户真正在工作的项目（而非 folder[0]）。用当前活动编辑器播种。
-  rememberEditorFolder(vscode.window.activeTextEditor);
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(rememberEditorFolder),
-  );
-
   // —— 5. 会话宿主（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace） ——
   const { ChatHost } = await import("./host.js");
   const callbacks: ChatHostCallbacks = {
@@ -433,20 +410,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (localeCfg === "en" || localeCfg === "zh") host?.setLocale(localeCfg);
 
   // —— 6. 命令（主编辑器区 Tab：openChat 创建/聚焦面板） ——
-  //  ★ openChat / newSession：按当前活动编辑器重定向项目根（多根工作区下跟随聚焦项目），
-  //    applyProjectRoot 重设 env+chdir，core 文件沙箱实时跟随。selectProjectRoot 走显式选择器兜底。
+  //  ★ 无切换·全可见：openChat/newSession/submit 不再切根——主根 activate 时定并持久化，运行期稳定；
+  //    agent 经绝对路径访问所有 folder（沙箱放行）。selectProjectRoot 为唯一显式换主根入口。
   context.subscriptions.push(
     vscode.commands.registerCommand("deepseekerCode.openChat", () => {
       if (!host) return;
-      const root = resolveProjectRoot();
-      if (root) applyProjectRoot(root); // 切换/保持一致（不变时 applyProjectRoot 内部短路）
       revealPanel(context);
       postState();
     }),
     vscode.commands.registerCommand("deepseekerCode.newSession", async () => {
       if (!host) return;
-      const root = resolveProjectRoot();
-      if (root) applyProjectRoot(root);
       cleanImageTmp();
       revealPanel(context);
       await host.newSession();
@@ -466,9 +439,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
       if (!picked) return;
       if (applyProjectRoot(picked.description!)) {
+        void context.workspaceState.update("deepseekerCode.activeProjectRoot", picked.description);
         revealPanel(context);
         postState();
-        void vscode.window.showInformationMessage(`DeepSeeker-Code：项目根已切换为 ${picked.label}`);
+        void vscode.window.showInformationMessage(`DeepSeeker-Code：主根已切换为 ${picked.label}`);
       }
     }),
     vscode.commands.registerCommand("deepseekerCode.listSessions", async () => {
