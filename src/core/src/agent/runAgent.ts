@@ -75,12 +75,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //         文案/阈值/触发/预算/死循环保险统一抽到 agentNudges.ts；此处仅持实例 + 薄调用，控制流与提示词解耦。
     //  兜底：MAX_AGENT_ROUNDS 极高（500），仅防失控烧 token 的病理死循环；正常任务不会触及，触及亦 graceful（可"继续"接续）。
     const MAX_AGENT_ROUNDS = 500;
-    const nudges = createNudgeScheduler();
+    // ★ 首轮 PLAN_FIRST nudge 入参：首条 user prompt（仅顶层 agent；subagent 不引导自主进计划模式）+ 当前 planMode。
+    //   looksComplex 命中即在首轮注入「先调 enter_plan_mode 规划」引导，配合 systemPrompt 强提示扭转从不进计划模式的问题。
+    const firstPrompt = (() => {
+        if (depth !== 0) return "";
+        const m = (message as any[]).find((x) => x?.role === "user");
+        return typeof m?.content === "string" ? m.content : "";
+    })();
+    const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode });
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
     const startTime = performance.now();
-    // ★ 重复工具调用熔断器（完整签名 3 次 / 工具名序列 8 次）：跨轮有状态，每轮推理后 check()。
+    // ★ 重复工具调用熔断器（完整签名 3 次 / 后台轮询同任务 4 次）：跨轮有状态，每轮推理后 check()。
     //   从 runAgent 抽出到 repeatBreaker.ts；breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
     const breaker = createRepeatBreaker({ sessionId, depth, llmDecisionSource, startTime, events });
     try {
@@ -110,11 +117,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         output: lastContent,
                     }
                 })
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 顶部检测 signal.aborted`);
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
 
             }
             yield { type: 'round.start', round };
+            console.log(`[DSC-DIAG] ═══ round ${round} 开始 (depth=${depth})`);
             try {
                 // 判断是否需要压缩上下文并触发摘要
                 await ensureFitsWindow(
@@ -131,6 +140,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
 
                 );
             } catch (e) {
+                // ★ 用户主动中止（点清空 / 停止）恰好打断压缩摘要请求：summarize 的 API 请求会抛
+                //   "Request was aborted"。此处优先判 signal.aborted 走安静收尾，避免污染错误日志
+                //   + 向用户显示"（Request was aborted）"误导性文案。
+                if (signal?.aborted) {
+                    yield { type: 'final', text: lastContent || "（已中止）" };
+                    return;
+                }
                 const msg = e instanceof Error ? e.message : String(e);
                 console.error("❌ " + msg);
                 stopReason = 'error';
@@ -150,12 +166,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
                 events, keepRecentUnits, compactRatio, modelWindow,
             });
+            console.log(`[DSC-DIAG] round ${round} 推理结果: ${infResult.kind}`);
             if (infResult.kind === 'aborted') {
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 推理aborted`);
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
                 yield { type: 'final', text: infResult.partialText || lastContent || "（已中止）" };
                 return;
             }
             if (infResult.kind === 'error') {
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 推理error stopReason=error`);
                 stopReason = 'error';
                 yield { type: 'final', text: lastContent || "（发生错误）" };
                 return;
@@ -176,21 +195,27 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             }
 
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
+            const tcCount = assistantMessage.tool_calls?.length ?? 0;
+            console.log(`[DSC-DIAG] round ${round} assistant: tool_calls=${tcCount} contentLen=${typeof assistantMessage.content === 'string' ? assistantMessage.content.length : 0}`);
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
-                if (nudges.interceptFinal(finalText, round)) continue;
+                const intercepted = nudges.interceptFinal(finalText, round);
+                console.log(`[DSC-DIAG] round ${round} 收尾分支: interceptFinal=${intercepted} finalTextLen=${finalText.length}`);
+                if (intercepted) continue;
                 // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
+                console.log(`[DSC-DIAG] round ${round} ═══ FINAL 正常收尾 stopReason=normal`);
                 yield { type: 'final', text: finalText || lastContent || "" };
                 return;
             }
             // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
             nudges.noteToolCall();
-            // 2、重复工具调用熔断（完整签名 3 次 / 工具名序列 8 次）：委托 repeatBreaker。
+            // 2、重复工具调用熔断（完整签名 3 次 / 后台轮询同任务 4 次）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
             if (repeatVerdict.tripped) {
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 重复熔断 repeat`);
                 stopReason = 'repeat';
                 yield { type: 'final', text: repeatVerdict.text };
                 return;
@@ -211,11 +236,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
             //   调度内部异常不自理，上抛至此处外层 catch(toolErr) 兜底 yield final（与原内联实现一致）。
             const scheduleResult: ScheduleResult = yield* scheduleToolCalls(assistantMessage, message, toolCallCtx);
+            console.log(`[DSC-DIAG] round ${round} 工具调度结果: ${scheduleResult.kind}`);
             if (scheduleResult.kind === 'aborted') {
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 工具调度aborted`);
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
             }
             if (scheduleResult.kind === 'terminal') {
+                console.log(`[DSC-DIAG] round ${round} ═══ EXIT 工具调度terminal`);
                 yield { type: 'final', text: scheduleResult.terminalText };
                 return;
             }
@@ -232,6 +260,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         }
         const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
         console.error('❌ agent 工具执行段异常（兜底收尾）:', errMsg);
+        console.log(`[DSC-DIAG] ═══ EXIT 外层catch toolErr: ${errMsg}`);
         stopReason = 'error';
         yield { type: 'final', text: (lastContent || "") + `\n（工具执行异常：${errMsg}）` };
         return;

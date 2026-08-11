@@ -211,14 +211,14 @@ export const fsTools: CustomTool[] = [
                 properties: {
                     path: { type: "string", description: "文件相对路径" },
                     start_line: { type: "number", description: "起始行号（从 1 开始，默认 1）" },
-                    end_line: { type: "number", description: "结束行号（默认最多往后读 500 行）" }
+                    end_line: { type: "number", description: "结束行号（默认最多往后读 2000 行）" }
                 },
                 required: ["path"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            // ★ 单条读取预算脱离通用 16K 兜底：500 行精读约 30K 字符，给足避免被二次截断（对标 Claude Code 的宽松读取）
-            maxOutputCharacters: 32000,
+            // ★ 单条读取预算脱离通用 16K 兜底：2000 行精读约 120K 字符，给足避免被二次截断（对齐 Claude Code 的宽松读取）
+            maxOutputCharacters: 128000,
             // ★ 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥，
             //   在 verifyResult 之后、回灌云端模型之前由 runAgent 调用，仅影响"发给模型的视图"。
             privacyMaskingRules: maskSecretsInContent,
@@ -236,7 +236,7 @@ export const fsTools: CustomTool[] = [
                     // 1. 先用最轻量的方式获取文件总行数（可选，若不需要显示 totalLines，甚至可以省略这一步以追求极致性能）
                     // 这里提供一个仅针对所需区间的高效单次流读取方案：
                     const start = args.start_line ? Math.max(1, args.start_line) : 1;
-                    const maxLinesToRead = 500; // 默认单次精读 500 行（对标 Claude Code 2000 行的折中：兼顾大文件往返次数与窗口占用）
+                    const maxLinesToRead = 2000; // 默认单次精读 2000 行（对齐 Claude Code；250K token 窗口下约 120K 字符、占窗口不到一半，安全且大幅减少大文件往返次数）
                     const end = args.end_line ? Math.max(start, args.end_line) : start + maxLinesToRead - 1;
 
                     const fileStream = createReadStream(absPath, { encoding: "utf-8" });

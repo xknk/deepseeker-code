@@ -219,6 +219,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             },
             payload: { input: message[message.length - 1].content as string },
         });
+        console.log(`[DSC-DIAG] streamInference round ${round} 完成: content=${contentBuf.length}chars reasoning=${reasoningBuf.length}chars toolCalls=${toolCallsBuf.size}`);
         return { kind: 'completed', assistantMessage };
     } catch (error) {
         // 异常路径中止（如退避 sleep 被 abort reject）：不落盘 partial，主循环用 lastContent 收尾
@@ -232,6 +233,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             metadata: { depth, decisionSource: llmDecisionSource, ok: false, durationMs: performance.now() - startTime, attempt: round },
             payload: { input: message[message.length - 1].content as string, output: err.message },
         });
+        console.log(`[DSC-DIAG] streamInference round ${round} ═══ ERROR: ${err.message}`);
         return { kind: 'error', error: err };
     }
 };

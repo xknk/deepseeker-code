@@ -126,14 +126,17 @@ export class ChatHost {
   private enterPlanReason: string | null = null;
   private pendingQuestion: { resolve: (a: QuestionAnswer) => void } | null = null;
   private pendingPlan: { resolve: (r: PlanResolution) => void } | null = null;
-  /** 重载恢复来的会话待回放（webview ready 后 replayIfRestored 消费一次即清）。 */
-  private needsReplay = false;
+  // ★ 挂起交互暂存（panel 重建后重广播，杜绝关 tab 后审批/提问/方案死锁与丢失）：
+  //   「挂起」= 对应 pending resolve 仍存在（用户尚未决策）；resolve 时清空，避免重播已解决的历史交互。
+  private lastApprovalEvt: Record<string, unknown> | null = null;
+  private lastQuestionReq: QuestionRequest | null = null;
+  private lastPlanText: string | null = null;
 
   constructor(private callbacks: ChatHostCallbacks) {
     // ★ 重载恢复：从 workspaceState 取回上次活动会话 id，避免重载后新建碎片 session；
-    //   needsReplay 标记「恢复来的会话，webview ready 后回放历史」实现无缝续接。
+    //   会话回放改由 replayCurrentSession 在 webview ready 时统一驱动（sessionId 非空即重放）。
     const persisted = callbacks.getPersistedSessionId?.();
-    if (persisted) { this.sessionId = persisted; this.needsReplay = true; }
+    if (persisted) this.sessionId = persisted;
   }
 
   get isBusy(): boolean {
@@ -146,11 +149,18 @@ export class ChatHost {
     return this.autoMode;
   }
 
-  /** 事件 sink：先截获 plan 两阶段所需信号，再原样转发给 UI。 */
+  /** 事件 sink：先截获 plan 两阶段所需信号 + 挂起交互（approval/question/plan）暂存，再原样转发给 UI。
+   *  暂存的挂起交互供 collectPendingUI 在 panel 重建后重广播，杜绝关 tab 后审批死锁。 */
   private sink = (evt: Record<string, unknown>): void => {
     const type = evt?.type as string;
-    if (type === "plan.proposed") this.proposedPlan = (evt.plan as string) ?? "";
-    else if (type === "plan.enterRequested") this.enterPlanReason = (evt.reason as string) ?? "";
+    if (type === "plan.proposed") {
+      this.proposedPlan = (evt.plan as string) ?? "";
+      this.lastPlanText = this.proposedPlan;
+    } else if (type === "plan.enterRequested") {
+      this.enterPlanReason = (evt.reason as string) ?? "";
+    } else if (type === "approval_request") {
+      this.lastApprovalEvt = { ...evt };
+    }
     this.callbacks.sink(evt);
   };
 
@@ -265,9 +275,11 @@ export class ChatHost {
     this.currentAc?.abort();
   }
 
-  /** 新会话：id 置空 + UI 清屏（下次 submit 生成新会话）。 */
+  /** 新会话：id 置空 + UI 清屏（下次 submit 生成新会话）。
+   *  ★ busy 时也允许：死循环/卡死时这是用户唯一的出路——先 abort 中止当前轮，再开新会话。
+   *    abort 触发 runAgent 走 aborted 出口收尾；final 事件仅 closeStreaming 不 appendRow，不污染新屏。 */
   async newSession(): Promise<void> {
-    if (this.busy) return;
+    if (this.busy) this.abort();
     this.setSessionId(null);
     this.callbacks.onSessionReset();
   }
@@ -294,11 +306,20 @@ export class ChatHost {
     this.callbacks.setPersistedSessionId?.(id);
   }
 
-  /** webview ready 后调用：若 sessionId 是重载恢复来的，回放历史实现无缝续接（仅一次）。 */
-  async replayIfRestored(): Promise<void> {
-    if (!this.needsReplay) return;
-    this.needsReplay = false;
+  /** webview ready 后调用：若存在活动会话则回放历史（panel 重建 / 重载恢复都走此路径，无缝续接）。
+   *  去除原 needsReplay 一次性限制——ready 仅在 webview 首次加载触发一次，不会重复重放。 */
+  async replayCurrentSession(): Promise<void> {
     if (this.sessionId) await this.loadSession(this.sessionId);
+  }
+
+  /** 收集当前挂起、需在 panel 重建后重广播的交互消息（approval/question/plan）。
+   *  仅当对应 pending resolve 仍存在（用户尚未决策）时才返回，避免重播已解决的历史交互。 */
+  collectPendingUI(): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    if (this.lastApprovalEvt) out.push({ type: "evt", evt: this.lastApprovalEvt });
+    if (this.pendingQuestion && this.lastQuestionReq) out.push({ type: "question", req: this.lastQuestionReq });
+    if (this.pendingPlan && this.lastPlanText != null) out.push({ type: "plan", plan: this.lastPlanText });
+    return out;
   }
 
   /** 枚举本工作区历史会话（供 UI 会话选择器）。 */
@@ -324,6 +345,7 @@ export class ChatHost {
 
   /** 审批决策：core approvalGate 按 toolsId 定位挂起的审批锁并解锁。 */
   resolveApproval(sessionId: string, toolsId: string, decision: ApprovalDecision): void {
+    this.lastApprovalEvt = null; // 已决策，不再重广播
     resolveUserApprovalLock(sessionId, toolsId, decision);
   }
 
@@ -331,6 +353,7 @@ export class ChatHost {
   resolvePlan(r: PlanResolution): void {
     const p = this.pendingPlan;
     this.pendingPlan = null;
+    this.lastPlanText = null; // 已决策，不再重广播
     p?.resolve(r);
   }
 
@@ -338,6 +361,7 @@ export class ChatHost {
   resolveQuestion(answer: QuestionAnswer): void {
     const p = this.pendingQuestion;
     this.pendingQuestion = null;
+    this.lastQuestionReq = null; // 已决策，不再重广播
     p?.resolve(answer);
   }
 
@@ -346,6 +370,7 @@ export class ChatHost {
   private askQuestion(req: QuestionRequest): Promise<QuestionAnswer> {
     return new Promise<QuestionAnswer>((resolve) => {
       this.pendingQuestion = { resolve };
+      this.lastQuestionReq = req; // 暂存供 panel 重建后重广播
       this.callbacks.onQuestion(req);
     });
   }

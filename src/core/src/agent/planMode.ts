@@ -10,7 +10,7 @@
  *
  *  对偶入口（让模型自主进入计划模式，而非只能用户手动开启）：
  *  4) enterPlanModeToolSchema / appendPlanControlTools —— 非计划模式下暴露 enter_plan_mode（主动进入计划模式）+ exit_plan_mode（自行调研后直接提交方案）；
- *  5) PLAN_MODE_AUTO_ENTER_HINT —— 引导模型对非平凡任务优先进入计划模式的系统提示词。
+ *  5) PLAN_MODE_AUTO_ENTER_HINT —— 引导模型对非平凡任务优先进入计划模式的系统提示词片段（systemPrompt.ts 拼入【计划模式】段段首）。
  */
 import { CustomTool } from "@/tool/index.ts";
 
@@ -102,3 +102,13 @@ export function appendPlanControlTools(tools: CustomTool[]): CustomTool[] {
         exitPlanModeToolSchema as unknown as CustomTool,
     ];
 }
+
+/**
+ * 计划模式强引导片段（由 systemPrompt.ts 拼入【计划模式】段段首）：把「非平凡任务先规划」立为默认动作，
+ * 给出可操作的非平凡判据，扭转 DeepSeek 在无强约束下倾向直接动手、从不调 enter_plan_mode 的问题。
+ * 与 enterPlanModeToolSchema.description 呼应——让模型自觉在首轮对复杂任务发出进入计划模式信号。
+ */
+export const PLAN_MODE_AUTO_ENTER_HINT = `【任务分类（收到实现类请求时的首个动作）】先判断复杂度，再决定是否先规划：
+- **非平凡任务**（满足任一即算：涉及多个文件改动 / 需要架构决策 / 实现路径不确定 / 高风险操作 / 预估 ≥3 个步骤）→ **默认先调用 enter_plan_mode 进入计划模式**：以只读方式专注调研、理清现状与改造点，再调用 exit_plan_mode 提交完整实现方案（要改哪些文件、具体怎么改、为何这么做、有什么风险与取舍），方案经用户审批后才进入实现阶段。
+- **简单任务**（单文件、单行修复、明确的小调整、纯查询或解释）→ 无需规划，直接实现或作答。
+- 判据示例：「新增/实现一个功能模块」「重构/改造 XX 子系统」「把 A 迁移到 B」「调整整体数据流」→ 非平凡，先规划；「改一下第 N 行的变量名」「解释这段代码」「跑一下测试」→ 简单，直接做。`;

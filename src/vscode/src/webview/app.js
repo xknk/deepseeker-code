@@ -38,7 +38,9 @@ planEditing: false,
 sessions: [],
 showTodos: false,
 todos: [],
-roundSeq: 1,
+roundSeq: 0,
+currentTurn: 0,
+turnHeaderBySeq: new Map(),
   };
 
   // 模式配置面板元素（buildComposer 时挂载）
@@ -174,6 +176,13 @@ case "tool": {
         });
         break;
       }
+      case "turnHeader": {
+        const caret = row.collapsed ? "▸" : "▾";
+        const summaryHtml = row.collapsed && row.summary ? ` <span class="turn-summary">${escapeHtml(row.summary)}</span>` : "";
+        wrap.innerHTML = `<div class="turn-head"><span class="turn-caret">${caret}</span><span class="turn-seq">第 ${row.seq} 轮</span>${summaryHtml}</div>`;
+        wrap.querySelector(".turn-head")?.addEventListener("click", () => toggleTurn(row.seq));
+        break;
+      }
       case "meta": {
 wrap.innerHTML = `<div class="meta-line">${escapeHtml(row.text)}</div>`;
 break;
@@ -205,14 +214,48 @@ case "info":
     }
   }
 
+  // ★ 开启新一轮对话 turn：插可折叠头（seq + user 摘要），后续行归入此 turn。
+  //   由 appendRow 在 user 行入栈时统一调用——覆盖实时 / 回放 / 所有 row 入口，无需各入口重复处理。
+  function beginUserTurn(text) {
+    state.roundSeq = (state.roundSeq || 0) + 1;
+    state.currentTurn = state.roundSeq;
+    const header = { key: nextKey(), kind: "turnHeader", seq: state.roundSeq, turn: state.roundSeq, summary: truncate(text || "", 50), collapsed: false };
+    state.turnHeaderBySeq.set(state.roundSeq, header);
+    appendRow(header); // turnHeader.kind !== "user"，不会递归触发
+  }
+
+  // ★ 折叠/展开某 turn：切换该 turn 下所有非头行的 display（user 消息 + agent 工具/思考/回复/info 全收起）。
+  function toggleTurn(seq) {
+    const header = state.turnHeaderBySeq.get(seq);
+    if (!header) return;
+    header.collapsed = !header.collapsed;
+    rebuildRow(header);
+    const hide = header.collapsed;
+    for (const k of state.order) {
+      const r = state.rowMap.get(k);
+      if (r && r.turn === seq && r.kind !== "turnHeader") {
+        const el = messagesEl().querySelector(`[data-key="${CSS.escape(k)}"]`);
+        if (el) el.style.display = hide ? "none" : "";
+      }
+    }
+    if (!hide && nearBottom()) scrollToBottom();
+  }
+
   function appendRow(row) {
+    // ★ user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口
+    if (row.kind === "user") beginUserTurn(row.text);
+    if (row.turn == null) row.turn = state.currentTurn;
     state.order.push(row.key);
     state.rowMap.set(row.key, row);
     const wrap = buildRowEl(row);
-wrap.classList.add("row-enter");
-messagesEl().appendChild(wrap);
+    wrap.classList.add("row-enter");
+    // 归属 turn 已折叠 → 新行也隐藏（流式新行尊重已有折叠状态）
+    if (row.kind !== "turnHeader" && row.turn != null && state.turnHeaderBySeq.get(row.turn)?.collapsed) {
+      wrap.style.display = "none";
+    }
+    messagesEl().appendChild(wrap);
     if (nearBottom()) scrollToBottom();
-  updateEmptyState();
+    updateEmptyState();
   }
 
   function updateRow(key, patch) {
@@ -322,6 +365,10 @@ messagesEl().appendChild(wrap);
     state.order = [];
     state.rowMap.clear();
     state.toolRowByCallId.clear();
+    // ★ 轮次状态随会话重置：杜绝跨会话/回放累积（旧 bug：回放历史会话时 roundSeq 一路累加显示"第20+轮"）
+    state.roundSeq = 0;
+    state.currentTurn = 0;
+    state.turnHeaderBySeq = new Map();
     messagesEl().innerHTML = "";
     buildEmptyState();
     renderTodos();
@@ -334,11 +381,7 @@ if (!evt || typeof evt !== "object") return;
 // ★ host 经 sink 发来的完整行（用户消息 / 回放 / meta），与 onMessage 顶层 row 逻辑一致
 if (evt.type === "row" || evt.type === "rowUpdate") {
 if (evt.type === "row") {
-// 轮次分割线：用户开始新一轮对话时插入（首轮不插）
-if (evt.kind === "user" && state.order.length > 0) {
-state.roundSeq = (state.roundSeq || 0) + 1;
-appendRow({ key: nextKey(), kind: "meta", text: `第 ${state.roundSeq} 轮` });
-}
+// ★ 轮次折叠头由 appendRow 统一在 user 行入栈时插入（覆盖实时 / 回放 / 所有 row 入口），此处不再单独插分割线
 const row = { key: evt.key || nextKey(), kind: evt.kind, text: evt.text ?? "" };
 if (evt.kind === "tool") {
 row.toolName = String(evt.toolName ?? "");

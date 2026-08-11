@@ -113,6 +113,32 @@ function postState(): void {
   });
 }
 
+// —— panel 销毁期间的事件缓冲（断链修复）——
+//  retainContextWhenHidden=true 时单纯隐藏不断；但 panel 被销毁（关 tab / Reload Window / 内存驱逐 retained webview）
+//  后 host 任务仍在跑，事件无处投递。缓冲流式增量，待 panel 重建（webview ready）时 flush；
+//  挂起交互类（approval/question/plan）不缓冲——由 host.collectPendingUI 在 ready 时重广播，避免重复投递。
+//  sessionReset 是清屏语义，绝不缓冲（否则会在重放历史后再清屏，擦掉刚回放的对话）。
+const MAX_PENDING_EVENTS = 2000;
+let pendingEvents: Record<string, unknown>[] = [];
+
+/** 是否「挂起交互类」消息（靠 host.collectPendingUI 重广播，故 panel 销毁期间不缓冲）。 */
+const isPendingInteraction = (msg: Record<string, unknown>): boolean => {
+  if (msg.type === "question" || msg.type === "plan" || msg.type === "sessionReset") return true;
+  const inner = msg.evt as Record<string, unknown> | undefined;
+  return inner?.type === "approval_request";
+};
+
+/** 统一投递：panel 有效直发；panel===null 时流式事件入缓冲队列，挂起交互类丢弃。 */
+const deliver = (msg: Record<string, unknown>): void => {
+  if (panel) {
+    void panel.webview.postMessage(msg);
+    return;
+  }
+  if (isPendingInteraction(msg)) return;
+  pendingEvents.push(msg);
+  if (pendingEvents.length > MAX_PENDING_EVENTS) pendingEvents.shift();
+};
+
 // —— 面板 HTML ——
 
 function getNonce(): string {
@@ -234,9 +260,16 @@ function handleMessage(msg: Record<string, unknown>): void {
   if (!h) return;
   switch (type) {
     case "ready":
-      // 前端就绪：广播一次状态快照 + 若有重载恢复来的会话则回放历史（无缝续接）
-      postState();
-      void h.replayIfRestored();
+      // 前端就绪（panel 首次加载/重建）：状态快照 → 重放活动会话历史 → flush 销毁期间缓冲的增量 → 重广播挂起交互。
+      //  串行顺序：先重放（含清屏）后 flush，避免增量被 replayCurrentSession 的清屏擦掉。
+      void (async () => {
+        postState();
+        await h.replayCurrentSession();
+        const buffered = pendingEvents;
+        pendingEvents = [];
+        for (const m of buffered) deliver(m);
+        for (const m of h.collectPendingUI()) deliver(m);
+      })();
       break;
     case "submit": {
       const text = String(msg.text ?? "");
@@ -384,16 +417,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // —— 5. 会话宿主（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace） ——
   const { ChatHost } = await import("./host.js");
   const callbacks: ChatHostCallbacks = {
-    sink: (evt) => {
-      if (panel) void panel.webview.postMessage({ type: "evt", evt });
-    },
+    sink: (evt) => deliver({ type: "evt", evt }),
     onBusy: () => postState(),
-    onQuestion: (req) => {
-      if (panel) void panel.webview.postMessage({ type: "question", req });
-    },
-    onPlan: (plan) => {
-      if (panel) void panel.webview.postMessage({ type: "plan", plan });
-    },
+    onQuestion: (req) => deliver({ type: "question", req }),
+    onPlan: (plan) => deliver({ type: "plan", plan }),
     onSessionReset: () => {
       if (panel) void panel.webview.postMessage({ type: "sessionReset" });
     },

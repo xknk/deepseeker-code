@@ -41,7 +41,23 @@ export type RepeatBreakerContext = {
 export const createRepeatBreaker = (ctx: RepeatBreakerContext) => {
     const { sessionId, depth, llmDecisionSource, startTime, events } = ctx;
     const recentSignatures: string[] = [];
-    const recentNameSignatures: string[] = [];
+    // 轮询类工具"同目标反复查询"序列（仅 get_background_output 等轮询工具的目标指纹，见 pollTarget）
+    const recentPollTargets: string[] = [];
+    // ★ 轮询目标提取：忽略 tail_lines 等游标参数，只按目标标识（task_id）判等。
+    //   死循环特征是"反复查/改同一目标"，正常多步特征是"每次目标不同"——
+    //   按工具名是否相同判定注定误杀长任务（连读 N 个文件、连改 N 处都是同名不同目标）。
+    //   故序列熔断只对已知轮询工具按"目标标识"判等；其余工具的"完全相同调用"由完整签名 3 次覆盖。
+    const POLL_TARGET_KEYS: Record<string, string[]> = { get_background_output: ["task_id"] };
+    const pollTarget = (tc: any): string | null => {
+        const name = tc?.function?.name;
+        const keys = name ? POLL_TARGET_KEYS[name] : undefined;
+        if (!keys) return null;
+        let args: any = {};
+        try { args = JSON.parse(tc?.function?.arguments || "{}"); } catch { /* 非法 JSON 当空 */ }
+        const picked: Record<string, unknown> = {};
+        for (const k of keys) if (k in args) picked[k] = args[k];
+        return `${name}:${JSON.stringify(picked)}`;
+    };
 
     const check = (
         toolCalls: any[],
@@ -75,30 +91,36 @@ export const createRepeatBreaker = (ctx: RepeatBreakerContext) => {
             return { tripped: true, kind: 'full', text, toolName: tooName };
         }
 
-        // 2) 参数微变死循环兜底：完整签名随时间戳/游标等动态参数变化永不重复，
-        //    补"仅工具名"序列检测——连续 8 轮同一组工具名（参数可能每轮微变）即熔断，
-        //    给分页读取等合理的连续同工具调用留出空间。
-        recentNameSignatures.push(tooName);
-        if (recentNameSignatures.length > 16) recentNameSignatures.shift();
-        const last8 = recentNameSignatures.slice(-8);
-        if (last8.length === 8 && last8.every(s => s === last8[0])) {
-            const text = (lastContent || "") + "\n（检测到工具名序列持续重复（参数可能微变），已停止）";
-            events({
-                sessionId,
-                eventType: 'tool.repeat_break',
-                metadata: {
-                    depth,
-                    decisionSource: llmDecisionSource,
-                    durationMs: performance.now() - startTime,
-                    round,
-                    toolName: tooName,
-                    toolSource: 'builtin',
-                    ok: false,
-                    attempt: round,
-                },
-                payload: { output: text },
-            });
-            return { tripped: true, kind: 'names', text, toolName: tooName };
+        // 2) 轮询类工具"同目标反复查询"死循环兜底（替代原"纯工具名序列"——后者对连续 read 多文件 / edit 多位置
+        //    等正常长任务一律误杀）：
+        //    仅对已知轮询工具（get_background_output：agent 主动轮询后台任务输出）按"目标标识"（task_id）判等，
+        //    忽略 tail_lines 等游标参数。连续 4 轮查同一后台任务 = 轮询死循环（agent 不该空轮询，应等用户或做别的）。
+        //    其他工具（edit/read/grep…）的"完全相同调用"已由上方完整签名 3 次覆盖，"同名不同参数"属正常多步，不再拦。
+        const pollTargets = toolCalls.map(pollTarget).filter(Boolean);
+        if (pollTargets.length) {
+            const pollSig = pollTargets.join("|");
+            recentPollTargets.push(pollSig);
+            if (recentPollTargets.length > 8) recentPollTargets.shift();
+            const last4 = recentPollTargets.slice(-4);
+            if (last4.length === 4 && last4.every((s) => s === last4[0])) {
+                const text = (lastContent || "") + "\n（检测到后台任务轮询死循环（反复查询同一任务），已停止）";
+                events({
+                    sessionId,
+                    eventType: 'tool.repeat_break',
+                    metadata: {
+                        depth,
+                        decisionSource: llmDecisionSource,
+                        durationMs: performance.now() - startTime,
+                        round,
+                        toolName: tooName,
+                        toolSource: 'builtin',
+                        ok: false,
+                        attempt: round,
+                    },
+                    payload: { output: text },
+                });
+                return { tripped: true, kind: 'names', text, toolName: tooName };
+            }
         }
 
         // 未触发：发 tool.resolve 埋点（本轮工具调用的解析归档），主循环继续
