@@ -16,12 +16,23 @@
 import OpenAI from "openai";
 export type Msg = OpenAI.Chat.ChatCompletionMessageParam
 
+/** 判定码点是否属于 CJK 系（按 1:1 计 token，DeepSeek 中文/日文压缩率基本在此范围）。
+ *  覆盖：CJK 统一表意基本区、CJK 扩展 A、日文假名、全角符号——原仅判基本区会对其余 CJK 字符
+ *  按 ÷divisor 高估，补齐后估算更稳。 */
+const isCjkCodePoint = (c: number): boolean =>
+    (c >= 0x4e00 && c <= 0x9fff) ||  // CJK 统一表意文字（基本区）
+    (c >= 0x3400 && c <= 0x4dbf) ||  // CJK 扩展 A
+    (c >= 0x3040 && c <= 0x30ff) ||  // 日文假名（平假名 + 片假名）
+    (c >= 0xff00 && c <= 0xffef);    // 全角 ASCII / 全角标点符号
+
 /**
- * @description: 计算当前token
- * @param {string} text // 上下文内容
- * @return {*}
+ * @description: 计算文本的 token 估算值
+ * @param {string} text 文本内容
+ * @param {number} divisor 非 CJK 字符的折算除数：代码/JSON 等结构化内容用 4（BPE 密度高），
+ *   散文用 4.8（默认）。CJK 系始终 1:1。
+ * @return {number} 估算 token 数
  */
-const estimateTextTokens = (text: string): number => {
+const estimateTextTokens = (text: string, divisor = 4.8): number => {
     if (!text) return 0;
     let cjk = 0;
     let rest = 0;
@@ -29,18 +40,15 @@ const estimateTextTokens = (text: string): number => {
     //   的代理对算作 2 个 rest，导致 token 估算偏高、过早触发压缩。现每个码点算 1，遇代理对跳过低位代理。
     for (let i = 0; i < text.length;) {
         const c = text.codePointAt(i)!;
-        if (c >= 0x4e00 && c <= 0x9fff) {
+        if (isCjkCodePoint(c)) {
             cjk++;
         } else {
             rest++;
         }
         i += c > 0xffff ? 2 : 1; // 增补平面字符占 2 个 code unit，跳过低位代理
     }
-    // 【核心微调】：针对 DeepSeek V4 优化的代码重构场景折算
-    // 1. 中文字符依然保持 1:1（DeepSeek 的中文压缩率基本在这个范围）
-    // 2. 考虑到多文件代码中海量的缩进空格、换行、连写关键字，
-    //    将非中文折算比率从 4:1 放宽到 4.8:1（即除以 4.8），防止高估代码 Token
-    return cjk + Math.ceil(rest / 4.8);
+    // CJK 系 1:1；非 CJK 按 divisor 折算（调用方按消息性质传入，见 estimateTokens）。
+    return cjk + Math.ceil(rest / divisor);
 }
 
 /**
@@ -72,7 +80,11 @@ export const estimateTokens = (messagesArr: Msg[]): number => {
                 pureText += ` ${(m as any)[key]}`;
             }
         }
-        const tokens = estimateTextTokens(pureText) + 4; // 4 为消息结构开销
+        // ★ 按消息性质选折算系数：tool 返回（文件/命令输出/JSON）与 assistant 的工具调用参数
+        //   （Search/Replace 等巨型 JSON）都是代码/结构化内容，BPE token 密度远高于散文（≈÷4）。
+        //   原统一 ÷4.8 对这类内容系统性低估，导致压缩阈值被估算偏差吃掉、靠 API 400 兜底。
+        const isStructured = m.role === 'tool' || (Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0);
+        const tokens = estimateTextTokens(pureText, isStructured ? 4 : 4.8) + 4; // 4 为消息结构开销
         return total + (isNaN(tokens) ? 0 : tokens);
     }, 0);
 }

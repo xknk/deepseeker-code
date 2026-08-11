@@ -27,10 +27,14 @@ export const appConfig = {
     dataDir: _DataDir,
     maxReasoningRounds: 3,
     // DeepSeek-V4 标称上下文窗口 1M，但实测编码甜点区在 150K–250K（300K+ 精度明显衰减）。
-    // 取 250K 作为历史 token 上限：压缩阈值 0.85×250K≈212K 恰好在衰减前触发，宁早压缩不贪长文。
-    // 切勿贪心调到 1M——那会越过甜点区，精度与延迟双劣化。
+    // 取 250K 作为历史 token 上限。切勿贪心调到 1M——那会越过甜点区，精度与延迟双劣化。
     MAX_HISTORY_TOKENS: 250000,
-    COMPACT_RATIO: 0.85,
+    // ★ 压缩触发比例：上下文 token 超过 modelWindow × COMPACT_RATIO 时开始压缩。
+    //   取 0.72 而非 0.85：本地 estimateTokens（CJK 1:1、代码/JSON ÷4、散文 ÷4.8）仍是近似，
+    //   对结构化内容有残余低估。用更低的阈值给估算偏差预留 buffer，让真实 token 在到达窗口前触发，
+    //   回归"宁早压缩不贪长文"原意——避免主路径漏判后靠 API 400 兜底（每次漏判是一次完整失败的付费请求）。
+    //   副作用是单会话摘要调用略增，可接受（用摘要调用换 400 失败请求）。
+    COMPACT_RATIO: 0.72,
     KEEP_RECENT_UNITS: 5,
     MAX_TOOL_RESULT_CHARS: 16000,
     /** 后台工具（isSync:false）兜底超时（ms）：超时强制收尾释放互斥锁，防 generator 卡死导致锁永久泄漏。

@@ -163,22 +163,29 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal): Promise<
  * @param {AbortSignal} signal
  * @return {*}
  */
-export const compactToLine = async (toCompact: Msg[], modelWindow: number, signal?: AbortSignal): Promise<string> => {
-    const MAX_BATCH_TOKENS = Math.floor(modelWindow * 0.25);
-    const lines: string[] = [];
-    let batch: Msg[] = []; // 需要压缩的上下文
+export const compactToLine = async (toCompact: Msg[], _modelWindow: number, signal?: AbortSignal): Promise<string> => {
+    // ★ 批次上限固定 16K token（对齐 appConfig.MAX_TOOL_RESULT_CHARS 口径）：原 modelWindow*0.25≈62.5K
+    //   一批过大，摘要模型在超长输入下注意力稀释、丢细节——而摘要恰是用来保细节的。16K 保摘要质量，
+    //   批次数通常 1–3。（_modelWindow 保留入参位置以兼容调用方，批次大小不再依赖它。）
+    const MAX_BATCH_TOKENS = 16000;
+    const batches: Msg[][] = [];
+    let batch: Msg[] = []; // 当前累积的待压缩批次
     let batchTokens = 0;
     for (const msg of toCompact) {
-        const size = estimateTokens([msg]) // 获取token数量
+        const size = estimateTokens([msg]); // 单条 token 数
         if (batchTokens + size > MAX_BATCH_TOKENS && batch.length > 0) {
-            lines.push(await compactBatch(batch, signal)); // 生成本次区间的摘要
+            batches.push(batch); // 封批
             batch = [];
             batchTokens = 0;
         }
         batch.push(msg);
         batchTokens += size;
     }
-    if (batch.length > 0) lines.push(await compactBatch(batch, signal));
+    if (batch.length > 0) batches.push(batch);
+    // ★ 批次间无依赖，并行压缩：map 保序 + Promise.all 保序 → join 顺序与原串行完全一致。
+    //   compactBatch → chatWithModelWithSummary 每次独立请求、无共享状态，并行安全；abort 经 signal
+    //   传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
+    const lines = await Promise.all(batches.map(b => compactBatch(b, signal)));
     return lines.join("\n"); // 返回最后的摘要信息
 }
 /**
@@ -197,9 +204,12 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
     }
 }
 
+/** 摘要自收敛阈值（token）：摘要自身超此值就在本轮压缩后就地再压一次，防长会话摘要区侵蚀窗口。 */
+const SUMMARY_SELF_COMPACT_THRESHOLD = 2000;
+
 /**
  * @description: 压缩全量上下文
- *  当 token 超过 modelWindow * compactRatio 时，循环把“可压缩区”分批压成摘要，
+ *  当 token 超过 modelWindow * compactRatio 时，循环把”可压缩区”分批压成摘要，
  *  写入 messageArr[1] 的滚动摘要槽，仅保留最近 keepRecentUnits 条活动消息。
  *  每轮压缩后落盘（rollingSummary 快照）；连续失败 3 次触发物理熔断，保护账单。
  * @param {ensureOptions} event // 含全量上下文、阈值与回调的压缩入参（messageArr 原地修改）
@@ -229,6 +239,12 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 获取全量的摘要
                 const old: string = summaryMsg?.content || ''; // 旧的消息摘要
                 summaryMsg.content = old ? `${old}\n${line}` : line; // 拼接新的消息摘要
+                // ★ P2 摘要自收敛：摘要只追加不自收敛会越长越大，最终侵蚀窗口、形成"摘要越大→越早
+                //   触发压缩→又追加新摘要"的怪圈。每轮压缩后若摘要自身超阈值，就地再压一次收敛。
+                //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
+                if (estimateTokens([summaryMsg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
+                    summaryMsg.content = await compactToLine([summaryMsg], event.modelWindow, event.signal);
+                }
                 const endTime = performance.now();
 
                 event.messageArr.length = 0;
@@ -329,8 +345,13 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
     await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: lastSize, tokensAfter: estimateTokens(event.messageArr) }).catch(() => { });
 
-    if (estimateTokens(event.messageArr) > event.modelWindow * 0.9) {
-        throw new Error(`上下文超出模型窗口上限（估算约 ${estimateTokens(event.messageArr)} / ${event.modelWindow} token），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
+    // ★ 兜底阈值派生自 compactRatio：原硬编码 0.9 与可配 compactRatio 耦合——compactRatio 调高时
+    //   兜底反而比压缩目标还低、反向更早抛错。现取 compactRatio + 0.13 并封顶 0.95，保证兜底始终
+    //   高于压缩目标（0.72→0.85；0.8→0.93；0.9→0.95），且不越过安全区。
+    const hardLimitRatio = Math.min(event.compactRatio + 0.13, 0.95);
+    const finalTokens = estimateTokens(event.messageArr);
+    if (finalTokens > event.modelWindow * hardLimitRatio) {
+        throw new Error(`上下文超出模型窗口上限（估算约 ${finalTokens} / ${event.modelWindow} token，兜底 ${hardLimitRatio}×window），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
     }
 }
 
