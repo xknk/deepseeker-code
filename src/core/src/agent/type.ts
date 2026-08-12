@@ -97,7 +97,16 @@ export interface ensureOptions  {
     /** agent 嵌套深度。 */
     depth: number,
     /** 主动中止信号。 */
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** ★ 估算校准系数（runAgent 用真实 prompt_tokens/本地估算 的 EMA 维护）：
+     *  修正 estimateTokens 对代码/JSON/CJK 的系统性低估（实测约 31%），让压缩判定按「真实 token 口径」进行，
+     *  避免长任务真实 token 逼近窗口而本地估算仍以为安全 → 靠 API 400 兜底（每次漏判是一次完整失败的付费请求）。
+     *  缺省 1.4（首轮/无反馈时的保守偏高值，偏早压缩，安全侧）。 */
+    correctionRatio?: number,
+    /** 上一轮 API 真实 prompt_tokens（用于算缓存命中率，驱动缓存感知的压缩阈值）。 */
+    lastRealPromptTokens?: number,
+    /** 上一轮 API 前缀缓存命中 token 数（cached_tokens）。与 lastRealPromptTokens 配对算命中率。 */
+    lastCachedTokens?: number,
 }
 
 /**

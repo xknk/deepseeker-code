@@ -223,19 +223,34 @@ const SUMMARY_SELF_COMPACT_THRESHOLD = 2000;
  * @return {*}
  */
 export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
-    if (estimateTokens(event.messageArr) <= event.modelWindow * event.compactRatio) return;
+    // ★ 真实口径校准：estimateTokens 对代码/JSON/CJK 系统性低估（实测约 31%），用 runAgent 维护的
+    //   correctionRatio（真实 prompt_tokens / 本地估算 的 EMA）修正，使压缩判定落在「真实 token」维度。
+    //   避免长任务真实逼近窗口、估算仍以为安全 → 漏压缩 → 靠 API 400 兜底（每次漏判是一次完整失败的付费请求）。
+    //   缺省 1.4：首轮/无反馈时的保守偏高值（偏早压缩，安全侧）。
+    const correctionRatio = event.correctionRatio ?? 1.4;
+    const estReal = (arr: Msg[]) => estimateTokens(arr) * correctionRatio;
+    // ★ 缓存感知阈值：DS 前缀缓存命中时，压缩会改写 message[1] 摘要槽 → 从 message[1] 往后的缓存全部击穿
+    //   （message[0] 系统提示词段保住，P0-4 前缀稳定性不受影响）。故命中率越高，压缩的击穿机会成本越高，越倾向推迟；
+    //   命中率越低（已在 miss 区），压缩越接近纯赚，越早压。
+    //   幅度克制（cacheFactor ∈ [0.9, 1.1]），并用 0.82 硬上限封顶 effectiveRatio，绝不贴窗口。
+    //   无真实 usage 数据（首轮）时 cacheFactor = 1.0（中性），仅靠 correctionRatio 校准。
+    const hitRate = (event.lastRealPromptTokens && event.lastCachedTokens != null && event.lastRealPromptTokens > 0)
+        ? event.lastCachedTokens / event.lastRealPromptTokens : null;
+    const cacheFactor = hitRate == null ? 1.0 : Math.min(1.1, Math.max(0.9, 0.9 + hitRate * 0.2));
+    const effectiveRatio = Math.min(event.compactRatio * cacheFactor, 0.82);
+    if (estReal(event.messageArr) <= event.modelWindow * effectiveRatio) return;
     // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
-    const tokensThreshold = Math.round(event.modelWindow * event.compactRatio);
-    await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: estimateTokens(event.messageArr), tokensThreshold });
+    const tokensThreshold = Math.round(event.modelWindow * effectiveRatio);
+    await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(estReal(event.messageArr)), tokensThreshold });
     const systemMsg = event.messageArr[0]; // 获取系统提示词
     const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
     let keep = event.keepRecentUnits;
-    let lastSize = estimateTokens(event.messageArr); // 获取当前上下文token总量
+    let lastSize = estReal(event.messageArr); // 校准后的真实口径 token 总量
     const startTime = performance.now();
     let round = 0
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
     //   唯一的 continue 分支（keep--）不修改 messageArr，故 lastSize 始终与实际 token 量一致。省一次全量扫描/轮。
-    while (lastSize > event.modelWindow * event.compactRatio) {
+    while (lastSize > event.modelWindow * effectiveRatio) {
         if (event.signal?.aborted) {
             return
         }; // 是否停止
@@ -268,7 +283,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                     },
                     usage: {
                         prompt_tokens: lastSize,
-                        compress_tokens: estimateTokens(event.messageArr),
+                        compress_tokens: estReal(event.messageArr),
                     }
                 })
                 // 【核心大厂级落盘动作】：强行把这个最新滚好的快照，作为一个新节点，写入本地数据库/JSONL中
@@ -344,21 +359,21 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             // =============================================================
             break;
         }
-        const newSize = estimateTokens(event.messageArr);
+        const newSize = estReal(event.messageArr);
         if (newSize >= lastSize) break;
         lastSize = newSize;
     }
 
     // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
-    await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: lastSize, tokensAfter: estimateTokens(event.messageArr) }).catch(() => { });
+    await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
 
     // ★ 兜底阈值派生自 compactRatio：原硬编码 0.9 与可配 compactRatio 耦合——compactRatio 调高时
     //   兜底反而比压缩目标还低、反向更早抛错。现取 compactRatio + 0.13 并封顶 0.95，保证兜底始终
     //   高于压缩目标（0.72→0.85；0.8→0.93；0.9→0.95），且不越过安全区。
     const hardLimitRatio = Math.min(event.compactRatio + 0.13, 0.95);
-    const finalTokens = estimateTokens(event.messageArr);
+    const finalTokens = estReal(event.messageArr);
     if (finalTokens > event.modelWindow * hardLimitRatio) {
-        throw new Error(`上下文超出模型窗口上限（估算约 ${finalTokens} / ${event.modelWindow} token，兜底 ${hardLimitRatio}×window），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
+        throw new Error(`上下文超出模型窗口上限（校准约 ${Math.round(finalTokens)} / ${event.modelWindow} token，兜底 ${hardLimitRatio}×window），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
     }
 }
 

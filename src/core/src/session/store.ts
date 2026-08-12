@@ -186,6 +186,13 @@ type RollingState = {
     archivedMessageCount: number,
     consecutiveFailures: number,
     updatedAt?: string,
+    /** ★ 估算校准系数（真实 prompt_tokens / 本地估算 的 EMA）：跨 run 持久化，让后续 run 复用前一 run 攒的
+     *  真实校准，避免 calibRatio 每 run 重置回 1.4（致实现 run 对压缩时机判断从零开始、更晚压缩）。 */
+    calibRatio?: number,
+    /** 上一轮 API 真实 prompt_tokens（缓存感知压缩阈值用，跨 run 持久化）。 */
+    lastRealPromptTokens?: number,
+    /** 上一轮前缀缓存命中 token 数（与 lastRealPromptTokens 配对算命中率）。 */
+    lastCachedTokens?: number,
 }
 /** 
  * 获取当前会话的上下文归档状态
@@ -208,6 +215,10 @@ export async function getRollingState(
         // 读取持久化的连续失败次数，若不存在则默认为 0
         consecutiveFailures:
             typeof (store as any).consecutiveFailures === "number" ? (store as any).consecutiveFailures : 0,
+        // ★ 跨 run 持久化的压缩校准状态（缺省 undefined，调用方按 ?? 回落默认）
+        calibRatio: typeof store.calibRatio === "number" ? store.calibRatio : undefined,
+        lastRealPromptTokens: typeof store.lastRealPromptTokens === "number" ? store.lastRealPromptTokens : undefined,
+        lastCachedTokens: typeof store.lastCachedTokens === "number" ? store.lastCachedTokens : undefined,
     };
 }
 
@@ -229,6 +240,26 @@ export async function setRollingState(
         await writeStore(sessionId, store);
     });
 }
+
+/**
+ * ★ 原子更新跨 run 压缩校准状态（calibRatio / lastRealPromptTokens / lastCachedTokens），不动 rollingSummary 等。
+ *  runAgent 在 finally 末尾调用，让下一 run（续接/实现阶段）复用本 run 攒的真实校准与缓存命中率，
+ *  避免 calibRatio 每 run 重置回 1.4。走 withStoreLock 与 setRollingState 串行，互不覆盖。
+ *  仅写入传入的数值字段，undefined 跳过（保留 store 原值）。
+ */
+export const updateCalibration = async (
+    sessionId: string,
+    calib: { calibRatio?: number; lastRealPromptTokens?: number; lastCachedTokens?: number },
+): Promise<void> => {
+    return withStoreLock(sessionId, async () => {
+        const store = await readStore(sessionId);
+        if (!store) return;
+        if (typeof calib.calibRatio === "number" && Number.isFinite(calib.calibRatio)) store.calibRatio = calib.calibRatio;
+        if (typeof calib.lastRealPromptTokens === "number") store.lastRealPromptTokens = calib.lastRealPromptTokens;
+        if (typeof calib.lastCachedTokens === "number") store.lastCachedTokens = calib.lastCachedTokens;
+        await writeStore(sessionId, store);
+    });
+};
 
 /**
  * 读取当前会话的任务清单（由 todo_write 工具维护，供前端/其他逻辑读取）

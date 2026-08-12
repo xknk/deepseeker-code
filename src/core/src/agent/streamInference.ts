@@ -25,7 +25,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
  *  - aborted   —— 用户中止；若仅有 partial 文本（无半截 tool_call）已在本模块内落盘，partialText 供主循环拼 final；
  *  - error     —— 推理异常（已发 llm.error 埋点），主循环 yield final(发生错误) + return。 */
 export type InferenceResult =
-    | { kind: 'completed'; assistantMessage: Msg }
+    | { kind: 'completed'; assistantMessage: Msg; usage?: ProviderUsage }
     | { kind: 'aborted'; partialText: string }
     | { kind: 'error'; error: Error };
 
@@ -220,7 +220,10 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             payload: { input: message[message.length - 1].content as string },
         });
         console.log(`[DSC-DIAG] streamInference round ${round} 完成: content=${contentBuf.length}chars reasoning=${reasoningBuf.length}chars toolCalls=${toolCallsBuf.size}`);
-        return { kind: 'completed', assistantMessage };
+        // ★ 带出本轮真实 usage（prompt_tokens/cached_tokens）：供 runAgent 维护「估算校准系数」
+        //   （修正 estimateTokens 对代码/CJK 的系统性低估）与「缓存命中率」（缓存感知压缩决策）。
+        //   仅 completed 路径有；aborted/error 不带，调用方按 undefined 处理（回落保守默认）。
+        return { kind: 'completed', assistantMessage, usage: lastUsage };
     } catch (error) {
         // 异常路径中止（如退避 sleep 被 abort reject）：不落盘 partial，主循环用 lastContent 收尾
         if (signal?.aborted) {

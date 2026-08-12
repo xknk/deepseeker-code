@@ -37,6 +37,10 @@ export const appConfig = {
     COMPACT_RATIO: 0.72,
     KEEP_RECENT_UNITS: 5,
     MAX_TOOL_RESULT_CHARS: 16000,
+    /** ★ 跨 run 历史工具结果衰减阈值（字符）：buildContextMessages 重建上下文时，保留最近 KEEP_RECENT_UNITS 个
+     *  对话单元的 tool 结果全文，更早的（跨 run 旧 tool）content 截断到此长度 + 折叠提示。旧 tool 的结论早已被
+     *  后续 assistant 消化进文本/方案，原文无需跨 run 完整保留——砍掉跨 run 重复背负的只读检索体积，零 LLM 开销。 */
+    BOUNDARY_TOOL_KEEP_CHARS: 500,
     /** 后台工具（isSync:false）兜底超时（ms）：超时强制收尾释放互斥锁，防 generator 卡死导致锁永久泄漏。
      *  abort 仍是主取消通道，此值仅作最后防线；默认 30min 远超合理后台任务时长，正常任务不受影响。 */
     MAX_BACKGROUND_TOOL_MS: 30 * 60 * 1000,

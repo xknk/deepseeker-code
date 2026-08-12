@@ -23,6 +23,8 @@
  */
 import OpenAI from "openai";
 import { appendMessage } from "@/session/transcript.ts";
+import { estimateTokens } from "@/session/contextCore.ts";
+import { getRollingState, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
@@ -87,6 +89,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
     const startTime = performance.now();
+    // ★ 估算校准 + 缓存感知压缩状态（跨轮维护）：
+    //   calibRatio 用「真实 prompt_tokens / 本地估算」的 EMA 修正 estimateTokens 的系统性低估（实测约 31%），
+    //   让 ensureFitsWindow 按「真实 token 口径」判定压缩时机，避免长任务真实逼近窗口而估算仍以为安全 → 靠 API 400 兜底。
+    //   lastReal/lastCached 取自上一轮 API 真实 usage：算缓存命中率，驱动「缓存感知」的压缩阈值——
+    //   DS 前缀缓存命中时压缩会击穿 message[1]+ 的缓存（message[0] 系统提示词段保住），故命中率越高越推迟、
+    //   越低越早压（详见 truncate.ts 的 effectiveRatio）。message[0] 前缀稳定性（P0-4）不受影响。
+    // ★ 跨 run 持久化：复用前一 run 攒的真实校准与缓存数据，避免每 run 从 1.4 重零
+    //   （实测致实现 run 压缩判定滞后、更晚压缩）。详见 store.ts updateCalibration。
+    const persistedCalib = await getRollingState(sessionId);
+    let calibRatio = persistedCalib.calibRatio ?? 1.4;  // 回落 1.4（保守偏高，偏早压缩，安全侧）
+    let lastRealPromptTokens = persistedCalib.lastRealPromptTokens;
+    let lastCachedTokens = persistedCalib.lastCachedTokens;
     // ★ 重复工具调用熔断器（完整签名 3 次 / 后台轮询同任务 4 次）：跨轮有状态，每轮推理后 check()。
     //   从 runAgent 抽出到 repeatBreaker.ts；breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
     const breaker = createRepeatBreaker({ sessionId, depth, llmDecisionSource, startTime, events });
@@ -134,6 +148,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         events,
                         depth,
                         signal,
+                        correctionRatio: calibRatio,
+                        lastRealPromptTokens,
+                        lastCachedTokens,
                     }
 
                 );
@@ -174,6 +191,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 yield { type: 'final', text: lastContent || "（发生错误）" };
                 return;
             }
+            // ★ 用本轮真实 usage 校准估算系数 + 记录缓存数据（供下一轮 ensureFitsWindow 缓存感知判定）。
+            //   message 此时正是推理时的上下文（push assistant 在下文），与真实 prompt_tokens 时序对齐；
+            //   EMA（历史 0.6 / 新观测 0.4）平滑单轮抖动，estAtInfer>1000 过滤极小上下文的噪声。
+            if (infResult.usage?.prompt_tokens) {
+                const estAtInfer = estimateTokens(message);
+                if (estAtInfer > 1000) {
+                    const observed = infResult.usage.prompt_tokens / estAtInfer;
+                    calibRatio = calibRatio * 0.6 + observed * 0.4;
+                }
+                lastRealPromptTokens = infResult.usage.prompt_tokens;
+                lastCachedTokens = infResult.usage.cached_tokens;
+            }
             // assistantMessage 已由 streamInference 委托 provider.buildAssistantMessage 构造完成（含厂商扩展字段，
             //   如 DeepSeek 的 reasoning_content）。此处整体落盘 + ...spread 透传，杜绝手工列举字段名漏挂——
             //   DeepSeek 思考模式下含工具调用的轮次必须回传 reasoning_content，否则 API 返回 400；
@@ -202,7 +231,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
             // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
-            nudges.noteToolCall(round);
+            //   + 透传 tool_calls 供重复检索检测（read_file 路径 / search_grep·glob 检索词计数，命中阈值 → 下一轮 nudge）
+            nudges.noteToolCall(round, assistantMessage.tool_calls);
             // 2、重复工具调用熔断（完整签名 3 次 / 后台轮询同任务 4 次）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
@@ -258,6 +288,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const reason = signal?.aborted ? 'aborted' : stopReason;
             // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
+        } catch { /* ignore */ }
+        // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
+        //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
+        try {
+            await updateCalibration(sessionId, { calibRatio, lastRealPromptTokens, lastCachedTokens });
         } catch { /* ignore */ }
     }
 }

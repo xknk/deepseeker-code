@@ -32,6 +32,14 @@ const TOOL_DIGEST_MAX = 2;               // 「工具消化收尾」守护：刚
 const TOOL_DIGEST_WINDOW = 2;            // 距上次工具调用 ≤ 此轮数才视为「工具消化期内」
 const TOOL_DIGEST_TEXT_MAX_LEN = 30;     // ★ 只拦「空手收尾」：finalText 去空白后短于此才视为没给实质回应；长总结绝不拦（防「连续 final、中间无 user」）
 const PLAN_FIRST_FENCE = "⟦DSC:PLAN_FIRST⟧";
+// —— 重复检索检测（REPEAT_RETRIEVAL）——
+//   一次中等需求烧 800w token 的主要病态循环：同一文件被反复 read（trace 实测 Table.vue 10×、PaymentPlanDetail.vue 8×）、
+//   同一意图被反复 grep。此处运行时计数，命中阈值即注入一次 ephemeral nudge，与 systemPrompt 的「反碎步」引导互补：
+//   提示词管「检索风格」，nudge 拦「已发生的重复循环」。预算全局计次（REPEAT_NUDGE_MAX），防模型无视 nudge 仍重复时无限堆积。
+const REPEAT_FENCE = "⟦DSC:REPEAT_RETRIEVAL⟧";
+const READ_REPEAT_THRESHOLD = 3;     // 同一路径第 3 次读取 → nudge（前两次可能是先浏览后细读，属正常）
+const GREP_REPEAT_THRESHOLD = 2;     // 同一检索第 2 次即 nudge（grep 重复几乎必为浪费）
+const REPEAT_NUDGE_MAX = 3;          // 整个 run 最多推 3 次重复检索 nudge（推满即停，避免与无效模型无限拉扯）
 
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
@@ -60,6 +68,29 @@ const PLAN_FIRST_TEXT = `系统判断你本次任务疑似「非平凡实现任�
 const looksComplete = (text: string): boolean =>
     /已完成|已修改|已创建|已删除|已重构|已实现|已修复|已替换|已更新|已配置|已验证|已提交|已全部|全部完成|改造完成|修改完成|实现完成|测试通过|总结(一下)?|以上就是|done|finished|completed/i.test(text || "");
 
+// —— 重复检索检测：工具调用解析 + 归一化 + nudge 文案 ——
+/** 安全解析一个 tool_call 的 name 与 arguments（arguments 是 JSON 字符串）。 */
+const parseToolCall = (tc: any): { name: string; args: any } => {
+    const fn = tc?.function;
+    if (!fn) return { name: "", args: {} };
+    const name = String(fn.name || "");
+    let args: any = {};
+    try { args = typeof fn.arguments === "string" ? JSON.parse(fn.arguments) : (fn.arguments || {}); } catch { /* arguments 非法 JSON：忽略，按空参 */ }
+    return { name, args };
+};
+/** 路径归一：斜杠统一、去尾斜杠、盘符大小写归一（D:/foo 与 d:/foo 视为同文件）。 */
+const normPath = (p: unknown): string => {
+    let s = String(p ?? "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+    if (/^[a-z]:\//i.test(s)) s = s.charAt(0).toUpperCase() + s.slice(1);
+    return s;
+};
+/** 检索词归一：trim + 小写 + 折叠空白（"Foo  bar" 与 "foo bar" 视为同一检索）。 */
+const normQuery = (q: unknown): string => String(q ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+const REPEAT_READ_TEXT = (p: string, n: number): string =>
+    `你已第 ${n} 次读取「${p}」——该文件内容你早已拥有，无需整文件重读。如需某处细节请回看之前的工具结果；若该文件刚被改动、确需确认，只读改动附近几行即可，不要整文件重读。`;
+const REPEAT_GREP_TEXT = (q: string, n: number): string =>
+    `你已第 ${n} 次检索「${q}」——之前的结果你已拥有。请改用 read_file 读完整目标文件理解上下文，或缩小/调整检索范围，不要重复同一检索。`;
+
 /**
  * 创建一个 nudge 调度器（持有跨轮可变状态）。runAgent 每次 run 创建一个实例。
  *
@@ -72,7 +103,7 @@ const looksComplete = (text: string): boolean =>
 export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: boolean } = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
-    noteToolCall: (round: number) => void;
+    noteToolCall: (round: number, toolCalls?: any[]) => void;
 } => {
     const firstPrompt = opts.firstPrompt ?? "";
     const planMode = !!opts.planMode;
@@ -84,6 +115,14 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
     let toolDigestPending: NudgeMsg | null = null;
     let lastToolCallRound = 0;
     let planFirstSent = false;
+    // —— 重复检索检测跨轮状态（per-run，createNudgeScheduler 每 run 一实例）——
+    const readCounts = new Map<string, number>();    // normPath -> 本 run 读取次数
+    const grepCounts = new Map<string, number>();    // normQuery -> 本 run 检索次数（search_grep/glob）
+    const editedPaths = new Set<string>();           // 本 run 改过的路径：改后一次性重读合法，计数重置
+    const nudgedReads = new Set<string>();           // 已 nudge 过的读路径（同一路径不重复 nudge，除非其间被改动重置）
+    const nudgedGreps = new Set<string>();           // 已 nudge 过的检索词
+    let repeatNudges = 0;                            // 本 run 已注入的重复检索 nudge 次数（受 REPEAT_NUDGE_MAX 约束）
+    let repeatRetrievalPending: NudgeMsg | null = null;
 
     return {
         pickNudge(round) {
@@ -96,6 +135,9 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
             if (toolDigestPending) { const m = toolDigestPending; toolDigestPending = null; return m; }
             if (phantomPending) { const m = phantomPending; phantomPending = null; return m; }
             if (earlyFinalPending) { const m = earlyFinalPending; earlyFinalPending = null; return m; }
+            // 重复检索 nudge：工具轮 noteToolCall 命中阈值时设入，下一轮推理前消费。优先级低于收尾守护
+            //   （空回复/早收尾/工具消化属正确性兜底，先于效率类 nudge），高于周期 NUDGE。
+            if (repeatRetrievalPending) { const m = repeatRetrievalPending; repeatRetrievalPending = null; return m; }
             if (round > 1 && round % NUDGE_EVERY === 1) {
                 return { role: 'system', content: `${NUDGE_FENCE}\n${NUDGE_TEXT(round)}` };
             }
@@ -131,12 +173,51 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
             }
             return false;
         },
-        noteToolCall(round) {
+        noteToolCall(round, toolCalls) {
             // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包）+ 工具消化预算（下次消化又给新鲜预算）
             //   + 记录本轮号供 TOOL_DIGEST 判定「消化期内」
             phantomRetries = 0;
             toolDigestNudges = 0;
             lastToolCallRound = round;
+            // ★ 重复检索检测：遍历本轮 tool_calls，对 read_file 计路径、对 search_grep/glob 计检索词，
+            //   命中阈值且未达预算/无待消费 nudge 时设入 repeatRetrievalPending（下一轮 pickNudge 消费）。
+            //   edit_file/write_file/create_file 标记「刚改过」并重置该路径读计数——改后一次性重读是合法核验，不判重复。
+            //   统计始终更新（即便已超预算/有待消费 nudge），保持 editedPaths 边界与计数随轮推进，避免漏判后续重复。
+            if (!Array.isArray(toolCalls)) return;
+            for (const tc of toolCalls) {
+                const { name, args } = parseToolCall(tc);
+                if (name === "edit_file" || name === "write_file" || name === "create_file") {
+                    const p = normPath(args?.path);
+                    if (p) { editedPaths.add(p); readCounts.set(p, 0); nudgedReads.delete(p); }
+                    continue;
+                }
+                if (name === "read_file") {
+                    const p = normPath(args?.path);
+                    if (!p) continue;
+                    const n = (readCounts.get(p) ?? 0) + 1;
+                    readCounts.set(p, n);
+                    if (n >= READ_REPEAT_THRESHOLD && !nudgedReads.has(p)
+                        && repeatNudges < REPEAT_NUDGE_MAX && !repeatRetrievalPending) {
+                        nudgedReads.add(p);
+                        repeatNudges++;
+                        repeatRetrievalPending = { role: "system", content: `${REPEAT_FENCE}\n${REPEAT_READ_TEXT(p, n)}` };
+                    }
+                    continue;
+                }
+                if (name === "search_grep" || name === "glob") {
+                    const q = normQuery(args?.query ?? args?.pattern);
+                    if (!q) continue;
+                    const n = (grepCounts.get(q) ?? 0) + 1;
+                    grepCounts.set(q, n);
+                    if (n >= GREP_REPEAT_THRESHOLD && !nudgedGreps.has(q)
+                        && repeatNudges < REPEAT_NUDGE_MAX && !repeatRetrievalPending) {
+                        nudgedGreps.add(q);
+                        repeatNudges++;
+                        repeatRetrievalPending = { role: "system", content: `${REPEAT_FENCE}\n${REPEAT_GREP_TEXT(q, n)}` };
+                    }
+                    continue;
+                }
+            }
         },
     };
 };
