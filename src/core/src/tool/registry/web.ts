@@ -435,11 +435,12 @@ const pinnedMetadataGuardDispatcher = new Agent({
  *  默认由 pinnedSsrfDispatcher 钉 IP 防 DNS rebinding；allowPrivate 时不钉（本地已知服务无需防 rebinding）。
  *  任一不合规即抛错，由调用方 catch 转友好提示。
  */
-async function safeFetchFollow(
+export async function safeFetchFollow(
     startUrl: string,
     baseHeaders: Record<string, string>,
     signals: AbortSignal[],
     allowPrivate = false,
+    init?: { method?: string; body?: string },
 ) {
     const startProtocol = new URL(startUrl).protocol;
     let url = startUrl;
@@ -459,7 +460,8 @@ async function safeFetchFollow(
         }
         // ★ 用 undici fetch：dispatcher 选项有类型保证、不会被运行时静默吞掉（防 DNS rebinding 钉 IP 失效）
         const res = await undiciFetch(url, {
-            method: "GET",
+            method: init?.method ?? "GET",
+            ...(init?.body !== undefined ? { body: init.body } : {}),
             signal: AbortSignal.any(signals),
             redirect: "manual",          // ★ 永不自动跟随，逐跳手判
             headers: baseHeaders,
@@ -492,7 +494,7 @@ type FetchLikeResponse = {
  *  在多并发会话的服务进程里，单次抓取即可 OOM 拖垮全部会话。这里逐块累计、超上限即 cancel()，
  *  把单次抓取内存钉死在 maxBytes 以内。content-type 已由调用方在调用前判定（非文本不进来）。
  */
-const readBodyCapped = async (
+export const readBodyCapped = async (
     res: FetchLikeResponse,
     maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> => {

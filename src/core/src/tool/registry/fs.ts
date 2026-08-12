@@ -10,18 +10,10 @@ import fs from "fs/promises";
 import type * as ts from "typescript";   // P0-1：type-only——esbuild 编译期剥离，运行时不 resolve（CLI 不发布 typescript）
 import path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-
-// P0-1：typescript 仅 view_symbol_outline 的 AST 符号大纲用到。惰性动态加载——
-//   CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩（Cannot find module）。
+// typescript 模块惰性加载（view_symbol_outline 的 AST + 代码导航/诊断的 LanguageService 共用）已收敛到 tsHost，
+//   本文件不再持私有副本。CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩；
 //   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
-let _ts: typeof import('typescript') | null = null;
-let _tsTried = false;
-const getTs = async (): Promise<typeof import('typescript') | null> => {
-    if (_tsTried) return _ts;
-    _tsTried = true;
-    try { _ts = await import('typescript'); } catch { _ts = null; }
-    return _ts;
-};
+import { getTs } from "../tsHost.ts";
 import {
     getActiveWorkspaceRoot,
     getContainingRoot,

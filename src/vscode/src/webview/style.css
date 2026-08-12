@@ -715,6 +715,22 @@ body {
   background: var(--hover);
 }
 
+/* 长 assistant 折叠组：标题 + 正文纵向堆叠。
+   .row-assistant 是 flex 行（● + 内容）；若标题与正文同为行内 item，
+   展开时正文的大 max-content 会把 CJK 最小内容仅 1~2 字的标题挤到 min-content → 逐字折行。
+   用列容器包裹二者，并 min-width:0 让正文内部换行而非外挤标题。 */
+.assistant-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.assistant-content {
+  min-width: 0;
+  word-break: break-word;
+  color: var(--fg);
+}
+
 .assistant-caret {
   font-size: 10px;
 }

@@ -19,6 +19,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
+import { homedir } from "os";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
 import {
@@ -37,7 +38,33 @@ function sanitize(s: string): string {
     return s.replace(/[^a-zA-Z0-9_]/g, "_");
 }
 
-/** 读取并校验 MCP 配置；无配置则返回空对象（静默跳过） */
+/**
+ * 配置占位符展开：${dataDir} → appConfig.dataDir，${home} → 用户家目录。
+ * 使 mcp.json 可跨机器复用——路径不再写死某台机器的绝对路径（如 C:\Users\xxx\...），
+ * 改写 ${dataDir}/mcp-servers/... 后，同一份配置在任何机器的 ~/.deepseeker-code/ 下都能用。
+ */
+const expandPlaceholders = (s: any): any => {
+    if (typeof s !== "string") return s;
+    return s
+        .replace(/\$\{dataDir\}/g, appConfig.dataDir)
+        .replace(/\$\{home\}/g, homedir());
+};
+
+/** 对单个 server 配置的字符串字段（command/args/env/url）展开占位符；headers 保守不动 */
+const expandServerConfig = (cfg: McpServerConfig): McpServerConfig => {
+    const out: McpServerConfig = { ...cfg };
+    if (out.command) out.command = expandPlaceholders(out.command);
+    if (Array.isArray(out.args)) out.args = out.args.map(expandPlaceholders);
+    if (out.url) out.url = expandPlaceholders(out.url);
+    if (out.env && typeof out.env === "object") {
+        const e: Record<string, string> = {};
+        for (const [k, v] of Object.entries(out.env)) e[k] = expandPlaceholders(v);
+        out.env = e;
+    }
+    return out;
+};
+
+/** 读取并校验 MCP 配置；无配置则返回空对象（静默跳过）。占位符在返回前统一展开。 */
 async function readMcpConfig(): Promise<Record<string, McpServerConfig>> {
     const configPath = process.env.MCP_CONFIG || path.join(appConfig.dataDir, "mcp.json");
     let raw: string;
@@ -49,7 +76,12 @@ async function readMcpConfig(): Promise<Record<string, McpServerConfig>> {
     try {
         const parsed = JSON.parse(raw);
         const servers = parsed?.mcpServers;
-        return servers && typeof servers === "object" ? servers : {};
+        if (!servers || typeof servers !== "object") return {};
+        const out: Record<string, McpServerConfig> = {};
+        for (const [name, cfg] of Object.entries(servers)) {
+            out[name] = expandServerConfig(cfg as McpServerConfig);
+        }
+        return out;
     } catch (e: any) {
         console.warn(`⚠️ [MCP] 配置文件解析失败（${configPath}）: ${e.message}`);
         return {};

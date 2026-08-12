@@ -27,6 +27,8 @@ import { globTools } from "./registry/glob.ts";
 import { gitTools } from "./registry/git.ts";
 import { dependencyTools } from "./registry/inspect_dependencies.ts";
 import { webTools } from "./registry/web.ts";
+import { httpTools } from "./registry/http.ts";
+import { typescriptTools } from "./registry/typescript.ts";
 import { todoTools } from "./registry/todo.ts";
 import { backgroundTools } from "./registry/background.ts";
 import { undoTools } from "./registry/undo.ts";
@@ -59,6 +61,8 @@ agentTools.push(
     ...gitTools,         // git 操作集（status/log/diff 纯读 + commit 变更）
     ...dependencyTools,  // 查看 package.json 依赖清单（SAFE，纯读）
     ...webTools,         // 联网抓取 URL（DANGER，强制审批 + SSRF 防护）
+    ...httpTools,        // 全方法 HTTP 客户端（本地联调/API 测试，DANGER + 放行内网 + 拦云元数据）
+    ...typescriptTools,  // TS/JS 代码导航 + 类型诊断（LanguageService，SAFE 纯读；无 typescript 模块时 validateEnvironment 自隐藏）
     ...todoTools,        // 任务清单管理（SAFE，整表覆盖 + UIEvent 推前端）
     ...backgroundTools,  // 后台任务（run/get_output/stop，自管理进程注册表）
     ...undoTools,        // 文件回退（undo_list 只读 + undo_restore 回退，含写前自动备份）

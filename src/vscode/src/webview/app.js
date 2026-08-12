@@ -137,9 +137,14 @@ turnHeaderBySeq: new Map(),
         if (!row.streaming && isLongAssistant(row.text)) {
           // 长回复（计划/方案）默认展开，点头部折叠——历史回放同样可折
           const collapsed = !!row.collapsed;
+          // ★ 标题与正文需纵向堆叠：包进 .assistant-wrap（flex 列），
+          //   否则二者作为 .row-assistant（flex 行）的同级 item，展开时正文的大 max-content
+          //   会把 CJK 最小内容仅 1~2 字的标题挤到 min-content，导致标题逐字折行。
           wrap.innerHTML =
+            `<div class="assistant-wrap">` +
             `<div class="assistant-head" title="点击折叠/展开"><span class="assistant-caret">${collapsed ? "▸" : "▾"}</span>${escapeHtml(firstLine(row.text))}</div>` +
-            `<div class="assistant-content" style="${collapsed ? "display:none" : ""}">${html}</div>`;
+            `<div class="assistant-content" style="${collapsed ? "display:none" : ""}">${html}</div>` +
+            `</div>`;
           wrap.querySelector(".assistant-head")?.addEventListener("click", () => {
             row.collapsed = !row.collapsed;
             rebuildRow(row);

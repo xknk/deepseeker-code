@@ -196,6 +196,18 @@ function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   panel.onDidDispose(() => {
     panel = null;
   });
+  // ★ 锁定聊天所在编辑器组：避免「再打开一个文件」时文件落到对话侧遮挡会话。
+  //   组一旦上锁，新文件改投到未锁的编辑器组（文件侧），聊天 tab 始终留在原位不被覆盖。
+  //   仅在 openBeside（聊天独占侧栏列）时锁定——若聊天与文件同列（openBeside=false），
+  //   锁定会迫使所有文件开到新组，反而干扰正常编辑。createWebviewPanel 已聚焦聊天组，
+  //   故 lockEditorGroup 命中正确组；仅在创建时锁（reveal 走 preserveFocus，活动组非聊天组）。
+  if (openBeside) {
+    void vscode.commands
+      .executeCommand("workbench.action.lockEditorGroup")
+      .then(undefined, () => {
+        /* 命令不可用时静默（极旧版本/被禁用） */
+      });
+  }
   return panel;
 }
 
