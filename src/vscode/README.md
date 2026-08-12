@@ -1,6 +1,6 @@
 # DeepSeeker-Code for Visual Studio Code
 
-> DeepSeek 驱动的终端级 AI 编程助手，架构对齐 Claude Code：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 计划模式 + Undo 回退。
+> DeepSeek 驱动的终端级 AI 编程助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 计划模式 + Undo 回退。
 
 DeepSeeker-Code 把一个完整的 agent 编码引擎塞进 VS Code 的一个聊天面板：流式逐字输出、可折叠思考过程、工具调用卡、内联审批、两阶段计划模式、历史会话续接、文件级 Undo 回退，以及对 MCP / Hooks / Skills / 声明式子 Agent 的全套支持。
 

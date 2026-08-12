@@ -13,7 +13,7 @@
  *  tsconfig paths 与下方 CORE_CANDIDATES 均已双候选兼容，任一处 npm run build 皆可。
  */
 import { build } from "esbuild";
-import { cp, mkdir } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -21,6 +21,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const ROOT = path.dirname(fileURLToPath(import.meta.url)); // 本工程根（vscode/）
 const DIST = path.join(ROOT, "dist");
 const watch = process.argv.includes("--watch");
+// 发布构建（非 watch）开启 minify：剥离源码注释，避免开发注释进入 vsix 产物；dev 模式保留注释便于调试。
+const minify = !watch;
 const ctx = {};
 
 /** core 源码目录双候选（与 tsconfig paths 一致：cli/vscode 与 src/vscode）。 */
@@ -64,6 +66,8 @@ async function buildExtension() {
     outfile: path.join(DIST, "extension.js"),
     sourcemap: true,
     logLevel: "info",
+    legalComments: "none",
+    ...(minify ? { minify: true } : {}),
     ...(watch ? { watch: true } : {}),
   });
   if (watch) ctx.extension = res;
@@ -80,6 +84,8 @@ async function buildWebview() {
     outfile: path.join(DIST, "webview.js"),
     sourcemap: watch,
     logLevel: "info",
+    legalComments: "none",
+    ...(minify ? { minify: true } : {}),
     ...(watch ? { watch: true } : {}),
   });
   if (watch) ctx.webview = res;
@@ -88,7 +94,10 @@ async function buildWebview() {
 // —— 拷贝静态资产（style.css + codicons 字体/CSS + core 内置 skills/agents/commands） ——
 async function copyAssets() {
   await mkdir(DIST, { recursive: true });
-  await cp(path.join(ROOT, "src/webview/style.css"), path.join(DIST, "style.css"), { force: true }).catch(() => {});
+  // style.css：拷贝为 dist 副本时剥离块注释（注释仅开发用，避免进入 vsix 产物）
+  await readFile(path.join(ROOT, "src/webview/style.css"), "utf8")
+    .then((s) => writeFile(path.join(DIST, "style.css"), s.replace(/\/\*[\s\S]*?\*\//g, ""), "utf8"))
+    .catch(() => {});
 
   // ★ 面板页卡图标（media/icon.svg → dist/icon.svg），供 extension.ts panel.iconPath 引用
   await cp(path.join(ROOT, "media/icon.svg"), path.join(DIST, "icon.svg"), { force: true }).catch((e) => {

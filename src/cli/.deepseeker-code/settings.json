@@ -15,7 +15,7 @@
       "run_command(node -e \"const p=require('./vscode/package.json');console.log('version:',p.version);console.log('dependencies:',JSON.stringify(p.dependencies));console.log('devDeps has typescript:',!!p.devDependencies.typescript);\")",
       "run_command(cd vscode && node .tmp-bump.cjs && node -e \"const p=require('./package.json');console.log('VERIFY version:',p.version,'| typescript in deps:',p.dependencies.typescript,'| ts in devDeps:',!!(p.devDependencies&&p.devDependencies.typescript));\")",
       "run_command(cd vscode && npm run package 2>&1)",
-      "web_search(Claude Code VS Code extension UI 界面 聊天面板 样式 设计)",
+      "web_search(VS Code extension UI 界面 聊天面板 样式 设计)",
       "run_command(cd vscode && node .tmp-refactor-ui.cjs && node --check src\\webview\\app.js && echo SYNTAX_OK)",
       "run_command(cd vscode && node .tmp-verify-ui.cjs)",
       "run_command(cd vscode && node .tmp-bump.cjs && del .tmp-bump.cjs && npm run package 2>&1 | findstr /v \"INFO WARNING\")",

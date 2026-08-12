@@ -1,13 +1,13 @@
 {
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
-  "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口，交互对齐 Claude Code）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.1",
+  "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
+  "version": "1.0.2",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
   "categories": ["Machine Learning", "Other"],
-  "keywords": ["ai", "deepseek", "coding-assistant", "agent", "chat", "claude-code"],
+  "keywords": ["ai", "deepseek", "coding-assistant", "agent", "chat"],
   "repository": {
     "type": "git",
     "url": "https://github.com/xknk/deepSeekCode.git",

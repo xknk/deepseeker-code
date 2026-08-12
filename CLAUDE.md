@@ -8,7 +8,7 @@
 -->
 # DeepSeeker-Code
 
-基于 DeepSeek 的 AI 编码助手（类 Claude Code 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills。
+基于 DeepSeek 的 AI 编码助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills。
 
 ## 产品定位（评估 / 规划基准）
 

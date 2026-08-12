@@ -1,6 +1,6 @@
 # DeepSeeker-Code
 
-> 基于 DeepSeek 的 AI 编码助手（架构对齐 Claude Code）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 声明式子 Agent + 计划模式 + Undo 回退。
+> 基于 DeepSeek 的 AI 编码助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 声明式子 Agent + 计划模式 + Undo 回退。
 
 DeepSeeker-Code 是一套自研的 agentic 编码引擎，外加三个共享同一 core 的入口。core 是一个流式 agent 主循环，配备完整的工具链（读写文件 / 跑命令 / 搜索 / 网页抓取）、审批网关、上下文压缩、会话持久化，以及 MCP / Hooks / Skills / 子 Agent 四套扩展机制。三个入口——VS Code 插件、终端 CLI、HTTP 服务——共享同一引擎和 `~/.deepseeker-code/` 数据目录，同一项目下会话可互续。
 
@@ -14,8 +14,8 @@ DeepSeeker-Code 是 **单人本地 AI coding 工具**——运行在开发者本
 
 | 入口 | 适用场景 | 详细文档 |
 | --- | --- | --- |
-| **VS Code 插件** | 日常编码，IDE 内聊天面板，对齐 Claude Code 插件交互 | [src/vscode/README.md](./src/vscode/README.md) |
-| **终端 CLI** | 终端原生体验（React Ink），对标 Claude Code CLI | [src/cli/README.md](./src/cli/README.md) |
+| **VS Code 插件** | 日常编码，IDE 内聊天面板 | [src/vscode/README.md](./src/vscode/README.md) |
+| **终端 CLI** | 终端原生体验（React Ink） | [src/cli/README.md](./src/cli/README.md) |
 | **HTTP 服务** | 程序化对接 / 远程访问 / 多并发会话 / SSE 流式 | 见下方「HTTP 服务」 |
 
 三者功能等价（同一 core 引擎、同一套工具/审批/计划模式/Undo/MCP/Hooks/Skills），区别仅在交互形态。
@@ -137,7 +137,6 @@ VS Code 插件：`cd src/vscode && npm install && npm run build`（或 `npm run 
 | [src/cli/README.md](./src/cli/README.md) | 终端 CLI 使用与配置（npm 发布档） |
 | [src/vscode/README.md](./src/vscode/README.md) | VS Code 插件使用与配置（商城发布档） |
 | [.ai-docs/发布指南.md](./.ai-docs/发布指南.md) | **VS Code 商城 / npm 上架发布操作手册（维护者）** |
-| [.ai-docs/Claude-Code对标分析.md](./.ai-docs/Claude-Code对标分析.md) | 全功能对标 Claude Code + 优化路线 |
 | [.ai-docs/API契约.md](./.ai-docs/API契约.md) | HTTP 服务 API 契约（前端对接说明书） |
 | [.ai-docs/工具扩充计划.md](./.ai-docs/工具扩充计划.md) | 工具链扩充计划与落地状态 |
 | [.ai-docs/下一步计划.md](./.ai-docs/下一步计划.md) | 引擎能力盘点与字段时机 |
