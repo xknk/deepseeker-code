@@ -37,12 +37,13 @@ code --install-extension deepseeker-code-<version>.vsix
 ## 功能特性
 
 - **流式输出**：逐字打字效果 + 可折叠的思考过程块。
-- **工具调用**：读/写/编辑文件、运行命令、搜索（内置 ripgrep）、网页抓取与搜索，每步以工具卡展示。
+- **工具调用**：读/写/编辑文件 + 符号大纲、运行命令（前台/后台）、ripgrep 搜索 + glob、Git 操作集、网页抓取与搜索、HTTP 客户端（联调）、TypeScript 诊断与跳转、Word/PDF/Excel 阅读，每步以工具卡展示。
 - **审批网关**：写操作 / 危险命令弹内联审批（允许本次 / 总是允许 / 拒绝）；「总是允许」会智能落成 glob 规则持久化。
 - **两阶段计划模式**：先只读调研出方案 → 你审阅（接受并自动执行 / 逐步审批 / 编辑 / 拒绝）→ 再落地实现。
 - **结构化提问**：agent 需要澄清时以选项按钮提问，而非盲猜。
 - **历史会话**：`/sessions` 点选续接过往会话；同一项目目录的会话在 CLI 与插件间互通。
 - **Undo 回退**：每次写操作前自动备份，可按操作回退文件变更。
+- **持久记忆**：跨会话记忆（用户偏好 / 反馈 / 项目约束 / 外部资源），agent 主动保存与召回。
 - **多根工作区**：agent 跟随「当前活动编辑器所属文件夹」工作，无需手动切目录。
 - **MCP / Hooks / Skills / 子 Agent**：完整的声明式扩展机制（见下「可扩展配置」）。
 
@@ -235,15 +236,15 @@ MCP 配置（`mcp.json`，独立文件）：
 > 以下面向贡献者。普通用户无需关心。
 
 ```bash
-cd src/cli/vscode
+cd src/vscode
 npm install
 npm run build      # 产出 dist/（extension.js 内联 core 全部源码 + webview.js + 资产）
 npm run dev        # 监听模式
 npm run package    # 打 .vsix（esbuild 瘦身：纯 JS 依赖全 bundle，只 external vscode + vscode-ripgrep）
 ```
 
-- **F5 调试**：用 VS Code 打开 `src/cli/vscode/`，F5 启动「Run Extension (DeepSeeker-Code)」（preLaunchTask 自动 `node build.mjs`），会弹出 Extension Development Host 新窗口。
-- **打包瘦身约定**：`build.mjs` 把 openai/undici/ignore/typescript 等纯 JS 依赖 bundle 进 `dist/extension.js`，`dependencies` 只留 `vscode-ripgrep`（原生 rg 二进制），故 vsix ~3.8MB。新增运行时依赖默认进 `devDependencies`（会被 bundle），只有原生二进制才进 `dependencies`。
+- **F5 调试**：用 VS Code 打开 `src/vscode/`，F5 启动「Run Extension (DeepSeeker-Code)」（preLaunchTask 自动 `node build.mjs`），会弹出 Extension Development Host 新窗口。
+- **打包瘦身约定**：`build.mjs` 把 openai/undici/ignore/typescript 等纯 JS 依赖 bundle 进 `dist/extension.js`，`dependencies` 只留 `vscode-ripgrep`（原生 rg 二进制），故 vsix ~4.8MB（随 read_docx/read_pdf/read_xlsx 等新工具引入 mammoth/exceljs/unpdf 等纯 JS 依赖而增长）。新增运行时依赖默认进 `devDependencies`（会被 bundle），只有原生二进制才进 `dependencies`。
 
 ---
 
