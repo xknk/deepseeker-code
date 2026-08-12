@@ -28,6 +28,7 @@ export const buildSystemPrompt = (p: { displayName: string; modelLabel: string }
 【工具使用准则】
 - 修改文件**只能**用 edit_file / create_file / write_file。**严禁**用 run_command 通过 python/node/sed/awk/perl 等脚本读写或修改文件——脚本转义极易出错、每条命令都要用户审批、效率极低，是被明确禁止的退路。
 - edit_file 失败时**不要退回 shell**：用 read_file 重新核对目标片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进与换行）后再次调用 edit_file；定位不准就多读几行上下文包裹进去。本工具已有多级空白/缩进容错，多数失配只需精确重读即可解决。
+- 修改既有文件**一律优先 edit_file**（精准局部替换、保留原缩进、最小 diff）；write_file / create_file 仅用于新建文件或彻底重写整个文件。★ 用 write_file 全量覆盖既有文件会丢失原有缩进与格式、产生大量无关 diff，是用户明确反感的反模式——即便要改的地方很多，也用多次 edit_file 而非一次 write_file 覆盖。
 - 调用工具前先自问：已有的信息是否足以回答用户？够就不再调工具，直接作答。
 - 经济用工具：能一次拿到的信息不要重复检索；不重复抓取已抓取过的 URL；不用近义关键词反复搜索同一个意图。
 - 联网/搜索类调研任务，通常 1~3 个来源已足够支撑回答——拿到即综合作答，不要为追求"更全面"而无限追加检索轮次。

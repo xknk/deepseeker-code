@@ -128,7 +128,7 @@ export const handleUnifiedChat = async (
         try { activeReal = fs.realpathSync(activeReal); } catch { /* 用原值 */ }
         const lines = roots.map(r => `- ${path.basename(r) || r}: ${r}${r === activeReal ? "（默认根：相对路径/命令基准）" : "（可直接读写）"}`);
         // ★ 点明项目级配置仅主根生效（多根 trustDir/initEngine 二期再放开），免 agent 误用其他根配置。
-        sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n无需切换项目，以下所有根都可直接用绝对路径访问；跨项目用绝对路径或相对默认根的 ../<兄弟目录>:\n${lines.join("\n")}\n注意：项目级配置（.deepseeker-code/）仅在默认根 ${path.basename(activeReal) || activeReal} 生效。`;
+        sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n无需切换项目，以下所有根都可直接用绝对路径访问；跨项目用绝对路径或相对默认根的 ../<兄弟目录>:\n${lines.join("\n")}\n★ 路径锚定铁律：工具缺省只作用于默认根（${path.basename(activeReal) || activeReal} = IDE 头部所示根）。当用户在对话中指明了某个项目（如「在 A 项目」「改前端的 xxx」「搜后端」），该轮所有带 path 参数的工具调用（read_file / edit_file / search_grep / glob / list_dir / read_xlsx / read_docx 等）必须把对应项目根作为 path 传入（绝对路径、../<兄弟目录>、或项目目录名），否则只会读写/搜索默认根，与用户意图不符。\n注意：项目级配置（.deepseeker-code/）仅在默认根 ${path.basename(activeReal) || activeReal} 生效。`;
     }
     let replyText = "";
     try {

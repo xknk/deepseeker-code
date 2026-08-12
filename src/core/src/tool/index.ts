@@ -34,6 +34,8 @@ import { askTools } from "./registry/ask.ts";
 import { worktreeTools } from "./registry/worktree.ts";
 import { notebookTools } from "./registry/notebook.ts";
 import { memoryTools } from "./registry/memory.ts";
+import { spreadsheetTools } from "./registry/spreadsheet.ts";
+import { documentTools } from "./registry/document.ts";
 
 export * from "./type.ts";
 
@@ -64,4 +66,6 @@ agentTools.push(
     ...worktreeTools,    // P2-13 独立 worktree（enter/exit/status，会话作用域隔离）
     ...notebookTools,    // P2-10 NotebookEdit（.ipynb cell 编辑，MUTATION + undo 接线）
     ...memoryTools,      // 持久记忆（memory_save/read/list/delete，跨会话笔记召回）
+    ...spreadsheetTools, // read_xlsx（Excel 工作簿读取，补 read_file 读不了的二进制 xlsx）
+    ...documentTools,    // read_docx / read_pdf（Word / PDF 文档读取，补 read_file 读不了的二进制文档）
 );

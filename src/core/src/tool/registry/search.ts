@@ -13,7 +13,7 @@
  */
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, getAllowedWorkspaceRoots } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
@@ -30,20 +30,20 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "search_grep",
-            description: "在工作区的所有文件中检索匹配的代码行，返回带行列号的平铺线索，用于快速定位符号定义或报错位置。默认按字面量关键词匹配；如需正则，传 is_regex=true。多根工作区下可传 path 指定搜索某个项目根（绝对路径或相对当前默认根的 ../兄弟目录）。",
+            description: "在工作区的所有文件中检索匹配的代码行，每个命中带前后各 2 行上下文（可直接判断用法、免紧跟一次 read_file）；默认按字面量关键词匹配，如需正则传 is_regex=true。多根工作区下用 path 限定搜索目录：可传项目目录名（如 'frontend'）自动匹配工作区根，或传绝对路径 / 相对默认根的 ../兄弟目录。★ 当用户在对话里指明了某个项目时，务必把该项目作为 path 传入——否则只会搜索 IDE 头部所示的活动根，常与用户意图不符。",
             parameters: {
                 type: "object",
                 properties: {
                     query: { type: "string", description: "检索内容。默认为字面量关键词（如 'function runAgent'）；is_regex=true 时按正则解析（如 'function\\s+runAgent'）。" },
                     is_regex: { type: "boolean", description: "是否将 query 作为正则表达式解析，默认 false（字面量匹配，自动转义特殊字符）" },
-                    path: { type: "string", description: "限定搜索的目录（可选）。默认搜索当前活动项目根。多根工作区下可传另一个项目根（绝对路径，或相对当前默认根的 ../<兄弟目录>）来跨项目检索，须经工作区沙箱校验。" }
+                    path: { type: "string", description: "限定搜索的目录（可选）。默认搜索 IDE 头部所示活动根。多根场景下：传项目目录名（如 'frontend'）自动匹配工作区根；或传绝对路径 / 相对默认根的 ../<兄弟目录>；均经沙箱校验。用户提到具体项目时必填。" }
                 },
                 required: ["query"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            // ★ 200 行结果约 30K 字符，配独立预算脱离通用 16K 兜底，避免被二次截回 ~100 行
-            maxOutputCharacters: 32000,
+            // ★ 300 行（含上下文）约 48K 字符，配独立预算脱离通用 16K 兜底，避免被二次截回 ~100 行
+            maxOutputCharacters: 48000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { query: string; is_regex?: boolean; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
@@ -61,13 +61,32 @@ export const searchTools: CustomTool[] = [
                     //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
                     // ★ 多根工作区：args.path 指定搜索目录时经 resolveSafePath 校验（须落在任一工作区根内），
                     //   支持 ../<兄弟目录> 跨项目检索；缺省搜索当前活动根。
-                    const searchRoot = (args.path ? resolveSafePath(args.path) : (ctx?.cwd ?? getActiveWorkspaceRoot())).replace(/\\/g, "/");
+                    // ★ 多根工作区：args.path 支持直接传「项目目录名」（basename）自动匹配工作区根。
+                    //   模型常以项目名（如 "frontend"）而非完整绝对路径表达意图；而 IDE 头部所示「活动根」
+                    //   由 activate 时定的主根决定，与对话里指明的项目可能不一致——若不锚定，缺省会误搜活动根。
+                    //   仅当传入是「裸目录名」（非绝对路径、无分隔符）时才按 basename 匹配；绝对路径 / ../兄弟 等
+                    //   仍走 resolveSafePath 原逻辑，向后兼容、无误伤。
+                    const resolveSearchRoot = (): string => {
+                        if (!args.path) return ctx?.cwd ?? getActiveWorkspaceRoot();
+                        const p = args.path.trim();
+                        const looksLikeBareName = !path.isAbsolute(p) && !p.includes("/") && !p.includes("\\");
+                        if (looksLikeBareName) {
+                            const hit = getAllowedWorkspaceRoots().find(r => {
+                                const bn = path.basename(r);
+                                return bn === p || bn.toLowerCase() === p.toLowerCase();
+                            });
+                            if (hit) return hit;
+                        }
+                        return resolveSafePath(args.path);
+                    };
+                    const searchRoot = resolveSearchRoot().replace(/\\/g, "/");
                     const rgArgs = [
                         "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",
                         "--column",
                         "--no-heading",
                         "--color", "never",
+                        "-C", "2", // ★ 每个命中带前后各 2 行上下文：模型一次看懂用法，免去紧跟的 read_file 往返（减调用次数的关键）
                         "--max-count", "10",
                         "--glob", "!node_modules/**",
                         "--glob", "!dist/**",
@@ -96,9 +115,9 @@ export const searchTools: CustomTool[] = [
                     if (!stdout.trim()) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
 
                     const resultLines = stdout.split("\n").filter(Boolean);
-                    const MAX_GREP_LINES = 200; // 对标 Claude Code 宽松检索（head_limit ~250），由 80 上调
+                    const MAX_GREP_LINES = 300; // 含上下文行后单匹配膨胀，由 200 上调以容纳更多命中
                     if (resultLines.length > MAX_GREP_LINES) {
-                        return resultLines.slice(0, MAX_GREP_LINES).join("\n") + `\n\n[... 匹配项过多，已隐藏剩余的 ${resultLines.length - MAX_GREP_LINES} 条结果，建议更换更精准的关键词重新检索 ...]`;
+                        return resultLines.slice(0, MAX_GREP_LINES).join("\n") + `\n\n[... 匹配项过多，已隐藏剩余的 ${resultLines.length - MAX_GREP_LINES} 条结果，建议更换更精准的关键词，或用 path 参数限定到具体目录/项目后重试 ...]`;
                     }
                     return resultLines.join("\n");
                 } catch (error: any) {

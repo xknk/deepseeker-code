@@ -133,14 +133,14 @@ export const sweepStaleAtomicTmp = async (root?: string, staleSeconds = 60): Pro
  * @param base 该文件所属根（取对应根的 gitignore 引擎；缺省=活动根，向后兼容单根）
  * @returns 拦截时返回提示字符串（直接 return 给模型）；放行返回 null。
  */
-const assertReadable = async (relForCheck: string, displayPath: string, base?: string): Promise<string | null> => {
+export const assertReadable = async (relForCheck: string, displayPath: string, base?: string): Promise<string | null> => {
     if (isSensitiveReadTarget(relForCheck)) {
         return `🔒 [安全拦截]：[${displayPath}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝读取以防机密外泄。如确需查看请人工处理。`;
     }
-    await initializeWorkspaceIgnore(base);
-    if (checkIsPathIgnored(relForCheck, base)) {
-        return `🚫 [忽略规则]：[${displayPath}] 命中 .gitignore / 通用忽略规则，已跳过。`;
-    }
+    // ★ 不再按 .gitignore / 通用忽略拦截 read：gitignore 是 VCS 概念（不入库 ≠ agent 不能读）。
+    //   agent 明确指定路径的文件即应可读——业务文档/配置常被 gitignore 本地保留，agent 需读以理解接口与上下文，
+    //   拦截会造成"明明指明了文件却读不到"的误伤。密钥外泄防线由上方 isSensitiveReadTarget 单独硬拒
+    //   （.env/.npmrc/私钥/credentials），安全不降级。目录树噪音过滤仍由 list_dir 自持 checkIsPathIgnored 负责。
     return null;
 };
 
@@ -241,7 +241,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "read_file",
-            description: "读取指定文件的文本内容，并自动带上用于对齐定位的物理行号。支持大文件分片读取，防止 Token 爆炸。",
+            description: "读取指定【文本】文件的文本内容，并自动带上用于对齐定位的物理行号。支持大文件分片读取，防止 Token 爆炸。★ 仅处理文本文件——二进制文件会读出乱码：.xlsx 改用 read_xlsx，.docx 改用 read_docx，.pdf 改用 read_pdf。",
             parameters: {
                 type: "object",
                 properties: {
@@ -262,11 +262,16 @@ export const fsTools: CustomTool[] = [
                 try {
                     const absPath = resolveSafePath(args.path);
 
-                    // ★ 读保护三道闸（防密钥外泄到云端模型）：
-                    //   1) 敏感凭证文件硬黑名单 → 直接拒读；
-                    //   2) .gitignore / 通用忽略规则 → 跳过（与 list_dir 同口径，避免读到 .env 等被忽略产物）。
-                    // ★ 多根：相对路径 + 引擎都按【文件所属根】算，而非活动根——否则跨根文件得 `../兄弟项目/...`，
-                    //   既触发 ignore 包抛 RangeError、又是用错根的 gitignore 引擎在判。
+                    // ★ 二进制文件拦截：xlsx/docx/pdf 有专用工具，read_file 强行 UTF-8 读会满屏乱码——
+                    //   直接引导到专用工具，省一次无意义的乱码读取（agent 常误用 read_file 读表格/文档）。
+                    const lowerExt = absPath.toLowerCase();
+                    if (lowerExt.endsWith(".xlsx")) return `⚠️ [${args.path}] 是 Excel 二进制文件，read_file 读不了（UTF-8 解码满屏乱码）。请改用 read_xlsx（支持 sheet 选择 / 翻页 / Markdown 表格输出）。`;
+                    if (lowerExt.endsWith(".docx")) return `⚠️ [${args.path}] 是 Word 二进制文档，read_file 读不了。请改用 read_docx 提取正文文本。`;
+                    if (lowerExt.endsWith(".pdf")) return `⚠️ [${args.path}] 是 PDF 二进制文档，read_file 读不了。请改用 read_pdf 提取文字层。`;
+
+                    // ★ 读保护闸（防密钥外泄到云端模型）：敏感凭证文件（.env/私钥/credentials）硬拒读。
+                    //   注：不再按 .gitignore 拦截 read——gitignore 是 VCS 概念（不入库 ≠ agent 不能读），
+                    //   业务文档常被 gitignore 本地保留而 agent 需读，拦截会造成误伤（assertReadable 已同步调整）。
                     const checkBase = getContainingRoot(absPath);
                     const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
                     const readBlock = await assertReadable(relForCheck, args.path, checkBase);
@@ -625,7 +630,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "write_file",
-            description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。适合从零生成文件或大段重写；局部修改请改用 edit_file。",
+            description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。★ 仅用于【新建文件】或【彻底重写整个文件】——修改既有文件一律改用 edit_file（精准局部替换、保留原缩进、最小 diff）。用 write_file 覆盖既有文件会丢失原有 Tab/空格缩进，产生大量无关 diff，用户强烈反感。",
             parameters: {
                 type: "object",
                 properties: {
