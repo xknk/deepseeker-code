@@ -7,3 +7,4 @@ dist/
 .ai-docs/
 src/cli/vscode/deepseeker-code-1.0.10.vsix
 src/cli/vscode/deepseeker-code-1.0.10.vsix
+src/文章示例/test.md
