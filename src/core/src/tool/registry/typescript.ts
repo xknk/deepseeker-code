@@ -15,7 +15,7 @@ import fs from "fs/promises";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative } from "../tsHost.ts";
-import { resolveSafePath, getContainingRoot } from "../guard.ts";
+import { resolveReadablePath, getContainingRoot } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
 /** 单文件体积上限（防 minified 巨型文件 AST/type-check 吃内存）——同 view_symbol_outline。 */
@@ -30,9 +30,7 @@ const toDisplayPath = (wsRoot: string, abs: string): string => {
 
 /** 读门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示串或 null（放行）。 */
 const precheck = async (displayPath: string, absPath: string): Promise<string | null> => {
-    const checkBase = getContainingRoot(absPath);
-    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-    const readBlock = await assertReadable(relForCheck, displayPath, checkBase);
+    const readBlock = await assertReadable(absPath, displayPath);
     if (readBlock) return readBlock;
     const stat = await fs.stat(absPath);
     if (stat.size > MAX_FILE_BYTES) {
@@ -71,7 +69,7 @@ export const typescriptTools: CustomTool[] = [
                 try {
                     const TS = await getTs();
                     if (!TS) return `⚠️ [类型诊断不可用]：typescript 模块未加载（VSCode 扩展内可用；CLI 环境未必安装 typescript）。可改用 run_command 跑 \`tsc --noEmit\`。`;
-                    const absPath = realpathNative(resolveSafePath(args.path));
+                    const absPath = realpathNative(resolveReadablePath(args.path));
                     const block = await precheck(args.path, absPath);
                     if (block) return block;
 
@@ -142,7 +140,7 @@ export const typescriptTools: CustomTool[] = [
                 try {
                     const TS = await getTs();
                     if (!TS) return `⚠️ [跳转定义不可用]：typescript 模块未加载（VSCode 扩展内可用；CLI 环境未必安装 typescript）。`;
-                    const absPath = realpathNative(resolveSafePath(displayPath));
+                    const absPath = realpathNative(resolveReadablePath(displayPath));
                     const block = await precheck(displayPath, absPath);
                     if (block) return block;
 

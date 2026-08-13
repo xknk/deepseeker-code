@@ -2,12 +2,11 @@
  * @file tool/registry/spreadsheet.ts
  * @description 电子表格读取工具 read_xlsx：用 exceljs 解析 .xlsx 工作簿，按 sheet 转 Markdown 表格回灌模型。
  *  read_file 强制 UTF-8 文本流，读不了二进制 xlsx 容器（ZIP+XML，会满屏乱码）；本工具补齐表格类数据源
- *  （配置表 / 数据表 / 导出报表）。安全与 read_file 对齐：SAFE 级 + resolveSafePath 围栏 + 读保护闸门
- *  （敏感凭证拒读 / gitignore 跳过）+ 单元格内容脱敏。
+ *  （配置表 / 数据表 / 导出报表）。安全与 read_file 对齐：SAFE 级 + resolveReadablePath 跨界读 + 读保护闸门
+ *  （敏感凭证拒读）+ 单元格内容脱敏。
  */
-import path from "path";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { resolveSafePath, getContainingRoot } from "../guard.ts";
+import { resolveReadablePath } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
 // exceljs 体积可观且仅本工具用到——惰性动态加载，不影响其它工具与所有进程的启动开销。
@@ -65,11 +64,9 @@ export const spreadsheetTools: CustomTool[] = [
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string; sheet?: string; start_row?: number; max_rows?: number }): Promise<string> {
                 try {
-                    const absPath = resolveSafePath(args.path);
-                    // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读 + gitignore/通用忽略跳过；多根按文件所属根。
-                    const checkBase = getContainingRoot(absPath);
-                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
+                    const absPath = resolveReadablePath(args.path);
+                    // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
+                    const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
 
                     // ★ exceljs 只解 .xlsx（ZIP+XML）；.xls 老二进制 / 其它格式直接拒，免白跑解析。

@@ -13,7 +13,7 @@
  */
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath, getAllowedWorkspaceRoots } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveReadablePath, getAllowedWorkspaceRoots } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
 import path from "path";
@@ -59,13 +59,14 @@ export const searchTools: CustomTool[] = [
                     //   Windows 下 process.cwd() 返回反斜杠（如 D:\code\自研\...），spawn/execFile 用「反斜杠+中文」
                     //   作 cwd 派生 rg 会失败（ENOENT 或无限卡死，实测 search_grep 查 import 卡 >90s）。
                     //   显式 path 参数由 rg 直接解析，绕开 cwd 解析坑——实测唯一稳定方式（391 行秒级）。
-                    // ★ 多根工作区：args.path 指定搜索目录时经 resolveSafePath 校验（须落在任一工作区根内），
-                    //   支持 ../<兄弟目录> 跨项目检索；缺省搜索当前活动根。
+                    // ★ 跨界检索：args.path 指定搜索目录时经 resolveReadablePath 解析（不围栏），
+                    //   真正支持 ../<兄弟目录> 跨项目与绝对路径检索（旧 resolveSafePath 在单根下会 SECURITY 拦截 ../，
+                    //   与本工具描述承诺的「../兄弟目录」相悖）；缺省搜索当前活动根。
                     // ★ 多根工作区：args.path 支持直接传「项目目录名」（basename）自动匹配工作区根。
                     //   模型常以项目名（如 "frontend"）而非完整绝对路径表达意图；而 IDE 头部所示「活动根」
                     //   由 activate 时定的主根决定，与对话里指明的项目可能不一致——若不锚定，缺省会误搜活动根。
                     //   仅当传入是「裸目录名」（非绝对路径、无分隔符）时才按 basename 匹配；绝对路径 / ../兄弟 等
-                    //   仍走 resolveSafePath 原逻辑，向后兼容、无误伤。
+                    //   仍走 resolveReadablePath 原逻辑，向后兼容、无误伤。
                     const resolveSearchRoot = (): string => {
                         if (!args.path) return ctx?.cwd ?? getActiveWorkspaceRoot();
                         const p = args.path.trim();
@@ -77,7 +78,7 @@ export const searchTools: CustomTool[] = [
                             });
                             if (hit) return hit;
                         }
-                        return resolveSafePath(args.path);
+                        return resolveReadablePath(args.path);
                     };
                     const searchRoot = resolveSearchRoot().replace(/\\/g, "/");
                     const rgArgs = [

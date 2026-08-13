@@ -3,12 +3,11 @@
  * @description 文档读取工具集：read_docx（Word .docx）/ read_pdf（.pdf）。
  *  read_file 强制 UTF-8 文本流，读不了二进制 docx/pdf 容器（满屏乱码）；本文件用 mammoth / unpdf
  *  解析，补齐文档类数据源（规格说明 / 设计文档 / 需求 / 报告）。安全与 read_file 对齐：
- *  SAFE 级 + resolveSafePath 围栏 + 读保护闸门（敏感凭证拒读 / gitignore 跳过）+ 内容脱敏。
+ *  SAFE 级 + resolveReadablePath 跨界读 + 读保护闸门（敏感凭证拒读）+ 内容脱敏。
  */
-import path from "path";
 import fs from "fs/promises";
 import { CustomTool, ToolSafetyLevel } from "../type.ts";
-import { resolveSafePath, getContainingRoot } from "../guard.ts";
+import { resolveReadablePath } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
 /** 动态加载 mammoth（CJS interop 兼容 default / namespace 两种导出形态）。 */
@@ -42,11 +41,9 @@ export const documentTools: CustomTool[] = [
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string; start_char?: number; max_chars?: number }): Promise<string> {
                 try {
-                    const absPath = resolveSafePath(args.path);
-                    // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读 + gitignore/通用忽略跳过；多根按文件所属根。
-                    const checkBase = getContainingRoot(absPath);
-                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
+                    const absPath = resolveReadablePath(args.path);
+                    // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
+                    const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
 
                     if (!absPath.toLowerCase().endsWith(".docx")) {
@@ -95,10 +92,8 @@ export const documentTools: CustomTool[] = [
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string; start_char?: number; max_chars?: number }): Promise<string> {
                 try {
-                    const absPath = resolveSafePath(args.path);
-                    const checkBase = getContainingRoot(absPath);
-                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
+                    const absPath = resolveReadablePath(args.path);
+                    const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
 
                     if (!absPath.toLowerCase().endsWith(".pdf")) {

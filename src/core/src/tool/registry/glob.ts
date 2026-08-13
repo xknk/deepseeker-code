@@ -7,7 +7,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveReadablePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
 
 /**
  * glob → regex（支持 ** 与 * 与 ?），无新依赖。
@@ -54,8 +54,9 @@ export const globTools: CustomTool[] = [
 
                     // ★ 显式根（与 run_command/fs 工具签名统一）：优先 ctx.cwd（已与 ALS 同源），否则回退 ALS 活动根。
                     //   消除对全局 ALS 的隐式依赖，使工具更可测、可覆盖（ctx.cwd 与 getActiveWorkspaceRoot() 等价）。
+                    //   ★ 跨界扫描：args.path 走 resolveReadablePath（不围栏），支持 ../兄弟目录 / 绝对路径作扫描起点。
                     const activeRoot = ctx?.cwd ?? getActiveWorkspaceRoot();
-                    const root = args.path ? resolveSafePath(args.path) : activeRoot;
+                    const root = args.path ? resolveReadablePath(args.path) : activeRoot;
                     const re = globToRegex(cleanPattern);
                     await initializeWorkspaceIgnore();
 

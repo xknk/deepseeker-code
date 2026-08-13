@@ -192,6 +192,25 @@ export const resolveSafePath = (rel: string, base?: string): string => {
 };
 
 /**
+ * 📖 只读路径解析：供 read_file / view_symbol_outline / read_docx / read_pdf / read_xlsx /
+ *  get_diagnostics / goto_definition / search_grep / glob 等 SAFE 只读工具使用。
+ *
+ * 与 resolveSafePath 的区别——【不施加工作区围栏】：允许 `..` 与绝对路径解析到本机任意位置。
+ * 动因：单人本地 AI coding 定位下，agent 常需读活动根之外的兄弟项目 / 上层配置（如活动根为
+ *   pms-front 时读 ../tms-front 的文件）。旧围栏在单根场景对 `..` 一律 SECURITY 拦截，迫使 agent
+ *   改走绝对路径——而绝对路径同样逃出唯一注册根也被拦，陷入「指明了文件却读不到」的死局。
+ * 安全不降级：密钥外泄防线收敛到 fs.ts 的 isSensitiveReadTarget（.env / 私钥 / credentials 等硬拒），
+ *   read 系工具另带 maskSecretsInContent 内容脱敏。写/删/移动/notebook 工具仍走 resolveSafePath（围栏不动）。
+ *
+ * 仍以 ALS 活动根为相对锚（worktree 隔离 / 多根活动根切换语义一致）；不 realpath——read 非破坏，
+ *   symlink 跟随即是「读任意位置」的既定契约，无 TOCTOU 风险（那是写路径专属）。
+ */
+export const resolveReadablePath = (rel: string): string => {
+    const root = getActiveWorkspaceRoot();
+    return path.resolve(root, rel);
+};
+
+/**
  * 🛡️ 写操作前夕二次围栏复检（TOCTOU 收紧）：
  *  resolveSafePath 入口已 realpath + 围栏判定，但「检查」与「写」之间存在竞争窗口——
  *  软链接可在两步间被替换为指向工作区外的目标（如 rm foo; ln -s /etc/passwd foo）。
@@ -358,8 +377,9 @@ export const checkIsPathIgnored = (checkPath: string, base?: string): boolean =>
     const engine = ignoreCache.get(root);
     if (!engine) return false;
     // ★ 防性 fail-open：ignore 包对含 `..` / 绝对路径的入参会抛 RangeError。文档承诺「未构建则不误判忽略」，
-    //   此处把抛错也归一为 false（放行），与 fail-open 契约一致，杜绝上游误传跨根路径时整个 read_file 崩。
-    //   调用方（read_file/view_symbol_outline）应先用 getContainingRoot 算对相对路径，本 catch 仅作兜底。
+    //   此处把抛错也归一为 false（放行），与 fail-open 契约一致，杜绝上游误传跨根路径时整个工具崩。
+    //   read 系工具已改走 resolveReadablePath（允许跨界读），不再依 getContainingRoot 算相对路径；
+    //   本 catch 仅作 list_dir / glob 等扫描工具的兜底（它们用 path.relative 算 rel，偶现跨根 `..`）。
     try { return engine.ignores(checkPath); } catch { return false; }
 };
 

@@ -16,8 +16,8 @@ import { CustomTool, ToolSafetyLevel } from "../type.ts";
 import { getTs } from "../tsHost.ts";
 import {
     getActiveWorkspaceRoot,
-    getContainingRoot,
     resolveSafePath,
+    resolveReadablePath,
     assertWithinWorkspace,
     initializeWorkspaceIgnore,
     checkIsPathIgnored
@@ -31,16 +31,24 @@ import { Stats } from "fs";
  * 原因：read_file 是 SAFE 免审批工具，内容会原样回灌云端模型上下文——
  *   prompt injection（被 web_fetch 抓取的恶意页面诱导）或模型猜路径即可读走密钥。
  * 与 undo/backup.ts 的 isSensitivePath 同源，此处聚焦"读取"语义。
+ *
+ * ★ 入参改为【已解析的绝对路径】（resolveReadablePath 产物）：read 系工具已放行 `..`/绝对路径跨界读，
+ *   相对活动根的 rel 对工作区外文件会带 `..` 前缀甚至跨盘符绝对路径——直接对物理路径串做正则更稳。
+ *   随放行跨界新增无扩展名凭证（AWS ~/.aws/credentials）/ .netrc / .htpasswd：旧围栏在时这些在工作区外碰不到，
+ *   现在能被 agent 显式读到，须补拦。
  */
-const isSensitiveReadTarget = (rel: string): boolean => {
-    const p = rel.toLowerCase().replace(/\\/g, "/");
+const isSensitiveReadTarget = (resolvedPath: string): boolean => {
+    const p = resolvedPath.toLowerCase().replace(/\\/g, "/");
     return [
         /\.env(\.|$|\/)/,                                   // .env / .env.local / .env.production
         /\.npmrc$/,                                         // npm 凭证（_authToken）
+        /\.netrc$/,                                         // ~/.netrc 明文 API token（跨界读暴露面增大，补拦）
+        /(^|\/)\.htpasswd$/i,                               // HTTP 基本认证凭证文件
         /\.pem$/, /\.key$/, /\.pfx$/, /\.p12$/, /\.keystore$/, /\.jks$/,
         /(^|\/)id_(rsa|ecdsa|ed25519|dsa)(\.pub)?$/,        // SSH 私钥（含子目录路径，如 deploy_keys/id_rsa）
         /(^|\/)secrets?\.(json|ya?ml|toml|ini|conf)$/i,
         /(^|\/)credentials?\.(json|ya?ml|toml|ini|conf)$/i,
+        /(^|\/)credentials?$/i,                             // 无扩展名凭证文件（AWS ~/.aws/credentials 等）
     ].some(re => re.test(p));
 };
 
@@ -119,14 +127,15 @@ export const sweepStaleAtomicTmp = async (root?: string, staleSeconds = 60): Pro
 };
 
 /**
- * 读保护闸门：敏感凭证文件拒读 + .gitignore/通用忽略跳过。read_file / view_symbol_outline 共用。
- * @param relForCheck 相对【文件所属根】的路径（多根下不能写死相对活动根，否则跨根得 `..` → ignore 包抛错）
+ * 读保护闸门：敏感凭证文件拒读。read_file / view_symbol_outline / read_docx / read_pdf / read_xlsx /
+ *  get_diagnostics / goto_definition 共用。
+ * @param absPath 已解析的绝对路径（resolveReadablePath 产物）——直接对其做凭证正则判定，
+ *   对 `..`/绝对路径跨界读同样有效（read 系工具已放行跨界，凭证防线须跟随到工作区外）。
  * @param displayPath 展示给用户/模型的原始路径
- * @param base 该文件所属根（取对应根的 gitignore 引擎；缺省=活动根，向后兼容单根）
  * @returns 拦截时返回提示字符串（直接 return 给模型）；放行返回 null。
  */
-export const assertReadable = async (relForCheck: string, displayPath: string, base?: string): Promise<string | null> => {
-    if (isSensitiveReadTarget(relForCheck)) {
+export const assertReadable = async (absPath: string, displayPath: string): Promise<string | null> => {
+    if (isSensitiveReadTarget(absPath)) {
         return `🔒 [安全拦截]：[${displayPath}] 属于敏感凭证文件（.env / 私钥 / 密钥库 / 凭证），已拒绝读取以防机密外泄。如确需查看请人工处理。`;
     }
     // ★ 不再按 .gitignore / 通用忽略拦截 read：gitignore 是 VCS 概念（不入库 ≠ agent 不能读）。
@@ -237,7 +246,7 @@ export const fsTools: CustomTool[] = [
             parameters: {
                 type: "object",
                 properties: {
-                    path: { type: "string", description: "文件相对路径" },
+                    path: { type: "string", description: "文件路径：相对活动工作区根（支持 ../ 跨兄弟项目）、或绝对路径" },
                     start_line: { type: "number", description: "起始行号（从 1 开始，默认 1）" },
                     end_line: { type: "number", description: "结束行号（默认最多往后读 2000 行）" }
                 },
@@ -252,7 +261,7 @@ export const fsTools: CustomTool[] = [
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string; start_line?: number; end_line?: number }) {
                 try {
-                    const absPath = resolveSafePath(args.path);
+                    const absPath = resolveReadablePath(args.path);
 
                     // ★ 二进制文件拦截：xlsx/docx/pdf 有专用工具，read_file 强行 UTF-8 读会满屏乱码——
                     //   直接引导到专用工具，省一次无意义的乱码读取（agent 常误用 read_file 读表格/文档）。
@@ -264,9 +273,9 @@ export const fsTools: CustomTool[] = [
                     // ★ 读保护闸（防密钥外泄到云端模型）：敏感凭证文件（.env/私钥/credentials）硬拒读。
                     //   注：不再按 .gitignore 拦截 read——gitignore 是 VCS 概念（不入库 ≠ agent 不能读），
                     //   业务文档常被 gitignore 本地保留而 agent 需读，拦截会造成误伤（assertReadable 已同步调整）。
-                    const checkBase = getContainingRoot(absPath);
-                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
+                    //   ★ 跨界读：read_file 走 resolveReadablePath（不围栏），支持 ../跨项目与绝对路径；
+                    //     assertReadable 对物理路径做凭证判定，工作区外的 .env/私钥同样拦得住。
+                    const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
 
                     // 1. 先用最轻量的方式获取文件总行数（可选，若不需要显示 totalLines，甚至可以省略这一步以追求极致性能）
@@ -685,12 +694,9 @@ export const fsTools: CustomTool[] = [
             privacyMaskingRules: maskSecretsInContent,
             async execute(args: { path: string }): Promise<string> {
                 try {
-                    const absPath = resolveSafePath(args.path);
-                    // ★ 读保护三道闸（与 read_file 对称）：敏感凭证文件拒读 + .gitignore 忽略跳过
-                    // ★ 多根：按【文件所属根】算相对路径 + 取对应引擎（同 read_file，否则跨根 `..` 让 ignore 抛错）
-                    const checkBase = getContainingRoot(absPath);
-                    const relForCheck = path.relative(checkBase, absPath).replace(/\\/g, "/");
-                    const readBlock = await assertReadable(relForCheck, args.path, checkBase);
+                    const absPath = resolveReadablePath(args.path);
+                    // ★ 读保护闸（与 read_file 对称）：敏感凭证文件拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
+                    const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
                     // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，
                     //   read_file 已分片，本工具补同口径防护（1MB 上限）。
