@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import path from "path";
 import os from "os";
+import fs from "fs";
 import { resolveReadablePath, runWithWorkspaceRoot } from "@/tool/guard.ts";
 import { assertReadable } from "@/tool/registry/fs.ts";
 
@@ -31,6 +32,19 @@ describe("resolveReadablePath — 只读跨界放行", () => {
     it("相对路径仍以活动根为锚（零回归）", () => {
         const r = runWithWorkspaceRoot(tmp, () => resolveReadablePath("a.txt"));
         assert.equal(r, path.resolve(tmp, "a.txt"));
+    });
+
+    it("重复根名前缀去重容错（ENOENT 时自愈模型常见错误）", () => {
+        // 模型常误带「活动根目录名」前缀：根=pms-front，却传 pms-front/src/x.vue → 去重为 src/x.vue
+        const root = path.join(os.tmpdir(), "dsc-dedup", "pms-front");
+        fs.mkdirSync(path.join(root, "src"), { recursive: true });
+        fs.writeFileSync(path.join(root, "src", "x.vue"), "x");
+        try {
+            const r = runWithWorkspaceRoot(root, () => resolveReadablePath("pms-front/src/x.vue"));
+            assert.equal(r, path.join(root, "src", "x.vue"));
+        } finally {
+            fs.rmSync(path.join(os.tmpdir(), "dsc-dedup"), { recursive: true, force: true });
+        }
     });
 });
 

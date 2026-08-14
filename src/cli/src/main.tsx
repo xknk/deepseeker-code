@@ -21,8 +21,8 @@ import { isTrustedDir, trustDir } from "@/trust/index.ts";
 import type { Locale } from "@/common/index.ts";
 
 /** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c、--trust。 */
-const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean } => {
-    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean } = {};
+const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean } => {
+    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean } = {};
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--resume" || a === "-r") out.resume = argv[++i];
@@ -30,6 +30,7 @@ const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: bo
         else if (a === "--auto" || a === "-a") out.auto = true;
         else if (a === "--continue" || a === "-c") out.continue = true;
         else if (a === "--trust") out.trust = true; // 非 TTY 显式信任（CI/脚本启用项目级配置）
+        else if (a === "--no-update-check") out.noUpdateCheck = true; // 关闭启动期更新检查
     }
     return out;
 };
@@ -181,6 +182,17 @@ const main = async (): Promise<void> => {
         }
     };
     process.stdout.write(S.startupBanner(cwd, appConfig.userWorkspaceDir, cwdIsHome()));
+
+    // ★ 启动期更新检查（对标 Claude Code 的 "new version available"）：走 banner（process.stdout.write），
+    //   不进 Ink 动态区——规避 log-update 全量擦写闪屏。同步基于缓存显示，异步 fire-and-forget 刷新缓存
+    //   （6h TTL，供下次启动）。--no-update-check 关闭。提示随对话滚走，零常驻开销。
+    if (!args.noUpdateCheck) {
+        const { readLocalVersion, getCachedLatestIfNewer, refreshUpdateCache } = await import("./updateCheck.ts");
+        const current = readLocalVersion();
+        const latest = getCachedLatestIfNewer(current);
+        if (latest) process.stdout.write(S.updateAvailable(latest, current));
+        refreshUpdateCache();
+    }
 
     // ★ --continue/-c：无显式 --resume 时，自动续接本工作区最近一次会话（对标 cc -c）。
     //   取 sessions 目录里 updatedAt 最新的主会话 id；无历史则回落到全新会话（resumeId 留空）。

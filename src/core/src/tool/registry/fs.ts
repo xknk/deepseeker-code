@@ -181,9 +181,19 @@ const matchLineBlockWith = (
     }
     if (hits.length === 0) return { ok: false, reason: "none", count: 0 };
     if (!replaceAll && hits.length > 1) return { ok: false, reason: "conflict", count: hits.length };
-    const newLines = newBlock.split("\n");
     const out = [...contentLines];
-    for (let k = hits.length - 1; k >= 0; k--) out.splice(hits[k], oldLines.length, ...newLines); // 倒序替换避免索引漂移
+    // 倒序替换避免索引漂移；每个命中块按其【在文件里的真实首非空行缩进】对齐 new_str（修模型丢基线→顶格）。
+    //   逐行容错（尤其 trim 归一）下，模型给的 old_str/new_str 常顶格：精确子串口径以 old_str 为基线，
+    //   但这里 old_str 可能本就顶格不能当基线 → 必须取【文件命中行】的真实缩进，否则替换进去的代码统一靠左。
+    for (let k = hits.length - 1; k >= 0; k--) {
+        const start = hits[k];
+        let baseIndent = "";
+        for (let j = start; j < start + oldLines.length; j++) {
+            if (contentLines[j].trim() !== "") { baseIndent = contentLines[j].match(/^[ \t]*/)?.[0] ?? ""; break; }
+        }
+        const aligned = baseIndent ? reindentToBase(newBlock, baseIndent) : newBlock;
+        out.splice(start, oldLines.length, ...aligned.split("\n"));
+    }
     return { ok: true, content: out.join("\n"), count: hits.length };
 };
 

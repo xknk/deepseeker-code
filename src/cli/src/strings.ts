@@ -50,6 +50,8 @@ interface StringDict {
     statusAuto: string;
     noApiKey: (env: string) => string;
     startupBanner: (cwd: string, projectKey: string, isHome: boolean) => string;
+    /** 启动期更新提示（banner 后打印，随对话滚走；latest=远程最新，current=本地当前）。 */
+    updateAvailable: (latest: string, current: string) => string;
     /** 本地命令描述（命令 name 不翻译，仅描述随 locale） */
     cmdHelp: string;
     cmdStatus: string;
@@ -148,6 +150,13 @@ const STRINGS: Record<Locale, StringDict> = {
                 `${yellow}⚠️  当前工作目录是用户家目录（${cwd}）${reset}\n` +
                 `${yellow}   工具将以该目录为项目根读写文件，建议先 cd 到具体项目目录再运行。${reset}\n` +
                 `${dim}   项目键：${projectKey}${reset}\n\n`
+            );
+        },
+        updateAvailable: (latest, current) => {
+            const cyan = "\x1b[36m", dim = "\x1b[2m", reset = "\x1b[0m";
+            return (
+                `${cyan}↻ 检测到新版本 ${latest}${reset} ${dim}（当前 ${current}）${reset}\n` +
+                `${dim}  运行 npm i -g deepseeker-code@latest 更新${reset}\n\n`
             );
         },
         cmdHelp: "查看帮助与快捷键",
@@ -265,6 +274,13 @@ const STRINGS: Record<Locale, StringDict> = {
                 `${yellow}⚠️  Current working directory is your home directory (${cwd})${reset}\n` +
                 `${yellow}   Tools will read/write files with this as project root—cd into the actual project first.${reset}\n` +
                 `${dim}   Project key: ${projectKey}${reset}\n\n`
+            );
+        },
+        updateAvailable: (latest, current) => {
+            const cyan = "\x1b[36m", dim = "\x1b[2m", reset = "\x1b[0m";
+            return (
+                `${cyan}↻ New version ${latest} available${reset} ${dim}(current ${current})${reset}\n` +
+                `${dim}  Run npm i -g deepseeker-code@latest to update${reset}\n\n`
             );
         },
         cmdHelp: "Show help & shortcuts",

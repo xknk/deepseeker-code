@@ -207,7 +207,19 @@ export const resolveSafePath = (rel: string, base?: string): string => {
  */
 export const resolveReadablePath = (rel: string): string => {
     const root = getActiveWorkspaceRoot();
-    return path.resolve(root, rel);
+    const absPath = path.resolve(root, rel);
+    // ★ 路径容错：模型常误把「活动根目录名」当前缀重复带上（如根=pms-front，传 pms-front/src/...），
+    //   拼出 pms-front/pms-front/... → ENOENT。主路径不存在时，若 rel 首段恰为根名，去掉重试。
+    //   仅 ENOENT 触发、只匹配根 basename——不误伤 ../跨界读、兄弟目录（tms-front/）或绝对路径。
+    if (!fsSync.existsSync(absPath)) {
+        const rootName = path.basename(root);
+        const firstSeg = rel.split(/[\\/]/)[0];
+        if (rootName && firstSeg === rootName) {
+            const alt = path.resolve(root, rel.slice(firstSeg.length + 1));
+            if (fsSync.existsSync(alt)) return alt;
+        }
+    }
+    return absPath;
 };
 
 /**
