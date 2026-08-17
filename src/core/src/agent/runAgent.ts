@@ -248,6 +248,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 sessionId, cwd, depth, round, startTime, llmDecisionSource,
                 signal, rawTools, events,
                 permissionMode: options.permissionMode,
+                planMode: !!options.planMode, // ★ P0-A runtime 档：计划期写工具在 processToolCall 执行层拒绝（工具表恒定不裁剪）
                 onUIEvent: options.onUIEvent,
                 requestApproval: options.requestApproval,
                 requestQuestion: options.requestQuestion,

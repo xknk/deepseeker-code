@@ -12,6 +12,7 @@
 import type OpenAI from "openai";
 import { RunAgentOptions, RunAgentEvents } from "./type.ts";
 import { ToolContext } from "@/tool/index.ts";
+import { appConfig } from "@/config/index.ts";
 import { filterToolsForPlanMode, appendPlanControlTools } from "./planMode.ts";
 import { filterByEnvironment } from "./toolFilter.ts";
 import { ensureSummarySlot } from "./truncate.ts";
@@ -36,8 +37,14 @@ export const prepareToolsAndInjections = async (
     events: RunAgentEvents,
 ): Promise<{ rawTools: any[]; cleanedToolSchemas: any[] }> => {
     const { toolSchemas, planMode, locale, outputStyle } = options;
-    // 计划模式：过滤为只读/研究工具 + 注入 exit_plan_mode；非计划模式：注入 enter_plan_mode + exit_plan_mode 供模型自主进入计划/提交方案（见 agent/planMode.ts）
-    const rawToolsPreEnv = planMode ? filterToolsForPlanMode(toolSchemas ?? []) : appendPlanControlTools(toolSchemas ?? []);
+    // ★ P0-A 计划模式工具表策略：runtime 档（默认）两态统一走 appendPlanControlTools——工具表全会话
+    //   恒定，保 DeepSeek 前缀缓存（tools 序列化在请求头部，裁表翻转 = 全历史 re-prefill 两次）；
+    //   计划期写工具改由 processToolCall 执行层按 PLAN_ALLOWED_TOOLS 拒绝。
+    //   schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退旧裁表路径（计划期 = 只读白名单 + exit_plan_mode）。
+    //   非计划模式：注入 enter_plan_mode + exit_plan_mode 供模型自主进入计划/提交方案（见 agent/planMode.ts）。
+    const rawToolsPreEnv = (planMode && appConfig.planEnforcement === 'schema')
+        ? filterToolsForPlanMode(toolSchemas ?? [])
+        : appendPlanControlTools(toolSchemas ?? []);
     // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
     const validationCtx: ToolContext = {
         sessionId: options.sessionId,
@@ -62,7 +69,8 @@ export const prepareToolsAndInjections = async (
     // 预留系统提示词和摘要存放区域（message[1] 槽，被 ensureFitsWindow/ensureSummarySlot 强依赖——勿改前两个下标）
     ensureSummarySlot(message);
     // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]
-    //   （改写会破坏 DeepSeek 隐式前缀缓存）。真正的模式强制仍由 filterToolsForPlanMode（限制工具表）保证。
+    //   （改写会破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档由 processToolCall 执行层按
+    //   PLAN_ALLOWED_TOOLS 拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
     // 回复语言：按 locale 幂等注入「用中文/英文回复」引导（fence 机制，会话内不变 → 不破坏前缀缓存）
     if (locale) {
         const hint = locale === "zh" ? "请始终用中文回复用户。" : "Always reply to the user in English.";

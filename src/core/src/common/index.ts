@@ -123,19 +123,29 @@ export const createSemaphore = (max: number) => {
  * 向 message[0].content 幂等追加一个带 fence 锚点的块：
  *  - 只追加到 system 消息，绝不新增数组元素、绝不改下标 0/1
  *    （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary 槽）；
- *  - 用 fence（罕用定长串）作切除锚点：重复注入时先按 fence 切除旧块再重接（支持清单热更新）。
- *    fence 用罕用串而非人可读标题，避免标题被内容复述导致 split 误切其后全部注入。
+ *  - fence 已存在时做【块级比对】（本块 = fence 起 → 下一个 ⟦…⟧ fence 块或串尾）：内容一致 → 字节级不动；
+ *  - ★ P0-B 会话首锁：内容变化（如会话中途切 output-style / 记忆索引更新）→ 保留旧块 + 告警，
+ *    新内容下个新会话生效。改写 message[0] 任意字节都会击穿 DeepSeek 前缀缓存（其后全部历史
+ *    re-prefill），故「会话内不变」从注释假设升级为机制强制。代价：fence 清单（skills/agents/
+ *    memory 等）不再会话内热更新，接受（L1 稳定优先）。
+ *  - fence 用罕用串而非人可读标题，避免标题被内容复述导致边界误判。
  * @param message 上下文数组（原地修改 message[0].content）
- * @param fence   切除/重接锚点（罕用串，由调用方定义）
+ * @param fence   块锚点（罕用串，约定 ⟦DSC:XXX⟧ 形态）
  * @param body    要注入的块正文（含人可读标题 + 清单）
  */
 export const injectMarkedBlock = (message: any[], fence: string, body: string): void => {
     const sys = message[0];
     if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
-    if (sys.content.includes(fence)) {
-        sys.content = sys.content.split(fence)[0].trimEnd();
+    const idx = sys.content.indexOf(fence);
+    if (idx === -1) {
+        sys.content += `\n\n${fence}\n${body}`; // 首次创建（会话首轮）：追加即建块
+        return;
     }
-    sys.content += `\n\n${fence}\n${body}`;
+    const after = sys.content.slice(idx + fence.length);
+    const next = after.match(/\n\n⟦[^\n]*?⟧/); // 本块边界 = 下一个 fence 块起点或串尾
+    const oldBody = next?.index !== undefined ? after.slice(0, next.index) : after;
+    if (oldBody === `\n${body}`) return; // 幂等：字节级一致，不动 content
+    console.warn(`⚠️ ${fence} 已锁定（会话内不变以保前缀缓存），内容变化将于下个新会话生效。`);
 };
 
 // ============ Windows 子进程输出编码兜底（GBK OEM 代码页防乱码） ============

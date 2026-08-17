@@ -111,9 +111,13 @@ export const runSubagent = async (
         ].join("\n");
 
     // ★ 工具表：manifest.tools 非空 → 显式 allowlist（替代 deny-list）；否则回退 deny-list（向后兼容）
+    //   P1-MCP dispatcher 兼容：manifest 声明 mcp__*（旧逐工具名）、mcp_call 或 mcp_list_tools 时，
+    //   一并授予两个恒定分发器工具（dispatcher 模式下全局表不再有 mcp__server__tool 独立名）。
     const allTools = getGlobalTools();
+    const wantsMcp = manifest?.tools.some(t => t === 'mcp_call' || t === 'mcp_list_tools' || t.startsWith('mcp__')) ?? false;
     const toolSchemas = manifest && manifest.tools.length > 0
-        ? allTools.filter((t: any) => manifest.tools.includes(t.function.name))
+        ? allTools.filter((t: any) => manifest.tools.includes(t.function.name)
+            || (wantsMcp && (t.function.name === 'mcp_call' || t.function.name === 'mcp_list_tools')))
         : allTools.filter((t: any) => !SUBAGENT_DENYLIST.has(t.function.name));
 
     console.log(`🐣 派生子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);

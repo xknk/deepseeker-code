@@ -275,6 +275,100 @@ const mcpPromptTools: CustomTool[] = [
     },
 ];
 
+// ─── P1-MCP dispatcher：恒定 schema 分发器（默认暴露模式）──────────────────────────
+/**
+ * mcp_call 的权限合成名：把 (server, tool) 映射回 mcp__<server>__<tool>，
+ * 使 permissions 规则（含 mcp__server__* 通配）与 auto 分类器的 isMcpTool 判定在 dispatcher 模式下语义不变。
+ * 供 agent/toolExecution.ts 在 checkPermission / runAutoCheck 前调用；非 mcp_call 原样返回。
+ */
+export const resolveMcpPermissionName = (calledName: string, args: any): string => {
+    if (calledName !== 'mcp_call') return calledName;
+    const server = typeof args?.server === 'string' ? sanitize(args.server) : '';
+    const tool = typeof args?.tool === 'string' ? sanitize(args.tool) : '';
+    return server && tool ? `mcp__${server}__${tool}` : calledName;
+};
+
+/**
+ * MCP 分发器双工具（schema 恒定，替代 N 个逐工具 schema）：
+ *  - mcp_list_tools：实时查询目录（工具结果 = 上下文尾部，缓存零伤害；新增/重连 server 即查即见，工具表不变）；
+ *  - mcp_call：按 (server, tool) 分发执行。args 收 JSON 字符串（少一层对象嵌套，DeepSeek arguments 解析友好）。
+ *  安全语义与逐工具路径一致：mcp_call 为 DANGER + requireApproval（server/tool/args 详列），
+ *  权限/分类器经 resolveMcpPermissionName 合成名走既有规则。
+ */
+const mcpDispatcherTools: CustomTool[] = [
+    {
+        type: "function",
+        function: {
+            name: "mcp_list_tools",
+            description: "列出已连接 MCP server 的外部工具目录（server / 工具名 / 一行描述 / 参数名，必填参数带 *）。调用 MCP 工具用 mcp_call（须传回 server 与工具原名）。目录实时查询——新增 server 后即查即见，无需任何变更。",
+            parameters: {
+                type: "object",
+                properties: {
+                    server: { type: "string", description: "仅列出该 server 的工具（缺省列出全部已连接 server）" },
+                },
+            },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
+            async execute(args: any): Promise<string> {
+                const server = args?.server;
+                const lines: string[] = [];
+                for (const c of clients) {
+                    if (server && c.serverName !== server) continue;
+                    try {
+                        const ts = await c.listTools();
+                        for (const t of ts) {
+                            const props = t?.inputSchema?.properties && typeof t.inputSchema.properties === "object"
+                                ? Object.keys(t.inputSchema.properties) : [];
+                            const required = Array.isArray(t?.inputSchema?.required) ? t.inputSchema.required : [];
+                            const argList = props.map((p: string) => (required as string[]).includes(p) ? `${p}*` : p).join(", ");
+                            lines.push(`- [${c.serverName}] ${t.name}${t.description ? `：${String(t.description).split("\n")[0]}` : ""}${argList ? `（参数：${argList}）` : ""}`);
+                        }
+                    } catch (e: any) {
+                        console.warn(`⚠️ [MCP] listTools "${c.serverName}" 失败（已跳过）: ${e?.message ?? e}`);
+                    }
+                }
+                if (lines.length === 0) return server ? `(server "${server}" 未连接或无工具)` : "(无已连接的 MCP server)";
+                return `[MCP tools]\n${lines.join("\n")}`;
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "mcp_call",
+            description: "调用指定 MCP server 的外部工具。server 与工具名必填——均来自 mcp_list_tools 的目录输出（用原名，不要改写）。args 为该工具参数的 JSON 字符串（参数名见目录；无参数传 \"{}\"）。执行外部逻辑，每次调用需审批。",
+            parameters: {
+                type: "object",
+                properties: {
+                    server: { type: "string", description: "MCP server 名（见 mcp_list_tools 输出）" },
+                    tool: { type: "string", description: "工具名（见 mcp_list_tools 输出，用原名）" },
+                    args: { type: "string", description: '工具参数的 JSON 字符串，如 {"query":"..."}；无参数传 "{}"' },
+                },
+                required: ["server", "tool"],
+            },
+            safetyLevel: ToolSafetyLevel.DANGER,
+            isSync: true,
+            requireApproval: (args: any) =>
+                `⚠️【MCP 工具审批】\n服务: ${args?.server} / 工具: ${args?.tool}\n参数: ${args?.args}`,
+            async execute(args: any): Promise<string> {
+                const { server, tool } = args ?? {};
+                if (!server || !tool) return "❌ [mcp_call] 缺少 server 或 tool（先用 mcp_list_tools 查目录）。";
+                let parsed: any = {};
+                if (typeof args.args === "string" && args.args.trim() && args.args.trim() !== "{}") {
+                    try { parsed = JSON.parse(args.args); }
+                    catch {
+                        return `❌ [mcp_call] args 不是合法 JSON：${String(args.args).slice(0, 200)}。请传该工具参数的 JSON 字符串（无参数传 "{}"）。`;
+                    }
+                }
+                const c = findClient(server);
+                if (!c) return `❌ 未连接的 MCP server：${server}（用 mcp_list_tools 查看已连接列表）`;
+                const result = await c.callTool(tool, parsed);
+                return `[MCP ${server}/${tool}]\n${result}`;
+            },
+        },
+    },
+];
+
 /**
  * 加载所有已配置 MCP server 的工具。
  * 单个 server 失败不影响其它。返回包装后的 CustomTool[]（不含 client 句柄）。
@@ -317,9 +411,17 @@ export async function loadMcpTools(): Promise<CustomTool[]> {
  */
 export async function initMcpTools(into: CustomTool[]): Promise<void> {
     const mcpTools = await loadMcpTools();
-    if (mcpTools.length > 0) {
+    // ★ P1-MCP dispatcher 档（默认）：只注入 2 个恒定 schema（mcp_list_tools + mcp_call），目录/调用全按需——
+    //   工具表不随 MCP server 工具数增长（L1 恒定，保 DeepSeek 前缀缓存），中途新增/重连 server 无需变更工具表。
+    //   schemas 档（DEEP_SEEK_MCP_EXPOSE_MODE=schemas）回退旧路径：每个 MCP 工具独立 schema 常驻。
+    if (appConfig.mcpExposeMode === 'dispatcher') {
+        if (clients.length > 0) {
+            into.push(...mcpDispatcherTools);
+            console.log(`🔌 [MCP] dispatcher 模式：注入 mcp_list_tools + mcp_call（覆盖 ${clients.length} 个 server / ${mcpTools.length} 个工具）`);
+        }
+    } else if (mcpTools.length > 0) {
         into.push(...mcpTools);
-        console.log(`🔌 [MCP] 共注入 ${mcpTools.length} 个 MCP 工具`);
+        console.log(`🔌 [MCP] 共注入 ${mcpTools.length} 个 MCP 工具 schema（schemas 模式）`);
     }
     // ★ resources/prompts 聚合工具：仅当某 server 声明对应能力时注入（无则不占工具位，保持零污染）。
     //   镜像 initSkills「有才注入」；clients 已在 loadMcpTools 内填充、能力已在各 start() 捕获。

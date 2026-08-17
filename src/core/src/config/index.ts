@@ -101,6 +101,16 @@ export const appConfig = {
     /** P0-3 run_workflow 单个子 agent 结果的字符预算：超出按头尾截断，避免单个巨型结果挤占聚合输出。
      *  最终聚合再受工具 maxOutputCharacters 兜底。 */
     workflowPerStepChars: 6000,
+    /** ★ P0-A 计划模式强制位置：'runtime'（默认）= 工具表全会话恒定（两态统一 appendPlanControlTools），
+     *  计划期写工具由 processToolCall 执行层按 PLAN_ALLOWED_TOOLS 拒绝——保 DeepSeek 前缀缓存
+     *  （tools 参数序列化在请求头部，计划模式裁表翻转 = 全会话历史 re-prefill 两次）；
+     *  'schema' = 旧路径（计划期裁成只读白名单子表）。env DEEP_SEEK_PLAN_ENFORCEMENT=schema 回退。 */
+    planEnforcement: (process.env.DEEP_SEEK_PLAN_ENFORCEMENT === "schema" ? "schema" : "runtime") as "runtime" | "schema",
+    /** ★ P1-MCP 工具暴露模式：'dispatcher'（默认）= 只注入恒定 schema 的 mcp_list_tools + mcp_call
+     *  （目录按需查、审批/权限用合成名 mcp__<server>__<tool> 匹配既有规则；工具表不随 MCP server
+     *  工具数增长，L1 恒定）；'schemas' = 旧路径（每个 MCP 工具独立 schema 常驻）。
+     *  env DEEP_SEEK_MCP_EXPOSE_MODE=schemas 回退。 */
+    mcpExposeMode: (process.env.DEEP_SEEK_MCP_EXPOSE_MODE === "schemas" ? "schemas" : "dispatcher") as "dispatcher" | "schemas",
 };
 
 // —— 用户可配置覆盖（settings.json 的 engine 段，白名单合并进 appConfig） ——

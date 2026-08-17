@@ -84,10 +84,12 @@ export const initAgents = async (into: CustomTool[], includeProject: boolean): P
         );
         for (const { item: m, file, source } of picked) {
             // 白名单校验：引用了不存在的工具 → warn 剔除（单项失败隔离，不拒绝整个 agent）
+            // ★ mcp__* 条目不剔除：schemas 模式逐工具名可命中 known；dispatcher 模式运行期由
+            //   runSubagent 翻译为 mcp_call/mcp_list_tools 授权（启动期全局表无这些独立名，known 不含属预期）
             if (m.tools.length > 0) {
-                const unknown = m.tools.filter(t => !known.has(t));
+                const unknown = m.tools.filter(t => !known.has(t) && !t.startsWith('mcp__'));
                 if (unknown.length) console.warn(`⚠️ [agents] ${m.name} 声明了未知工具 [${unknown.join(", ")}]，已剔除`);
-                m.tools = m.tools.filter(t => known.has(t));
+                m.tools = m.tools.filter(t => known.has(t) || t.startsWith('mcp__'));
             }
             // ★ 项目级信任告警（镜像 hooks/loader.ts）：白名单可显式授权 run_command 等高危工具，
             //   运行期 requestApproval 审批网关仍是后盾（spawn_agent 已透传，未绕过）。

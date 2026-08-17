@@ -14,7 +14,8 @@ const AGENT_CATALOG_MARKER = "【可用子 Agent 目录】";
 // ★ 切除锚点用罕用数学括号定长串，避免中文 marker 被 agent description 复述导致 split 误切（与 skills/inject 同源修复）
 const AGENT_CATALOG_FENCE = "⟦DSC:AGENT_CATALOG⟧";
 const AGENT_USAGE_HINT =
-    "当某子任务匹配下列某个子 Agent 的专长时，调用 spawn_agent 并传入对应 name 参数（如 spawn_agent(name=\"code-reviewer\", task=\"...\"））将其委派给该声明式子 Agent；不传 name 则走默认通用子 agent。";
+    "当某子任务匹配下列某个子 Agent 的专长时，调用 spawn_agent 并传入对应 name 参数（如 spawn_agent(name=\"code-reviewer\", task=\"...\"））将其委派给该声明式子 Agent；不传 name 则走默认通用子 agent。\n" +
+    "委派优先原则（P1-C）：需要一大坨专用工具或独立上下文的子任务（深度 web 调研、批量 MCP 工具操作、独立 worktree 试验等），优先委派给对应子 Agent，而非在主会话堆叠调用——子 Agent 有自己的工具白名单与独立上下文，主会话保持精简、工具表保持恒定。";
 
 /**
  * 幂等注入子 Agent 目录到系统提示词。无 agent / system 槽缺失时静默跳过。

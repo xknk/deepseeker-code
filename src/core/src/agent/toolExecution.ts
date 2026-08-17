@@ -17,6 +17,9 @@ import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
 import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { runAutoCheck, matchCommandDeny, isReadOnlyCommand } from "@/tool/autoPermission.ts";
+import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
+import { appConfig } from "@/config/index.ts";
+import { PLAN_ALLOWED_TOOLS } from "./planMode.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
@@ -77,6 +80,8 @@ export type ToolCallContext = {
     rawTools: any[];
     events: RunAgentEvents;
     permissionMode?: PermissionMode;
+    /** ★ P0-A 计划模式（runtime 档执行层门禁用）：计划期写工具在 processToolCall 拒绝，工具表不裁剪（保前缀缓存）。 */
+    planMode?: boolean;
     onUIEvent?: (evt: UIEvent) => void;
     requestApproval?: RequestApprovalFn;
     requestQuestion?: RequestQuestionFn;
@@ -98,7 +103,7 @@ export type ToolCallContext = {
  */
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const { sessionId, depth, round, startTime, llmDecisionSource, signal, rawTools, events,
-        permissionMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion,
+        permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion,
         keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt } = ctx;
     let calledName = "";
     let calledArgs: any = {};
@@ -116,6 +121,12 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'exit_plan_mode', plan } };
     }
     if (calledName === "enter_plan_mode") {
+        // ★ P0-A runtime 档：工具表恒定后计划模式也暴露 enter_plan_mode——已在计划模式时不再作为终结信号
+        //   （防「重复进入 → 上层翻转重跑」循环），以普通结果引导模型继续调研/提交方案。
+        if (planMode) {
+            const note = "（已在计划模式中，无需重复进入。请继续只读调研，完成后调 exit_plan_mode 提交方案。）";
+            return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true };
+        }
         const reason = typeof calledArgs?.reason === "string" ? calledArgs.reason : "";
         const note = "📋 [进入计划模式] 模型请求先以只读方式调研并规划方案，已切换至计划模式。";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'enter_plan_mode', reason } };
@@ -124,6 +135,17 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     if (signal?.aborted) {
         const placeholder = "（已中止，未执行）";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
+    }
+    // ★ P0-A 计划模式执行层门禁（runtime 档，默认）：工具表全会话恒定（systemInjections 两态统一
+    //   appendPlanControlTools），计划期改由此处按 PLAN_ALLOWED_TOOLS 拒绝写工具——不发审批、不加锁、
+    //   不进 hook 流水线，直接以结果文案引导模型转只读/提交方案（计划先于执行的语义不变）。
+    //   schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
+    if (!parseFailed && planMode && appConfig.planEnforcement === 'runtime'
+        && calledName !== 'enter_plan_mode' && calledName !== 'exit_plan_mode'
+        && !PLAN_ALLOWED_TOOLS.has(calledName)) {
+        const note = `❌ [计划模式] 当前为只读调研阶段，禁止 ${calledName}。完成方案请调 exit_plan_mode 提交，经用户审批后进入实现阶段。`;
+        events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: note } });
+        return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: false };
     }
     const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
     // ★ toolCtx.cwd 与工具内部根同源：所有工具（fs/glob/search/command）内部 spawn/读取/搜索根都走 ALS 的
@@ -157,7 +179,9 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
         let perm: ReturnType<typeof checkPermission> = null;
         try {
-            perm = checkPermission(calledName, calledArgs);
+            // ★ P1-MCP dispatcher 兼容：mcp_call 在权限层用合成名 mcp__<server>__<tool> 匹配规则
+            //   （用户既有 permissions 规则含 mcp__server__* 通配，语义不变）；其余工具名原样。
+            perm = checkPermission(resolveMcpPermissionName(calledName, calledArgs), calledArgs);
             if (perm === 'deny') { denied = true; result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`; }
             else if (perm === 'allow') { needApproval = false; }
             else if (perm === 'ask') { needApproval = true; }
@@ -196,7 +220,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         //   想对某项目/工具强制人工：配 permissions.ask（优先级高于分类器）。
         //   优先级：保护路径 > checkPermission 显式规则（上方已判）> deny 清单 > 分类器 > requestApproval 人工。
         if (needApproval && !denied) {
-            const auto = await runAutoCheck(calledName, calledArgs, toolCtx, permissionMode === 'auto');
+            // ★ P1-MCP：同上，auto 分类器亦按合成名参与（isMcpTool / aggressive 档判定与旧逐工具名路径一致）
+            const auto = await runAutoCheck(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx, permissionMode === 'auto');
             if (auto === 'allow') { needApproval = false; }
             else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
             // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工

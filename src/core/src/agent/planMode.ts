@@ -20,11 +20,13 @@ export const PLAN_ALLOWED_TOOLS = new Set<string>([
     "read_file", "list_dir", "view_symbol_outline", "read_project_guide",
     "search_grep", "glob",
     "get_git_diff", "git_status", "git_log", "inspect_dependencies",
+    "get_diagnostics", "goto_definition", // ★ P0-A 补漏：LSP 导航/诊断恰是调研阶段最需要的（原白名单漂移漏登记，schema 档与 runtime 档共用此表）
     "web_fetch", "web_search", // 只读研究类（虽为 DANGER 但不写本地状态；仍走各自审批）
 ]);
 
 // P0-4：计划模式约束已静态化进 SYSTEM_PROMPT（agent/systemPrompt.ts【计划模式】段），不再随 planMode 状态
-//   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。真正的模式强制仍由 filterToolsForPlanMode 保证。
+//   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档（默认）由 toolExecution
+//   按 PLAN_ALLOWED_TOOLS 在执行层拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
 
 /**
  * exit_plan_mode 工具 schema。
