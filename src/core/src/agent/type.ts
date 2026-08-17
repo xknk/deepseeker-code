@@ -132,4 +132,6 @@ export type AgentEvent =
     /** 计划模式：模型调用 exit_plan_mode 提交实现方案（供上层呈现给用户审批，审批通过后退出计划模式进入实现）。 */
     | { type: 'plan.proposed'; plan: string }
     /** 整个 agent 运行结束的最终文本（正常结束 / 中止 / 出错）。 */
-    | { type: 'final'; text: string };
+    | { type: 'final'; text: string }
+    /** inbox steering：回合边界认领了运行中排队的补充输入（已注入上下文并落盘；texts 仅供前端提示，勿重复渲染）。 */
+    | { type: 'inbox.claimed'; texts: string[] };

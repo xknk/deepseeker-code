@@ -11,7 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/session/store.ts";
-import { readMessages } from "@/session/transcript.ts";
+import { readTranscriptLines } from "@/session/transcript.ts";
+import { pushSessionInbox } from "@/agent/inbox.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
 import type { ApprovalDecision, ApprovalMeta, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
@@ -94,6 +95,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const turnGenRef = useRef(0);
     /** 中止安全网定时器句柄（abortCurrent 设、runOnce 正常结束时清）。 */
     const abortGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /** ★ inbox steering：已排队未送达模型的补充输入计数（inbox.claimed 递减；run 结束仍 >0 → carryover 提示）。 */
+    const queuedUnclaimedRef = useRef(0);
     const proposedPlanRef = useRef<string | null>(null);
     /** 模型自主请求进入计划模式时的原因（plan.enterRequested 事件存入；submit 据此转入计划阶段）。 */
     const enterPlanReasonRef = useRef<string | null>(null);
@@ -115,8 +118,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         if (!initialSessionId) return;
         void (async () => {
             try {
-                const msgs = await readMessages(initialSessionId);
-                const seeded = buildReplayRows(msgs, newRowId);
+                const lines = await readTranscriptLines(initialSessionId);
+                const seeded = buildReplayRows(lines, newRowId);
                 if (seeded.length) setRows(seeded);
             } catch { /* 无历史或读取失败 → 空回放，不阻塞 */ }
         })();
@@ -332,10 +335,19 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             case "approval_request":
                 // 阻塞式审批由 requestApproval(cliHost) 直接驱动模态，此处不重复处理
                 break;
+            case "inbox.claimed": {
+                // ★ inbox steering：排队文本已在 queueInput 时渲染过 user 行，此处仅提示送达（勿重复渲染）。
+                const n = Array.isArray(obj.texts) ? (obj.texts as string[]).length : 0;
+                if (n > 0) {
+                    queuedUnclaimedRef.current = Math.max(0, queuedUnclaimedRef.current - n);
+                    pushInfo(S.inboxClaimed(n));
+                }
+                break;
+            }
             default:
                 break;
         }
-    }, [closeStreaming, flush, scheduleFlush]);
+    }, [closeStreaming, flush, scheduleFlush, pushInfo]);
 
     // —— 工具审批（RequestApprovalFn → Ink 模态） ——
     const askApproval = useCallback((detail: string, toolName: string): Promise<ApprovalDecision> =>
@@ -425,9 +437,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 setAborting(false);
                 currentAcRef.current = null;
                 if (abortGuardRef.current) { clearTimeout(abortGuardRef.current); abortGuardRef.current = null; }
+                // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
+                //   flush 落盘（此刻已完成），如实提示下轮自动带入。
+                if (queuedUnclaimedRef.current > 0) {
+                    pushInfo(S.inboxCarryover(queuedUnclaimedRef.current));
+                    queuedUnclaimedRef.current = 0;
+                }
             }
         }
-    }, [askApproval, autoRequestApproval, flush, onTrace, pushEvent]);
+    }, [askApproval, autoRequestApproval, flush, onTrace, pushEvent, pushInfo]);
 
     /** 方案审批 + 实现：弹出方案审批模态，接受则按方案实现（autoExecute=实现阶段免审批）。 */
     const approveAndImplement = useCallback(async (sid: string, plan: string) => {
@@ -448,6 +466,19 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         const plan = takeProposedPlan();
         if (plan != null) await approveAndImplement(sid, plan);
     }, [runOnce, takeProposedPlan, approveAndImplement]);
+
+    /** ★ inbox steering：busy 期间排队补充输入（入 core per-session 队列，runAgent 回合边界 claim）。
+     *  本地立即渲染 user 行与提示行（runAgent claim 时会 appendMessage 落盘，回放不重复——本地行不落盘）。
+     *  @returns false = 开关关/空串/队满 → 调用方回退旧 busy 报错路径。 */
+    const queueInput = useCallback((content: string): boolean => {
+        const text = content.trim();
+        const sid = sessionIdRef.current;
+        if (!text || !sid || !pushSessionInbox(sid, text)) return false;
+        pushUser(text);
+        pushInfo(S.inboxQueued);
+        queuedUnclaimedRef.current++;
+        return true;
+    }, [pushUser, pushInfo]);
 
     /** 提交一轮对话。计划模式下走两阶段（调研 → 方案审批 → 实现）；模型亦可在普通轮主动请求进入计划模式。 */
     const submit = useCallback(async (content: string) => {
@@ -530,8 +561,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         sessionIdRef.current = id;
         clearRows();
         try {
-            const msgs = await readMessages(id);
-            const seeded = buildReplayRows(msgs, newRowId);
+            const lines = await readTranscriptLines(id);
+            const seeded = buildReplayRows(lines, newRowId);
             if (seeded.length) setRows(seeded);
         } catch { /* 无历史或读取失败 → 空回放，不阻塞 */ }
         pushInfo(`📂 ${S.sessionLoaded(truncateMiddle(id, 12))}`);
@@ -568,7 +599,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions,
         sessionIdRef,
         // 动作
-        submit, abortCurrent, pushUser, pushInfo, pushEvent,
+        submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,

@@ -10,6 +10,7 @@
  *  - 计划两阶段：plan.proposed 存方案 → runOnce 返回后弹方案条 → accept 后带最终方案重跑实现轮。
  */
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
+import { pushSessionInbox } from "@/agent/inbox.ts";
 import { getOrCreateSessionId, listSessions, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
 import { readMessages } from "@/session/transcript.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
@@ -122,6 +123,8 @@ export class ChatHost {
 
   private currentAc: AbortController | null = null;
   private busy = false;
+  // ★ inbox steering：busy 期间已排队、尚未在回合边界送达的补充输入条数（送达/收尾时递减，驱动提示）。
+  private queuedUnclaimed = 0;
   private proposedPlan: string | null = null;
   private enterPlanReason: string | null = null;
   private pendingQuestion: { resolve: (a: QuestionAnswer) => void } | null = null;
@@ -160,6 +163,15 @@ export class ChatHost {
       this.enterPlanReason = (evt.reason as string) ?? "";
     } else if (type === "approval_request") {
       this.lastApprovalEvt = { ...evt };
+    } else if (type === "inbox.claimed") {
+      // ★ inbox steering：排队文本已在 submit 时渲染过 user 行，此处仅转成 info 提示送达
+      //   （勿重复渲染文本；webview 无此事件 case，转换后转发保持零新协议感知）。
+      const n = Array.isArray(evt.texts) ? (evt.texts as string[]).length : 0;
+      if (n > 0) {
+        this.queuedUnclaimed = Math.max(0, this.queuedUnclaimed - n);
+        this.callbacks.sink({ type: "info", text: `📬 已送达模型（${n} 条补充输入）` });
+      }
+      return;
     }
     this.callbacks.sink(evt);
   };
@@ -209,6 +221,12 @@ export class ChatHost {
     } finally {
       this.currentAc = null;
       this.setBusy(false);
+      // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
+      //   flush 落盘（此刻已完成），如实提示下轮自动带入。
+      if (this.queuedUnclaimed > 0) {
+        this.sink({ type: "info", text: `📬 本轮结束时 ${this.queuedUnclaimed} 条补充输入未在回合边界送达，已写入会话历史，下轮对话自动带入。` });
+        this.queuedUnclaimed = 0;
+      }
     }
   }
 
@@ -240,7 +258,20 @@ export class ChatHost {
   /** 提交一轮对话（UI 输入框 Enter 触发）。 */
   async submit(content: string): Promise<void> {
     const text = content.trim();
-    if (!text || this.busy) return;
+    if (!text) return;
+    // ★ inbox steering：busy 期间排队补充输入，runAgent 回合边界送达模型。替代旧「静默 return」
+    //   ——webview 在调用前已清空输入框，静默等于丢字。排队失败（开关关/队满）至少提示用户未发送。
+    if (this.busy) {
+      const sid = this.sessionId;
+      if (sid && pushSessionInbox(sid, text)) {
+        this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}` });
+        this.sink({ type: "info", text: "📮 已排队，将在回合边界送达模型（停止按钮仍可中止）。" });
+        this.queuedUnclaimed++;
+      } else {
+        this.sink({ type: "info", text: "⏳ 生成中，输入未发送。" });
+      }
+      return;
+    }
     if (this.sessionId == null) {
       this.setSessionId(await getOrCreateSessionId(undefined));
     }

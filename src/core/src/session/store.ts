@@ -328,6 +328,7 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
                 if (!line) continue;
                 let msg: any;
                 try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
+                if (typeof msg?.dscEvent === 'string') continue; // ★ 事件行（事件日志化）不计入消息数
                 messageCount++;
  if (!preview && msg?.role === "user" && typeof msg.content === "string") {
  const t = msg.content.replace(/\s+/g, " ").trim();

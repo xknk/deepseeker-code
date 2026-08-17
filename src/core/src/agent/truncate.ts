@@ -25,6 +25,7 @@ import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
+import { appendEvent } from "@/session/transcript.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 
@@ -296,6 +297,14 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                     consecutiveFailures: 0,
                     updatedAt: new Date().toISOString()
                 })
+                // ★ 事件日志化：压缩边界事件行。顺序铁律：先 setRollingState 成功、再 appendEvent——
+                //   崩溃夹缝只会出现「state 有计数、transcript 无事件」单向 desync（recovery 交叉校验按此方向判定）。
+                //   携带归档计数 + 摘要全文 → transcript 自包含，fork/审计不再押 state.json 单点。
+                await appendEvent(event.sessionId, {
+                    dscEvent: 'compaction',
+                    archivedMessageCount: store.archivedMessageCount,
+                    summary: summaryMsg.content,
+                })
             } else if (keep > 1) { // 如果保留的条数还是大于最大token，则继续减少保留数据
                 keep--;
                 continue;
@@ -311,6 +320,13 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                     rollingSummary: summaryMsg.content,
                     consecutiveFailures: 0,
                     updatedAt: new Date().toISOString()
+                })
+                // ★ 事件日志化：摘要自收敛分支（toCompact 为空、归档计数不变，仅摘要被再压缩）——
+                //   fork 派生"该时点的摘要文本"依赖此事件，与归档分支同样先 state 后事件。
+                await appendEvent(event.sessionId, {
+                    dscEvent: 'compaction',
+                    archivedMessageCount: store.archivedMessageCount,
+                    summary: summaryMsg.content,
                 })
             } else {
                 break

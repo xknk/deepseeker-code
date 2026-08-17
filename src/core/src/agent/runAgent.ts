@@ -22,7 +22,9 @@
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
 import OpenAI from "openai";
-import { appendMessage } from "@/session/transcript.ts";
+import { appendMessage, appendEvent, UsageSnapshot } from "@/session/transcript.ts";
+import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
+import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { getRollingState, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
@@ -104,6 +106,22 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 重复工具调用熔断器（完整签名 3 次 / 后台轮询同任务 4 次）：跨轮有状态，每轮推理后 check()。
     //   从 runAgent 抽出到 repeatBreaker.ts；breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
     const breaker = createRepeatBreaker({ sessionId, depth, llmDecisionSource, startTime, events });
+    // ★ 事件日志化：run 边界事件行直接落盘（不经 AgentEvent 通道——subagent abort 时 break 出 for-await，
+    //   generator return 的 finally 不能 yield，AgentEvent 送不出去；直接落盘同时自动覆盖主/子会话，
+    //   且不污染 SSE/UI 事件流）。appendEvent 内部查开关，关闭时 no-op。
+    const runId = createUUID();
+    // 本 run 用量累计（run.end 永久计量；trace 侧 3 天自动清理，transcript 永久留存互补）
+    let usageSum: UsageSnapshot | undefined;
+    const addUsage = (u?: UsageSnapshot) => {
+        if (!u) return;
+        usageSum = {
+            prompt_tokens: (usageSum?.prompt_tokens ?? 0) + (u.prompt_tokens ?? 0),
+            completion_tokens: (usageSum?.completion_tokens ?? 0) + (u.completion_tokens ?? 0),
+            total_tokens: (usageSum?.total_tokens ?? 0) + (u.total_tokens ?? 0),
+            cached_tokens: (usageSum?.cached_tokens ?? 0) + (u.cached_tokens ?? 0),
+        };
+    };
+    await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
     try {
         while (true) {
             round++;
@@ -134,6 +152,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
 
+            }
+            // ★ inbox steering：回合边界认领运行中排队的补充输入。位于防失控上限/中止检查之后、round.start 之前——
+            //   认领即 push + 落盘并广播（本轮推理随即消费）；撞上收尾出口（final/limit/aborted）则不认领，
+            //   由 finally flushLeftoverToTranscript 落盘，下轮 buildContextMessages 自然带入。
+            const inboxTexts = claimSessionInbox(sessionId);
+            if (inboxTexts.length > 0) {
+                for (const t of inboxTexts) {
+                    message.push({ role: 'user', content: t });
+                    await appendMessage({ sessionId, role: 'user', content: t } as any);
+                }
+                yield { type: 'inbox.claimed', texts: inboxTexts };
             }
             yield { type: 'round.start', round };
             try {
@@ -203,6 +232,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 lastRealPromptTokens = infResult.usage.prompt_tokens;
                 lastCachedTokens = infResult.usage.cached_tokens;
             }
+            addUsage(infResult.usage); // completed 轮用量累计进 run.end（事件日志化）
             // assistantMessage 已由 streamInference 委托 provider.buildAssistantMessage 构造完成（含厂商扩展字段，
             //   如 DeepSeek 的 reasoning_content）。此处整体落盘 + ...spread 透传，杜绝手工列举字段名漏挂——
             //   DeepSeek 思考模式下含工具调用的轮次必须回传 reasoning_content，否则 API 返回 400；
@@ -221,6 +251,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
             const tcCount = assistantMessage.tool_calls?.length ?? 0;
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+                // ★ 事件日志化：本轮 assistant 已落盘、无工具调用（无待 flush 项）→ round 完整闭合。
+                //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
+                await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
@@ -238,6 +271,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
             if (repeatVerdict.tripped) {
                 stopReason = 'repeat';
+                // ★ 熔断硬化（事件日志化配套）：assistant 已于上方落盘，若直接 return 会留下孤儿 tool_calls，
+                //   续接时只能靠孤儿修复启发式兜底。镜像 toolScheduling 中止占位写法逐条补齐（push + appendMessage），
+                //   使「闭合 run 无孤儿」成为不变式。本路径不写 round.end——缺失即「异常收尾」取证信号。
+                for (const tc of assistantMessage.tool_calls) {
+                    const ph = "（重复调用熔断，未执行）";
+                    message.push({ role: 'tool', tool_call_id: tc.id, content: ph });
+                    await appendMessage({ sessionId, role: 'tool', tool_call_id: tc.id, content: ph } as any);
+                }
                 yield { type: 'final', text: repeatVerdict.text };
                 return;
             }
@@ -267,6 +308,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
             // completed：继续下一轮推理
+            // ★ 事件日志化：本轮 assistant + 全部 tool 结果已完整 flush → round 闭合（completed 路径独有；
+            //   abort/error/repeat/terminal 不写 round.end，缺失即取证信号）。
+            await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
         }
     } catch (toolErr) {
         // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all
@@ -283,6 +327,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         yield { type: 'final', text: (lastContent || "") + `\n（工具执行异常：${errMsg}）` };
         return;
     } finally {
+        // ★ inbox 收尾：未认领的补充输入落盘成 user 消息。置于 run.end 事件行之前——
+        //   fork 缺省锚点（最后一个 run.end）的前缀包含它们，分叉语义完整。
+        try {
+            await flushLeftoverToTranscript(sessionId);
+        } catch { /* 容错，绝不击垮收尾 */ }
+        // ★ 事件日志化：run 闭合事件行——必须在 finally 直接落盘（generator return 路径不能 yield，
+        //   AgentEvent 通道送不出去）；stopReason 与 Stop hook 同口径（signal.aborted 覆盖推断）。
+        //   放 Stop hook / updateCalibration 之前：run 边界元数据先于旁路持久化。
+        try {
+            await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: usageSum });
+        } catch { /* appendEvent 已内部吞错，双保险 */ }
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
         try {

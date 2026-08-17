@@ -116,3 +116,56 @@ describe("buildReplayRows（transcript → 行重建）", () => {
         assert.equal(rows.length, 0, "全部应被跳过，不抛错");
     });
 });
+
+describe("buildReplayRows（事件行：usage 回挂 + 中断标记）", () => {
+    it("round.end usage 回挂最近 assistant 行（cached_tokens → prompt_cache_hit_tokens）", () => {
+        const rows = buildReplayRows([
+            { role: "user", content: "q" },
+            { role: "assistant", content: "a" },
+            { id: "e1", ts: "t", dscEvent: "round.end", runId: "r1", round: 1, usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, cached_tokens: 80 } },
+        ] as any, newNid());
+        assert.equal(rows.length, 2, "事件行不渲染本体");
+        const a = rows[1] as any;
+        assert.equal(a.usage.prompt_tokens, 100);
+        assert.equal(a.usage.completion_tokens, 20);
+        assert.equal(a.usage.total_tokens, 120);
+        assert.equal(a.usage.prompt_cache_hit_tokens, 80, "cached_tokens 映射为 TraceBase 口径");
+    });
+
+    it("run.end 累计 usage 不覆盖已有轮级 usage", () => {
+        const rows = buildReplayRows([
+            { role: "assistant", content: "a" },
+            { id: "e1", ts: "t", dscEvent: "round.end", runId: "r1", round: 1, usage: { prompt_tokens: 100 } },
+            { id: "e2", ts: "t", dscEvent: "run.end", runId: "r1", stopReason: "normal", rounds: 1, usage: { prompt_tokens: 999 } },
+        ] as any, newNid());
+        assert.equal((rows[0] as any).usage.prompt_tokens, 100, "run.end 仅在行尚无 usage 时兜底回挂");
+    });
+
+    it("run.abandoned → 「被中断」info 行；末 run 未闭合 → 收尾补 info 行", () => {
+        const closed = buildReplayRows([
+            { id: "e1", ts: "t", dscEvent: "run.start", runId: "r1", depth: 0 },
+            { role: "assistant", content: "做了一半" },
+            { id: "e2", ts: "t", dscEvent: "run.abandoned", runId: "r1", reason: "x" },
+        ] as any, newNid());
+        assert.equal(closed.length, 2);
+        assert.equal((closed[1] as any).kind, "info");
+        assert.ok(((closed[1] as any).text).includes("被中断"));
+        // 未闭合（进程被杀、闭墓都没来得及补）→ 收尾兜底同样提示
+        const unclosed = buildReplayRows([
+            { id: "e1", ts: "t", dscEvent: "run.start", runId: "r2", depth: 0 },
+            { role: "assistant", content: "做了一半" },
+        ] as any, newNid());
+        assert.equal(unclosed.length, 2);
+        assert.equal((unclosed[1] as any).kind, "info");
+        assert.ok(((unclosed[1] as any).text).includes("被中断"));
+    });
+
+    it("纯事件行输入 → 零渲染行（除未闭合提示）", () => {
+        const rows = buildReplayRows([
+            { id: "e1", ts: "t", dscEvent: "run.start", runId: "r1", depth: 0 },
+            { id: "e2", ts: "t", dscEvent: "compaction", archivedMessageCount: 3, summary: "S" },
+            { id: "e3", ts: "t", dscEvent: "run.end", runId: "r1", stopReason: "normal", rounds: 2 },
+        ] as any, newNid());
+        assert.equal(rows.length, 0, "闭合 run 的事件流无任何渲染行");
+    });
+});

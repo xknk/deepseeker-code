@@ -27,6 +27,9 @@ import { sendOutbound } from "@/channels/chatChannelAdapter.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision } from "@/host/type.ts";
 import { readStore, writeStore } from "@/session/store.ts"
+import { forkSession } from "@/session/fork.ts";
+import { pushSessionInbox } from "@/agent/inbox.ts";
+import { appConfig } from "@/config/index.ts";
 import { createUUID, isSafeSessionId } from "@/common/index.ts";
 import { requireAuth } from "./auth.ts";
 
@@ -150,6 +153,49 @@ export const createServer = () => {
         ac.abort();                         // 触发中断：审批判拒绝、工具执行终止
         activeControllers.delete(sessionId);
         res.json({ ok: true });
+    });
+
+    // ★ inbox steering 入站（第二梯队 #2）：向运行中会话排队补充输入，runAgent 回合边界 claim 注入。
+    //   按 sessionId 跨端点操作，与 /api/approve、/api/abort 同模板；挂 /api 下自动过 requireAuth。
+    app.post("/api/sessions/inbox", (req, res) => {
+        const { sessionId, content } = (req.body || {}) as { sessionId?: string; content?: string };
+        if (!isSafeSessionId(sessionId) || typeof content !== "string" || !content.trim()) {
+            res.status(400).json({ ok: false, error: "需要 { sessionId: string, content: string }" });
+            return;
+        }
+        // 子会话（spawn_agent 内部会话）不开放排队：用户只知道主 sessionId，防误用护栏
+        if (sessionId.includes("__sub__")) {
+            res.status(400).json({ ok: false, error: "不支持向子会话排队" });
+            return;
+        }
+        if (!appConfig.inboxSteering) {
+            res.status(501).json({ ok: false, error: "inbox steering 已禁用（DEEP_SEEK_INBOX=0）" });
+            return;
+        }
+        if (!activeControllers.has(sessionId)) {
+            res.status(409).json({ ok: false, queued: false, error: "会话不在运行中（请直接 /api/chat 发送）" });
+            return;
+        }
+        const queued = pushSessionInbox(sessionId, content);
+        res.status(queued ? 200 : 409).json({ ok: queued, queued });
+    });
+
+    // ★ 会话分叉（事件日志化落地）：从源会话任意历史点派生新会话（拷 transcript 前缀 + 派生 state）。
+    //   upToLineId 缺省 = 最后一个已完成 turn 边界。CLI/VSCode 分叉选择 UX 属后续「会话历史UX」项目，
+    //   此端点先提供本地程序化入口（对齐产品定位：serve 仅本地 API 入口）。
+    app.post("/api/sessions/fork", async (req, res) => {
+        const { sessionId, upToLineId } = (req.body || {}) as { sessionId?: string; upToLineId?: string };
+        if (!isSafeSessionId(sessionId) || (upToLineId !== undefined && typeof upToLineId !== "string")) {
+            res.status(400).json({ ok: false, error: "需要 { sessionId: string, upToLineId?: string }" });
+            return;
+        }
+        try {
+            const result = await forkSession(sessionId, upToLineId);
+            res.json({ ok: true, ...result });
+        } catch (e) {
+            // 源不存在 / upToLineId 未找到 → 404（forkSession 抛错信息已可读）
+            res.status(404).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
     });
 
     app.post("/createJson", async (req, res) => {

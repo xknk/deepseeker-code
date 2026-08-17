@@ -111,6 +111,15 @@ export const appConfig = {
      *  工具数增长，L1 恒定）；'schemas' = 旧路径（每个 MCP 工具独立 schema 常驻）。
      *  env DEEP_SEEK_MCP_EXPOSE_MODE=schemas 回退。 */
     mcpExposeMode: (process.env.DEEP_SEEK_MCP_EXPOSE_MODE === "schemas" ? "schemas" : "dispatcher") as "dispatcher" | "schemas",
+    /** ★ 事件日志化：transcript 追加 turn/step 边界事件行（run.start/round.end/run.end/compaction/
+     *  run.abandoned，带 dscEvent 标记，readMessages 自动过滤）——崩溃恢复从盲扫启发式升级为事件确认，
+     *  compaction 事件携带归档计数+摘要文本使 transcript 自包含（分叉/审计不再押 state.json 单点）。
+     *  关闭时 appendEvent 全 no-op、恢复走纯内存启发式（= 改造前行为）。env DEEP_SEEK_TRANSCRIPT_EVENTS=0 回退。 */
+    transcriptEvents: process.env.DEEP_SEEK_TRANSCRIPT_EVENTS !== "0",
+    /** ★ inbox steering（第二梯队 #2）：agent 运行中用户补充输入进 per-session 队列，runAgent 回合边界
+     *  claim 注入上下文并落盘 transcript（长任务中途补指示不再只能中止重跑）。
+     *  关闭时全链路 no-op：端点 501 / CLI 回退 busy 提示 / VSCode 不排队。env DEEP_SEEK_INBOX=0 回退。 */
+    inboxSteering: process.env.DEEP_SEEK_INBOX !== "0",
 };
 
 // —— 用户可配置覆盖（settings.json 的 engine 段，白名单合并进 appConfig） ——
