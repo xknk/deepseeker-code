@@ -1352,15 +1352,6 @@ body {
   filter: brightness(1.15);
 }
 
-/* 快捷键提示（大盒子正下方，居中） */
-.composer-hint {
-  text-align: center;
-  font-size: 11px;
-  color: var(--vscode-descriptionForeground, var(--fg-dim));
-  padding: 6px 0 2px;
-  user-select: none;
-}
-
 /* 斜杠命令菜单（输入 / 时弹出） */
 .slash-menu {
   margin-top: 8px;

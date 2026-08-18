@@ -2,7 +2,7 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -151,14 +151,7 @@
           "description": "打开聊天面板时自动并排到当前编辑器右侧（ViewColumn.Beside）。关掉则回到第一列。"
         }
       }
-    },
-    "keybindings": [
-      {
-        "command": "deepseekerCode.openChat",
-        "key": "ctrl+esc",
-        "mac": "ctrl+esc"
-      }
-    ]
+    }
   },
   "scripts": {
     "build": "node build.mjs",

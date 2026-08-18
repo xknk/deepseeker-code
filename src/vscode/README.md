@@ -29,7 +29,7 @@ code --install-extension deepseeker-code-<version>.vsix
 ## 快速开始
 
 1. **配置 API Key**：打开 VS Code 设置，搜索 `deepseekerCode`，在 **API Key** 填入你的 DeepSeek API Key（也可改用环境变量，见下）。
-2. **打开聊天面板**：命令面板执行 `DeepSeeker-Code: 打开聊天`，或快捷键 `Ctrl+Esc`。
+2. **打开聊天面板**：命令面板执行 `DeepSeeker-Code: 打开聊天`。
 3. **开始对话**：在输入框提问即可。agent 会自主读文件、改代码、跑命令，危险操作会弹审批条。
 
 ---
@@ -137,8 +137,6 @@ code --install-extension deepseeker-code-<version>.vsix
 | `/sessions` | 列出并续接历史会话 |
 | `/clear`、`/new` | 新会话 |
 | `/help` | 帮助 |
-
-快捷键：`Ctrl+Esc` 打开聊天面板。
 
 ---
 

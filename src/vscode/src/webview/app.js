@@ -1368,7 +1368,7 @@ c.innerHTML = `
 <div class="slash-menu" id="slash-menu" style="display:none"></div>
 <div class="composer-attachments" id="composer-attachments"></div>
 </div>
-<div class="composer-hint">ctrl esc to focus or unfocus DeepSeek</div>`;
+`;
 const input = $("#input");
 const menu = $("#slash-menu");
 const btnSend = $("#btn-send");
