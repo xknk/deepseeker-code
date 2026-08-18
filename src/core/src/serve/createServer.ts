@@ -11,6 +11,7 @@
  * @description HTTP 服务构建：基于 express 暴露核心路由——
  *  /api/chat（SSE 流式对话主通道，含审批事件推送）、/api/approve（审批回传，解锁挂起的工具协程）、
  *  /api/abort（按 sessionId 主动中止 agent 任务：审批判拒绝、工具执行终止）、
+ *  /api/config（dump-config 只读诊断：有效配置树 + 来源标注）、
  *  /createJson（会话历史读写）、/health（健康检查）。
  *
  *  ★ 安全（2026-07-23 加固）：
@@ -30,6 +31,7 @@ import { readStore, writeStore } from "@/session/store.ts"
 import { forkSession } from "@/session/fork.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
 import { appConfig } from "@/config/index.ts";
+import { dumpEffectiveConfig } from "@/config/dump.ts";
 import { createUUID, isSafeSessionId } from "@/common/index.ts";
 import { requireAuth } from "./auth.ts";
 
@@ -196,6 +198,13 @@ export const createServer = () => {
             // 源不存在 / upToLineId 未找到 → 404（forkSession 抛错信息已可读）
             res.status(404).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
         }
+    });
+
+    // ★ dump-config（第二梯队 #5）：只读输出合并后有效配置树 + 逐字段来源标注
+    //    （default/env/settings.global/settings.project；机密字段仅指纹）。GET 无副作用，
+    //    挂 /api 下自动过 requireAuth——本地程序化诊断入口（「这个行为到底被谁改了」一查便知）。
+    app.get("/api/config", (_req, res) => {
+        res.json({ ok: true, ...dumpEffectiveConfig() });
     });
 
     app.post("/createJson", async (req, res) => {

@@ -32,6 +32,47 @@ export type ForkPrefix = {
     unclosedRunId?: string;
 };
 
+/** 分叉锚点（选择器列表项，纯数据）：一轮 assistant 回复 = 一个可选检查点。 */
+export type ForkAnchor = {
+    /** 锚点行 id（forkSession 的 upToLineId，前缀含该行） */
+    lineId: string;
+    /** 第几轮 assistant（1 起，展示用） */
+    roundNo: number;
+    /** 该轮之前最近的 user 提问预览（跨多轮 run 内共享同一提问；无则 ''） */
+    userPreview: string;
+    /** assistant 正文预览；纯工具轮用工具名序列，保证每轮都可选可辨 */
+    assistantPreview: string;
+};
+
+/**
+ * 从 transcript 行序派生可分叉锚点列表（纯函数，CLI/VSCode 选择器共用）。
+ * 锚点 = assistant 消息行（前缀含该行 = 一个完整检查点）；事件行/工具行/user 行跳过——
+ * mid-run（工具行中间）分叉 derivePrefix 层面支持，仅 UX 不暴露（对用户不可理解）。
+ */
+export const listForkAnchors = (lines: TranscriptLine[]): ForkAnchor[] => {
+    const anchors: ForkAnchor[] = [];
+    let lastUser = "";
+    for (const l of lines) {
+        if (isEventLine(l)) continue;
+        const row = l as any;
+        if (row?.role === "user") {
+            lastUser = typeof row.content === "string" ? row.content : "";
+        } else if (row?.role === "assistant") {
+            const content = typeof row.content === "string" ? row.content : "";
+            const names = Array.isArray(row.tool_calls)
+                ? row.tool_calls.map((tc: any) => tc?.function?.name ?? "").filter(Boolean).join(", ")
+                : "";
+            anchors.push({
+                lineId: row.id,
+                roundNo: anchors.length + 1,
+                userPreview: lastUser,
+                assistantPreview: content || (names ? `🔧 ${names}` : "(空回复)"),
+            });
+        }
+    }
+    return anchors;
+};
+
 /**
  * 纯函数：切前缀并派生派生态。
  * @param lines readTranscriptLines 的全量行（消息 + 事件混合序列）

@@ -31,6 +31,7 @@ import { QuestionModal } from "./components/QuestionModal.tsx";
 import { PlanModal } from "./components/PlanModal.tsx";
 import { PlanEditor } from "./components/PlanEditor.tsx";
 import { SessionPicker } from "./components/SessionPicker.tsx";
+import { ForkPicker } from "./components/ForkPicker.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
@@ -173,6 +174,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "lang": return S.cmdLang;
                 case "output-style": return S.cmdOutputStyle;
                 case "sessions": return S.cmdSessions;
+                case "fork": return S.cmdFork;
                 case "usage": return S.cmdUsage;
                 case "context": return S.cmdContext;
                 case "permissions": return S.cmdPermissions;
@@ -198,13 +200,13 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         return menuEntries.filter((c) => c.name.toLowerCase().startsWith(q));
     }, [input, menuEntries]);
 
-    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null;
+    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null;
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
     // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, slashVisible, filteredCommands.length]);
     // ★ 提问模态打开/切换时重置光标与已勾选
     useEffect(() => { setQCursor(0); setQChecked(new Set()); }, [state.pendingQuestion]);
 
@@ -222,6 +224,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 return true;
             case "/sessions":
                 void state.openSessionPicker();
+                return true;
+            case "/fork":
+                void state.openForkPicker();
                 return true;
             case "/help":
                 state.pushInfo(S.helpText(modelDisplay, state.getThinkingLevel(), getLocale()));
@@ -439,6 +444,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             else if (key.escape || (key.ctrl && ch === "g")) state.resolveSession(null);
             return;
         }
+        if (state.pendingFork) {
+            const list = state.pendingFork.anchors;
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + list.length) % list.length);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % list.length);
+            else if (key.return) {
+                const sel = list[Math.min(selectIdxRef.current, list.length - 1)];
+                state.resolveFork(sel ?? null);
+            }
+            else if (key.escape || (key.ctrl && ch === "g")) state.resolveFork(null);
+            return;
+        }
         if (key.ctrl && ch === "t") { state.toggleShowThinking(); return; }
         if (key.ctrl && ch === "g") { state.abortCurrent(); return; }
         if (slashVisible) {
@@ -516,6 +532,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                     ) : null}
                     {state.pendingSessions ? (
                         <SessionPicker sessions={state.pendingSessions.sessions} selectedIndex={selectIdx} wrapW={wrapW} />
+                    ) : null}
+                    {state.pendingFork ? (
+                        <ForkPicker anchors={state.pendingFork.anchors} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {slashVisible ? (
                         <SlashMenu entries={filteredCommands} selectedIndex={selectIdx} cols={cols} />

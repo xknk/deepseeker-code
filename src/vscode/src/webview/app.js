@@ -38,6 +38,7 @@ planEditing: false,
 planCollapsed: false, // 计划正文折叠态（点击标题切换）
 replaying: false, // 回放中：抑制逐条滚动，replayDone 一次性落底
 sessions: [],
+forkAnchors: [], // 当前会话可分叉锚点（各轮 assistant 检查点，host 经 listForkAnchors 回推）
 showTodos: false,
 todos: [],
 roundSeq: 0,
@@ -587,6 +588,10 @@ switch (evt.type) {
         state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         renderSessionsPanel();
         break;
+      case "forkAnchors":
+        state.forkAnchors = Array.isArray(msg.anchors) ? msg.anchors : [];
+        renderForkPanel();
+        break;
       case "sessionReset":
         clearMessages();
         break;
@@ -963,6 +968,81 @@ sessionsFilter = "";
 editingSessionId = null;
 confirmingDeleteId = null;
 clearTimeout(confirmDeleteTimer);
+}
+
+// ———————— 分叉面板（当前会话各轮检查点，点击该轮即从其后分叉出新会话） ————————
+function buildForkPanel() {
+if ($("#fork-panel")) return;
+const panel = document.createElement("div");
+panel.id = "fork-panel";
+panel.className = "sessions-panel"; // 复用历史面板样式（同款浮层外观）
+panel.style.display = "none";
+panel.innerHTML = `
+<div class="sessions-search">
+<span class="codicon codicon-git-fork"></span>
+<span style="flex:1;font-size:12px;color:#888;">选择分叉点：保留该轮及之前的历史，之后重新走向</span>
+<button id="fork-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
+</div>
+<div class="sessions-list" id="fork-list"></div>`;
+document.querySelector("#approval-anchor").before(panel);
+$("#fork-close").addEventListener("click", () => {
+closeForkPanel();
+const inp = $("#input");
+if (inp) inp.focus();
+});
+}
+
+function toggleForkPanel() {
+let panel = $("#fork-panel");
+if (!panel) buildForkPanel();
+panel = $("#fork-panel");
+if (panel && panel.style.display !== "none") {
+closeForkPanel();
+return;
+}
+openForkPanel();
+}
+
+function openForkPanel() {
+vscode.postMessage({ type: "listForkAnchors" });
+let panel = $("#fork-panel");
+if (!panel) buildForkPanel();
+panel = $("#fork-panel");
+panel.style.display = "";
+renderForkPanel();
+}
+
+function closeForkPanel() {
+const p = $("#fork-panel");
+if (p) p.style.display = "none";
+}
+
+function renderForkPanel() {
+const panel = $("#fork-panel");
+if (!panel || panel.style.display === "none") return;
+const box = $("#fork-list");
+const anchors = state.forkAnchors || [];
+if (!anchors.length) {
+box.innerHTML = `<div class="sessions-empty">当前会话暂无可分叉的检查点</div>`;
+return;
+}
+box.innerHTML = anchors
+.map(
+(a, i) => `
+<div class="session-row fork-row" data-i="${i}" title="从该轮分叉出新会话（原会话不变）">
+<span class="session-title">#${a.roundNo} ${escapeHtml(a.userPreview || "(无提问)")}</span>
+<span class="session-meta">→ ${escapeHtml(a.assistantPreview || "")}</span>
+</div>`
+)
+.join("");
+box.querySelectorAll(".fork-row").forEach((row) => {
+row.addEventListener("click", () => {
+const a = anchors[Number(row.dataset.i)];
+if (!a) return;
+closeForkPanel();
+vscode.postMessage({ type: "fork", lineId: a.lineId });
+});
+});
 }
 
 function dedupBySessionId(arr) {
@@ -1476,11 +1556,15 @@ tb.innerHTML = `
 <div class="actions">
 <button id="btn-new" title="新会话" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
 <button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
+<button id="btn-fork" title="分叉当前会话" class="icon-btn"><span class="codicon codicon-git-fork"></span></button>
 </div>`;
 $("#btn-project-root").addEventListener("click", () => vscode.postMessage({ type: "selectProjectRoot" }));
 $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
 $("#btn-sessions").addEventListener("click", () => {
 toggleSessionsPanel();
+});
+$("#btn-fork").addEventListener("click", () => {
+toggleForkPanel();
 });
 }
 function syncToolbar() {

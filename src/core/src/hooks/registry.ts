@@ -19,6 +19,7 @@ import {
     TOOL_EVENTS,
 } from "./types.ts";
 import { MAX_STDIN_FIELD } from "./shellExecutor.ts";
+import { appConfig } from "@/config/index.ts";
 
 /** 全局规则表（程序化注册 + 声明式配置共同写入） */
 const rules: HookRule[] = [];
@@ -60,8 +61,14 @@ export const listHooks = (): { event: string; matcher: string; source: string; o
     return rules.map(r => ({ event: r.event, matcher: strMatcher(r.matcher), source: r.source, onError: r.onError }));
 };
 
-/** dispatch 返回：deny/reason（拦截语义）+ contextAdditions（prompt-type hook 注入文本，仅 UserPromptSubmit 消费）。 */
-export type DispatchResult = { deny: boolean; reason?: string; contextAdditions?: string[] };
+/** dispatch 返回：deny/reason（拦截语义）+ contextAdditions（prompt-type hook 注入文本，仅 UserPromptSubmit 消费）
+ *  + argsOverride（PreToolUse 改写后的最终 args，瀑布终点值）/ resultOverride（PostToolUse last-wins 改写值）。
+ *  开关 DEEP_SEEK_HOOK_REWRITE=0 时两改写字段恒 undefined（单点门禁在此，调用方无需判开关）。 */
+export type DispatchResult = { deny: boolean; reason?: string; contextAdditions?: string[]; argsOverride?: any; resultOverride?: string };
+
+/** argsOverride 合法性：普通对象（非数组/null——args 本就是 JSON 对象，替换值同型）。 */
+const isPlainObject = (v: any): v is Record<string, any> =>
+    v !== null && typeof v === "object" && !Array.isArray(v);
 
 /**
  * 按事件分发：
@@ -99,16 +106,36 @@ export const dispatch = async (event: EventType, ctx: any): Promise<DispatchResu
             })
         ));
         const additions: string[] = [];
-        for (const r of results) if (r?.contextAdditions) additions.push(...r.contextAdditions);
-        return pack(additions);
+        // ★ PostToolUse resultOverride 收集：Promise.all 结果数组按 matched（注册）序——并发执行但覆盖
+        //   顺序确定（last-wins，非瀑布；观察事件保并发，不为改写串行化）。开关关时恒 undefined。
+        let resultOverride: string | undefined;
+        for (const r of results) {
+            if (r?.contextAdditions) additions.push(...r.contextAdditions);
+            if (event === 'PostToolUse' && appConfig.hookRewrite
+                && typeof r?.resultOverride === 'string' && r.resultOverride) {
+                resultOverride = r.resultOverride;
+            }
+        }
+        return { ...pack(additions), resultOverride };
     }
 
     // 可拦截事件：串行 + 短路；handler 抛错时按 rule.onError 决策。累积 contextAdditions。
+    // ★ PreToolUse argsOverride 瀑布：hook 返回即原地更新 ctx.args——后续 hook 与安全门禁均见改写后
+    //   参数；最终改写值随返回带出（deny 短路时丢弃——被拒的调用不会执行，改写无意义）。
     const additions: string[] = [];
+    let argsOverride: any = undefined;
     for (const rule of matched) {
         try {
             const res: HookResult = await rule.run(ctx);
             if (res?.contextAdditions) additions.push(...res.contextAdditions);
+            if (event === 'PreToolUse' && appConfig.hookRewrite && res?.argsOverride !== undefined) {
+                if (isPlainObject(res.argsOverride)) {
+                    ctx.args = res.argsOverride;
+                    argsOverride = res.argsOverride;
+                } else {
+                    console.warn(`⚠️ [hook:PreToolUse] argsOverride 须为普通对象，已忽略`);
+                }
+            }
             if (res && res.deny) {
                 return { deny: true, reason: res.reason, contextAdditions: additions.length > 0 ? additions : undefined };
             }
@@ -122,7 +149,7 @@ export const dispatch = async (event: EventType, ctx: any): Promise<DispatchResu
             console.warn(`⚠️ [hook:${event}] 执行异常，按放行处理: ${msg}`);
         }
     }
-    return pack(additions);
+    return { ...pack(additions), argsOverride };
 };
 
 // ============ 兼容门面：保持 runAgent 现有调用签名不变 ============
@@ -155,16 +182,18 @@ const truncateForHook = (s: string): string =>
     s.length <= HOOK_RESULT_MAX ? s : s.slice(0, HOOK_RESULT_MAX) + `\n…[hook 视图截断，共 ${s.length} 字符]`;
 
 /**
- * 执行 PostToolUse hook（execute 后，仅观察）。签名与旧 tool/hooks.ts 一致，runAgent 现有调用零改动。
- * result 在此截断后再分发——hook 仅作观察，无需完整大输出（模型侧的完整工具结果不受影响）。
+ * 执行 PostToolUse hook（execute 后，观察 + 开关开时可改写 resultForModel）。
+ * 返回 DispatchResult：resultOverride 供调用方替换模型视图（用户视图不动）。
+ * result 在此截断后再分发——hook 观察无需完整大输出；hook 自己写回的 resultOverride 不受此截断
+ * （调用方按工具自身 maxOutputCharacters 上限约束）。向后兼容：旧调用忽略返回值即可。
  */
 export const runPostHooks = async (
     toolName: string,
     args: any,
     result: string,
     ctx: ToolContext,
-): Promise<void> => {
-    await dispatch('PostToolUse', {
+): Promise<DispatchResult> => {
+    return dispatch('PostToolUse', {
         sessionId: ctx.sessionId,
         cwd: ctx.cwd,
         env: ctx.env,

@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/session/store.ts";
 import { readTranscriptLines } from "@/session/transcript.ts";
+import { forkSession, listForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
@@ -40,6 +41,8 @@ export type PlanResolution =
 export type PendingPlan = { plan: string; resolve: (r: PlanResolution) => void };
 /** 待选择的历史会话（/sessions 选择器）。resolve(null)=取消。 */
 export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string | null) => void };
+/** 待选择的分叉锚点（/fork 选择器）。resolve(null)=取消。 */
+export type PendingFork = { anchors: ForkAnchor[]; resolve: (anchor: ForkAnchor | null) => void };
 
 /** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
  *  120ms≈8fps：在 Windows Terminal 上进一步减闪（帧数较 80ms 再降约 33%），流式文本/打字延迟仍可接受。
@@ -77,6 +80,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
     const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
     const [pendingSessions, setPendingSessions] = useState<PendingSessions | null>(null);
+    const [pendingFork, setPendingFork] = useState<PendingFork | null>(null);
 
     const nextId = useRef(1);
     const assistantStreamingId = useRef<number | null>(null);
@@ -579,6 +583,30 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         if (picked) await loadSession(picked);
     }, [pushInfo, loadSession]);
 
+    // —— 会话分叉（/fork 选择器，会话历史 UX ③） ——
+    /** 关闭分叉选择器并回传结果（null=取消）。 */
+    const resolveFork = useCallback((anchor: ForkAnchor | null) => {
+        setPendingFork((prev) => { prev?.resolve(anchor); return null; });
+    }, []);
+    /** 唤出 /fork 选择器：列当前会话各轮 assistant 检查点 → 选定即 forkSession 派生新会话并载入
+     *  （in-process 直调 core 原语，不经 HTTP；源会话 transcript 不动，新会话字节级前缀拷贝）。 */
+    const openForkPicker = useCallback(async () => {
+        const sid = sessionIdRef.current;
+        if (!sid) { pushInfo(S.forkEmpty); return; }
+        let anchors: ForkAnchor[] = [];
+        try { anchors = listForkAnchors(await readTranscriptLines(sid)); } catch { /* 读失败按无锚点处理 */ }
+        if (anchors.length === 0) { pushInfo(S.forkEmpty); return; }
+        const picked = await new Promise<ForkAnchor | null>((resolve) => setPendingFork({ anchors, resolve }));
+        if (!picked) return;
+        try {
+            const r = await forkSession(sid, picked.lineId);
+            await loadSession(r.sessionId);
+            pushInfo(S.forkDone(truncateMiddle(r.sessionId, 12), picked.roundNo));
+        } catch (e: any) {
+            pushInfo(S.forkFailed(e?.message ?? String(e)));
+        }
+    }, [pushInfo, loadSession]);
+
     /** /model 设置模型覆盖（透传 RunAgentOptions.model）。 */
     const setModelOverride = useCallback((m: string) => { modelRef.current = m; }, []);
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
@@ -596,14 +624,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions,
+        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork,
         sessionIdRef,
         // 动作
         submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
-        openSessionPicker, resolveSession, loadSession,
+        openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork,
     };
 };
 

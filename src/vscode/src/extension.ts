@@ -299,6 +299,21 @@ function handleMessage(msg: Record<string, unknown>): void {
     case "listSessions":
       void sendSessions();
       break;
+    case "listForkAnchors":
+      void (async () => {
+        const anchors = (await h.listForkAnchors()) ?? [];
+        if (panel) void panel.webview.postMessage({ type: "forkAnchors", anchors });
+      })();
+      break;
+    case "fork":
+      void (async () => {
+        try {
+          await h.forkFrom(String(msg.lineId ?? ""));
+        } catch (e) {
+          void vscode.window.showErrorMessage(`分叉失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
+      break;
     case "loadSession":
       void h.loadSession(String(msg.id ?? ""));
       break;

@@ -156,6 +156,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode };
     let result = "";
     let explicitOk: boolean | null = null;
+    // ★ PostToolUse hook 改写的模型视图结果（在 outputFilter 之后套用；用户视图 resultForUser 不动）
+    let postHookOverride: string | undefined;
     if (parseFailed) {
         result = `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`;
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
@@ -164,6 +166,25 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const level = matchedTool.function.safetyLevel;
         let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
         let denied = false;
+        // ★ 改写型 PreToolUse（第二梯队 #3，开关开时的正确位置）：位于全部安全门禁之前——
+        //   改写后的 args 才是被保护路径/权限规则/灾难命令/互斥锁/审批/undo 备份评估的对象
+        //   （否则 hook 改写会绕过门禁，或用户批了 X 而 hook 已改成 Y）。deny 亦前置（省无谓审批
+        //   弹窗，对齐 Claude Code 顺序）。开关关（DEEP_SEEK_HOOK_REWRITE=0）→ 跳过此处，
+        //   回退下方旧位（审批后、仅 deny），行为与改造前一致。
+        let preHooksAdvanced = false;
+        if (appConfig.hookRewrite) {
+            preHooksAdvanced = true;
+            let veto: { deny: boolean; reason?: string; argsOverride?: any };
+            try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
+            catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
+            if (veto.deny) {
+                denied = true;
+                result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
+            } else if (veto.argsOverride !== undefined && veto.argsOverride !== null && typeof veto.argsOverride === 'object' && !Array.isArray(veto.argsOverride)) {
+                console.log(`✏️ [Pre-hook] [${calledName}] args 已被 hook 改写`);
+                calledArgs = veto.argsOverride;
+            }
+        }
         // ★ P1-7 / P0-3 保护路径硬规则：写工具碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒。
         //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
         //   P0-3：与 isUndoTrigger 解耦——move_file 不在 Undo 名单（双路径超 schema），但同样必须拦截，
@@ -238,8 +259,9 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 if (!approved && !denied) { denied = true; result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`; }
             }
         }
-        // ★ pre-hooks：审批通过后、执行前注入用户自定义逻辑（可 deny 拦截，异常 fail-closed）
-        if (!denied) {
+        // ★ pre-hooks（旧位兜底）：开关关时保持改造前行为（审批后、仅 deny，改写字段已被 dispatch 忽略）；
+        //   开关开时已在分支顶部前置执行（deny+改写），此处跳过防重复执行。
+        if (!denied && !preHooksAdvanced) {
             let veto: { deny: boolean; reason?: string };
             try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
@@ -275,10 +297,14 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
                 events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
             }
-            // post-hooks：执行后观察（不拦截，自身异常仅告警）
-            await runPostHooks(calledName, calledArgs, result, toolCtx).catch((e: any) => {
+            // ★ post-hooks：执行后观察（不拦截，自身异常仅告警）+ 开关开时收集 resultOverride
+            //   （改写模型视图；hook 观察到的 result 是 4K 截断视图，其自写回的 override 不受该截断）
+            try {
+                const post = await runPostHooks(calledName, calledArgs, result, toolCtx);
+                postHookOverride = post?.resultOverride;
+            } catch (e: any) {
                 console.warn(`⚠️ post-hook [${calledName}] 异常（已忽略）:`, e?.message ?? e);
-            });
+            }
         }
     } else {
         result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
@@ -299,6 +325,13 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             resultForModel = split.toModel;
             resultForUser = split.toUser;
         } catch { /* 容错：outputFilter 异常则两者均用原 result */ }
+    }
+    // ★ PostToolUse hook 改写（第二梯队 #3）：仅替换模型视图，用户视图保持工具真实输出；
+    //   套用工具自身 maxOutputCharacters 同上限（override 由用户 hook 产生，同样需有界）。
+    //   transcript 落盘的是 resultForModel → 模型实际所见，回放/压缩/fork 天然一致。
+    if (postHookOverride !== undefined) {
+        console.log(`✏️ [Post-hook] [${calledName}] 模型视图结果已被 hook 改写`);
+        resultForModel = truncateToolResult(postHookOverride, matchedTool?.function?.maxOutputCharacters);
     }
     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok };
 };

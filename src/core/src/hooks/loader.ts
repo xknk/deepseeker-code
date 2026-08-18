@@ -25,6 +25,9 @@
  *
  *  执行类型（type，缺省 'command'）：
  *   - command：spawn shell 命令（既有行为，shellExecutor）。必需 command。
+ *           ★ stdout JSON 决策协议（第二梯队 #3）：exitCode 0 时可输出
+ *             {"deny":true,"reason":"...","argsOverride":{...},"resultOverride":"..."}（整体替换语义，
+ *             非合并）；非 JSON 文本静默忽略（既有 hook 零影响）。改写经 registry.dispatch 统一校验/瀑布。
  *   - http：POST 上下文 JSON 到 url，按响应决策 deny（webhook/云集成，httpExecutor）。必需 url（http/https）。
  *           响应体为 JSON 且含 {deny:true,reason} 即拒；否则非 2xx 按 denyOnNonZero 决策。
  *   - prompt：经 contextAdditions 通道向 agent 注入文本（仅 UserPromptSubmit 合法）。必需 text；不 deny。
@@ -40,7 +43,7 @@ import { executeHookCommand } from "./shellExecutor.ts";
 import { executeHttpHook } from "./httpExecutor.ts";
 import { runSubagent } from "@/agent/subagent.ts";
 import { agentTools } from "@/tool/index.ts";
-import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT } from "./types.ts";
+import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT, HookResult } from "./types.ts";
 
 /** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
 interface RawHookRule {
@@ -218,6 +221,32 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
 };
 
 /**
+ * 解析 command hook 的 stdout JSON 决策协议（第二梯队 #3）：exitCode 0 时脚本可在 stdout 输出
+ * `{"deny":true,"reason":"...","argsOverride":{...},"resultOverride":"..."}` 参与拦截/改写。
+ * 非 JSON / 非对象 / 无已知字段 → undefined 静默忽略（向后兼容：prettier、lint 等普通文本输出的既有 hook 不受影响）。
+ * argsOverride 的 plain-object 校验由 registry.dispatch 统一做（程序化/声明式单一校验点）。
+ * 导出供单测。
+ */
+export const parseStdoutDecision = (stdout: string): HookResult | undefined => {
+    const s = (stdout ?? "").trim();
+    if (!s || !s.startsWith("{")) return undefined;
+    try {
+        const parsed = JSON.parse(s);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+        const out: { deny?: boolean; reason?: string; argsOverride?: any; resultOverride?: string } = {};
+        if (parsed.deny === true) {
+            out.deny = true;
+            if (typeof parsed.reason === "string" && parsed.reason) out.reason = parsed.reason;
+        }
+        if (parsed.argsOverride !== undefined) out.argsOverride = parsed.argsOverride;
+        if (typeof parsed.resultOverride === "string" && parsed.resultOverride) out.resultOverride = parsed.resultOverride;
+        return (out.deny !== undefined || out.argsOverride !== undefined || out.resultOverride !== undefined) ? out : undefined;
+    } catch {
+        return undefined;
+    }
+};
+
+/**
  * 解析 agent hook 子 agent 输出的 DECISION 协议（取最后一行 `DENY: <理由>` / `ALLOW`，忽略大小写）。
  * @returns { deny, explicit } —— explicit=true=解析到明确决策行；false=无（调用方按 denyOnNonZero 兜底）。
  * 导出供单测。
@@ -311,12 +340,19 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                         ? { deny: true, reason: `hook http 请求失败：${res.error}` }
                         : { deny: false };
                 }
-                // 响应体为 JSON 且含 { deny: true, reason } → 直接采纳对端决策
+                // 响应体为 JSON 且含 { deny: true, reason } → 直接采纳对端决策；
+                // ★ 改写协议（第二梯队 #3）：argsOverride / resultOverride 亦经此通道（2xx 才采纳）
                 try {
                     const parsed = JSON.parse(res.responseBody);
-                    if (parsed && typeof parsed === "object" && parsed.deny === true) {
-                        const reason = typeof parsed.reason === "string" ? parsed.reason : `hook http 拒绝（status ${res.status}）`;
-                        return { deny: true, reason };
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        if (parsed.deny === true) {
+                            const reason = typeof parsed.reason === "string" ? parsed.reason : `hook http 拒绝（status ${res.status}）`;
+                            return { deny: true, reason };
+                        }
+                        const out: HookResult = {};
+                        if (parsed.argsOverride !== undefined) out.argsOverride = parsed.argsOverride;
+                        if (typeof parsed.resultOverride === "string" && parsed.resultOverride) out.resultOverride = parsed.resultOverride;
+                        if (out.argsOverride !== undefined || out.resultOverride !== undefined) return out;
                     }
                 } catch { /* 非 JSON 响应：退回按状态码决策 */ }
                 // 非 2xx → 按 denyOnNonZero 决策（默认 PreToolUse=true 拦）
@@ -328,7 +364,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
         };
     }
 
-    // —— command（默认/既有）：spawn shell，按 exitCode 决策 ——
+    // —— command（默认/既有）：spawn shell，按 exitCode 决策 + stdout JSON 改写协议（第二梯队 #3）——
     const command = raw.command!;
     return {
         ...base,
@@ -348,6 +384,12 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
             if (denyOnNonZero && res.exitCode !== 0) {
                 const detail = res.stderr ? `：${res.stderr.slice(0, 200)}` : "";
                 return { deny: true, reason: `hook 退出码 ${res.exitCode}${detail}` };
+            }
+            // ★ stdout JSON 决策协议（exitCode 0）：脚本可输出 {deny,reason,argsOverride,resultOverride}
+            //   参与拦截/改写；普通文本输出（prettier/lint 等）静默忽略——既有 hook 零影响。
+            if (res.exitCode === 0) {
+                const out = parseStdoutDecision(res.stdout);
+                if (out) return out;
             }
             return { deny: false };
         },

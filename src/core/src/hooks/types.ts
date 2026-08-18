@@ -15,8 +15,8 @@ import { ToolContext } from "@/tool/type.ts";
 export type EventType =
     | 'SessionStart'        // 会话启动（取到 sessionId 后，紧邻 session.start trace）
     | 'UserPromptSubmit'    // 用户原始输入进入、未进 agent 前（serve 层；可拦截整轮）
-    | 'PreToolUse'          // 工具审批通过后、execute 前（可拦截）
-    | 'PostToolUse'         // 工具 execute 后（含异常；仅观察）
+    | 'PreToolUse'          // 工具 execute 前（可拦截；开关开时前置到全部安全门禁之前 + 可改写 args，见 toolExecution）
+    | 'PostToolUse'         // 工具 execute 后（含异常；观察 + 开关开时可改写 resultForModel）
     | 'Stop'                // agent 主循环退出（正常/中止/熔断/错误；仅观察）
     | 'SessionEnd'          // 请求结束、SSE 关闭前（紧邻 session.end trace；仅观察）
     | 'SubagentStart'       // P1-8 子 agent 实际启动（spawn_agent / run_workflow 派生后；仅观察）
@@ -132,9 +132,14 @@ export type HookType = 'command' | 'http' | 'prompt' | 'agent';
  * hook 返回值。
  * - deny（可选）：可拦截事件返回 deny:true 即阻断；观察事件忽略。
  * - contextAdditions（可选）：prompt-type hook 经此通道注入文本，由 UserPromptSubmit 接缝拼入用户输入。
+ * - argsOverride（可选，仅 PreToolUse 合法）：整体替换工具 args（非合并）。dispatch 内做瀑布——
+ *   后续 hook 与安全门禁（保护路径/权限/审批/undo 备份）均见改写后参数。须为普通对象，否则 warn 忽略。
+ *   开关 DEEP_SEEK_HOOK_REWRITE=0 时全链路忽略（含 toolExecution 的前置位回退）。
+ * - resultOverride（可选，仅 PostToolUse 合法）：替换 resultForModel（模型视图）；resultForUser 不动
+ *   （用户始终看到工具真实输出）。多个 hook 按注册序后者覆盖前者（last-wins）。
  *   向后兼容：现有 {deny:false} / dispatch 的 `if(res&&res.deny)` 判定不受影响（deny 缺省即 undefined→falsy）。
  */
-export type HookResult = void | { deny?: boolean; reason?: string; contextAdditions?: string[] };
+export type HookResult = void | { deny?: boolean; reason?: string; contextAdditions?: string[]; argsOverride?: any; resultOverride?: string };
 
 /**
  * 工具名匹配器（沿用旧 tool/hooks.ts 语义）：

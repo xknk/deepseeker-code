@@ -12,7 +12,8 @@
 import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
 import { getOrCreateSessionId, listSessions, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
-import { readMessages } from "@/session/transcript.ts";
+import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
+import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
@@ -356,6 +357,26 @@ export class ChatHost {
   /** 枚举本工作区历史会话（供 UI 会话选择器）。 */
   async listSessions(): Promise<SessionSummary[]> {
     return listSessions();
+  }
+
+  /** 枚举当前会话可分叉锚点（各轮 assistant 检查点；无活动会话/读失败 → 空表）。 */
+  async listForkAnchors(): Promise<ForkAnchor[]> {
+    const sid = this.sessionId;
+    if (!sid) return [];
+    try {
+      return deriveForkAnchors(await readTranscriptLines(sid));
+    } catch {
+      return [];
+    }
+  }
+
+  /** 从锚点分叉当前会话：forkSession 派生新会话（源不动）→ 载入续接。 */
+  async forkFrom(lineId: string): Promise<void> {
+    const sid = this.sessionId;
+    if (!sid) throw new Error("当前无活动会话，无可分叉");
+    const r = await forkSession(sid, lineId);
+    await this.loadSession(r.sessionId);
+    this.sink({ type: "info", text: `🌿 已分叉为新会话（源会话不变），继续对话将写入新会话。` });
   }
 
   /** 重命名会话：写 state.title（不动 sessionId/文件夹，transcript 路径稳定）。 */

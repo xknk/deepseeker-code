@@ -120,7 +120,43 @@ export const appConfig = {
      *  claim 注入上下文并落盘 transcript（长任务中途补指示不再只能中止重跑）。
      *  关闭时全链路 no-op：端点 501 / CLI 回退 busy 提示 / VSCode 不排队。env DEEP_SEEK_INBOX=0 回退。 */
     inboxSteering: process.env.DEEP_SEEK_INBOX !== "0",
+    /** ★ hooks 改写型拦截点（第二梯队 #3）：PreToolUse 可改 args（argsOverride，前置到全部安全门禁
+     *  之前生效——门禁/审批评估的是改写后参数）、PostToolUse 可改 resultForModel（仅模型视图，
+     *  用户视图 resultForUser 不变）。关闭时 PreToolUse 回退旧位（审批后、仅 deny），改写字段全忽略，
+     *  行为与改造前一致。env DEEP_SEEK_HOOK_REWRITE=0 回退。 */
+    hookRewrite: process.env.DEEP_SEEK_HOOK_REWRITE !== "0",
 };
+
+// —— 配置来源标注（第二梯队 #5 dump-config） ——
+
+/** 每个「值由环境变量参与决定」的 appConfig 字段 → 变量名（dump-config 来源标注 + 文档校对用）。
+ *  仅登记真实参与取值的变量；engine 白名单字段无 env 源（settings.json 专属），两者无交集。 */
+export const ENV_SOURCES: Record<string, string> = {
+    dataDir: "DEEPSEEKER_CODE_DATA_DIR",
+    searchProvider: "SEARCH_PROVIDER",
+    tavilyApiKey: "TAVILY_API_KEY",
+    webFetchAllowPrivate: "WEB_FETCH_ALLOW_PRIVATE",
+    parallelSafeTools: "DEEP_SEEK_PARALLEL_SAFE_TOOLS",
+    workflowConcurrency: "DEEP_SEEK_WORKFLOW_CONCURRENCY",
+    workflowMaxSteps: "DEEP_SEEK_WORKFLOW_MAX_STEPS",
+    planEnforcement: "DEEP_SEEK_PLAN_ENFORCEMENT",
+    mcpExposeMode: "DEEP_SEEK_MCP_EXPOSE_MODE",
+    transcriptEvents: "DEEP_SEEK_TRANSCRIPT_EVENTS",
+    inboxSteering: "DEEP_SEEK_INBOX",
+    hookRewrite: "DEEP_SEEK_HOOK_REWRITE",
+};
+
+/** 配置值来源标签：内置默认 / 环境变量 / 全局 settings.json / 项目 settings.json（后者覆盖前者）。 */
+export type ConfigSource = "default" | "env" | "settings.global" | "settings.project";
+
+/** 字段 → 生效值来源（模块加载期随 env 判定 + engine 合并过程记录；dump-config 输出用）。未记录 = default。 */
+export const configSources: Record<string, ConfigSource> = {};
+
+// env 源标注：变量已设且非空即记 env。反向语义开关设非 "0" 值时结果虽与默认相同，仍是 env 决定的——如实标注。
+for (const [key, envName] of Object.entries(ENV_SOURCES)) {
+    const v = process.env[envName];
+    if (v !== undefined && v !== "") configSources[key] = "env";
+}
 
 // —— 用户可配置覆盖（settings.json 的 engine 段，白名单合并进 appConfig） ——
 
@@ -150,11 +186,12 @@ export const ENGINE_OVERRIDE_KEYS = Object.keys(ENGINE_OVERRIDE_VALIDATORS);
  *  容错：文件缺失静默跳过；解析 / 校验失败仅 warn，绝不抛（config 是最底层模块，抛了会全局崩）。
  */
 const applyEngineOverrides = (cfg: typeof appConfig): void => {
+    // scope 标签随合并过程写入 configSources（dump-config 来源标注）；项目级后应用 → 标注自然覆盖全局（最终赢家）。
     const paths = [
-        path.join(cfg.dataDir, "settings.json"), // 全局用户级
-        path.join(process.cwd(), ".deepseeker-code", "settings.json"), // 项目级（覆盖全局）
+        { scope: "settings.global" as ConfigSource, configPath: path.join(cfg.dataDir, "settings.json") }, // 全局用户级
+        { scope: "settings.project" as ConfigSource, configPath: path.join(process.cwd(), ".deepseeker-code", "settings.json") }, // 项目级（覆盖全局）
     ];
-    for (const configPath of paths) {
+    for (const { scope, configPath } of paths) {
         let raw: string;
         try {
             raw = readFileSync(configPath, "utf-8");
@@ -178,6 +215,7 @@ const applyEngineOverrides = (cfg: typeof appConfig): void => {
                 continue;
             }
             (cfg as Record<string, unknown>)[key] = valid;
+            configSources[key] = scope; // 值采纳即记来源（含值与默认相同的合法覆盖）
         }
     }
 };

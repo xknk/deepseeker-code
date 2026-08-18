@@ -84,6 +84,13 @@ interface StringDict {
     sessionsPrompt: string;
     noHistory: string;
     sessionLoaded: (id: string) => string;
+    /** /fork 选择器（会话分叉） */
+    cmdFork: string;
+    forkTitle: string;
+    forkPrompt: string;
+    forkEmpty: string;
+    forkDone: (id: string, roundNo: number) => string;
+    forkFailed: (e: string) => string;
     /** 本地化的相对时间（"3 分钟前" / "3m ago"）；iso 非法/空 → 空串。 */
     relTime: (iso: string) => string;
     /** /lang 与启动期信任询问 */
@@ -190,6 +197,12 @@ const STRINGS: Record<Locale, StringDict> = {
         sessionsPrompt: "↑↓ 选择 · Enter 载入 · Esc 取消",
         noHistory: "（暂无历史会话）",
         sessionLoaded: (id) => `已载入会话 ${id}（继续对话将续接此会话）`,
+        cmdFork: "从当前会话的某轮回复处分叉出新会话",
+        forkTitle: "🌿 分叉当前会话（↑↓ 选检查点 · Enter 分叉）",
+        forkPrompt: "↑↓ 选择 · Enter 分叉 · Esc 取消",
+        forkEmpty: "（当前会话暂无可分叉的检查点）",
+        forkDone: (id, roundNo) => `已从第 ${roundNo} 轮分叉 → 新会话 ${id}（已载入，后续对话写入新会话，原会话不变）`,
+        forkFailed: (e) => `分叉失败：${e}`,
         relTime: (iso) => {
             const t = Date.parse(iso);
             if (!t) return "";
@@ -222,6 +235,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
+            "/fork      — 从当前会话的某轮回复处分叉出新会话",
             "/trust  — 管理已信任目录（项目级 hooks/skills 等仅在信任目录加载；CI 用 --trust 显式信任）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
         ].join("\n"),
@@ -317,6 +331,12 @@ const STRINGS: Record<Locale, StringDict> = {
         sessionsPrompt: "↑↓ pick · Enter resume · Esc cancel",
         noHistory: "(no past sessions)",
         sessionLoaded: (id) => `Resumed session ${id} (new messages continue it)`,
+        cmdFork: "Fork the current session from a past round",
+        forkTitle: "🌿 Fork current session (↑↓ to pick · Enter to fork)",
+        forkPrompt: "↑↓ pick · Enter fork · Esc cancel",
+        forkEmpty: "(no checkpoints to fork from in this session)",
+        forkDone: (id, roundNo) => `Forked from round ${roundNo} → new session ${id} (loaded; new messages go to the fork, source untouched)`,
+        forkFailed: (e) => `Fork failed: ${e}`,
         relTime: (iso) => {
             const t = Date.parse(iso);
             if (!t) return "";
@@ -349,6 +369,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",
+            "/fork      — Fork the current session from a past round",
             "/trust  — Manage trusted dirs (project hooks/skills load only when trusted; CI uses --trust)",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
         ].join("\n"),
@@ -375,4 +396,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
