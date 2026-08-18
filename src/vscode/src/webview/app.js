@@ -979,7 +979,7 @@ panel.className = "sessions-panel"; // 复用历史面板样式（同款浮层�
 panel.style.display = "none";
 panel.innerHTML = `
 <div class="sessions-search">
-<span class="codicon codicon-git-fork"></span>
+<span class="codicon codicon-gist-fork"></span>
 <span style="flex:1;font-size:12px;color:#888;">选择分叉点：保留该轮及之前的历史，之后重新走向</span>
 <button id="fork-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
 </div>
@@ -1556,7 +1556,7 @@ tb.innerHTML = `
 <div class="actions">
 <button id="btn-new" title="新会话" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
 <button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
-<button id="btn-fork" title="分叉当前会话" class="icon-btn"><span class="codicon codicon-git-fork"></span></button>
+<button id="btn-fork" title="分叉当前会话" class="icon-btn"><span class="codicon codicon-gist-fork"></span></button>
 </div>`;
 $("#btn-project-root").addEventListener("click", () => vscode.postMessage({ type: "selectProjectRoot" }));
 $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
