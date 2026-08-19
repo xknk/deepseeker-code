@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+代码变更红绿 diff 预览 + 计划模式交互对齐 Claude Code。
+
+### 终端交互
+
+- **编辑工具红绿 diff**：`edit_file` / `create_file` / `write_file` 工具卡与审批弹窗内联展示变更（LCS 行级 diff + 上下文折叠，− 红 / + 绿，多处以「—— 第 N 处 ——」分隔；纯 UI 层从 args 计算，不耗模型 token）。
+- **计划模式对齐 Claude Code**：审批卡「准备开始编码？」四选项（是并自动接受编辑 / 是并手动审批编辑 / 编辑方案 / 否——留在计划模式继续迭代修订）；「否」不再终止，补充要求后模型修订方案再次提交。
+- **Markdown 渲染增强**：assistant 标题行（`#`~`######`）剥前缀加粗白渲染——计划方案分节即刻可读。
+- **输入框模式标识**：计划模式紫色圆角边框 + `plan mode on` 徽标、自动模式黄色边框 + `auto-accept edits on` 徽标。
+
+---
+
 ## 1.0.0
 
 首个 npm 公开发布版本（终端 CLI，React Ink，in-process 直驱 core 引擎）。
