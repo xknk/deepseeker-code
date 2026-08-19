@@ -14,6 +14,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { THEME } from "../theme.ts";
 import { argHint, findTool, resultPreview, strWidth, truncateMiddle } from "../util.ts";
+import { EDIT_TOOL_NAMES, extractEditPairs, pairsToDisplayRows } from "../diffView.ts";
 
 type Props = {
     toolName: string;
@@ -58,6 +59,19 @@ export const ToolCard = ({ toolName, args, result, ok, status, progress, wrapW }
         return truncateMiddle(last, Math.max(20, wrapW - 6));
     })();
 
+    // ★ 编辑类工具（edit_file/create_file/write_file）成功后的红绿 diff（对齐 Claude Code 终端样式）：
+    //   纯 UI 层从 args 计算（lineDiff），不进工具结果字符串（避免 diff 回灌模型浪费 token）。
+    //   上下文已折叠 + 总行数封顶，超大改动只示意首部（完整内容仍在 transcript / args 明细）。
+    const MAX_DIFF_LINES = 14;
+    const diffAll = (() => {
+        if (status !== "done" || !ok) return null;
+        if (!(EDIT_TOOL_NAMES as readonly string[]).includes(toolName)) return null;
+        const pairs = extractEditPairs(toolName, args);
+        return pairs ? pairsToDisplayRows(pairs) : null;
+    })();
+    const diffRows = diffAll ? diffAll.slice(0, MAX_DIFF_LINES) : null;
+    const diffHidden = diffAll ? Math.max(0, diffAll.length - MAX_DIFF_LINES) : 0;
+
     return (
         <Box flexDirection="column" marginTop={0.3} marginBottom={0.3}>
             {/* 头行：⏺(安全色) + 工具名(加粗白) + 主参数(暗) + 状态图标；无背景色、无动画 */}
@@ -79,6 +93,25 @@ export const ToolCard = ({ toolName, args, result, ok, status, progress, wrapW }
                 <Box flexDirection="row" flexShrink={0}>
                     <Text color={THEME.grayDim}>{"  ⎿  "}</Text>
                     <Text color={THEME.gray}>{runningLine || "运行中…"}</Text>
+                </Box>
+            ) : null}
+            {/* 编辑类工具的红绿 diff（- 红 / + 绿 / 省略行暗灰）；与结果行同列缩进，前景色无背景（Ink Static 擦写约束） */}
+            {diffRows && diffRows.length > 0 ? diffRows.map((r, i) => (
+                <Box key={`diff-${i}`} flexDirection="row" flexShrink={0}>
+                    <Text color={THEME.grayDim}>{"     "}</Text>
+                    {r.t === "ellip" ? (
+                        <Text color={THEME.grayDim}>{r.n > 0 ? `  ⋯ ${r.n} 行未变` : "  ⋯"}</Text>
+                    ) : (
+                        <Text color={r.t === "del" ? THEME.danger : r.t === "add" ? THEME.ok : THEME.grayDim}>
+                            {`${r.t === "del" ? "- " : r.t === "add" ? "+ " : "  "}${truncateMiddle(r.s, Math.max(20, wrapW - 8))}`}
+                        </Text>
+                    )}
+                </Box>
+            )) : null}
+            {diffHidden > 0 ? (
+                <Box flexDirection="row" flexShrink={0}>
+                    <Text color={THEME.grayDim}>{"     "}</Text>
+                    <Text color={THEME.grayDim}>{`  …（另有 ${diffHidden} 行改动未显示）`}</Text>
                 </Box>
             ) : null}
         </Box>

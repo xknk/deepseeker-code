@@ -21,6 +21,7 @@
   --link: var(--vscode-textLink-foreground, #4ea1ff);
   --error: var(--vscode-errorForeground, #f48771);
   --warn: var(--vscode-editorWarning-foreground, #cca700);
+  --diff-add: var(--vscode-charts-green, #3fb950);
 
   --radius: 6px;
   --font-mono: var(--vscode-editor-font-family, Consolas, "Cascadia Code", monospace);
@@ -535,6 +536,98 @@ body {
 
 .row-tool .tool-detail pre.dim {
   color: var(--fg-dim);
+}
+
+/* ———————— 文件修改类工具的左右对比 diff（GitHub 式：左=修改前，右=修改后） ———————— */
+.tool-diff {
+  margin: 4px 2px 0 18px; /* 与 ⎿ 结果行对齐 */
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tool-diff .diff-hunk-label {
+  padding: 2px 8px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-deep);
+}
+
+/* 行：两等分栅格，左格右边线作分隔；−/+ 槽位标记随文本走 */
+.tool-diff .drow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.tool-diff .drow + .drow,
+.tool-diff .diff-hunk-label + .drow {
+  border-top: 1px solid color-mix(in srgb, var(--border-soft) 45%, transparent);
+}
+
+.tool-diff .dl,
+.tool-diff .dr {
+  padding: 0 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-width: 0;
+}
+
+.tool-diff .dl {
+  border-right: 1px solid var(--border-soft);
+}
+
+/* 改动着色：删=红（左）、增=绿（右）、配对行两侧各染色；前景 + 极淡底色（克制的 diff 语义） */
+.tool-diff .drow.del .dl,
+.tool-diff .drow.mod .dl {
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+
+.tool-diff .drow.add .dr,
+.tool-diff .drow.mod .dr {
+  color: var(--diff-add);
+  background: color-mix(in srgb, var(--diff-add) 8%, transparent);
+}
+
+.tool-diff .drow.ctx .dl,
+.tool-diff .drow.ctx .dr {
+  color: var(--fg-dim);
+}
+
+.tool-diff .drow.ellip .dr {
+  color: var(--fg-faint);
+}
+
+/* 「打开左右对比」按钮：host 有修改前快照时出现，点开原生 vscode.diff */
+.diff-open-btn {
+  margin: 4px 2px 0 18px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.diff-open-btn:hover {
+  color: var(--fg);
+  border-color: var(--focus);
+  background: var(--hover);
+}
+
+/* 审批条内的 diff：容器已有 modal 边框，去掉内层描边只留栅格 */
+.modal .approval-diff {
+  color: var(--fg);
+  font-size: 11.5px;
+  margin: 0 0 4px;
+}
+
+.modal .tool-diff {
+  margin: 4px 0;
 }
 
 /* info / system */

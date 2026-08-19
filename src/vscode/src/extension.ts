@@ -20,6 +20,12 @@ let engineDispose: (() => void) | null = null;
 /** 主编辑区面板（单例：已存在则 reveal 聚焦）。 */
 let panel: vscode.WebviewPanel | null = null;
 
+// —— 「打开左右对比」：修改前快照的虚拟文档（vscode.diff 左侧） ——
+//  URI 形如 deepseeker-diff:/<safeKey>/<文件名>；safeKey 为本类自生成 UUID（URL 安全，
+//  不从 URI 反解 toolCallId，规避 percent-decode 语义分歧）。内容 = host 快照的修改前文本。
+const DIFF_SCHEME = "deepseeker-diff";
+const diffDocs = new Map<string, string>();
+
 /** 初始化错误（如缺 API Key）；随 state 快照发给 webview 显示提示横幅。 */
 let initError: string | null = null;
 
@@ -354,6 +360,35 @@ function handleMessage(msg: Record<string, unknown>): void {
     case "uploadImage":
       void handleUploadImage(msg);
       break;
+    case "openDiff": {
+      // ★ 聊天面板「打开左右对比」：host 快照的修改前内容 vs 盘上现状 → 原生 vscode.diff 编辑器。
+      //   preview tab + preserveFocus：不抢聊天面板焦点；无快照（回放/重载）友好提示回退内嵌对比。
+      void (async () => {
+        const snap = h.getDiffSnapshot(String(msg.toolCallId ?? ""));
+        if (!snap) {
+          void vscode.window.showInformationMessage(
+            "DeepSeeker-Code：该修改的「修改前」快照不可用（历史会话回放 / 窗口重载后失效），请查看聊天内的对比视图。",
+          );
+          return;
+        }
+        const safeKey = randomUUID();
+        diffDocs.set(safeKey, snap.old);
+        if (diffDocs.size > 100) {
+          const oldest = diffDocs.keys().next().value;
+          if (oldest !== undefined) diffDocs.delete(oldest);
+        }
+        const name = path.basename(snap.path);
+        const oldUri = vscode.Uri.parse(`${DIFF_SCHEME}:/${safeKey}/${encodeURIComponent(name)}`);
+        await vscode.commands.executeCommand(
+          "vscode.diff",
+          oldUri,
+          vscode.Uri.file(snap.path),
+          `${name} · 修改前 → 修改后`,
+          { preview: true, preserveFocus: true },
+        );
+      })();
+      break;
+    }
     default:
       break;
   }
@@ -435,6 +470,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   host = new ChatHost(callbacks);
   const localeCfg = cfg.get<string>("locale");
   if (localeCfg === "en" || localeCfg === "zh") host?.setLocale(localeCfg);
+
+  // ★ 「打开左右对比」虚拟文档供给：deepseeker-diff:/<safeKey>/<文件名> → 修改前快照内容
+  //  （文件名带真实扩展名，左侧虚拟文档的语言高亮与右侧一致）。
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(DIFF_SCHEME, {
+      provideTextDocumentContent: (uri) => diffDocs.get(uri.path.split("/").filter(Boolean)[0] ?? "") ?? "",
+    }),
+  );
 
   // —— 6. 命令（主编辑器区 Tab：openChat 创建/聚焦面板） ——
   //  ★ 无切换·全可见：openChat/newSession/submit 不再切根——主根 activate 时定并持久化，运行期稳定；

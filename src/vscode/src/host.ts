@@ -19,6 +19,8 @@ import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
+import * as fs from "fs";
+import * as path from "path";
 
 /** UI 回调（由 panel 实现：转发到 webview）。 */
 export interface ChatHostCallbacks {
@@ -136,6 +138,13 @@ export class ChatHost {
   private lastQuestionReq: QuestionRequest | null = null;
   private lastPlanText: string | null = null;
 
+  // —— 文件修改快照（「打开左右对比」用）——
+  // edit_file/create_file/write_file 开跑前的盘上旧内容（toolCallId → {path, old}）。
+  // ★ 不依赖 git：修改前内容 = 工具执行前本类快照；快照同步读（readFileSync）保证先于工具写盘完成。
+  //   限当前工作区内、单文件 ≤8MB、最多留 50 条（长会话防无限增长）。仅存活于本 host 实例，
+  //   历史会话回放/窗口重载后无快照——webview 按标记隐藏按钮，聊天内嵌 diff 仍可用（走 args）。
+  private diffSnapshots = new Map<string, { path: string; old: string }>();
+
   constructor(private callbacks: ChatHostCallbacks) {
     // ★ 重载恢复：从 workspaceState 取回上次活动会话 id，避免重载后新建碎片 session；
     //   会话回放改由 replayCurrentSession 在 webview ready 时统一驱动（sessionId 非空即重放）。
@@ -157,6 +166,13 @@ export class ChatHost {
    *  暂存的挂起交互供 collectPendingUI 在 panel 重建后重广播，杜绝关 tab 后审批死锁。 */
   private sink = (evt: Record<string, unknown>): void => {
     const type = evt?.type as string;
+    // ★ 文件修改快照：必须在工具写盘之前读（tool.start 先于 execute 下发）。
+    //   同步读保证此刻完成——异步 readFile 与工具自身的读写存在竞态，读到的可能是改后内容。
+    //   ready 事件压后到 tool.start 转发之后再发：webview 需先登记 toolCallId→行，才能亮出按钮。
+    let diffReadyEvt: Record<string, unknown> | null = null;
+    if (type === "tool.start") {
+      diffReadyEvt = this.captureDiffSnapshot(evt);
+    }
     if (type === "plan.proposed") {
       this.proposedPlan = (evt.plan as string) ?? "";
       this.lastPlanText = this.proposedPlan;
@@ -175,6 +191,7 @@ export class ChatHost {
       return;
     }
     this.callbacks.sink(evt);
+    if (diffReadyEvt) this.callbacks.sink(diffReadyEvt);
   };
 
   private takeProposedPlan(): string | null {
@@ -187,6 +204,43 @@ export class ChatHost {
     const r = this.enterPlanReason;
     this.enterPlanReason = null;
     return r;
+  }
+
+  /** tool.start 拦截：文件修改类工具开跑前同步快照盘上旧内容，返回待发的 fileDiff.ready 事件
+   *  （由 sink 在 tool.start 转发后发出）。快照失败（越界路径/超限）返回 null 静默跳过；
+   *  新建文件 ENOENT → old=""（对比呈现为全新增），仍值得快照。 */
+  private captureDiffSnapshot(evt: Record<string, unknown>): Record<string, unknown> | null {
+    const toolName = String(evt.toolName ?? "");
+    if (toolName !== "edit_file" && toolName !== "create_file" && toolName !== "write_file") return null;
+    const toolCallId = String(evt.toolCallId ?? "");
+    const args = evt.args as { path?: unknown } | undefined;
+    const p = typeof args?.path === "string" ? args.path : "";
+    if (!toolCallId || !p) return null;
+    const abs = path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+    // 快照仅用于 UI 对比：限制在当前工作区内（process.cwd()=主根，extension.ts activate 时 chdir），
+    // 逃逸路径不快照，避免借对比按钮读工作区外文件。
+    const rel = path.relative(process.cwd(), abs);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+    try {
+      // 超大文件跳过（防同步读卡住扩展宿主）
+      if (fs.statSync(abs).size > 8 * 1024 * 1024) return null;
+    } catch {
+      /* 不存在 = 新建，走 old="" */
+    }
+    let old = "";
+    try { old = fs.readFileSync(abs, "utf-8"); } catch { old = ""; }
+    // 上限 50 条：超出丢最旧（Map 保插入序）
+    if (this.diffSnapshots.size >= 50) {
+      const oldest = this.diffSnapshots.keys().next().value;
+      if (oldest != null) this.diffSnapshots.delete(oldest);
+    }
+    this.diffSnapshots.set(toolCallId, { path: abs, old });
+    return { type: "fileDiff.ready", toolCallId };
+  }
+
+  /** 取某次文件修改的「修改前」快照（extension 打开原生 vscode.diff 用）；无快照返回 null。 */
+  getDiffSnapshot(toolCallId: string): { path: string; old: string } | null {
+    return this.diffSnapshots.get(toolCallId) ?? null;
   }
 
   /** 单轮 runAgent（经 handleUnifiedChat）。planMode=true=只读调研；autoApprove=true=本轮免审批。 */
