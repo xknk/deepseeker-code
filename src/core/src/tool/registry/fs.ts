@@ -164,7 +164,7 @@ const stripEdgeBlankLines = (s: string): string => {
  */
 const matchLineBlockWith = (
     content: string, oldBlock: string, newBlock: string, replaceAll: boolean,
-    norm: (l: string) => string,
+    norm: (l: string) => string, anchorAlign: boolean,
 ): { ok: true; content: string; count: number } | { ok: false; reason: "none" | "conflict"; count: number } => {
     const contentLines = content.split("\n");
     const oldLines = oldBlock.split("\n");
@@ -182,16 +182,23 @@ const matchLineBlockWith = (
     if (hits.length === 0) return { ok: false, reason: "none", count: 0 };
     if (!replaceAll && hits.length > 1) return { ok: false, reason: "conflict", count: hits.length };
     const out = [...contentLines];
-    // 倒序替换避免索引漂移；每个命中块按其【在文件里的真实首非空行缩进】对齐 new_str（修模型丢基线→顶格）。
-    //   逐行容错（尤其 trim 归一）下，模型给的 old_str/new_str 常顶格：精确子串口径以 old_str 为基线，
-    //   但这里 old_str 可能本就顶格不能当基线 → 必须取【文件命中行】的真实缩进，否则替换进去的代码统一靠左。
+    // 倒序替换避免索引漂移。缩进对齐两档：
+    //   - 行尾空白归一（anchorAlign=false）：模型 old_str 前导缩进与文件逐字一致（否则到不了这档），
+    //     其相对缩进可信 → 沿用 reindentToBase：按【文件命中块首非空行真实缩进】对齐基线、保留相对层级
+    //     （修模型丢基线→顶格）。
+    //   - 全空白归一（anchorAlign=true）：模型 old_str 的缩进已被证明与文件不符（前几档口径都没命中），
+    //     new_str 的相对缩进同样不可信 → 逐行锚定文件真实缩进（alignIndentsByAnchor），零锚点才回退基线对齐。
     for (let k = hits.length - 1; k >= 0; k--) {
         const start = hits[k];
         let baseIndent = "";
         for (let j = start; j < start + oldLines.length; j++) {
             if (contentLines[j].trim() !== "") { baseIndent = contentLines[j].match(/^[ \t]*/)?.[0] ?? ""; break; }
         }
-        const aligned = baseIndent ? reindentToBase(newBlock, baseIndent) : newBlock;
+        let aligned = baseIndent ? reindentToBase(newBlock, baseIndent) : newBlock;
+        if (anchorAlign) {
+            const anchored = alignIndentsByAnchor(newBlock, oldLines, contentLines, start);
+            if (anchored !== null) aligned = anchored;
+        }
         out.splice(start, oldLines.length, ...aligned.split("\n"));
     }
     return { ok: true, content: out.join("\n"), count: hits.length };
@@ -247,6 +254,45 @@ const reindentToBase = (newStr: string, baseIndent: string): string => {
     }).join("\n");
 };
 
+/**
+ * 逐行锚定缩进映射（全空白归一路径专用）：old_str 已按 trim 口径匹配到文件块（行号一一对应），
+ * new_str 各行按「去前导空白的行内容」在 old_str 中顺序找锚（游标只进不退，防重复行错位），
+ * 锚中即采用文件对应行的【真实缩进】；插入行（old_str 中不存在的行）沿用上一锚点缩进；空行原样。
+ * 一个锚都没有（new_str 与 old_str 无公共非空行，纯整块重写）→ 返回 null，调用方回退 reindentToBase。
+ *
+ * 为什么全空白归一路径不用 reindentToBase：能走到这档说明模型 old_str 的前导缩进已与文件不符
+ * （精确子串/行尾空白两档都未命中），此时 new_str 的【相对】缩进同样不可信——reindentToBase
+ * 只对齐基线、原样保留模型的相对错位（如字段行整体多一层 Tab），写入后与上下文错位、需多轮修复。
+ * 文件才是缩进的 ground truth，逐行以文件为准。
+ */
+const alignIndentsByAnchor = (
+    newBlock: string, oldLines: string[], contentLines: string[], start: number,
+): string | null => {
+    const stripLead = (l: string): string => l.replace(/^[ \t]+/, "");
+    const out: string[] = [];
+    let cursor = 0;                     // old_str 顺序游标（重复行防错位）
+    let lastIndent: string | null = null;
+    let anchors = 0;
+    for (const line of newBlock.split("\n")) {
+        if (line.trim() === "") { out.push(line); continue; }   // 空行原样
+        const bare = stripLead(line);
+        let idx = -1;
+        for (let i = cursor; i < oldLines.length; i++) {
+            if (oldLines[i].trim() !== "" && stripLead(oldLines[i]) === bare) { idx = i; break; }
+        }
+        if (idx === -1) {
+            // 插入行：沿用上一锚点缩进；此前无锚则原样保留
+            out.push(lastIndent === null ? line : lastIndent + bare);
+            continue;
+        }
+        cursor = idx + 1;
+        lastIndent = contentLines[start + idx].match(/^[ \t]*/)?.[0] ?? "";
+        anchors++;
+        out.push(lastIndent + bare);
+    }
+    return anchors > 0 ? out.join("\n") : null;
+};
+
 /** edit_file 入参：单条（old_str/new_str）与批量（edits 数组）两种形态并存，edits 优先。 */
 type EditFileArgs = {
     path: string;
@@ -261,8 +307,9 @@ type EditFileArgs = {
  * 批量模式（edits 数组）的循环体——全部条目成功后由调用方一次性写盘，保证整体原子；
  * 单条老参数（old_str/new_str）等价于长度 1 的批量。多级容错匹配口径与历史行为完全一致：
  * ①精确子串 ②剥首尾空行 ③剥 read_file 行号前缀 ④逐行容错（行尾空白→全空白）⑤逐行诊断。
+ * @internal 导出仅供单测（tests/edit-file.test.ts）直驱多级容错口径，不经落盘 execute。
  */
-const applyOneEditToContent = (
+export const applyOneEditToContent = (
     normalizedContent: string, oldStr: string, newStr: string, replaceAll: boolean,
 ): { ok: true; content: string; summary: string } | { ok: false; error: string } => {
     const normalizedNew = newStr.replace(/\r\n/g, "\n");
@@ -288,12 +335,14 @@ const applyOneEditToContent = (
     //    行对齐替换不污染文件其余行；冲突检测不放松（多处命中且非 replace_all → 报冲突，防误改）。
     if (normalizedOld == null) {
         const base = lnStripped !== normalizedOldRaw ? lnStripped : normalizedOldRaw;
-        const norms: Array<{ norm: (l: string) => string; tag: string }> = [
-            { norm: (l: string): string => l.replace(/[ \t]+$/, ""), tag: "逐行尾空白容错" },
-            { norm: (l: string): string => l.trim(), tag: "逐行全空白容错（前导 Tab/空格）" },
+        const norms: Array<{ norm: (l: string) => string; tag: string; anchor: boolean }> = [
+            // 行尾空白归一：old_str 前导缩进与文件一致（可信）→ 只对齐基线（anchor=false）
+            { norm: (l: string): string => l.replace(/[ \t]+$/, ""), tag: "逐行尾空白容错", anchor: false },
+            // 全空白归一：模型前导缩进已证明不符（不可信）→ 逐行锚定文件真实缩进（anchor=true）
+            { norm: (l: string): string => l.trim(), tag: "逐行全空白容错（前导 Tab/空格）", anchor: true },
         ];
-        for (const { norm, tag } of norms) {
-            const lm = matchLineBlockWith(normalizedContent, base, normalizedNew, replaceAll, norm);
+        for (const { norm, tag, anchor } of norms) {
+            const lm = matchLineBlockWith(normalizedContent, base, normalizedNew, replaceAll, norm, anchor);
             if (lm.ok) {
                 return {
                     ok: true,

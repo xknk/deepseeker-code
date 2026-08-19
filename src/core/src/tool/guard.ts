@@ -280,9 +280,18 @@ const SENSITIVE_ENV_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL|
 /** 复制 env 并剔除敏感凭证；默认基于 process.env。供 run_command / run_in_background 共用。 */
 export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
     const next: NodeJS.ProcessEnv = {};
+    // GIT_CONFIG_COUNT/KEY_n/VALUE_n 是 git 的「环境变量注入配置」一族，git 要求成套（COUNT≥1 则必须存在
+    // 每个 KEY_n/VALUE_n）。KEY_n 名字含 "KEY" 会被敏感模式剔除而 COUNT 残留时，git 会直接报
+    // "missing config key GIT_CONFIG_KEY_0"（宿主常注入 safe.bareRepository 等即踩中）→ 任一成员命中
+    // 剔除规则时整族（COUNT+全部 KEY_n/VALUE_n）同步剔除，让 git 回退读磁盘 gitconfig。
+    const GIT_CONFIG_MEMBER = /^GIT_CONFIG_(KEY|VALUE)_\d+$/;
+    const gitConfigFamilyHit = Object.keys(env).some(
+        k => GIT_CONFIG_MEMBER.test(k) && (COMMAND_ENV_DENYLIST.includes(k) || SENSITIVE_ENV_PATTERN.test(k)),
+    );
     for (const [k, v] of Object.entries(env)) {
         if (COMMAND_ENV_DENYLIST.includes(k)) continue;     // 显式 denylist
         if (SENSITIVE_ENV_PATTERN.test(k)) continue;        // 敏感模式匹配（第三方凭证）
+        if (gitConfigFamilyHit && (k === "GIT_CONFIG_COUNT" || GIT_CONFIG_MEMBER.test(k))) continue;
         next[k] = v;
     }
     return next;
