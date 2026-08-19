@@ -5,9 +5,10 @@
  *  ★ 约束：禁止在模块加载期快照 S.x（如 const x = S.placeholder）——会脱离响应式；必须在 render/调用期读取。
  */
 import type { Locale } from "@/common/index.ts";
+import { readLocalVersion } from "./updateCheck.ts";
 
-/** 版本号（与 package.json 对齐；展示用，避免再读文件）。 */
-export const VERSION = "v1.0.0";
+/** 版本号（运行时读 package.json：dev 与 bundle 布局均准确，见 updateCheck.readLocalVersion；手写常量会漂移成假版本）。 */
+export const VERSION = `v${readLocalVersion()}`;
 
 /** 文案字典类型（zh/en 同型约束，缺 key 编译期报错，杜绝两套漂移）。 */
 interface StringDict {

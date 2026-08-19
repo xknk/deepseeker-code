@@ -17,12 +17,13 @@ import path from "path";
 import { emitKeypressEvents } from "node:readline";
 import { S, setLocale } from "./strings.ts";
 import { readLocale, writeLocale } from "./prefs.ts";
+import { readLocalVersion } from "./updateCheck.ts";
 import { isTrustedDir, trustDir } from "@/trust/index.ts";
 import type { Locale } from "@/common/index.ts";
 
-/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c、--trust。 */
-const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean } => {
-    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean } = {};
+/** 极简 argv 解析（不引第三方）：--resume/-r <id>、--plan/-p、--continue/-c、--trust、--version/-v。 */
+const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean; version?: boolean } => {
+    const out: { resume?: string; plan?: boolean; auto?: boolean; continue?: boolean; trust?: boolean; noUpdateCheck?: boolean; version?: boolean } = {};
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--resume" || a === "-r") out.resume = argv[++i];
@@ -31,6 +32,7 @@ const parseArgs = (argv: string[]): { resume?: string; plan?: boolean; auto?: bo
         else if (a === "--continue" || a === "-c") out.continue = true;
         else if (a === "--trust") out.trust = true; // 非 TTY 显式信任（CI/脚本启用项目级配置）
         else if (a === "--no-update-check") out.noUpdateCheck = true; // 关闭启动期更新检查
+        else if (a === "--version" || a === "-v") out.version = true; // 打印版本即退（装完验证用）
     }
     return out;
 };
@@ -109,6 +111,13 @@ const main = async (): Promise<void> => {
     console.warn = silence;
 
     const args = parseArgs(process.argv.slice(2));
+
+    // ★ --version：装完即验（npm i -g deepseeker-code && deepseeker-code --version 核对）。
+    //    先于密钥校验/语言询问/信任闸门——无 key、非 TTY、任意目录都要能打印。
+    if (args.version) {
+        process.stdout.write(`deepseeker-code v${readLocalVersion()}\n`);
+        process.exit(0);
+    }
 
     // ★ 模型密钥前置校验（核心 OpenAI client 经 DEEP_SEEK_API_KEY 配置）。
     //    必须在动态 import 核心/Agent 之前——否则 createModel 加载期即抛错。
