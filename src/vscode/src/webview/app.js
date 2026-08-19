@@ -207,14 +207,15 @@ turnHeaderBySeq: new Map(),
     return out;
   }
 
-  /** 工具行 / 审批条共用的左右对比 HTML（两侧 −/+ 标记，改动静默无输出返回 ""）。 */
-  function buildDiffHtml(toolName, args) {
+  /** 工具行 / 审批条共用的左右对比 HTML（两侧 −/+ 标记，改动静默无输出返回 ""）。
+   *  big=true 为全屏放大模式：行数上限放开 + 上下文折叠保留更多行。 */
+  function buildDiffHtml(toolName, args, big = false) {
     const pairs = extractEditPairs(toolName, args);
     if (!pairs) return "";
-    const MAX_ROWS = 150;
+    const MAX_ROWS = big ? 3000 : 150;
     const parts = [];
     for (const p of pairs) {
-      const rows = alignDiffRows(collapseContext(lineDiff(p.old, p.neu), 2));
+      const rows = alignDiffRows(collapseContext(lineDiff(p.old, p.neu), big ? 6 : 2));
       if (!rows.some((r) => r.k === "del" || r.k === "add" || r.k === "mod")) continue;
       const lines = rows.slice(0, MAX_ROWS).map((r) => {
         if (r.k === "ellip") return `<div class="drow ellip"><span class="dl"></span><span class="dr">⋯ ${r.n} 行未变</span></div>`;
@@ -246,17 +247,74 @@ turnHeaderBySeq: new Map(),
   }
 
   /** 审批条 diff HTML：header 纯文本 + 各处左右对比。 */
-  function buildApprovalDiffHtml(detail, toolName) {
+  function buildApprovalDiffHtml(detail, toolName, big = false) {
     const parsed = parseApprovalDiff(detail, toolName);
     if (!parsed) return "";
     const out = [];
     for (const sec of parsed.sections) {
-      const html = buildDiffHtml("edit_file", { old_str: sec.old, new_str: sec.neu });
+      const html = buildDiffHtml("edit_file", { old_str: sec.old, new_str: sec.neu }, big);
       if (html) out.push(sec.label ? `<div class="diff-hunk-label">${escapeHtml(sec.label)}</div>${html}` : html);
     }
     if (!out.length) return "";
     return `<div class="modal-detail approval-diff">${escapeHtml(parsed.header)}</div>${out.join("")}`;
   }
+
+  // ———————— diff 全屏放大 overlay ————————
+  // 点击任意内嵌 .tool-diff → 占满面板的大号左右对比（行数放开 + 上下文多留），✕ / Esc / 点空白关闭。
+  // 数据源两类：工具行（rowMap 按 data-key 取 args 重算）、审批弹窗（renderApproval 存全局 source）。
+  let approvalDiffSource = null;
+
+  const closeDiffOverlay = () => { $(".diff-overlay")?.remove(); };
+
+  const openDiffOverlay = (title, bodyHtml) => {
+    closeDiffOverlay();
+    const ov = document.createElement("div");
+    ov.className = "diff-overlay";
+    ov.innerHTML =
+      `<div class="diff-overlay-panel">` +
+      `<div class="diff-overlay-bar">` +
+      `<span class="diff-overlay-title">${title}</span>` +
+      `<span class="diff-overlay-hint">点击空白处 / Esc 关闭</span>` +
+      `<button class="diff-overlay-close" title="关闭 (Esc)">✕</button>` +
+      `</div>` +
+      `<div class="diff-overlay-body">${bodyHtml}</div>` +
+      `</div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener("mousedown", (e) => { if (e.target === ov) closeDiffOverlay(); });
+    ov.querySelector(".diff-overlay-close")?.addEventListener("click", closeDiffOverlay);
+  };
+
+  // overlay 打开期间接管键盘：Esc 关闭；↑↓/Enter 一并吞掉——
+  // 否则会穿透到计划/审批条的键盘导航（overlay 里按 Enter ≠ 确认方案）。
+  document.addEventListener("keydown", (e) => {
+    if (!$(".diff-overlay")) return;
+    if (e.key === "Escape" || e.key === "Enter" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") closeDiffOverlay();
+    }
+  }, true);
+
+  // 委托：内嵌 diff 卡片整块可点（选中文本时视为复制，不触发）
+  document.addEventListener("click", (e) => {
+    const diffEl = e.target.closest(".tool-diff");
+    if (!diffEl || diffEl.closest(".diff-overlay")) return;
+    if (window.getSelection()?.toString()) return;
+    const rowWrap = diffEl.closest("[data-key]");
+    if (rowWrap) {
+      const row = state.rowMap.get(rowWrap.dataset.key);
+      if (row?.toolName && row.args) {
+        const body = buildDiffHtml(row.toolName, row.args, true);
+        const p = String(row.args.path || row.args.file_path || "");
+        if (body) openDiffOverlay(`${escapeHtml(row.toolName)}${p ? " · " + escapeHtml(p) : ""}`, body);
+        return;
+      }
+    }
+    if (approvalDiffSource) {
+      const body = buildApprovalDiffHtml(approvalDiffSource.detail, approvalDiffSource.toolName, true);
+      if (body) openDiffOverlay(`审批对比 · ${escapeHtml(approvalDiffSource.toolName)}`, body);
+    }
+  });
 
   // ———————— 消息流渲染 ————————
   const messagesEl = () => $("#messages");
@@ -310,6 +368,14 @@ turnHeaderBySeq: new Map(),
             row.collapsed = !row.collapsed;
             rebuildRow(row);
           });
+          // ★ 点击正文 → 全屏放大阅读（同 diff/计划正文）；流式输出中不绑，收尾 rebuildRow 后自然生效
+          if (!row.streaming) {
+            wrap.querySelector(".assistant-content")?.addEventListener("click", (e) => {
+              if (e.target.closest("a")) return;
+              if (window.getSelection()?.toString()) return;
+              openDiffOverlay(`● ${escapeHtml(truncate(row.text, 60))}`, `<div class="plan-overlay-content">${mdToHtml(row.text)}</div>`);
+            });
+          }
         } else {
           wrap.innerHTML = `<div class="assistant-body">${html}${row.streaming ? '<span class="cursor">▊</span>' : ""}</div>`;
         }
@@ -698,6 +764,13 @@ switch (evt.type) {
         if (key) updateRow(key, { diffReady: true });
         break;
       }
+      case "mode.change": {
+        // ★ host 内部翻转模式（拒绝方案→留在计划模式 / 接受→退出）：同步本地态与输入框模式标识
+        if (typeof evt.planMode === "boolean") state.planMode = evt.planMode;
+        if (typeof evt.autoMode === "boolean") state.autoMode = evt.autoMode;
+        syncToolbar();
+        break;
+      }
       case "approval_request": {
         closeStreaming();
         state.approvalSel = 0;
@@ -843,6 +916,7 @@ el.textContent = "⚠️ " + msg;
     const anchor = $("#approval-anchor");
     if (!state.pendingApproval) {
       anchor.innerHTML = "";
+      approvalDiffSource = null;
       return;
     }
     const p = state.pendingApproval;
@@ -857,6 +931,7 @@ el.textContent = "⚠️ " + msg;
     ).join("");
     // ★ edit_file：detail 含【减少】/【增加】结构 → 左右对比（红删绿增），其余工具维持纯文本
     const diffHtml = buildApprovalDiffHtml(p.detail, p.toolName);
+    approvalDiffSource = diffHtml ? { detail: p.detail, toolName: p.toolName } : null;
     anchor.innerHTML = `
       <div class="modal approval">
         <div class="modal-title">🔐 操作审批 · ${escapeHtml(p.toolName)}</div>
@@ -1033,11 +1108,12 @@ el.textContent = "⚠️ " + msg;
     const editing = state.planEditing;
     const collapsed = state.planCollapsed; // 折叠态（编辑态正文为空，折叠无视觉差异）
     const sel = state.planSel ?? 1;
+    // ★ 文案对齐 Claude Code：Ready to code? + 是/是/否三选项（编辑为额外能力保留）
     const opts = [
-      { d: "acceptAuto", cls: "ok", label: "⚡ 接受并自动执行" },
-      { d: "accept", cls: "warn", label: "接受并逐步审批" },
-      { d: editing ? "acceptEdited" : "edit", cls: "info", label: editing ? "✔️ 按编辑后方案执行" : "✏️ 编辑" },
-      { d: "reject", cls: "danger", label: "拒绝" },
+      { d: "acceptAuto", cls: "ok", label: "✅ 是，并自动接受编辑" },
+      { d: "accept", cls: "warn", label: "是，并手动审批编辑" },
+      { d: editing ? "acceptEdited" : "edit", cls: "info", label: editing ? "✔️ 按编辑后方案执行" : "✏️ 编辑方案" },
+      { d: "reject", cls: "danger", label: "↩ 否，继续规划" },
     ];
     const buttons = opts.map((o, i) =>
       `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
@@ -1046,7 +1122,7 @@ el.textContent = "⚠️ " + msg;
     anchor.innerHTML = `
       <div class="modal plan">
         <div class="modal-title plan-toggle" title="点击折叠/展开">
-          <span class="plan-caret">${collapsed ? "▶" : "▼"}</span>✅ 实现方案（计划模式）${collapsed ? `<span class="plan-collapsed-hint">（已折叠，点击展开）</span>` : ""}
+          <span class="plan-caret">${collapsed ? "▶" : "▼"}</span>📋 准备开始编码？${collapsed ? `<span class="plan-collapsed-hint">（已折叠，点击展开）</span>` : ""}
         </div>
         <div class="modal-detail plan-text" style="${hideText ? "display:none" : ""}">${editing ? "" : mdToHtml(plan)}</div>
         <textarea id="plan-edit" spellcheck="false" style="${editing ? "" : "display:none"}">${escapeHtml(plan)}</textarea>
@@ -1056,6 +1132,12 @@ el.textContent = "⚠️ " + msg;
     anchor.querySelector(".plan-toggle")?.addEventListener("click", () => {
       state.planCollapsed = !state.planCollapsed;
       renderPlan();
+    });
+    // ★ 点击正文 → 全屏放大阅读（复用 diff overlay）；链接走外链逻辑、选中文本视为复制，不触发
+    anchor.querySelector(".plan-text")?.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return;
+      if (window.getSelection()?.toString()) return;
+      openDiffOverlay("📋 实施方案", `<div class="plan-overlay-content">${mdToHtml(plan)}</div>`);
     });
     anchor.querySelectorAll(".plan-actions .btn").forEach((b) => {
       b.addEventListener("click", () => applyPlanDecision(b.dataset.d));
@@ -1547,6 +1629,8 @@ c.innerHTML = `
 </div>
 <div class="slash-menu" id="slash-menu" style="display:none"></div>
 <div class="composer-attachments" id="composer-attachments"></div>
+<span class="mode-badge plan">⏻ plan mode on（只读调研 → 方案审批 → 实现）</span>
+<span class="mode-badge auto">⏻ auto-accept edits on</span>
 </div>
 `;
 const input = $("#input");
@@ -1783,6 +1867,12 @@ label.textContent = m === "plan" ? "计划" : m === "auto" ? "自动" : "手动"
 const ic = btnMode.querySelector(".codicon");
 if (ic) ic.className = "codicon " + (m === "plan" ? "codicon-list-tree" : m === "auto" ? "codicon-sync" : "codicon-comment");
 btnMode.classList.toggle("on", m !== "manual");
+// 输入框模式标识：计划/自动 → 边框高亮 + 悬浮徽标（对齐 Claude Code 的模式提示）
+const shell = $("#composer .composer-shell");
+if (shell) {
+shell.classList.toggle("plan-on", m === "plan");
+shell.classList.toggle("auto-on", m === "auto");
+}
 modePopover.querySelectorAll(".mode-option").forEach((row) => {
 row.classList.toggle("on", row.dataset.mode === m);
 });

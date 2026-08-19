@@ -32,9 +32,14 @@ interface StringDict {
     planReject: string;
     planEditTitle: string;
     planEditHint: string;
-    planRejected: string;
+    /** 拒绝方案：留在计划模式继续迭代（对齐 Claude Code「No, keep planning」语义）。 */
+    planKeepPlanning: string;
     planEditEmpty: string;
     planAutoExecute: string;
+    /** 输入框模式徽标：计划模式（Claude Code 同款紫色边框 + "plan mode on"）。 */
+    inputBadgePlan: string;
+    /** 输入框模式徽标：自动接受编辑。 */
+    inputBadgeAuto: string;
     approvalTitle: string;
     approvalPrompt: string;
     approvalAllow: string;
@@ -130,17 +135,19 @@ const STRINGS: Record<Locale, StringDict> = {
         toolRunning: (name) => `⏺ ${name} 运行中…`,
         toolDone: (name, ok) => `⏺ ${name} · ${ok ? "成功" : "失败"}`,
         toolDenied: (name) => `🚫 ${name} 已被拒绝`,
-        planTitle: "✅ 实现方案（计划模式）",
-        planPrompt: "↑↓ 选择 · Enter 确认（修改项进入编辑，Enter 提交 / Esc 取消）。",
-        planAcceptAuto: "接受并自动执行（实现阶段免审批）",
-        planAcceptManual: "接受并手动执行（逐步审批每个工具）",
-        planEdit: "修改方案",
-        planReject: "拒绝，回到输入框",
+        planTitle: "准备开始编码？",
+        planPrompt: "↑↓ 选择 · Enter 确认（编辑项进入编辑器，Enter 提交 / Esc 取消）。",
+        planAcceptAuto: "是，并自动接受编辑（实现阶段免审批）",
+        planAcceptManual: "是，并手动审批编辑（逐步审批每个工具）",
+        planEdit: "编辑方案",
+        planReject: "否，继续规划",
         planEditTitle: "✏️ 编辑方案",
         planEditHint: "Enter 按此方案执行 · Esc 取消回到选项",
-        planRejected: "✋ 已拒绝方案，本轮未执行。",
+        planKeepPlanning: "✋ 已留在计划模式：继续输入补充要求，模型将修订方案后再次提交（/plan 可退出）。",
         planEditEmpty: "方案不能为空",
         planAutoExecute: "⚡ 已进入自动执行：实现阶段工具将免审批直接运行。",
+        inputBadgePlan: "plan mode on（只读调研 → 方案审批 → 实现）",
+        inputBadgeAuto: "auto-accept edits on",
         approvalTitle: "🔐 操作审批",
         approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
         approvalAllow: "允许本次",
@@ -265,17 +272,19 @@ const STRINGS: Record<Locale, StringDict> = {
         toolRunning: (name) => `⏺ ${name} running…`,
         toolDone: (name, ok) => `⏺ ${name} · ${ok ? "ok" : "failed"}`,
         toolDenied: (name) => `🚫 ${name} denied`,
-        planTitle: "✅ Implementation plan (plan mode)",
+        planTitle: "Ready to code?",
         planPrompt: "↑↓ then Enter (edit opens the editor: Enter to save / Esc to cancel).",
-        planAcceptAuto: "Accept & auto-run (skip impl approvals)",
-        planAcceptManual: "Accept & step-by-step (approve each tool)",
+        planAcceptAuto: "Yes, and auto-accept edits (skip impl approvals)",
+        planAcceptManual: "Yes, and manually approve edits (step-by-step)",
         planEdit: "Edit plan",
-        planReject: "Reject, back to prompt",
+        planReject: "No, keep planning",
         planEditTitle: "✏️ Edit plan",
         planEditHint: "Enter to implement with this plan · Esc back to options",
-        planRejected: "✋ Plan rejected, nothing executed this turn.",
+        planKeepPlanning: "✋ Staying in plan mode: add feedback and the plan will be revised and resubmitted (/plan to exit).",
         planEditEmpty: "Plan cannot be empty",
         planAutoExecute: "⚡ Auto-run: implementation tools will execute without approval.",
+        inputBadgePlan: "plan mode on (read-only research → approve → implement)",
+        inputBadgeAuto: "auto-accept edits on",
         approvalTitle: "🔐 Action approval",
         approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
         approvalAllow: "Allow once",

@@ -286,8 +286,10 @@ export class ChatHost {
   }
 
   /** 取已捕获方案 → 弹方案条 → accept 则带最终方案重跑实现轮（planMode=false）。
-   *  runPlanStage（计划模式调研后）与普通轮模型直接 exit_plan_mode（系统提示词鼓励）共用本尾段。 */
-  private async presentPlanAndImplement(plan: string): Promise<void> {
+   *  runPlanStage（计划模式调研后）与普通轮模型直接 exit_plan_mode（系统提示词鼓励）共用本尾段。
+   *  ★ 拒绝 = 继续规划（对齐 Claude Code「No, keep planning」）：留在计划模式，下轮输入即修订反馈。
+   *  返回 true=已接受执行 / false=拒绝（或未产出方案）。 */
+  private async presentPlanAndImplement(plan: string): Promise<boolean> {
     const res = await new Promise<PlanResolution>((resolve) => {
       this.pendingPlan = { resolve };
       this.callbacks.onPlan(plan);
@@ -297,17 +299,21 @@ export class ChatHost {
       const finalPlan = res.plan ?? plan;
       if (res.autoExecute) this.sink({ type: "info", text: "⚡ 已进入自动执行：实现阶段工具将免审批直接运行。" });
       await this.runOnce(`（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false, res.autoExecute);
-    } else {
-      this.sink({ type: "info", text: "👋 已拒绝方案，本轮未执行。" });
+      return true;
     }
+    this.planMode = true; // 留在计划模式（模型直提方案路径借此处补开）
+    this.sink({ type: "mode.change", planMode: true });
+    this.sink({ type: "info", text: "✋ 已留在计划模式：继续输入补充要求，模型将修订方案后再次提交（/plan 或模式面板可退出）。" });
+    return false;
   }
 
-  /** 计划模式一轮：只读调研 → 取方案 → 弹方案条 → accept 则带最终方案重跑实现轮。 */
-  private async runPlanStage(researchPrompt: string): Promise<void> {
+  /** 计划模式一轮：只读调研 → 取方案 → 弹方案条 → accept 则带最终方案重跑实现轮。
+   *  返回 true=已接受执行 / false=拒绝（留在计划模式）或未产出方案。 */
+  private async runPlanStage(researchPrompt: string): Promise<boolean> {
     await this.runOnce(researchPrompt, true);
     const plan = this.takeProposedPlan();
-    if (plan == null) return;
-    await this.presentPlanAndImplement(plan);
+    if (plan == null) return false;
+    return await this.presentPlanAndImplement(plan);
   }
 
   /** 提交一轮对话（UI 输入框 Enter 触发）。 */
@@ -332,7 +338,12 @@ export class ChatHost {
     }
     this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}` });
     if (this.planMode) {
-      await this.runPlanStage(text);
+      const kept = await this.runPlanStage(text);
+      // ★ 对齐 Claude Code：接受方案（已执行实现）→ 退出计划模式；拒绝/未产出 → 留在计划模式。
+      if (kept) {
+        this.planMode = false;
+        this.sink({ type: "mode.change", planMode: false });
+      }
     } else {
       await this.runOnce(text, false);
       // ★ 模型在普通轮可能：(a) 调 exit_plan_mode 直接提交方案（系统提示词鼓励，自行只读调研后）；
@@ -349,8 +360,12 @@ export class ChatHost {
             text: `📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`,
           });
           this.planMode = true;
-          await this.runPlanStage(ENTER_PLAN_RESEARCH_PROMPT);
-          this.planMode = false;
+          const kept = await this.runPlanStage(ENTER_PLAN_RESEARCH_PROMPT);
+          // 仅「已接受执行」恢复原模式；拒绝（继续规划）保持计划模式开启（对齐 Claude Code）。
+          if (kept) {
+            this.planMode = false;
+            this.sink({ type: "mode.change", planMode: false });
+          }
         }
       }
     }

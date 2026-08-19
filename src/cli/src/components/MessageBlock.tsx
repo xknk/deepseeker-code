@@ -39,8 +39,11 @@ const listPrefix = (line: string): { bullet: string; rest: string } | null => {
     return { bullet: `${m[2]} `, rest: m[3] };
 };
 
-/** assistant 单行：列表项 → 固定列前缀 + 内容；普通行 → 直接 RichText。 */
+/** assistant 单行：Markdown 标题 → 加粗白；列表项 → 固定列前缀 + 内容；普通行 → 直接 RichText。 */
 const AssistantLine = ({ line }: { line: string }): React.ReactElement => {
+    // 标题行（# ~ ######）：剥掉 # 前缀，加粗白整行（计划方案的 ## 分节标题即刻可读）
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) return <Text bold color="#ffffff">{heading[1]}</Text>;
     const list = listPrefix(line);
     if (list) {
         return (

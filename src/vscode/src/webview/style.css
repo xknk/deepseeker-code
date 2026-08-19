@@ -619,6 +619,93 @@ body {
   background: var(--hover);
 }
 
+/* ★ 内嵌 diff 可点击放大（消息流 + 审批弹窗内的都算；overlay 自身内部的除外） */
+.tool-diff {
+  cursor: zoom-in;
+}
+.tool-diff:hover {
+  border-color: color-mix(in srgb, var(--focus) 55%, transparent);
+}
+
+/* ★ diff 全屏放大 overlay：占满 webview 视口，✕ / Esc / 点空白关闭 */
+.diff-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 16px;
+}
+
+.diff-overlay-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1500px;
+  min-height: 0;
+  background: var(--vscode-editor-background, var(--bg-deep));
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.diff-overlay-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-deep);
+  flex-shrink: 0;
+}
+.diff-overlay-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-overlay-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.diff-overlay-close {
+  flex-shrink: 0;
+  padding: 1px 9px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.diff-overlay-close:hover {
+  color: var(--fg);
+  border-color: var(--focus);
+  background: var(--hover);
+}
+
+.diff-overlay-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 0;
+}
+/* overlay 内的 diff：全宽、字号放大一档、不再显示放大光标 */
+.diff-overlay-body .tool-diff {
+  margin: 0 14px 10px;
+  font-size: 12.5px;
+  cursor: default;
+}
+.diff-overlay-body .tool-diff:hover {
+  border-color: var(--border-soft);
+}
+
 /* 审批条内的 diff：容器已有 modal 边框，去掉内层描边只留栅格 */
 .modal .approval-diff {
   color: var(--fg);
@@ -760,6 +847,46 @@ body {
 
 .plan-text {
   white-space: normal;
+  cursor: zoom-in;
+}
+
+.plan-text:hover {
+  background: color-mix(in srgb, var(--focus) 4%, transparent);
+}
+
+/* overlay 内的计划全文：舒适阅读排版（mdToHtml 的 pre/code/strong.md-h 此处无作用域样式，需自带） */
+.diff-overlay-body .plan-overlay-content {
+  padding: 2px 18px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  cursor: default;
+}
+.diff-overlay-body .plan-overlay-content .md-h {
+  display: block;
+  margin: 10px 0 4px;
+  font-size: 14px;
+}
+.diff-overlay-body .plan-overlay-content pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.diff-overlay-body .plan-overlay-content code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--vscode-textPreformat-foreground, var(--fg));
+}
+.diff-overlay-body .plan-overlay-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.diff-overlay-body .plan-overlay-content a {
+  color: var(--vscode-textLink-foreground, var(--focus));
 }
 
 /* 计划标题可点击折叠条（▼/▶ 切换正文显示） */
@@ -822,6 +949,14 @@ body {
   min-width: 0;
   word-break: break-word;
   color: var(--fg);
+  cursor: zoom-in;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+/* 长回复正文可点击放大（同 diff/计划正文）；链接/选区不触发由 JS 判断 */
+.row-assistant .assistant-content:hover {
+  background: color-mix(in srgb, var(--focus) 4%, transparent);
 }
 
 .assistant-caret {
@@ -1157,6 +1292,42 @@ body {
 .composer-shell:focus-within {
   border-color: var(--vscode-focusBorder);
   box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+}
+
+/* ★ 模式标识（对齐 Claude Code）：计划/自动模式下输入框高亮边框 + 悬浮徽标。
+   徽标骑在边框上（实底背景遮住边框线），故 position:relative 的 shell 已就位。 */
+.composer-shell.plan-on,
+.composer-shell.plan-on:focus-within {
+  border-color: var(--vscode-charts-purple, #c586c0);
+  box-shadow: 0 0 0 1px var(--vscode-charts-purple, #c586c0);
+}
+.composer-shell.auto-on,
+.composer-shell.auto-on:focus-within {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn);
+}
+.mode-badge {
+  display: none;
+  position: absolute;
+  top: -9px;
+  right: 14px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 17px;
+  background: var(--bg-deep);
+  border: 1px solid var(--vscode-input-border);
+  pointer-events: none;
+}
+.composer-shell.plan-on .mode-badge.plan {
+  display: inline-block;
+  color: var(--vscode-charts-purple, #c586c0);
+  border-color: var(--vscode-charts-purple, #c586c0);
+}
+.composer-shell.auto-on .mode-badge.auto {
+  display: inline-block;
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 /* 上：输入行（prompt + textarea），独占一整行 */

@@ -451,24 +451,30 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
     }, [askApproval, autoRequestApproval, flush, onTrace, pushEvent, pushInfo]);
 
-    /** 方案审批 + 实现：弹出方案审批模态，接受则按方案实现（autoExecute=实现阶段免审批）。 */
-    const approveAndImplement = useCallback(async (sid: string, plan: string) => {
+    /** 方案审批 + 实现：弹出方案审批模态，接受则按方案实现（autoExecute=实现阶段免审批）。
+     *  ★ 拒绝 = 继续规划（对齐 Claude Code「No, keep planning」）：留在计划模式，下轮输入即修订反馈，
+     *    模型带着完整会话上下文（含上一版方案）重提方案。返回 true=已接受执行 / false=拒绝（或未产出方案）。 */
+    const approveAndImplement = useCallback(async (sid: string, plan: string): Promise<boolean> => {
         const res = await setPlan(plan);
         if (res.action === 'accept') {
             // ★ 编辑后方案不在 transcript，必须把最终方案全文塞进实现轮 prompt，否则模型按原方案执行。
             const finalPlan = res.plan ?? plan;
             if (res.autoExecute) pushInfo(S.planAutoExecute);
             await runOnce(sid, `（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false, res.autoExecute);
-        } else {
-            pushInfo(S.planRejected);
+            return true;
         }
+        planModeRef.current = true; // 留在计划模式（主分支本就 true；普通轮直提方案路径借此处补开）
+        pushInfo(S.planKeepPlanning);
+        return false;
     }, [runOnce, setPlan, pushInfo]);
 
-    /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。 */
-    const runPlanStage = useCallback(async (sid: string, researchPrompt: string) => {
+    /** 计划模式一轮：只读调研 → 取方案 → 审批 → 接受则实现。researchPrompt 为发起新一轮的文本。
+     *  返回 true=已接受执行 / false=拒绝（留在计划模式）或未产出方案。 */
+    const runPlanStage = useCallback(async (sid: string, researchPrompt: string): Promise<boolean> => {
         await runOnce(sid, researchPrompt, true);
         const plan = takeProposedPlan();
-        if (plan != null) await approveAndImplement(sid, plan);
+        if (plan == null) return false;
+        return await approveAndImplement(sid, plan);
     }, [runOnce, takeProposedPlan, approveAndImplement]);
 
     /** ★ inbox steering：busy 期间排队补充输入（入 core per-session 队列，runAgent 回合边界 claim）。
@@ -501,7 +507,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             pushUser(text);
 
             if (planModeRef.current) {
-                await runPlanStage(sid, text);
+                const kept = await runPlanStage(sid, text);
+                // ★ 对齐 Claude Code：接受方案（已执行实现）→ 退出计划模式；拒绝/未产出 → 留在计划模式。
+                if (kept) planModeRef.current = false;
             } else {
                 await runOnce(sid, text, false);
                 // ★ 模型在普通轮可能：(a) 调 exit_plan_mode 直接提交方案（自行只读调研后）；(b) 调 enter_plan_mode
@@ -515,8 +523,10 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                     if (enterReason != null) {
                         pushInfo(`📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`);
                         planModeRef.current = true;
-                        await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
-                        planModeRef.current = false;
+                        const kept = await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
+                        // ★ 仅「已接受执行」恢复原模式；拒绝（继续规划）则保持计划模式开启，
+                        //   用户继续输入修订反馈即可（对齐 Claude Code 拒绝后留在计划模式的闭环）。
+                        if (kept) planModeRef.current = false;
                     }
                 }
             }

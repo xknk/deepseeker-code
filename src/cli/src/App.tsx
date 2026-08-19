@@ -542,16 +542,37 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 </Box>
 
                 <Box flexDirection="column" paddingX={1} marginTop={1} flexShrink={0}>
-                    <Text dimColor color={THEME.gray}>{dimRule(cols)}</Text>
-                    <MultilineInput
-                        value={input}
-                        cursor={cursor}
-                        onChange={(v, c) => { setInput(v); setCursor(c); }}
-                        onSubmit={() => { void onSubmit(); }}
-                        active={inputActive}
-                        suppressSubmit={slashVisible}
-                        placeholder={S.placeholder}
-                    />
+                    {(() => {
+                        // ★ 模式激活时输入框换彩边框 + 角标（对齐 Claude Code：plan mode 紫 / auto-accept 橙；
+                        //   未激活维持原分隔线样式。plan 优先于 auto——两者理论上互斥，双开时以 plan 呈现。）
+                        const planOn = state.getPlanMode();
+                        const autoOn = !planOn && state.getAutoMode();
+                        const inputEl = (
+                            <MultilineInput
+                                value={input}
+                                cursor={cursor}
+                                onChange={(v, c) => { setInput(v); setCursor(c); }}
+                                onSubmit={() => { void onSubmit(); }}
+                                active={inputActive}
+                                suppressSubmit={slashVisible}
+                                placeholder={S.placeholder}
+                            />
+                        );
+                        if (planOn || autoOn) {
+                            return (
+                                <Box flexDirection="column" borderStyle="round" borderColor={planOn ? THEME.thinking : THEME.warn} paddingX={1}>
+                                    <Text color={planOn ? THEME.thinking : THEME.warn}>{planOn ? S.inputBadgePlan : S.inputBadgeAuto}</Text>
+                                    {inputEl}
+                                </Box>
+                            );
+                        }
+                        return (
+                            <>
+                                <Text dimColor color={THEME.gray}>{dimRule(cols)}</Text>
+                                {inputEl}
+                            </>
+                        );
+                    })()}
                 </Box>
 
                 <Box paddingX={1} marginTop={1} flexShrink={0}>
