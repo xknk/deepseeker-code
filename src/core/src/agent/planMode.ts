@@ -16,7 +16,6 @@ import { CustomTool } from "@/tool/index.ts";
 
 /** 计划模式允许的工具：只读 / 研究类。排除所有写工具、命令执行、后台任务、spawn_agent、todo_write。 */
 export const PLAN_ALLOWED_TOOLS = new Set<string>([
-    "getTime",
     "read_file", "list_dir", "view_symbol_outline", "read_project_guide",
     "search_grep", "glob",
     "get_git_diff", "git_status", "git_log", "inspect_dependencies",

@@ -8,7 +8,7 @@
  */
 /**
  * @file tool/index.ts
- * @description 工具注册中心：聚合所有分类工具（system / agent / fs / search / command / glob）
+ * @description 工具注册中心：聚合所有分类工具（agent / fs / search / command / glob 等）
  *  到统一的 agentTools 注册表，供 runAgent 通过 toolSchemas 传入。
  *
  *  关键设计：先声明空数组 agentTools，再把「获取自身」的闭包 () => agentTools 传给
@@ -16,7 +16,6 @@
  *  从而避免循环依赖（定义时 agentTools 尚未填充）。
  */
 import { CustomTool } from "./type.ts";
-import { systemTools } from "./registry/system.ts";
 import { createAgentTools } from "./registry/agent.ts";
 import { createWorkflowTools } from "./registry/workflow.ts";
 // 后续扩展可以继续 import:
@@ -51,7 +50,6 @@ const workflowTools = createWorkflowTools(() => agentTools);
 
 // 3. 将所有分类工具 push 到最终的注册表数组中
 agentTools.push(
-    ...systemTools,
     ...agentSubTools,
     ...workflowTools,    // P0-3 并行/流水线编排（spawn_agent 的多派生强化版）
     ...fsTools,      // 以后加了文件读写直接解构进来

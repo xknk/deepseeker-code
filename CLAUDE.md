@@ -41,4 +41,4 @@ DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek �
   - Hooks：`src/core/src/hooks/`，6 类生命周期事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd），声明式配置 + 程序化注册。
   - Skills：`src/core/src/skills/`，目录发现（builtin/global/project）+ `load_skill` 按需加载；内置 skill 放 `skills/builtin/<name>/SKILL.md`。
   - MCP：`src/core/src/tool/mcp/`，动态发现外部工具。
-- **文档索引**：架构与计划见 `.ai-docs/`（对标分析 / 工具扩充 / API 契约 / 验证修复 / 下一步计划）+ `src/core/src/memory/`（持久记忆系统：loader/inject/registry）。
+- **文档索引**：架构与计划见 `.ai-docs/`（下一步计划 / 子代理委派指南）+ `src/core/src/memory/`（持久记忆系统：loader/inject/registry）。

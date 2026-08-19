@@ -84,7 +84,7 @@ deepseeker-code/                 # pnpm workspace（src/*）
 │   └── README.md                #   npm 展示页
 ├── src/vscode/                  # VS Code 插件（独立用 npm，打 vsix）
 │   └── README.md                #   商城展示页
-└── .ai-docs/                    # 架构对标 / API 契约 / 扩充计划等设计文档
+└── .ai-docs/                    # 引擎计划 / 子代理委派指南等设计文档
 ```
 
 - **core 不发布**：它是引擎源码，被 cli 和 vscode 的 esbuild 构建**内联**进各自产物（`dist/cli.mjs` / `dist/extension.js`），靠 tsconfig 路径别名 `@/* → core/src/*` 引用，不是 npm 依赖。
@@ -136,11 +136,8 @@ VS Code 插件：`cd src/vscode && npm install && npm run build`（或 `npm run 
 | [CLAUDE.md](./CLAUDE.md) | 项目指令：架构要点、运行调试、开发规则 |
 | [src/cli/README.md](./src/cli/README.md) | 终端 CLI 使用与配置（npm 发布档） |
 | [src/vscode/README.md](./src/vscode/README.md) | VS Code 插件使用与配置（商城发布档） |
-| [.ai-docs/发布指南.md](./.ai-docs/发布指南.md) | **VS Code 商城 / npm 上架发布操作手册（维护者）** |
-| [.ai-docs/API契约.md](./.ai-docs/API契约.md) | HTTP 服务 API 契约（前端对接说明书） |
-| [.ai-docs/工具扩充计划.md](./.ai-docs/工具扩充计划.md) | 工具链扩充计划与落地状态 |
 | [.ai-docs/下一步计划.md](./.ai-docs/下一步计划.md) | 引擎能力盘点与字段时机 |
-| [.ai-docs/全项目验证与修复计划.md](./.ai-docs/全项目验证与修复计划.md) | 全项目审查与修复清单 |
+| [.ai-docs/子代理委派指南.md](./.ai-docs/子代理委派指南.md) | 子 Agent 委派模式与声明式配置 |
 
 ## License
 

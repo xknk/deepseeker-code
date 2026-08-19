@@ -30,13 +30,14 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "search_grep",
-            description: "在工作区的所有文件中检索匹配的代码行，每个命中带前后各 2 行上下文（可直接判断用法、免紧跟一次 read_file）；默认按字面量关键词匹配，如需正则传 is_regex=true。多根工作区下用 path 限定搜索目录：可传项目目录名（如 'frontend'）自动匹配工作区根，或传绝对路径 / 相对默认根的 ../兄弟目录。★ 当用户在对话里指明了某个项目时，务必把该项目作为 path 传入——否则只会搜索 IDE 头部所示的活动根，常与用户意图不符。",
+            description: "在工作区的所有文件中检索匹配的代码行，每个命中默认带前后各 2 行上下文（可直接判断用法、免紧跟一次 read_file；构造 edit_file 的 old_str 前可用 context 参数调大一次拿足）；默认按字面量关键词匹配，如需正则传 is_regex=true。★ 检索多个关键词时，用 is_regex=true 以 | 合并（如 'uploadVisible|uploadTip'）一次查完，勿逐个关键词多次调用。path 可限定到目录或具体文件（在单个大文件内多处定位时传文件路径最高效）。多根工作区下：可传项目目录名（如 'frontend'）自动匹配工作区根，或传绝对路径 / 相对默认根的 ../兄弟目录。★ 当用户在对话里指明了某个项目时，务必把该项目作为 path 传入——否则只会搜索 IDE 头部所示的活动根，常与用户意图不符。",
             parameters: {
                 type: "object",
                 properties: {
-                    query: { type: "string", description: "检索内容。默认为字面量关键词（如 'function runAgent'）；is_regex=true 时按正则解析（如 'function\\s+runAgent'）。" },
+                    query: { type: "string", description: "检索内容。默认为字面量关键词（如 'function runAgent'）；is_regex=true 时按正则解析（如 'function\\s+runAgent'，多关键词用 | 合并）" },
                     is_regex: { type: "boolean", description: "是否将 query 作为正则表达式解析，默认 false（字面量匹配，自动转义特殊字符）" },
-                    path: { type: "string", description: "限定搜索的目录（可选）。默认搜索 IDE 头部所示活动根。多根场景下：传项目目录名（如 'frontend'）自动匹配工作区根；或传绝对路径 / 相对默认根的 ../<兄弟目录>；均经沙箱校验。用户提到具体项目时必填。" }
+                    path: { type: "string", description: "限定搜索的目录或具体文件（可选）。传具体文件路径时相当于该文件内全文检索（大文件多处定位首选）。默认搜索 IDE 头部所示活动根。多根场景下：传项目目录名（如 'frontend'）自动匹配工作区根；或传绝对路径 / 相对默认根的 ../<兄弟目录>；均经沙箱校验。用户提到具体项目时必填。" },
+                    context: { type: "number", description: "每个命中附带的前后上下文行数（0-10，默认 2）。需要拿足一段完整代码作 edit_file 的 old_str 时可调大（如 5-8），免得二次检索" }
                 },
                 required: ["query"],
             },
@@ -46,7 +47,7 @@ export const searchTools: CustomTool[] = [
             maxOutputCharacters: 48000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { query: string; is_regex?: boolean; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
+            async execute(args: { query: string; is_regex?: boolean; path?: string; context?: number }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();
                     if (!cleanQuery) return "❌ [检索失败]：传入的检索关键词不能为空。";
@@ -81,13 +82,16 @@ export const searchTools: CustomTool[] = [
                         return resolveReadablePath(args.path);
                     };
                     const searchRoot = resolveSearchRoot().replace(/\\/g, "/");
+                    // ★ 上下文行数参数化（默认 2，0-10 钳制）：构造 edit_file old_str 时模型可一次拿足锚点上下文，
+                    //   免「命中行太短 → 换关键词再查」的连环往返（此前同文件反复 grep 的主因之一）。
+                    const contextLines = Math.min(Math.max(args.context ?? 2, 0), 10);
                     const rgArgs = [
                         "--threads", "1", // 单线程：全树并行 reader 偶发卡死的额外兜底（结果不变，小输出无性能影响）
                         "--line-number",
                         "--column",
                         "--no-heading",
                         "--color", "never",
-                        "-C", "2", // ★ 每个命中带前后各 2 行上下文：模型一次看懂用法，免去紧跟的 read_file 往返（减调用次数的关键）
+                        "-C", String(contextLines), // ★ 每个命中带前后上下文：模型一次看懂用法，免去紧跟的 read_file 往返（减调用次数的关键）
                         "--max-count", "10",
                         "--glob", "!node_modules/**",
                         "--glob", "!dist/**",

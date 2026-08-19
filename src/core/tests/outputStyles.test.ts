@@ -37,12 +37,20 @@ describe("injectOutputStyle", () => {
         assert.equal(msg[0].content, once, "重复注入后字节稳定");
     });
 
-    it("切换风格：旧块切除、新块接上（不累积）", () => {
+    it("切换风格：会话首锁——旧块保留、新风格下个新会话生效（不累积）", () => {
         const msg = mk();
         injectOutputStyle(msg, "a");
+        const once = msg[0].content;
+        assert.ok(once.includes("BODY_A_RULES"), "首次注入含风格 body");
+        // 会话内切风格：不重写块（P0-B 会话首锁，保 DeepSeek 前缀缓存）
         injectOutputStyle(msg, "b");
-        assert.ok(msg[0].content.includes("BODY_B_RULES"), "含新风格 body");
-        assert.ok(!msg[0].content.includes("BODY_A_RULES"), "旧风格 body 已切除");
+        assert.equal(msg[0].content, once, "切风格后块字节级不变（缓存安全）");
+        assert.ok(!msg[0].content.includes("BODY_B_RULES"), "新风格 body 不混入当前会话");
+        // 新会话 → 新风格生效、无旧块残留
+        const msg2 = mk();
+        injectOutputStyle(msg2, "b");
+        assert.ok(msg2[0].content.includes("BODY_B_RULES"), "新会话含新风格 body");
+        assert.ok(!msg2[0].content.includes("BODY_A_RULES"), "旧风格 body 不残留");
     });
 
     it("no-op：未设 styleName → 不动 system prompt", () => {

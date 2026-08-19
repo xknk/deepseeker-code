@@ -247,6 +247,90 @@ const reindentToBase = (newStr: string, baseIndent: string): string => {
     }).join("\n");
 };
 
+/** edit_file 入参：单条（old_str/new_str）与批量（edits 数组）两种形态并存，edits 优先。 */
+type EditFileArgs = {
+    path: string;
+    old_str?: string;
+    new_str?: string;
+    replace_all?: boolean;
+    edits?: Array<{ old_str: string; new_str: string; replace_all?: boolean }>;
+};
+
+/**
+ * edit_file 单条替换：对【已归一（\n）的全文】应用一条 old_str→new_str，纯内存操作不落盘。
+ * 批量模式（edits 数组）的循环体——全部条目成功后由调用方一次性写盘，保证整体原子；
+ * 单条老参数（old_str/new_str）等价于长度 1 的批量。多级容错匹配口径与历史行为完全一致：
+ * ①精确子串 ②剥首尾空行 ③剥 read_file 行号前缀 ④逐行容错（行尾空白→全空白）⑤逐行诊断。
+ */
+const applyOneEditToContent = (
+    normalizedContent: string, oldStr: string, newStr: string, replaceAll: boolean,
+): { ok: true; content: string; summary: string } | { ok: false; error: string } => {
+    const normalizedNew = newStr.replace(/\r\n/g, "\n");
+    const normalizedOldRaw = oldStr.replace(/\r\n/g, "\n");
+
+    // —— 多级容错匹配（CRLF 已双向归一）。逐级尝试子串命中，命中即用其口径做替换 ——
+    // ① 精确子串；② 剥首尾空行（模型常多带空行）；③ 剥 read_file 行号前缀（整段照抄）
+    const lnStripped = stripReadFileLineNumbers(normalizedOldRaw);
+    const candidates: Array<{ old: string; note: string }> = [
+        { old: normalizedOldRaw, note: "" },
+        { old: stripEdgeBlankLines(normalizedOldRaw), note: "（已容错首尾空行）" },
+    ];
+    if (lnStripped !== normalizedOldRaw) candidates.push({ old: lnStripped, note: "（已剥离 read_file 行号前缀）" });
+
+    let normalizedOld: string | null = null;
+    let note = "";
+    for (const c of candidates) {
+        if (c.old.length > 0 && normalizedContent.includes(c.old)) { normalizedOld = c.old; note = c.note; break; }
+    }
+
+    // ④ 逐行容错（子串口径全未命中时）：按行块匹配 + splice 替换。先「行尾空白」归一（保前导
+    //    缩进精确），再「全空白」归一（含前导 tab↔空格）兜模型复现代码时最高频的缩进差异。
+    //    行对齐替换不污染文件其余行；冲突检测不放松（多处命中且非 replace_all → 报冲突，防误改）。
+    if (normalizedOld == null) {
+        const base = lnStripped !== normalizedOldRaw ? lnStripped : normalizedOldRaw;
+        const norms: Array<{ norm: (l: string) => string; tag: string }> = [
+            { norm: (l: string): string => l.replace(/[ \t]+$/, ""), tag: "逐行尾空白容错" },
+            { norm: (l: string): string => l.trim(), tag: "逐行全空白容错（前导 Tab/空格）" },
+        ];
+        for (const { norm, tag } of norms) {
+            const lm = matchLineBlockWith(normalizedContent, base, normalizedNew, replaceAll, norm);
+            if (lm.ok) {
+                return {
+                    ok: true,
+                    content: lm.content,
+                    summary: replaceAll ? `已批量替换全部 ${lm.count} 处匹配（${tag}）。` : `已成功完成局部重构（${tag}）。`,
+                };
+            }
+            if (lm.reason === "conflict") {
+                return { ok: false, error: `❌ [代码修补失败]：代码冲突！old_str（${tag}归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。` };
+            }
+        }
+        // ⑤ 全失败：逐行诊断，精确指出最先失配的行，让模型一次定位（避免盲目重读整文件反复试错）
+        const diag = diagnoseOldStr(normalizedContent, normalizedOldRaw);
+        return { ok: false, error: `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对该处片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进）后重试。⚠️ 严禁改用 run_command 调用 python/node/sed/awk 等脚本绕过本工具修改文件。` };
+    }
+
+    // 精确口径：子串替换
+    const matchCount = normalizedContent.split(normalizedOld).length - 1;
+    // replace_all=true：放行多匹配，全量替换；默认：要求唯一，否则报冲突
+    if (!replaceAll && matchCount > 1) {
+        return { ok: false, error: `❌ [代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改，或显式设 replace_all=true 批量替换。` };
+    }
+    // ★ 缩进基线对齐：以 old_str 在文件里的真实缩进为基线重排 new_str，修模型丢基础缩进（顶格）。
+    //   baseIndent = old_str 第一非空行的真实前导；为空（old 本身顶格）则跳过、原样写入。
+    const oldFirstNonBlank = normalizedOld.split("\n").find(l => l.trim() !== "") ?? "";
+    const baseIndent = oldFirstNonBlank.match(/^[ \t]*/)?.[0] ?? "";
+    const alignedNew = baseIndent ? reindentToBase(normalizedNew, baseIndent) : normalizedNew;
+    const updatedContent = replaceAll
+        ? normalizedContent.split(normalizedOld).join(alignedNew) // 字面量全量替换（不受正则元字符影响）
+        : normalizedContent.replace(normalizedOld, () => alignedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
+    return {
+        ok: true,
+        content: updatedContent,
+        summary: replaceAll ? `已批量替换全部 ${matchCount} 处匹配。${note}` : `已成功完成唯一性局部重构。${note}`,
+    };
+};
+
 export const fsTools: CustomTool[] = [
     {
         type: "function",
@@ -411,91 +495,77 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "edit_file",
-            description: "针对指定的文件进行局部精准修改。old_str 必须与文件中的原始代码逐字符一致：请去掉 read_file 返回的「<行号>: 」前缀，并保留原有缩进（Tab/空格）与行尾空白；默认要求在全文中唯一，若设 replace_all=true 则替换全部匹配处（适合批量重命名/统一改写）。",
+            description: "针对指定的文件进行局部精准修改。★ 同一文件有多处要改时，务必一次调用传 edits 数组全部完成（按序应用、整体原子：任一处失败则全部不写入），勿逐处多次调用。old_str 必须与文件中的原始代码逐字符一致：请去掉 read_file 返回的「<行号>: 」前缀，并保留原有缩进（Tab/空格）与行尾空白；默认要求在全文中唯一，若设 replace_all=true 则替换全部匹配处（适合批量重命名/统一改写）。",
             parameters: {
                 type: "object",
                 properties: {
                     path: { type: "string", description: "准备修改的文件相对路径" },
-                    old_str: { type: "string", description: "文件中现有的完整旧代码块" },
-                    new_str: { type: "string", description: "准备替换进去的新代码块" },
-                    replace_all: { type: "boolean", description: "是否替换全文所有匹配处（默认 false 仅替换唯一匹配；批量重命名/统一改写时设 true）" }
+                    old_str: { type: "string", description: "文件中现有的完整旧代码块（单处修改用；多处修改请改用 edits 数组一次完成）" },
+                    new_str: { type: "string", description: "准备替换进去的新代码块（单处修改用）" },
+                    replace_all: { type: "boolean", description: "是否替换全文所有匹配处（默认 false 仅替换唯一匹配；批量重命名/统一改写时设 true）。顶层参数仅作用于单条 old_str/new_str；edits 内每条可独立设置" },
+                    edits: {
+                        type: "array",
+                        description: "★ 同一文件多处修改时优先使用：一次调用按序完成全部替换，省去逐处往返。第 N 条的 old_str 须基于前 N-1 条应用后的文件内容构造；任一条未命中则整体不写入（原子），修正该条后整组重试",
+                        items: {
+                            type: "object",
+                            properties: {
+                                old_str: { type: "string", description: "文件中现有的完整旧代码块" },
+                                new_str: { type: "string", description: "准备替换进去的新代码块" },
+                                replace_all: { type: "boolean", description: "该条是否替换全文所有匹配处（默认 false）" }
+                            },
+                            required: ["old_str", "new_str"]
+                        }
+                    }
                 },
-                required: ["path", "old_str", "new_str"]
+                required: ["path"]
             },
             safetyLevel: ToolSafetyLevel.MUTATION,
             isSync: true,
-            requireApproval: (args: { path: string; old_str: string; new_str: string; replace_all?: boolean }) =>
-                `申请修改文件 [${args.path}]${args.replace_all ? "（🔥 批量替换全部匹配处）" : ""}\n【减少】:\n${args.old_str}\n【增加】:\n${args.new_str}`,
-            async execute(args: { path: string; old_str: string; new_str: string; replace_all?: boolean }) {
+            requireApproval: (args: EditFileArgs) => {
+                const list = args.edits && args.edits.length > 0
+                    ? args.edits
+                    : [{ old_str: args.old_str ?? "", new_str: args.new_str ?? "", replace_all: args.replace_all }];
+                const patches = list
+                    .map((e, i) => `—— 第 ${i + 1} 处${e.replace_all ? "（🔥 批量替换全部匹配处）" : ""} ——\n【减少】:\n${e.old_str}\n【增加】:\n${e.new_str}`)
+                    .join("\n\n");
+                return `申请修改文件 [${args.path}]（共 ${list.length} 处修改，任一处失败将整体不写入）\n${patches}`;
+            },
+            async execute(args: EditFileArgs) {
                 try {
+                    // ★ 批量模式：edits 数组优先；单条老参数（old_str/new_str）向后兼容归一为长度 1 的列表。
+                    //   按序应用（第 N 条的 old_str 基于前 N-1 条应用后的内容）；整体原子——任一条未命中即整体放弃、不写盘。
+                    const editList: Array<{ old_str: string; new_str: string; replace_all?: boolean }> =
+                        args.edits && args.edits.length > 0
+                            ? args.edits
+                            : [{ old_str: args.old_str ?? "", new_str: args.new_str ?? "", replace_all: args.replace_all }];
+                    if (editList.length === 0 || editList.some(e => typeof e.old_str !== "string" || e.old_str.length === 0)) {
+                        return `❌ [参数缺失]：请传入 edits 数组（每条含 old_str/new_str）一次完成多处修改，或顶层 old_str + new_str 修改单处。old_str 不能为空。`;
+                    }
+
                     const absPath = resolveSafePath(args.path);
                     const rawContent = await fs.readFile(absPath, "utf-8");
                     const isCRLF = rawContent.includes("\r\n");
-                    const normalizedContent = rawContent.replace(/\r\n/g, "\n");
-                    const normalizedNew = args.new_str.replace(/\r\n/g, "\n");
-                    const normalizedOldRaw = args.old_str.replace(/\r\n/g, "\n");
+                    let content = rawContent.replace(/\r\n/g, "\n");
 
-                    // —— 多级容错匹配（CRLF 已双向归一）。逐级尝试子串命中，命中即用其口径做替换 ——
-                    // ① 精确子串；② 剥首尾空行（模型常多带空行）；③ 剥 read_file 行号前缀（整段照抄）
-                    const lnStripped = stripReadFileLineNumbers(normalizedOldRaw);
-                    const candidates: Array<{ old: string; note: string }> = [
-                        { old: normalizedOldRaw, note: "" },
-                        { old: stripEdgeBlankLines(normalizedOldRaw), note: "（已容错首尾空行）" },
-                    ];
-                    if (lnStripped !== normalizedOldRaw) candidates.push({ old: lnStripped, note: "（已剥离 read_file 行号前缀）" });
-
-                    let normalizedOld: string | null = null;
-                    let note = "";
-                    for (const c of candidates) {
-                        if (c.old.length > 0 && normalizedContent.includes(c.old)) { normalizedOld = c.old; note = c.note; break; }
-                    }
-
-                    // ④ 逐行容错（子串口径全未命中时）：按行块匹配 + splice 替换。先「行尾空白」归一（保前导
-                    //    缩进精确），再「全空白」归一（含前导 tab↔空格）兜模型复现代码时最高频的缩进差异。
-                    //    行对齐替换不污染文件其余行；冲突检测不放松（多处命中且非 replace_all → 报冲突，防误改）。
-                    if (normalizedOld == null) {
-                        const base = lnStripped !== normalizedOldRaw ? lnStripped : normalizedOldRaw;
-                        const norms: Array<{ norm: (l: string) => string; tag: string }> = [
-                            { norm: (l: string): string => l.replace(/[ \t]+$/, ""), tag: "逐行尾空白容错" },
-                            { norm: (l: string): string => l.trim(), tag: "逐行全空白容错（前导 Tab/空格）" },
-                        ];
-                        for (const { norm, tag } of norms) {
-                            const lm = matchLineBlockWith(normalizedContent, base, normalizedNew, !!args.replace_all, norm);
-                            if (lm.ok) {
-                                assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
-                                await fs.writeFile(absPath, isCRLF ? lm.content.replace(/\n/g, "\r\n") : lm.content, "utf-8");
-                                return args.replace_all
-                                    ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${lm.count} 处匹配（${tag}）。`
-                                    : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成局部重构（${tag}）。`;
-                            }
-                            if (lm.reason === "conflict") {
-                                return `❌ [代码修补失败]：代码冲突！old_str（${tag}归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。`;
-                            }
+                    const summaries: string[] = [];
+                    for (let i = 0; i < editList.length; i++) {
+                        const r = applyOneEditToContent(content, editList[i].old_str, editList[i].new_str ?? "", !!editList[i].replace_all);
+                        if (!r.ok) {
+                            // 单条直返原文案（与历史行为一致）；批量时前缀定位到第几条（剥内层重复的 ❌ 前缀），并明确整体未写入（原子）
+                            return editList.length === 1
+                                ? r.error
+                                : `❌ [代码修补失败]：edits 第 ${i + 1}/${editList.length} 条未命中，已整体放弃（文件未做任何改动，可修正该条后整组重试）。${r.error.replace(/^❌ \[代码修补失败\]：/, "")}`;
                         }
-                        // ⑤ 全失败：逐行诊断，精确指出最先失配的行，让模型一次定位（避免盲目重读整文件反复试错）
-                        const diag = diagnoseOldStr(normalizedContent, normalizedOldRaw);
-                        return `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对应贴片段。⚠️ 严禁改用 run_command 调用 python/node/sed/awk 等脚本绕过本工具修改文件——请用 read_file 重新读取目标片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进），再次调用 edit_file 重试。`;
+                        content = r.content;
+                        summaries.push(editList.length === 1 ? r.summary : `  ${i + 1}. ${r.summary}`);
                     }
 
-                    // 精确口径：子串替换
-                    const matchCount = normalizedContent.split(normalizedOld).length - 1;
-                    // replace_all=true：放行多匹配，全量替换；默认：要求唯一，否则报冲突
-                    if (!args.replace_all && matchCount > 1) {
-                        return `❌ [代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改，或显式设 replace_all=true 批量替换。`;
-                    }
-                    // ★ 缩进基线对齐：以 old_str 在文件里的真实缩进为基线重排 new_str，修模型丢基础缩进（顶格）。
-                    //   baseIndent = old_str 第一非空行的真实前导；为空（old 本身顶格）则跳过、原样写入。
-                    const oldFirstNonBlank = normalizedOld.split("\n").find(l => l.trim() !== "") ?? "";
-                    const baseIndent = oldFirstNonBlank.match(/^[ \t]*/)?.[0] ?? "";
-                    const alignedNew = baseIndent ? reindentToBase(normalizedNew, baseIndent) : normalizedNew;
-                    const updatedContent = args.replace_all
-                        ? normalizedContent.split(normalizedOld).join(alignedNew) // 字面量全量替换（不受正则元字符影响）
-                        : normalizedContent.replace(normalizedOld, () => alignedNew); // ★ 函数替换：规避 replacement string 的 $ 特殊模式（$&/$`/$'），new_str 含这些字符（正则/模板/转义）时不会被错误展开导致静默损坏
+                    // 全部条目成功 → 一次写盘（批量也只写一次，TOCTOU 复检随之收口到这一处）
                     assertWithinWorkspace(absPath); // ★ TOCTOU 二次围栏复检（写前夕再 realpath）
-                    await fs.writeFile(absPath, isCRLF ? updatedContent.replace(/\n/g, "\r\n") : updatedContent, "utf-8");
-                    return args.replace_all
-                        ? `✅ [代码修补成功]：文件 [${args.path}] 已批量替换全部 ${matchCount} 处匹配。${note}`
-                        : `✅ [代码修补成功]：文件 [${args.path}] 已成功完成唯一性局部重构。${note}`;
+                    await fs.writeFile(absPath, isCRLF ? content.replace(/\n/g, "\r\n") : content, "utf-8");
+                    return editList.length === 1
+                        ? `✅ [代码修补成功]：文件 [${args.path}] ${summaries[0]}`
+                        : `✅ [代码修补成功]：文件 [${args.path}] 已按序完成 ${editList.length} 处修改（单次原子写入）：\n${summaries.join("\n")}`;
                 } catch (error: any) {
                     return `操作失败: ${error.message}`;
                 }

@@ -15,19 +15,59 @@ import { getActiveWorkspaceRoot, resolveReadablePath, initializeWorkspaceIgnore,
  *   会被后续 replace 二次破坏（? 被改成点号、* 被改成非斜杠通配），导致「双星 + 斜杠」
  *   这类深层模式永远匹配失败（实际编译成乱码正则）。单次遍历一次性消费 glob 元字符，杜绝二次替换污染。
  */
-const globToRegex = (pattern: string): RegExp => {
-    let re = "";
-    let i = 0;
-    while (i < pattern.length) {
-        const c = pattern[i];
-        if (c === "*" && pattern[i + 1] === "*") {
-            if (pattern[i + 2] === "/") { re += "(?:.*/)?"; i += 3; }   // **/ 零或多层目录（可选）
-            else { re += ".*"; i += 2; }                                 // ** 任意字符（含分隔符）
-        } else if (c === "*") { re += "[^/]*"; i++; }                    // * 单层（不含分隔符）
-        else if (c === "?") { re += "."; i++; }                          // ? 单字符
-        else { re += /[.+^${}()|[\]\\]/.test(c) ? "\\" + c : c; i++; }   // 普通字符（含中文）：转义 regex 特殊字符
+/** 找 s[start] 处 '{' 的配对 '}'（计嵌套深度）；无配对返回 -1（按字面量处理）。 */
+const findMatchingBrace = (s: string, start: number): number => {
+    let depth = 0;
+    for (let i = start; i < s.length; i++) {
+        if (s[i] === "{") depth++;
+        else if (s[i] === "}") { depth--; if (depth === 0) return i; }
     }
-    return new RegExp(`^${re}$`);
+    return -1;
+};
+
+/** 顶层按 ',' 拆分（跳过嵌套 {} 内的逗号），供花括号多选展开用。 */
+const splitTopLevel = (s: string): string[] => {
+    const parts: string[] = [];
+    let depth = 0, cur = "";
+    for (const ch of s) {
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+        if (ch === "," && depth === 0) { parts.push(cur); cur = ""; continue; }
+        cur += ch;
+    }
+    parts.push(cur);
+    return parts;
+};
+
+/**
+ * glob 模式 → 锚定正则。支持 *（单层）、**（跨层）、?（单字符）与花括号多选 {a,b,c}（递归嵌套亦可）。
+ * ★ 花括号展开 → (?:a|b|c)：多类型/多目录查找（如 `*.{ts,tsx,vue}`、`src/{api,components}/**`）一次调用完成——
+ *   此前 { } 被当字面量转义，模型查两类文件只能分多次调用。未配对的 '{' 按字面量处理（保守不炸）。
+ */
+const globToRegex = (pattern: string): RegExp => {
+    const walk = (s: string): string => {
+        let re = "";
+        let i = 0;
+        while (i < s.length) {
+            const c = s[i];
+            if (c === "{") {
+                const close = findMatchingBrace(s, i);
+                if (close === -1) { re += "\\{"; i++; continue; }
+                const alts = splitTopLevel(s.slice(i + 1, close));
+                re += `(?:${alts.map(a => walk(a)).join("|")})`;
+                i = close + 1;
+                continue;
+            }
+            if (c === "*" && s[i + 1] === "*") {
+                if (s[i + 2] === "/") { re += "(?:.*/)?"; i += 3; }   // **/ 零或多层目录（可选）
+                else { re += ".*"; i += 2; }                          // ** 任意字符（含分隔符）
+            } else if (c === "*") { re += "[^/]*"; i++; }             // * 单层（不含分隔符）
+            else if (c === "?") { re += "."; i++; }                   // ? 单字符
+            else { re += /[.+^$}()|[\]\\]/.test(c) ? "\\" + c : c; i++; } // 普通字符（含中文）：转义 regex 特殊字符（'}' 兜底转义；'{' 已由上方配对逻辑处理）
+        }
+        return re;
+    };
+    return new RegExp(`^${walk(pattern)}$`);
 };
 
 /** 文件名 glob 搜索类工具集：glob（按模式匹配文件名，套用 gitignore 过滤）。 */
@@ -36,11 +76,11 @@ export const globTools: CustomTool[] = [
         type: "function",
         function: {
             name: "glob",
-            description: "按文件名 glob 模式快速查找文件（如 '**/*.ts'、'src/**/test*'、'**/*.test.ts'）。与 search_grep（按内容检索）互补。自动套用 .gitignore / 通用黑名单过滤。",
+            description: "按文件名 glob 模式快速查找文件（如 '**/*.ts'、'src/**/test*'、'**/*.test.ts'）。★ 支持花括号多选：'**/*.{ts,tsx,vue}'、'src/{api,components}/**' 一次查多类型/多目录，勿分多次调用。与 search_grep（按内容检索）互补。自动套用 .gitignore / 通用黑名单过滤。",
             parameters: {
                 type: "object",
                 properties: {
-                    pattern: { type: "string", description: "glob 模式，如 '**/*.ts' 或 'src/**/*.test.ts'" },
+                    pattern: { type: "string", description: "glob 模式，支持 * / ** / ? 与花括号多选 {a,b}（如 '**/*.{ts,vue}'、'src/{api,components}/**'）" },
                     path: { type: "string", description: "限定搜索的起始目录（相对路径，可选，默认工作区根）" },
                 },
                 required: ["pattern"],
