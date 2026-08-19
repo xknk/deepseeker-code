@@ -1,6 +1,6 @@
 {
     "name": "deepseeker-code",
-    "version": "1.0.4",
+    "version": "1.0.41",
     "description": "DeepSeeker-Code 终端客户端（React Ink，in-process 直驱 runAgent）",
     "homepage": "https://github.com/xknk/deepSeekCode#readme",
     "repository": {
