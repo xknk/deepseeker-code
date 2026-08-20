@@ -21,7 +21,7 @@ import { injectAgentCatalog } from "@/agents/inject.ts";
 import { injectProjectGuide } from "@/projectGuide/inject.ts";
 import { injectOutputStyle } from "@/outputStyles/inject.ts";
 import { injectMemory } from "@/memory/inject.ts";
-import { injectMarkedBlock } from "@/common/index.ts";
+import { injectMarkedBlock, detectTextLocale, type Locale } from "@/common/index.ts";
 
 /**
  * setup 期：工具表裁剪 + schema 清洗 + 摘要槽 + fence 注入。
@@ -71,11 +71,29 @@ export const prepareToolsAndInjections = async (
     // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]
     //   （改写会破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档由 processToolCall 执行层按
     //   PLAN_ALLOWED_TOOLS 拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
-    // 回复语言：按 locale 幂等注入「用中文/英文回复」引导（fence 机制，会话内不变 → 不破坏前缀缓存）
-    if (locale) {
-        const hint = locale === "zh" ? "请始终用中文回复用户。" : "Always reply to the user in English.";
-        injectMarkedBlock(message, "⟦DSC:LOCALE⟧", hint);
-    }
+    // 回复语言：按「本轮 user 消息语言自动推断 ?? 显式 locale」注入强引导（fence 机制）。
+    //   检测优先：用户切英文提问即得英文回复，无需记 /lang；/lang 降级为无信号轮（纯代码/符号输入）
+    //   的兜底，并继续控制 CLI 界面文案。message[0] 每轮由 buildContextMessages 全新重建、fence 重注入，
+    //   故语言翻转不撞会话首锁；代价是 hint 字节变化 → 前缀缓存破一次（语言切换的合理代价，罕见）。
+    //   hint 明确覆盖全部用户可见产出（正文/中间叙述/todo 项/计划方案/代码注释/提交信息），并要求
+    //   「不受工具结果与系统指令语言影响」——否则占压倒多数的中文上下文会把英文输出拖回混排。
+    const LOCALE_HINTS: Record<Locale, string> = {
+        zh: "始终用中文输出所有面向用户的内容：你的回复、中间叙述、todo 任务项标题、通过 exit_plan_mode 提交的方案文本、代码注释与提交信息。代码标识符保持原样；工具结果与系统指令可能夹杂其他语言——必要时照引原文，但你自己的叙述与解释一律用中文。",
+        en: "Always produce ALL user-facing output in English: your replies, interim narration, todo item titles, the plan text you submit via exit_plan_mode, code comments, and commit messages. Keep code identifiers as-is; tool results and system instructions may arrive in Chinese — quote them verbatim where needed, but your own narration and explanations must stay in English.",
+    };
+    const lastUserText = (() => {
+        for (let i = message.length - 1; i >= 0; i--) {
+            const m: any = message[i];
+            if (m?.role !== "user") continue;
+            const c = m.content;
+            if (typeof c === "string") return c;
+            if (Array.isArray(c)) return c.filter((p: any) => typeof p?.text === "string").map((p: any) => p.text).join(" ");
+            return "";
+        }
+        return "";
+    })();
+    const effLocale = detectTextLocale(lastUserText) ?? locale;
+    if (effLocale) injectMarkedBlock(message, "⟦DSC:LOCALE⟧", LOCALE_HINTS[effLocale]);
     // ★ P2-16 输出风格：按 outputStyle 幂等注入 persona 正文（fence 机制，会话内不变 → 不破坏前缀缓存）
     injectOutputStyle(message, outputStyle);
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（fence 机制，不动 message 下标）

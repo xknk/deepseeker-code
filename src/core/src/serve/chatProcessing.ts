@@ -57,7 +57,7 @@ export interface HostOptions {
     model?: string;
     /** 思考等级（CLI /thinking 用）：off=关闭 / high=常规 / max=深度。缺省回退全局 env。 */
     thinkingLevel?: ThinkingLevel;
-    /** 回复语言（CLI /lang 用）：runAgent 据此注入回复语言引导。 */
+    /** 回复语言兜底（CLI /lang 用）：runAgent 优先按本轮 user 消息语言自动推断，无信号时回退本值注入引导。 */
     locale?: Locale;
     /** 输出风格名（CLI /output-style 用，P2-16）：runAgent 据此注入对应风格 persona。未设/未命中=不注入。 */
     outputStyle?: string;

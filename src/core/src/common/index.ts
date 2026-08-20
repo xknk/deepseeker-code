@@ -66,6 +66,26 @@ export const assertSafeSessionId = (sessionId: string, label = "sessionId"): voi
 export type Locale = "zh" | "en";
 
 /**
+ * 从文本推断语言（zh/en；无信号返回 null）：CJK 与拉丁字母计数 + 混排比例启发式。
+ *  - 剥离围栏代码块/行内代码后再统计（大段代码不参与语言判定）；
+ *  - 纯符号/数字/空白 → null（无信号，调用方回退显式 locale）；
+ *  - 中英混排：中文字符占比 ≥ 20% 即视为中文——中文用户夹英文术语是常态、且中文单字符
+ *    信息密度高（「帮我把 getUserInfo 提取到 utils」这类应判中文，反之英文句夹单个中文词判英文）。
+ */
+export const detectTextLocale = (text: string): Locale | null => {
+    const stripped = (text || "")
+        .replace(/```[\s\S]*?```/g, " ") // 围栏代码块
+        .replace(/`[^`]*`/g, " ")       // 行内代码
+        .replace(/\s+/g, " ");
+    const cjk = (stripped.match(/[㐀-䶿一-鿿]/g) || []).length;
+    const latin = (stripped.match(/[A-Za-z]/g) || []).length;
+    if (cjk === 0 && latin === 0) return null;
+    if (cjk === 0) return "en";
+    if (latin === 0) return "zh";
+    return cjk / (cjk + latin) >= 0.2 ? "zh" : "en";
+};
+
+/**
  * 读取 JSON 文件并解析；文件不存在 / 损坏 / 解析失败一律静默返回 fallback（缺省 null），绝不抛错阻断启动。
  * 容错范式提炼自 hooks/loader.ts 与 tool/permissions.ts 的 readFile→JSON.parse 骨架。
  */

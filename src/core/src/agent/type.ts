@@ -72,7 +72,7 @@ export interface RunAgentOptions {
     permissionMode?: PermissionMode,
     /** 思考等级（运行时覆盖，缺省回退全局 env）：off=关闭 / high=常规 / max=深度（映射见 llm/model.ts）。 */
     thinkingLevel?: ThinkingLevel,
-    /** 回复语言（运行时覆盖）：runAgent 据此向 system prompt 注入「用中文/英文回复」引导。 */
+    /** 回复语言兜底（运行时覆盖）：优先按本轮 user 消息语言自动推断（common/detectTextLocale），无信号（纯代码/符号）时回退本值；据此注入回复语言引导。 */
     locale?: Locale,
     /** 输出风格名（运行时覆盖，P2-16）：runAgent 据此向 system prompt 注入对应风格的 persona 文本。未设/未命中=不注入。 */
     outputStyle?: string,
