@@ -2,7 +2,7 @@
  * @Author: fanqianliang 2438756801@qq.com
  * @Date: 2026-06-10 15:25:11
  * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-07-23 16:26:14
+ * @LastEditTime: 2026-08-20 15:29:06
  * @FilePath: \deepSeekCode\src\core\src\agent\runAgent.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
@@ -103,8 +103,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let calibRatio = persistedCalib.calibRatio ?? 1.4;  // 回落 1.4（保守偏高，偏早压缩，安全侧）
     let lastRealPromptTokens = persistedCalib.lastRealPromptTokens;
     let lastCachedTokens = persistedCalib.lastCachedTokens;
-    // ★ 重复工具调用熔断器（完整签名 3 次 / 后台轮询同任务 4 次）：跨轮有状态，每轮推理后 check()。
-    //   从 runAgent 抽出到 repeatBreaker.ts；breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
+    // ★ 重复工具调用熔断器（完整签名连续 3 次 / 后台忙轮询同任务连续 4 轮，带 wait_seconds 的等待查询豁免）：
+    //   跨轮有状态，每轮推理后 check()。从 runAgent 抽出到 repeatBreaker.ts；
+    //   breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
     const breaker = createRepeatBreaker({ sessionId, depth, llmDecisionSource, startTime, events });
     // ★ 事件日志化：run 边界事件行直接落盘（不经 AgentEvent 通道——subagent abort 时 break 出 for-await，
     //   generator return 的 finally 不能 yield，AgentEvent 送不出去；直接落盘同时自动覆盖主/子会话，
@@ -249,7 +250,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             }
 
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环
-            const tcCount = assistantMessage.tool_calls?.length ?? 0;
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
                 // ★ 事件日志化：本轮 assistant 已落盘、无工具调用（无待 flush 项）→ round 完整闭合。
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
@@ -266,7 +266,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
             //   + 透传 tool_calls 供重复检索检测（read_file 路径 / search_grep·glob 检索词计数，命中阈值 → 下一轮 nudge）
             nudges.noteToolCall(round, assistantMessage.tool_calls);
-            // 2、重复工具调用熔断（完整签名 3 次 / 后台轮询同任务 4 次）：委托 repeatBreaker。
+            // 2、重复工具调用熔断（完整签名连续 3 次 / 后台忙轮询同任务连续 4 轮，等待查询豁免）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
             if (repeatVerdict.tripped) {

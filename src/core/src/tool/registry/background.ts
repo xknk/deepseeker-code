@@ -222,22 +222,34 @@ export const backgroundTools: CustomTool[] = [
         type: "function",
         function: {
             name: "get_background_output",
-            description: "查看指定后台任务的最近输出日志与运行状态（running/exited/killed + 退出码）。纯读，免审批。用于确认 dev server 是否启动成功、查看报错等。",
+            description: "查看指定后台任务的最近输出日志与运行状态（running/exited/killed + 退出码）。纯读，免审批。用于确认 dev server 是否启动成功、查看报错等。等长任务（构建/测试）跑完：带 wait_seconds 阻塞等待任务退出后再返回（仍在跑则等到超时返回当前状态）——用它等，不要不带 wait 反复轮询查询。",
             parameters: {
                 type: "object",
                 properties: {
                     task_id: { type: "string", description: "run_in_background 返回的 task_id" },
-                    tail_lines: { type: "number", description: "只返回最后 N 行日志（默认 50，避免一次灌入过多）" }
+                    tail_lines: { type: "number", description: "只返回最后 N 行日志（默认 50，避免一次灌入过多）" },
+                    wait_seconds: { type: "number", description: "阻塞等待任务退出（或到达此时长）后再返回，上限 120 秒；任务已在跑且需要等结果时使用，不需要等就省略" }
                 },
                 required: ["task_id"]
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { task_id: string; tail_lines?: number }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { task_id: string; tail_lines?: number; wait_seconds?: number }, ctx?: ToolContext): Promise<string> {
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {
                     // 跨会话不可见：统一返回未找到，不泄露 task 是否存在
                     return `❌ [查询失败]：未找到 task_id=${args.task_id}（可能已随服务重启丢失，或不属于当前会话）。`;
+                }
+                // ★ 阻塞等待（长任务正解，替代忙轮询）：直至任务退出 / 超时 / 用户中止。
+                //   唤醒条件只看「退出」不看「有新输出」——chatty 构建/常驻 server 持续吐日志，按新输出
+                //   唤醒会把长等待打散成秒级返回、退化回忙轮询；要看中途日志直接不带 wait 查快照。
+                //   500ms 步进查内存 status，零开销；repeatBreaker 对带 wait 的调用豁免重复检测（见 agent/repeatBreaker.ts）。
+                const waitMs = Math.min(Math.max(0, args.wait_seconds ?? 0), 120) * 1000;
+                if (waitMs > 0 && task.status === "running") {
+                    const deadline = Date.now() + waitMs;
+                    while (task.status === "running" && Date.now() < deadline && !ctx?.abortSignal?.aborted) {
+                        await new Promise(r => setTimeout(r, 500));
+                    }
                 }
                 const tail = Math.max(1, args.tail_lines ?? 50);
                 const allLines = task.outputBuffer.split("\n");

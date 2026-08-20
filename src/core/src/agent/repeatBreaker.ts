@@ -3,8 +3,11 @@
  * @description 重复工具调用熔断（有状态工厂）。
  *  两道检测：
  *   1) 完整签名（name:arguments）连续 3 轮相同 → 精确重复，立即熔断；
- *   2) 仅工具名序列连续 8 轮相同 → 参数微变死循环兜底（完整签名随时间戳/游标等动态参数变化永不重复，
- *      补一条"仅工具名"序列；给分页读取等合理的连续同工具调用留 8 轮空间，不误杀）。
+ *   2) 轮询工具（get_background_output）同目标（task_id，忽略游标参数）连续 4 个轮询轮 → 忙轮询死循环兜底。
+ *      ★「连续」为真连续：非轮询轮 / 阻塞等待轮 push 空哨兵打断链条（原实现只在轮询轮 push、
+ *      其余轮既不 push 也不重置，实际语义是"累计 4 次无论间隔都熔断"，长任务穿插干活后再查一次即误杀）。
+ *   阻塞等待类查询（get_background_output 带 wait_seconds>0）豁免两道检测——它是"用等待替代轮询"的正解，
+ *   拦它等于逼模型退回忙轮询（与 background.ts 的 wait_seconds 配套）。
  *
  *  从 runAgent 主循环抽出（原内联闭包，跨轮累积 recentSignatures/recentNameSignatures）。
  *  事件发射（tool.repeat_break / tool.resolve）由本模块自行发起——它已持有安全包装后的 events，
@@ -48,30 +51,40 @@ export const createRepeatBreaker = (ctx: RepeatBreakerContext) => {
     //   按工具名是否相同判定注定误杀长任务（连读 N 个文件、连改 N 处都是同名不同目标）。
     //   故序列熔断只对已知轮询工具按"目标标识"判等；其余工具的"完全相同调用"由完整签名 3 次覆盖。
     const POLL_TARGET_KEYS: Record<string, string[]> = { get_background_output: ["task_id"] };
+    /** 安全解析一个 tool_call 的 arguments JSON（非法 JSON 当空对象）。 */
+    const parseArgs = (tc: any): Record<string, unknown> => {
+        try { return JSON.parse(tc?.function?.arguments || "{}") ?? {}; } catch { return {}; }
+    };
     const pollTarget = (tc: any): string | null => {
         const name = tc?.function?.name;
         const keys = name ? POLL_TARGET_KEYS[name] : undefined;
         if (!keys) return null;
-        let args: any = {};
-        try { args = JSON.parse(tc?.function?.arguments || "{}"); } catch { /* 非法 JSON 当空 */ }
+        const args = parseArgs(tc);
         const picked: Record<string, unknown> = {};
         for (const k of keys) if (k in args) picked[k] = args[k];
         return `${name}:${JSON.stringify(picked)}`;
     };
+    /** ★ 阻塞等待类查询（get_background_output 带 wait_seconds>0）豁免两道重复检测：
+     *  它是「用等待替代轮询」的正解（等长任务跑完），拦它等于逼模型退回忙轮询。 */
+    const isWaitPoll = (tc: any): boolean =>
+        tc?.function?.name === "get_background_output" && Number(parseArgs(tc).wait_seconds ?? 0) > 0;
 
     const check = (
         toolCalls: any[],
         round: number,
         lastContent: string | undefined,
     ): RepeatVerdict => {
-        const sig = toolCalls.map((t: any) => `${t.function.name}:${t.function.arguments}`).join("|");
+        // ★ 等待类调用（isWaitPoll）剔除后再算签名：等待轮 sig 为空串（空哨兵），非空才可能触发熔断——
+        //   既有豁免语义（等待不计数），又用空哨兵打断精确重复链（等待意味着模型做了别的事，不该续链）。
+        const effCalls = toolCalls.filter((t: any) => !isWaitPoll(t));
+        const sig = effCalls.map((t: any) => `${t.function.name}:${t.function.arguments}`).join("|");
         const tooName = toolCalls.map((t: any) => `${t.function.name}`).join("|");
 
         // 1) 完整签名（含 arguments）连续 3 轮相同 → 精确重复，熔断
         recentSignatures.push(sig);
         if (recentSignatures.length > 6) recentSignatures.shift(); // F-8：定长裁剪，防长会话无限增长占内存
         const last3 = recentSignatures.slice(-3);
-        if (last3.length === 3 && last3.every(s => s === last3[0])) {
+        if (sig && last3.length === 3 && last3.every(s => s === sig)) {
             const text = (lastContent || "") + "\n（检测到重复工具调用，已停止）";
             events({
                 sessionId,
@@ -91,39 +104,39 @@ export const createRepeatBreaker = (ctx: RepeatBreakerContext) => {
             return { tripped: true, kind: 'full', text, toolName: tooName };
         }
 
-        // 2) 轮询类工具"同目标反复查询"死循环兜底（替代原"纯工具名序列"——后者对连续 read 多文件 / edit 多位置
+        // 2) 轮询工具"同目标"忙轮询死循环兜底（替代原"纯工具名序列"——后者对连续 read 多文件 / edit 多位置
         //    等正常长任务一律误杀）：
-        //    仅对已知轮询工具（get_background_output：agent 主动轮询后台任务输出）按"目标标识"（task_id）判等，
-        //    忽略 tail_lines 等游标参数。连续 4 轮查同一后台任务 = 轮询死循环（agent 不该空轮询，应等用户或做别的）。
+        //    仅对已知轮询工具（get_background_output）按"目标标识"（task_id）判等，忽略 tail_lines 等游标参数。
+        //    ★「连续 4 个轮询轮」为真连续：非轮询轮/等待轮 push 空哨兵打断链条——原实现只在轮询轮 push、
+        //      其余轮既不 push 也不重置，实际语义是"累计 4 次无论间隔都熔断"，长任务穿插干活后再查一次即误杀。
+        //    连续 4 个轮询轮查同一后台任务 = 忙轮询死循环（agent 不该空轮询，应带 wait_seconds 等待/汇报/做别的）。
         //    其他工具（edit/read/grep…）的"完全相同调用"已由上方完整签名 3 次覆盖，"同名不同参数"属正常多步，不再拦。
-        const pollTargets = toolCalls.map(pollTarget).filter(Boolean);
-        if (pollTargets.length) {
-            const pollSig = pollTargets.join("|");
-            recentPollTargets.push(pollSig);
-            if (recentPollTargets.length > 8) recentPollTargets.shift();
-            const last4 = recentPollTargets.slice(-4);
-            if (last4.length === 4 && last4.every((s) => s === last4[0])) {
-                const text = (lastContent || "") + "\n（检测到后台任务轮询死循环（反复查询同一任务），已停止）";
-                events({
-                    sessionId,
-                    eventType: 'tool.repeat_break',
-                    metadata: {
-                        depth,
-                        decisionSource: llmDecisionSource,
-                        durationMs: performance.now() - startTime,
-                        round,
-                        toolName: tooName,
-                        toolSource: 'builtin',
-                        ok: false,
-                        attempt: round,
-                    },
-                    payload: { output: text },
-                });
-                return { tripped: true, kind: 'names', text, toolName: tooName };
-            }
+        const pollSig = effCalls.map(pollTarget).filter(Boolean).join("|");
+        recentPollTargets.push(pollSig);
+        if (recentPollTargets.length > 8) recentPollTargets.shift();
+        const last4 = recentPollTargets.slice(-4);
+        if (pollSig && last4.length === 4 && last4.every((s) => s === pollSig)) {
+            const text = (lastContent || "") + "\n（检测到后台任务轮询死循环（反复查询同一任务），已停止）";
+            events({
+                sessionId,
+                eventType: 'tool.repeat_break',
+                metadata: {
+                    depth,
+                    decisionSource: llmDecisionSource,
+                    durationMs: performance.now() - startTime,
+                    round,
+                    toolName: tooName,
+                    toolSource: 'builtin',
+                    ok: false,
+                    attempt: round,
+                },
+                payload: { output: text },
+            });
+            return { tripped: true, kind: 'names', text, toolName: tooName };
         }
 
         // 未触发：发 tool.resolve 埋点（本轮工具调用的解析归档），主循环继续
+
         events({
             sessionId,
             eventType: 'tool.resolve',
