@@ -126,7 +126,7 @@ code --install-extension deepseeker-code-<version>.vsix
 
 ## 聊天内命令
 
-在输入框以 `/` 开头：
+在输入框以 `/` 开头（弹出补全菜单，随选中项滚动，与 CLI 命令集对齐）：
 
 | 命令 | 作用 |
 |---|---|
@@ -135,9 +135,17 @@ code --install-extension deepseeker-code-<version>.vsix
 | `/model <名称>` | 切换模型 |
 | `/thinking <off\|high\|max>` | 切换思考强度 |
 | `/lang <zh\|en>` | 切换语言 |
+| `/output-style <名称>` | 切换输出风格（人格），`off` 恢复默认 |
 | `/sessions` | 列出并续接历史会话 |
+| `/fork` | 从当前会话某轮回复处分叉出新会话 |
 | `/clear`、`/new` | 新会话 |
+| `/status` / `/usage` / `/context` | 查看状态 / 用量 / 上下文 |
+| `/permissions` / `/mcp` / `/hooks` | 查看已加载的权限规则 / MCP / Hooks |
+| `/trust` | 管理已信任目录（列出 / 撤销，撤销后重载窗口生效） |
+| `/debug` | 调试信息 |
 | `/help` | 帮助 |
+
+> `commands/` 目录下的自定义命令在引擎加载完成后自动并入 `/` 菜单（回车即交给 agent 展开）。插件激活后面板立即可用——引擎（MCP/skills/命令）后台初始化，首次提交前自动等待就绪。
 
 ---
 
@@ -225,6 +233,7 @@ MCP 配置（`mcp.json`，独立文件）：
 ```
 
 - **配置注入通道**：插件激活时把 `apiKey`/`model` 写入 `process.env`、`chdir` 到工作区，**之后**才动态 import core；core 的 `appConfig` 与文件沙箱随之就位。
+- **引擎后台加载**：activate 注册完命令即返回（面板秒开），`initEngine`（MCP/skills/命令目录）后台初始化；首轮提交经 `waitEngineReady` 闸门等待注入完成，自定义斜杠命令就绪后推给 webview 并入 `/` 菜单。
 - **审批**：core 的 `createWebRequestApproval` 把 `approval_request` 发给前端 → 前端弹按钮 → `resolveUserApprovalLock` 解锁挂起的工具调用。
 - **多根工作区**：按「活动编辑器所属文件夹」解析项目根，每次提问自动跟随，无需重载窗口。
 

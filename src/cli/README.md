@@ -70,11 +70,15 @@ deepseeker-code --plan
 | `/lang <zh\|en>` | 切换语言 |
 | `/output-style <名称>` | 切换输出风格（人格） |
 | `/sessions` | 列出并续接历史会话 |
+| `/fork` | 从当前会话某轮回复处分叉出新会话 |
 | `/clear` | 新会话 |
 | `/status` / `/usage` / `/context` | 查看状态 / 用量 / 上下文 |
 | `/permissions` / `/mcp` / `/hooks` | 查看已加载的权限规则 / MCP / Hooks |
+| `/trust` | 管理已信任目录（列出 / 撤销） |
 | `/debug` | 调试信息 |
 | `/exit` / `/quit` | 退出 |
+
+> 菜单超出屏高时随选中项滚动（底栏显示 `n/m 条`）；`commands/` 目录下的自定义命令引擎就绪后自动并入菜单。启动时界面先行渲染，引擎（MCP/skills/命令）后台加载，首次提交前自动等待就绪。
 
 **快捷键**：`Ctrl+C` 退出 · `Esc` 中止/清输入 · `Ctrl+G` 中止当前轮 · `Ctrl+T` 展开/收起思考 · 模态/菜单 `↑↓ Enter`。
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.54
 
 代码变更 diff 视图 + 计划模式交互对齐 Claude Code；斜杠命令菜单补全 + 启动顿挫治理。
 
