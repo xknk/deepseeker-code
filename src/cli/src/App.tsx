@@ -36,7 +36,7 @@ import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
 import { TopPanel } from "./components/TopPanel.tsx";
-import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHooks, inspectDebug } from "./inspect.ts";
+import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHooks, inspectDebug } from "@/observability/inspect.ts";
 
 const KNOWN_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
 const CWD = process.cwd();
@@ -67,7 +67,7 @@ const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "tool" && r.status === "running") ||
     (r.kind === "todos" && !!r.active);
 
-export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initialIncludeProject }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean; initialIncludeProject?: boolean }): React.ReactElement => {
+export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initialIncludeProject, engineReady }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean; initialIncludeProject?: boolean; engineReady: Promise<unknown> }): React.ReactElement => {
     const state = useChatState(resumeSessionId, initialPlanMode, initialAutoMode);
     const { exit } = useApp();
     const { stdout } = useStdout();
@@ -86,6 +86,14 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     const [modelDisplay, setModelDisplay] = useState(MODEL_NAME);
     /** 语言切换计数器：setLocale 后 setTick 触发重渲染，刷新界面文案（S 在 render 期读取）。 */
     const [tick, setTick] = useState(0);
+    /** 引擎就绪标记：main 后台跑 initEngine（MCP/skills/commands），就绪后刷新斜杠菜单自定义命令。
+     *  UI 先行渲染不等待引擎——首次提交前 gate（见 ensureEngine）。 */
+    const [engineReadyFlag, setEngineReadyFlag] = useState(false);
+    useEffect(() => {
+        let alive = true;
+        void engineReady.then(() => { if (alive) setEngineReadyFlag(true); });
+        return () => { alive = false; };
+    }, [engineReady]);
     /** 计划方案编辑相位：pendingPlan 下选「修改」进入编辑器，预填原方案；Enter 确认 / Esc 取消回选项。 */
     const [planEditing, setPlanEditing] = useState(false);
     const [planDraft, setPlanDraft] = useState("");
@@ -191,9 +199,10 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         for (const name of LOCAL_COMMAND_NAMES) map.set(name, { name, description: descOf(name) });
         for (const c of listCommands()) if (!map.has(c.name)) map.set(c.name, { name: c.name, description: c.description });
         return [...map.values()];
-        // tick 用于语言切换后重算描述（S.cmdXxx 随 locale 变）；本身不在体内引用。
+        // tick 用于语言切换后重算描述（S.cmdXxx 随 locale 变）；engineReadyFlag 用于引擎后台
+        // 就绪后重扫 listCommands()（自定义命令在 initEngine 期间注册）；两者均不在体内直接引用。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tick]);
+    }, [tick, engineReadyFlag]);
     const filteredCommands = useMemo(() => {
         if (!input.startsWith("/")) return [];
         const q = input.slice(1).toLowerCase();
@@ -345,10 +354,18 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         }
     };
 
+    /** 引擎就绪闸门：后台 initEngine 未完成时提示并等待（MCP 工具/自定义命令随后可用）。 */
+    const ensureEngine = async (): Promise<void> => {
+        if (engineReadyFlag) return;
+        state.pushInfo("⏳ 引擎加载中（MCP/skills/commands）…");
+        await engineReady;
+    };
+
     /** 执行斜杠命令：本地优先 → 注册命令（expandSlashCommand 展开）→ 未知则提示，绝不把 `/xxx` 发给模型。 */
     const executeSlash = async (fullText: string): Promise<void> => {
         const text = fullText.trim();
         if (!text.startsWith("/")) { await state.submit(text); return; }
+        await ensureEngine();
         if (await runLocalSlash(text)) return;
         const name = text.slice(1).split(/\s+/)[0] ?? "";
         if (listCommands().some((c) => c.name === name)) { await state.submit(text); return; }
@@ -372,6 +389,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         setInput("");
         setCursor(0);
         if (v.startsWith("/")) { await executeSlash(v); return; }
+        await ensureEngine();
         await state.submit(v);
     };
 

@@ -38,6 +38,7 @@ planEditing: false,
 planCollapsed: false, // 计划正文折叠态（点击标题切换）
 replaying: false, // 回放中：抑制逐条滚动，replayDone 一次性落底
 sessions: [],
+customCommands: [], // core 注册的自定义斜杠命令（引擎就绪后经 "commands" 消息送达，合并进 / 菜单）
 forkAnchors: [], // 当前会话可分叉锚点（各轮 assistant 检查点，host 经 listForkAnchors 回推）
 showTodos: false,
 todos: [],
@@ -839,6 +840,11 @@ switch (evt.type) {
         state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         renderSessionsPanel();
         break;
+      case "commands":
+        // core 自定义命令目录（引擎后台就绪时 / panel ready 时推来）：合并进 / 菜单
+        state.customCommands = Array.isArray(msg.commands) ? msg.commands : [];
+        updateSlashMenu();
+        break;
       case "forkAnchors":
         state.forkAnchors = Array.isArray(msg.anchors) ? msg.anchors : [];
         renderForkPanel();
@@ -1509,7 +1515,7 @@ vscode.postMessage({ type: "setModel", model: arg });
 addInfo(`模型：${arg}`);
 syncToolbar();
 } else {
-addInfo("用法：/model <模型名>，如 /model deepseek-v4");
+addInfo(`当前模型：${state.model || "默认（deepseek-v4-flash）"}\n用法：/model <模型名>，如 /model deepseek-v4`);
 }
 return true;
 case "thinking":
@@ -1519,7 +1525,7 @@ vscode.postMessage({ type: "setThinking", level: arg });
 addInfo(`思考等级：${arg}`);
 syncToolbar();
 } else {
-addInfo("用法：/thinking off|high|max");
+addInfo(`当前思考等级：${state.thinkingLevel}\n用法：/thinking off|high|max`);
 }
 return true;
 case "lang":
@@ -1528,7 +1534,24 @@ state.locale = arg;
 vscode.postMessage({ type: "setLocale", locale: arg });
 addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}`);
 syncToolbar();
+} else if (!arg) {
+addInfo(`当前界面语言：${state.locale === "zh" ? "中文" : "English"}\n用法：/lang zh|en`);
 }
+return true;
+case "output-style":
+case "usage":
+case "context":
+case "permissions":
+case "mcp":
+case "hooks":
+case "trust":
+case "debug":
+// ★ 观测/管理类：数据在扩展宿主进程（trace/registry/store）采集，localObs 往返后 info 行回显
+vscode.postMessage({ type: "localObs", cmd, arg });
+return true;
+case "fork":
+toggleForkPanel();
+vscode.postMessage({ type: "listForkAnchors" });
 return true;
 case "clear":
 clearMessages();
@@ -1540,10 +1563,10 @@ case "sessions":
 toggleSessionsPanel();
 return true;
 case "help":
-addInfo("/help 帮助 · /plan 计划模式 · /auto 自动模式 · /model 模型 · /thinking 思考等级 · /lang 语言 · /sessions 历史 · /clear 清屏 · /new 新会话");
+addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
 return true;
 case "status":
-addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}`);
+addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}${state.projectRoot ? " · 根目录：" + state.projectRoot : ""}`);
 return true;
 default:
 return false; // 非本地命令 → 交给 agent（自定义 slash 命令）
@@ -1639,18 +1662,30 @@ const btnSend = $("#btn-send");
 btnMode = $("#btn-mode");
 modePopover = $("#mode-popover");
 
-// 命令驱动表：全部功能经斜杠命令交互，UI 零控件
+// 命令驱动表：全部功能经斜杠命令交互，UI 零控件。
+// ★ 与 CLI 的 LOCAL_COMMAND_NAMES 对齐（去掉无意义的 /exit）；obs=true 的命令数据在扩展宿主
+//   进程采集（trace/registry/store），经 localObs 消息往返后以 info 行回显。
+//   引擎加载完成后再合并 core 注册的自定义命令（state.customCommands，/ 菜单常驻可见）。
 const SLASH = [
-{ cmd: "/plan", hint: "切换计划模式", arg: false },
-{ cmd: "/auto", hint: "切换自动模式", arg: false },
-{ cmd: "/model", hint: "设置模型，如 /model deepseek-v4", arg: true },
-{ cmd: "/thinking", hint: "思考等级 off | high | max", arg: true },
-{ cmd: "/lang", hint: "界面语言 zh | en", arg: true },
-{ cmd: "/clear", hint: "清空当前会话", arg: false },
+{ cmd: "/help", hint: "查看帮助与快捷键", arg: false },
+{ cmd: "/status", hint: "查看当前模型/会话/模式", arg: false },
+{ cmd: "/plan", hint: "切换计划模式（只读调研→审批→实现）", arg: false },
+{ cmd: "/auto", hint: "切换自动模式（编辑分类器放行，高危转人工）", arg: false },
+{ cmd: "/model", hint: "切换模型：/model <deepseek-v4|…>", arg: true },
+{ cmd: "/thinking", hint: "切换思考等级：/thinking <off|high|max>", arg: true },
+{ cmd: "/lang", hint: "切换界面语言：/lang <zh|en>", arg: true },
+{ cmd: "/output-style", hint: "切换输出风格：/output-style <name|off>", arg: true, obs: true },
+{ cmd: "/sessions", hint: "选择并载入历史会话（续接对话）", arg: false },
+{ cmd: "/fork", hint: "从当前会话的某轮回复处分叉出新会话", arg: false },
+{ cmd: "/usage", hint: "查看本会话 token 用量（主/子 agent、缓存命中）", arg: false, obs: true },
+{ cmd: "/context", hint: "查看上下文窗口治理（阈值、填充率、已归档）", arg: false, obs: true },
+{ cmd: "/permissions", hint: "查看已加载的权限规则（allow/ask/deny）", arg: false, obs: true },
+{ cmd: "/mcp", hint: "查看已连接的 MCP server 与工具数", arg: false, obs: true },
+{ cmd: "/hooks", hint: "查看已注册的 hook 规则", arg: false, obs: true },
+{ cmd: "/trust", hint: "管理已信任目录（列出 / 撤销）", arg: true, obs: true },
+{ cmd: "/debug", hint: "排障快照（session/cwd/模型/配置/环境）", arg: false, obs: true },
 { cmd: "/new", hint: "新会话", arg: false },
-{ cmd: "/sessions", hint: "历史会话", arg: false },
-{ cmd: "/help", hint: "显示帮助", arg: false },
-{ cmd: "/status", hint: "显示当前状态", arg: false },
+{ cmd: "/clear", hint: "清空当前屏幕", arg: false },
 ];
 
 let slashItems = [];
@@ -1668,17 +1703,29 @@ doSend();
 updateSlashMenu();
 }
 
+/** 合并本地命令表 + core 注册的自定义命令（引擎就绪后经 "commands" 消息送达；本地同名优先）。 */
+function allSlashItems() {
+const seen = new Set(SLASH.map((s) => s.cmd));
+const extra = (state.customCommands || [])
+.filter((c) => c && c.name && !seen.has("/" + c.name))
+.map((c) => ({ cmd: "/" + c.name, hint: c.description || "自定义命令", arg: false, custom: true }));
+return SLASH.concat(extra);
+}
+
 function updateSlashMenu() {
 const v = input.value;
 if (!v.startsWith("/")) { menu.style.display = "none"; slashItems = []; selIdx = -1; return; }
 const q = v.toLowerCase();
-slashItems = SLASH.filter((s) => s.cmd.startsWith(q) || q.startsWith(s.cmd)).slice(0, 6);
+// ★ 不再截前 6 条：菜单 CSS 限高可滚动，选中项 scrollIntoView 跟随（修「命令显示不全」）
+slashItems = allSlashItems().filter((s) => s.cmd.startsWith(q) || q.startsWith(s.cmd));
 if (!slashItems.length) { menu.style.display = "none"; slashItems = []; selIdx = -1; return; }
 selIdx = Math.min(Math.max(selIdx, 0), slashItems.length - 1);
 menu.innerHTML = slashItems.map((s, i) =>
-`<div class="slash-item${i === selIdx ? " selected" : ""}" data-i="${i}"><span class="slash-cmd">${s.cmd}</span><span class="slash-hint">${s.hint}</span></div>`
+`<div class="slash-item${i === selIdx ? " selected" : ""}" data-i="${i}"><span class="slash-cmd">${s.cmd}</span><span class="slash-hint">${escapeHtml(s.hint)}</span></div>`
 ).join("");
 menu.style.display = "";
+const selEl = menu.querySelector(".slash-item.selected");
+if (selEl) selEl.scrollIntoView({ block: "nearest" });
 menu.querySelectorAll(".slash-item").forEach((el) => {
 el.addEventListener("click", () => runSlash(slashItems[Number(el.dataset.i)]));
 });
@@ -1723,6 +1770,8 @@ doSend();
 input.addEventListener("input", () => { autoGrow(input); updateSlashMenu(); });
 input.addEventListener("focus", () => updateSlashMenu());
 input.addEventListener("blur", () => setTimeout(() => { menu.style.display = "none"; }, 150));
+// ★ 菜单内 mousedown 不夺焦点（防拖滚动条/点条目时 blur 收起菜单）；click 仍正常触发
+menu.addEventListener("mousedown", (e) => e.preventDefault());
 
 // 发送/中止一体按钮：空闲 ↑（发送），生成中 ■（中止）
 btnSend.addEventListener("click", () => {

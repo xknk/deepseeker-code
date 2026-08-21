@@ -1,7 +1,7 @@
 /**
- * @file cli/src/inspect.ts
+ * @file observability/inspect.ts
  * @description P2-15 可观测性命令的数据采集与格式化：/usage /context /permissions /mcp /hooks /debug。
- *  纯采集 + 文本格式化，无 UI（App.tsx 的 runLocalSlash 调用后经 pushInfo 渲染）。
+ *  纯采集 + 文本格式化，无 UI（CLI 的 runLocalSlash 与 VSCode 的 localObs 消息都调用后以 info 行渲染）。
  *  数据源：trace JSONL（usage）、session store（archived）、appConfig（context/debug）、
  *  以及 core 新增的 listPermissionRules / listHooks / listMcpClients。
  */

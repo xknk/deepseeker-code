@@ -1616,14 +1616,16 @@ body {
   filter: brightness(1.15);
 }
 
-/* 斜杠命令菜单（输入 / 时弹出） */
+/* 斜杠命令菜单（输入 / 时弹出；限高滚动——全量命令+自定义命令不截断） */
 .slash-menu {
   margin-top: 8px;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   background: var(--vscode-editorWidget-background, var(--bg-deep));
   box-shadow: var(--vscode-widget-shadow, 0 4px 14px rgba(0, 0, 0, 0.45));
-  overflow: hidden;
+  overflow-y: auto;
+  max-height: 260px;
+  overscroll-behavior: contain;
 }
 
 .slash-item {

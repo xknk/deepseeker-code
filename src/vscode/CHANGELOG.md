@@ -2,7 +2,19 @@
 
 ## Unreleased
 
-代码变更 diff 视图 + 计划模式交互对齐 Claude Code。
+代码变更 diff 视图 + 计划模式交互对齐 Claude Code；斜杠命令菜单补全 + 启动顿挫治理。
+
+### 斜杠命令菜单补全（VSCode 与 CLI 对齐）
+
+- **全量命令表**：`/` 菜单从硬编码 10 条（且只显示前 6 条）扩到与 CLI 一致的本地全集（`/usage` `/context` `/permissions` `/mcp` `/hooks` `/trust` `/debug` `/output-style` `/fork` 等观测/管理命令经扩展宿主采集回显）。
+- **自定义命令合并**：core 注册的自定义斜杠命令（builtin/global/project 三源 `.md`）在引擎就绪后推送给 webview，合并进 `/` 菜单常驻可见。
+- **菜单可滚动**：去掉 6 条截断，限高 260px 滚动 + 选中项 `scrollIntoView` 跟随；拖滚动条不夺输入焦点。
+- **CLI 菜单视口滚动**：固定显示前 10 条改为视口随选中项滚动（19+ 条命令后段可选可执行），底栏显示 `n/m 条` 计数。
+
+### 启动顿挫治理（UI 先行、引擎后台加载）
+
+- **VSCode**：`activate` 不再 `await initEngine`（MCP spawn+握手常达秒级，期间 contributes 命令点不动）——面板秒开，引擎后台初始化，首轮提交经 `waitEngineReady` 闸门等待（加载中自动提示）。
+- **CLI**：清屏/横幅/渲染不再等引擎初始化完成，立即进入可交互界面；首次提交/斜杠命令 gate 在 `engineReady` 上，引擎就绪后自定义命令目录自动刷新进菜单。
 
 ### 代码变更 diff 视图（三档，不依赖 git）
 

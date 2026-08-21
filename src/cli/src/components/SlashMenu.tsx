@@ -14,8 +14,12 @@ type Props = { entries: MenuEntry[]; selectedIndex: number; cols: number };
 const MAX_ROWS = 10;
 
 export const SlashMenu = ({ entries, selectedIndex, cols }: Props): React.ReactElement => {
-    const visible = entries.slice(0, MAX_ROWS);
-    const more = entries.length > MAX_ROWS;
+    // ★ 视口随选中项滚动（边缘跟随）：selectedIndex 始终落在 [start, start+MAX_ROWS) 内，
+    //   ↑↓ 越过第 10 条时窗口下移——否则长列表（19+ 条本地命令 + 自定义命令）后半永远不可见。
+    const start = entries.length <= MAX_ROWS
+        ? 0
+        : Math.max(0, Math.min(selectedIndex - MAX_ROWS + 1, selectedIndex, entries.length - MAX_ROWS));
+    const visible = entries.slice(start, start + MAX_ROWS);
     const cmdW = Math.min(22, Math.max(8, ...visible.map((e) => e.name.length)) + 1);
     const descMax = Math.max(12, cols - cmdW - 6);
 
@@ -34,7 +38,9 @@ export const SlashMenu = ({ entries, selectedIndex, cols }: Props): React.ReactE
                     </Box>
                 );
             })}
-            {more ? <Text color={THEME.coralMuted}>… 还有 {entries.length - MAX_ROWS} 条</Text> : null}
+            {entries.length > MAX_ROWS ? (
+                <Text color={THEME.coralMuted}>↑↓ 滚动 · {selectedIndex + 1}/{entries.length} 条</Text>
+            ) : null}
         </Box>
     );
 };

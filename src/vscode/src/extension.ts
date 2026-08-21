@@ -17,6 +17,23 @@ import type { ChatHost, ChatHostCallbacks } from "./host";
 let host: ChatHost | null = null;
 let engineDispose: (() => void) | null = null;
 
+// —— core 观测/命令目录访问器（activate 第 4 步动态 import 后赋值；webview 的 /usage 等本地命令用） ——
+let inspectUsage: (sessionId: string) => Promise<string> = async () => "（引擎尚未加载）";
+let inspectContext: (sessionId: string) => Promise<string> = async () => "（引擎尚未加载）";
+let inspectPermissions: () => string = () => "（引擎尚未加载）";
+let inspectMcp: () => Promise<string> = async () => "（引擎尚未加载）";
+let inspectHooks: () => string = () => "（引擎尚未加载）";
+let inspectDebug: (sessionId: string) => string = () => "（引擎尚未加载）";
+let listCommandsForWebview: () => Array<{ name: string; description: string }> = () => [];
+let listOutputStylesForWebview: () => Array<{ name: string; description: string }> = () => [];
+let readTrustedDirsFn: () => Promise<string[]> = async () => [];
+let untrustDirFn: (dir: string) => Promise<boolean> = async () => false;
+
+// —— 引擎后台加载状态（治启动顿挫：activate 不再 await initEngine，见 activate 第 8 步） ——
+/** 引擎就绪闸门：activate 启动后台 initEngine，host 首轮 runAgent 前等待（失败也放行，仅缺 MCP/skills）。 */
+let waitEngine: () => Promise<void> = async () => {};
+let engineSettled = false;
+
 /** 主编辑区面板（单例：已存在则 reveal 聚焦）。 */
 let panel: vscode.WebviewPanel | null = null;
 
@@ -268,8 +285,59 @@ function handleMessage(msg: Record<string, unknown>): void {
         pendingEvents = [];
         for (const m of buffered) deliver(m);
         for (const m of h.collectPendingUI()) deliver(m);
+        // 自定义斜杠命令目录（引擎后台加载晚于面板打开时由此补推；engineSettled 后 listCommands 已就绪）
+        if (panel) void panel.webview.postMessage({ type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
       })();
       break;
+    case "localObs": {
+      // ★ 本地观测命令（与 CLI runLocalSlash 对齐）：/usage /context /permissions /mcp /hooks /debug /
+      //   /output-style /trust ——数据在扩展宿主进程采集（trace/registry/store），结果以 info 行回显。
+      void (async () => {
+        const cmd = String(msg.cmd ?? "");
+        const arg = String(msg.arg ?? "").trim();
+        const sid = h.activeSessionId ?? "";
+        let text = "";
+        try {
+          if (cmd === "usage") text = await inspectUsage(sid);
+          else if (cmd === "context") text = await inspectContext(sid);
+          else if (cmd === "permissions") text = inspectPermissions();
+          else if (cmd === "mcp") text = await inspectMcp();
+          else if (cmd === "hooks") text = inspectHooks();
+          else if (cmd === "debug") text = inspectDebug(sid);
+          else if (cmd === "output-style") {
+            const styles = listOutputStylesForWebview();
+            const listText = styles.map((s) => `  · ${s.name} — ${s.description}`).join("\n");
+            if (!arg) text = `当前输出风格：${h.currentOutputStyle ?? "默认"}\n${listText || "（未安装任何风格）"}\n切换：/output-style <name>，恢复默认：/output-style off`;
+            else {
+              const a = arg.toLowerCase();
+              if (a === "off" || a === "none" || a === "default") {
+                h.setOutputStyle(undefined);
+                text = "已恢复默认输出风格。";
+              } else if (styles.some((s) => s.name === a)) {
+                h.setOutputStyle(a);
+                text = `输出风格已切换：${a}`;
+              } else text = `未知风格：${arg}\n${listText}`;
+            }
+          } else if (cmd === "trust") {
+            const trusted = await readTrustedDirsFn();
+            if (!arg) {
+              text = trusted.length === 0
+                ? "已信任目录：（无）。"
+                : `已信任目录（撤销用 /trust <序号 或 路径>）：\n${trusted.map((d, i) => `  [${i}] ${d}`).join("\n")}\n\n撤销后需重载窗口生效（项目级配置仅在激活时加载）。`;
+            } else {
+              const idx = Number(arg);
+              const target = Number.isInteger(idx) && idx >= 0 && idx < trusted.length ? trusted[idx] : arg;
+              const removed = await untrustDirFn(target);
+              text = removed ? `已撤销信任：${target}\n（重载窗口后生效——项目级配置仅在激活时加载）` : `未找到该信任目录：${target}`;
+            }
+          } else text = `未知观测命令：${cmd}`;
+        } catch (e) {
+          text = `读取失败：${e instanceof Error ? e.message : String(e)}`;
+        }
+        deliver({ type: "info", text });
+      })();
+      break;
+    }
     case "submit": {
       const text = String(msg.text ?? "");
       if (!text.trim()) break;
@@ -439,12 +507,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
     import("@/trust/index.ts"),
+    import("@/commands/registry.ts"),
+    import("@/observability/inspect.ts"),
+    import("@/outputStyles/registry.ts"),
   ]);
+  // 观测/命令目录函数提升为模块级（handleMessage 是模块级函数，webview 的 /usage 等命令要用）
+  inspectUsage = inspect.inspectUsage;
+  inspectContext = inspect.inspectContext;
+  inspectPermissions = inspect.inspectPermissions;
+  inspectMcp = inspect.inspectMcp;
+  inspectHooks = inspect.inspectHooks;
+  inspectDebug = inspect.inspectDebug;
+  listCommandsForWebview = listCommands;
+  listOutputStylesForWebview = listOutputStyles;
+  readTrustedDirsFn = readTrustedDirs;
+  untrustDirFn = untrustDir;
 
   // ★ 多根沙箱：注册工作区所有文件夹 → core 的 resolveSafePath 放行「落在任一文件夹内」的绝对路径，
   //   仅拦截逃出整个工作区的路径。多根工作区下 agent 可直接读写任意项目，不再被锁死在 folder[0]。
@@ -466,6 +548,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：重载后恢复，杜绝碎片化新会话。
     getPersistedSessionId: () => context.workspaceState.get<string | undefined>("deepseekerCode.activeSessionId"),
     setPersistedSessionId: (id) => { void context.workspaceState.update("deepseekerCode.activeSessionId", id ?? undefined); },
+    // ★ 引擎就绪闸门：后台 initEngine 未完成时提示一句再等（MCP 工具/自定义命令注入后才跑 agent）。
+    waitEngineReady: async () => {
+      if (engineSettled) return;
+      deliver({ type: "info", text: "⏳ 引擎加载中（MCP/skills/commands）…完成后自动继续。" });
+      await waitEngine();
+    },
   };
   host = new ChatHost(callbacks);
   const localeCfg = cfg.get<string>("locale");
@@ -564,16 +652,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     includeProject = true;
   }
 
-  // —— 8. 后台初始化引擎（不阻塞命令注册；失败仅提示） ——
-  console.log("DeepSeeker-Code：引擎初始化中…（MCP/skills/agents/commands 加载）");
-  try {
-    engineDispose = await initEngine(agentTools, { includeProject });
-    console.log("✓ DeepSeeker-Code 引擎就绪（MCP/skills/agents 已注入）");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("❌ DeepSeeker-Code 引擎初始化失败：" + msg);
-    void vscode.window.showErrorMessage(`DeepSeeker-Code 引擎初始化失败（面板仍可用，但 MCP/skills 等工具缺失）：${msg}`);
-  }
+  // —— 8. 后台初始化引擎（★ 治启动顿挫：不再 await 阻塞 activate） ——
+  //   原 await initEngine（MCP spawn+握手常达秒级）期间 activate 未完成 → contributes.commands 的
+  //   隐式 onCommand 激活要等 activate promise resolve 才派发 → 点 sparkle 图标后面板迟迟不弹（顿挫主因）。
+  //   改 UI 先行：activate 立即返回、面板秒开；引擎后台加载，首轮提交经 host.waitEngineReady 闸门等待；
+  //   加载完成后把自定义斜杠命令目录推给 webview 合并进 / 菜单。
+  console.log("DeepSeeker-Code：引擎后台初始化中…（MCP/skills/agents/commands 加载）");
+  let resolveEngine: () => void = () => {};
+  const engineReadyPromise = new Promise<void>((r) => { resolveEngine = r; });
+  waitEngine = () => engineReadyPromise;
+  void (async () => {
+    try {
+      engineDispose = await initEngine(agentTools, { includeProject });
+      console.log("✓ DeepSeeker-Code 引擎就绪（MCP/skills/agents 已注入）");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("❌ DeepSeeker-Code 引擎初始化失败：" + msg);
+      void vscode.window.showErrorMessage(`DeepSeeker-Code 引擎初始化失败（面板仍可用，但 MCP/skills 等工具缺失）：${msg}`);
+    } finally {
+      engineSettled = true;
+      resolveEngine();
+      // 命令目录就绪后推给 webview（panel 未开则跳过——ready 流程会重推）
+      if (panel) void panel.webview.postMessage({ type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
+    }
+  })();
 
   console.log("✓ DeepSeeker-Code 插件已激活（工作区：" + workspaceRoot + "）");
 }

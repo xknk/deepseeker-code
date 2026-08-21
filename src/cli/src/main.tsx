@@ -172,10 +172,12 @@ const main = async (): Promise<void> => {
         import("@/config/index.ts"),
     ]);
 
-    // ★ 初始化引擎（MCP/hooks/permissions/skills/agents/projectGuide/commands），返回 dispose。
+    // ★ 引擎后台初始化（不 await）：MCP spawn+握手通常最慢（秒级），此前 await 后才清屏渲染，
+    //   用户盯着 PowerShell 残留画面干等——启动顿挫主因。改 UI 先行：立即清屏+横幅+渲染可交互界面，
+    //   引擎就绪前首次提交/斜杠命令在 App 内 gate（await engineReady），自定义命令目录也就绪后再列。
     //   includeProject 由信任闸门决定：已信任/已确认 → 加载项目级配置；未信任 → 跳过（安全默认）。
-    const dispose = await initEngine(agentTools, { includeProject });
-    const onExit = (): void => { dispose(); };
+    const engineReady = initEngine(agentTools, { includeProject });
+    const onExit = (): void => { void engineReady.then((dispose) => dispose()); };
     process.on("SIGINT", () => { onExit(); process.exit(0); });
     process.on("SIGTERM", () => { onExit(); process.exit(0); });
 
@@ -212,7 +214,7 @@ const main = async (): Promise<void> => {
     }
 
     const { waitUntilExit } = render(
-        <App resumeSessionId={resumeId} initialPlanMode={args.plan} initialAutoMode={args.auto} initialIncludeProject={includeProject} />,
+        <App resumeSessionId={resumeId} initialPlanMode={args.plan} initialAutoMode={args.auto} initialIncludeProject={includeProject} engineReady={engineReady} />,
         // exitOnCtrlC:false：Ctrl+C 交由 App useInput 处理（统一退出/中止语义）；
         // patchConsole:false：避免 console 劫持与全屏重绘叠加闪屏。
         { exitOnCtrlC: false, patchConsole: false },

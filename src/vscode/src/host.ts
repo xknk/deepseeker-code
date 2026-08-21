@@ -37,6 +37,9 @@ export interface ChatHostCallbacks {
   /** 持久化活动会话 id（workspaceState）：重载后恢复，杜绝重载新建碎片 session。 */
   getPersistedSessionId?: () => string | undefined;
   setPersistedSessionId?: (id: string | null) => void;
+  /** 引擎就绪闸门：extension 后台跑 initEngine（MCP/skills/commands），首次提交前等待注入完成。
+   *  缺省立即返回（引擎同步初始化的旧形态/测试场景）。 */
+  waitEngineReady?: () => Promise<void>;
 }
 
 /** 计划审批决策（与 CLI PlanResolution 同构）。 */
@@ -161,6 +164,10 @@ export class ChatHost {
   get currentAutoMode(): boolean {
     return this.autoMode;
   }
+  /** 活动会话 id（extension 的 /usage /debug 等观测命令读 trace 用）。 */
+  get activeSessionId(): string | null {
+    return this.sessionId;
+  }
 
   /** 事件 sink：先截获 plan 两阶段所需信号 + 挂起交互（approval/question/plan）暂存，再原样转发给 UI。
    *  暂存的挂起交互供 collectPendingUI 在 panel 重建后重广播，杜绝关 tab 后审批死锁。 */
@@ -245,6 +252,9 @@ export class ChatHost {
 
   /** 单轮 runAgent（经 handleUnifiedChat）。planMode=true=只读调研；autoApprove=true=本轮免审批。 */
   private async runOnce(body: string, planMode: boolean, autoApprove = false): Promise<void> {
+    // ★ 引擎就绪闸门：activate 已改为后台 initEngine（UI 先行治启动顿挫），MCP 工具/自定义命令
+    //   注入完成前不跑 agent（否则首轮缺 mcp__* 工具）。闸门 promise 永不 reject（失败也已放行）。
+    await this.callbacks.waitEngineReady?.();
     const ac = new AbortController();
     this.currentAc = ac;
     this.setBusy(true);
@@ -512,6 +522,13 @@ export class ChatHost {
   }
   setLocale(l: "zh" | "en"): void {
     this.locale = l;
+  }
+  /** 输出风格（/output-style 命令用）：undefined=清除（默认 persona）。 */
+  setOutputStyle(name: string | undefined): void {
+    this.outputStyle = name;
+  }
+  get currentOutputStyle(): string | undefined {
+    return this.outputStyle;
   }
 
   private setBusy(b: boolean): void {

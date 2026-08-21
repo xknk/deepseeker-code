@@ -2,7 +2,7 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
