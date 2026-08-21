@@ -26,7 +26,9 @@ export const SlashMenu = ({ entries, selectedIndex, cols }: Props): React.ReactE
     return (
         <Box flexDirection="column" borderStyle="round" borderColor={THEME.coral} paddingX={1} paddingY={0} marginTop={1}>
             {visible.map((e, i) => {
-                const active = i === selectedIndex;
+                // ★ i 是视口内局部下标（0..MAX_ROWS-1），selectedIndex 是全列表下标——
+                //   滚动到第二页后 start>0，必须 +start 换算，否则高亮/❯ 光标消失。
+                const active = i + start === selectedIndex;
                 const desc = e.description.length > descMax ? `${e.description.slice(0, descMax - 1)}…` : e.description;
                 const gap = Math.max(1, cmdW - e.name.length);
                 return (
