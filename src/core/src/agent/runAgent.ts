@@ -86,7 +86,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         const m = (message as any[]).find((x) => x?.role === "user");
         return typeof m?.content === "string" ? m.content : "";
     })();
-    const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode });
+    const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode, noEarlyFinal: !!options.noEarlyFinal });
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 

@@ -6,17 +6,20 @@
  *
  *  设计契约：
  *  - 不做任何面向模型/用户的「文案包装」（🎉 汇报框、🚨 同步通知等留给调用方，spawn_agent 保持原输出不变）；
+ *  - 支持续跑：spec.resumeSessionId 指向既有子会话时经 lineage 归属校验后复用其磁盘历史
+ *    （fork 后跨时间线续跑同理），缺省新建；
  *  - 返回 { ok, output, sessionId, manifestName } 纯数据 —— 成功 output 为 final 文本，失败 output 为 ❌ 错误串；
  *  - 深度 / manifest / 崩溃 / 中止 / 外层异常均以 ok:false + 错误串表达，调用方据此决定如何呈现与聚合。
  */
 import { runAgent } from "@/agent/runAgent.ts";
 import { buildContextMessages } from "@/session/content.ts";
-import { appendMessage } from "@/session/transcript.ts";
+import { appendMessage, readTranscriptLines } from "@/session/transcript.ts";
 import { createUUID } from "@/common/index.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { CustomTool, MAX_AGENT_DEPTH, ToolContext } from "@/tool/type.ts";
 import { getAgent } from "@/agents/registry.ts";
 import { dispatch } from "@/tool/hooks.ts";
+import { ownerCanApprove } from "@/session/lineage.ts";
 
 /**
  * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）
@@ -36,7 +39,24 @@ export interface SubagentSpec {
     name?: string;
     /** 角色/专长补充（可选，声明式 agent 自带 role 时作补充，不覆盖 manifest.body）。 */
     role?: string;
+    /**
+     * 续跑目标：此前 spawn_agent 返回的 agent_id。给出则复用该子会话的磁盘历史（完整上下文恢复，
+     * 不随主会话 fork 回滚——fork 只分叉对话，子 Agent 进展以磁盘现状为准）；缺省新建。
+     * 归属校验经 session/lineage.ts（字符串派生链 ∪ fork 链），禁止跨会话复活他人子 Agent。
+     */
+    resumeSessionId?: string;
 }
+
+/** 在飞子 agent 会话 ID 集（同进程并发护栏：同 ID 二次续跑会交叉写坏 transcript，直接拒绝）。 */
+const activeSubagents = new Set<string>();
+
+/** 续跑子系统词补充：父级对子会话历史零记忆（fork 时间线里此前的工具返回是孤儿占位文案），
+ *  责成子 agent 先回顾进展再继续，汇报也要先概述（父级全靠汇报对齐）。 */
+const RESUME_NOTE = [
+    `\n# 【续跑说明】`,
+    `你此前的工作历史已完整恢复到本次上下文（磁盘最新状态，可能比你上次记忆更新）。`,
+    `请先对照历史简要回顾已完成 / 未完成部分，再继续执行新任务；最终汇报也请先概述此前进展。`,
+].join("\n");
 
 /** runSubagent 的返回：纯数据，调用方据此包装文案 / 聚合。 */
 export interface SubagentResult {
@@ -63,7 +83,8 @@ export const runSubagent = async (
     ctx: ToolContext,
     getGlobalTools: () => CustomTool[],
 ): Promise<SubagentResult> => {
-    const { task, name, role } = spec;
+    const { task, name, role, resumeSessionId } = spec;
+    const resuming = typeof resumeSessionId === "string" && resumeSessionId.length > 0;
 
     // ★ 深度熔断：达到 MAX_AGENT_DEPTH 禁止继续向下嵌套（与原 spawn_agent 一致）
     if (ctx.depth >= MAX_AGENT_DEPTH) {
@@ -74,7 +95,41 @@ export const runSubagent = async (
         };
     }
 
-    const subSessionId = `${ctx.sessionId}__sub__${createUUID()}`;
+    // ★ 续跑前置校验（形态 / 归属 / 并发 / 存在性），全部通过才允许复用既有子会话；任一失败即拒，不静默降级为新建
+    if (resuming) {
+        const target = resumeSessionId!;
+        if (!target.includes("__sub__")) {
+            return {
+                ok: false,
+                output: `❌ [续跑失败]：${target} 不是子 Agent 会话 ID（应形如 <会话>__sub__<uuid>，来自此前 spawn_agent 返回的 agent_id）。`,
+                sessionId: "",
+            };
+        }
+        if (!ownerCanApprove(target, ctx.sessionId)) {
+            return {
+                ok: false,
+                output: `❌ [续跑失败]：子会话 ${target} 不属于当前会话（及其 fork 血缘），禁止跨会话复活。请核对 agent_id 或改用新建派生。`,
+                sessionId: "",
+            };
+        }
+        if (activeSubagents.has(target)) {
+            return {
+                ok: false,
+                output: `❌ [续跑失败]：子 Agent ${target} 正在执行中，禁止并发续跑同一子会话（会交叉写坏转录）。请等待其完成后再试。`,
+                sessionId: "",
+            };
+        }
+        const existing = await readTranscriptLines(target);
+        if (existing.length === 0) {
+            return {
+                ok: false,
+                output: `❌ [续跑失败]：子会话 ${target} 的转录不存在或为空，无法续跑。请改用新建派生。`,
+                sessionId: "",
+            };
+        }
+    }
+
+    const subSessionId = resuming ? resumeSessionId! : `${ctx.sessionId}__sub__${createUUID()}`;
     const parentSystemPrompt = ctx.parentSystemPrompt || '';
 
     // ★ 声明式子 Agent：name 显式给出 → 按 manifest 声明加载；未命中 → 显式报错（不静默回退）
@@ -87,8 +142,9 @@ export const runSubagent = async (
         };
     }
 
-    // ★ 子系统词：声明式 agent 用其 manifest.body；否则用精炼的默认模板（防上下文轰炸）
-    const subSystem = manifest
+    // ★ 子系统词：声明式 agent 用其 manifest.body；否则用精炼的默认模板（防上下文轰炸）；
+    //   续跑时追加续跑说明（系统词每次重建不入盘，历史消息都在 transcript 里，不冲突）
+    const subSystem = (manifest
         ? [
             `# 子 Agent 身份：${manifest.name}`,
             manifest.body,
@@ -108,7 +164,7 @@ export const runSubagent = async (
             `你直接共享并操作本地文件系统。当你对文件全量写入或局部修改时，必须确保操作的绝对精准。完成指定子任务后，请使用最终的文本总结向父级 Agent 交付结果。`,
             `\n# 【继承的全局代码规范】`,
             parentSystemPrompt,
-        ].join("\n");
+        ].join("\n")) + (resuming ? RESUME_NOTE : "");
 
     // ★ 工具表：manifest.tools 非空 → 显式 allowlist（替代 deny-list）；否则回退 deny-list（向后兼容）
     //   P1-MCP dispatcher 兼容：manifest 声明 mcp__*（旧逐工具名）、mcp_call 或 mcp_list_tools 时，
@@ -120,8 +176,9 @@ export const runSubagent = async (
             || (wantsMcp && (t.function.name === 'mcp_call' || t.function.name === 'mcp_list_tools')))
         : allTools.filter((t: any) => !SUBAGENT_DENYLIST.has(t.function.name));
 
-    console.log(`🐣 派生子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
+    console.log(`${resuming ? "🔁 续跑" : "🐣 派生"}子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}][${subSessionId}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
 
+    activeSubagents.add(subSessionId); // 同 ID 并发护栏（新建 UUID 天然不撞，续跑同会话在此拦住）
     try {
         // 构建并初始化子智能体的独立消息队列
         const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem);
@@ -144,6 +201,7 @@ export const runSubagent = async (
             onUIEvent: ctx.onUIEvent, // ★ 必须透传：否则子 agent 调用需审批工具时前端收不到弹窗，waitForUserApproval 永久挂起（死锁）
             requestApproval: ctx.requestApproval, // ★ 同步透传宿主审批钩子，子 agent 高危工具仍走同一审批通道
             permissionMode: ctx.permissionMode, // ★ P1-6 透传：子 agent 工作区文件编辑也走 auto 分类器
+            noEarlyFinal: true, // ★ 子 agent final 是交付父级的汇报，EARLY_FINAL 误推一轮纯浪费；父可经续跑纠错
             model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
         };
 
@@ -182,5 +240,7 @@ export const runSubagent = async (
         return result ?? { ok: false, output: `❌ [派生执行失败]: 未知错误`, sessionId: subSessionId, manifestName: manifest?.name };
     } catch (error: any) {
         return { ok: false, output: `❌ [派生执行失败]: ${error.message}`, sessionId: subSessionId, manifestName: manifest?.name };
+    } finally {
+        activeSubagents.delete(subSessionId); // 释放并发护栏（正常/中止/崩溃均走此）
     }
 };

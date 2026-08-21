@@ -168,6 +168,9 @@ export const forkSession = async (
         rollingSummary,
         consecutiveFailures: 0,
         title: `${srcTitle}(分叉)`.slice(0, 200),
+        // ★ fork 血缘元数据：新 ID 是纯 UUID（字符串上无痕），血缘回溯全靠此字段
+        //   （session/lineage.ts 消费：审批网关归属 / 子 Agent 续跑归属）。
+        forkedFrom: sourceId,
         // ★ 校准数据透传：fork 首轮压缩判定不从 1.4 重来（纯收益，语义同源会话续接）
         calibRatio: srcRolling.calibRatio,
         lastRealPromptTokens: srcRolling.lastRealPromptTokens,

@@ -29,31 +29,38 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
         type: "function",
         function: {
             name: "spawn_agent",
-            description: "创建一个拥有独立执行环境的子 agent 处理隔离的特定子任务，子任务完成后自动汇总改动点与结论返回。可通过 name 指定声明式子 Agent（见系统提示词【可用子 Agent 目录】）以套用其专长系统词/工具白名单/model；不传 name 走默认通用子 agent。",
+            description: "创建一个拥有独立执行环境的子 agent 处理隔离的特定子任务，子任务完成后自动汇总改动点与结论返回。可通过 name 指定声明式子 Agent（见系统提示词【可用子 Agent 目录】）以套用其专长系统词/工具白名单/model；不传 name 走默认通用子 agent。支持续跑：传 resume_session_id（此前返回的 agent_id）复用该子 Agent 的完整历史记忆，适合追问、继续未完成的任务。",
             parameters: {
                 type: "object",
                 properties: {
-                    task: { type: "string", description: "交给子 agent 的具体微观任务描述（如 '编写 Button 组件的单元测试'）" },
+                    task: { type: "string", description: "交给子 agent 的具体微观任务描述（如 '编写 Button 组件的单元测试'）；续跑时为新指令（如 '继续完成剩余用例'）" },
                     name: { type: "string", description: "声明式子 Agent 名称（须与系统提示词中【可用子 Agent 目录】一致）。提供时按其声明加载系统词/工具白名单/model；不提供则走默认通用子 agent。" },
                     role: { type: "string", description: "子 agent 的角色/专长（可选，如 '测试专家'、'重构先锋'）。声明式 agent 自带 role 时作补充。" },
+                    resume_session_id: { type: "string", description: "续跑既有子 Agent：传此前 spawn_agent 返回的 agent_id，其磁盘上的历史与记忆将完整恢复。注意：子 Agent 状态不随主会话 fork 回滚——fork 只分叉对话，续跑拿到的是子会话磁盘最新状态。缺省则新建子 Agent。" },
                 },
                 required: ["task"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { task: string; name?: string; role?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：强制约束返回值类型
+            async execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：强制约束返回值类型
                 if (!ctx) return "❌ [派生失败]：spawn_agent 缺少必须的智能体运行上下文。";
 
-                // ★ 派生内核：深度 / manifest / 子系统词 / 工具收权 / runAgent 驱动 / 异常熔断均在内
-                const res = await runSubagent(args, ctx, getGlobalTools);
+                // ★ 派生内核：深度 / manifest / 子系统词 / 工具收权 / runAgent 驱动 / 异常熔断 / 续跑校验均在内
+                //   （协议层 snake_case → spec 层 camelCase 映射）
+                const res = await runSubagent(
+                    { task: args.task, name: args.name, role: args.role, resumeSessionId: args.resume_session_id },
+                    ctx,
+                    getGlobalTools,
+                );
 
-                // 失败（深度熔断 / manifest 未命中 / 崩溃 / 中止 / 外层异常）：原样透传 ❌ 错误串
+                // 失败（深度熔断 / manifest 未命中 / 崩溃 / 中止 / 续跑校验 / 外层异常）：原样透传 ❌ 错误串
                 if (!res.ok) return res.output;
 
                 // 💡 成功：【状态同步防护】注入高亮醒目的硬性契约提示
                 // 强迫父 Agent 在拿到报告的第一时间，如果需要继续操作文件，必须先调用 read_file 刷新其对代码的"视网膜缓存"
                 return [
-                    `🎉 [子 Agent 执行完毕] 派生子任务汇报如下：\n`,
+                    `🎉 [子 Agent 执行完毕${args.resume_session_id ? "·续跑" : ""}] 派生子任务汇报如下：\n`,
+                    `🆔 agent_id: ${res.sessionId}\n（需要继续该子 Agent 的任务或追问时，调用 spawn_agent 传 resume_session_id=${res.sessionId}，其历史记忆完整保留）\n`,
                     `==================================================\n`,
                     res.output,
                     `\n==================================================\n`,

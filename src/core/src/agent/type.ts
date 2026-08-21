@@ -68,6 +68,9 @@ export interface RunAgentOptions {
     archivedMessageCount?: number,
     /** 计划模式：仅允许只读/研究类工具 + exit_plan_mode，先调研产出方案、经用户审批后再实现（见 agent/planMode.ts）。 */
     planMode?: boolean,
+    /** 关闭 EARLY_FINAL 早收尾守护（子 agent 用）：final 是交付父级的汇报，「轮次少且无完成声明」是常态而非病理，
+     *  误推一轮 = 白烧一次全上下文调用；父级可经 spawn_agent 续跑纠错。TOOL_DIGEST/PHANTOM 不受影响仍拦。 */
+    noEarlyFinal?: boolean,
     /** 权限模式（CLI `/auto` 或 `--auto`）：auto=工作区内文件编辑（edit/write/create）由辅助模型分类器智能放行、高危/异常转人工；default=常规人工审批。见 tool/autoPermission.ts。 */
     permissionMode?: PermissionMode,
     /** 思考等级（运行时覆盖，缺省回退全局 env）：off=关闭 / high=常规 / max=深度（映射见 llm/model.ts）。 */

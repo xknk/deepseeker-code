@@ -100,13 +100,18 @@ const REPEAT_GREP_TEXT = (q: string, n: number): string =>
  *   false 表示放行真实收尾（主循环 yield final）。
  * - noteToolCall()：本轮有 tool_calls（实质推进）时调用，重置空响应预算。
  */
-export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: boolean } = {}): {
+export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: boolean; noEarlyFinal?: boolean } = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
     noteToolCall: (round: number, toolCalls?: any[]) => void;
 } => {
     const firstPrompt = opts.firstPrompt ?? "";
     const planMode = !!opts.planMode;
+    // ★ 子 agent 关闭 EARLY_FINAL（noEarlyFinal）：其 final 是交付父级的汇报（一锤子买卖后由父审阅），
+    //   「轮次少且无完成声明词」在微观任务上是常态而非病理——误推一轮 = 白烧一次全上下文调用。
+    //   纠错责任上移：父级觉得汇报草率可经 spawn_agent 续跑追问（比每次派生交税便宜）。
+    //   TOOL_DIGEST / PHANTOM 不受此开关影响（空手/空回复是正确性问题，仍拦）。
+    const noEarlyFinal = !!opts.noEarlyFinal;
     let phantomRetries = 0;
     let phantomPending: NudgeMsg | null = null;
     let earlyFinalNudges = 0;
@@ -165,7 +170,7 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
                 return true;
             }
             // EARLY_FINAL：有 content 但轮次极少且无完成声明（疑似拿部分结果草率收尾）
-            if (text !== "" && round <= EARLY_FINAL_TURN_THRESHOLD
+            if (!noEarlyFinal && text !== "" && round <= EARLY_FINAL_TURN_THRESHOLD
                 && earlyFinalNudges < EARLY_FINAL_MAX && !looksComplete(finalText)) {
                 earlyFinalNudges++;
                 earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n${EARLY_FINAL_TEXT(round)}` };

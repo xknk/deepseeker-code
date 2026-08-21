@@ -8,6 +8,7 @@
  *    resolve 时必须 sessionId 匹配才放行 —— 拦截「持 token 的 A 会话跨会话批准 B 会话工具」的越权审批。
  */
 import type { ApprovalDecision } from "@/host/type.ts";
+import { ownerCanApprove } from "@/session/lineage.ts";
 
 type ApprovalResolver = (decision: ApprovalDecision) => void;
 type PendingApproval = { sessionId: string; resolver: ApprovalResolver };
@@ -58,9 +59,11 @@ export const resolveUserApprovalLock = (sessionId: string, toolsId: string, deci
     const entry = pendingLocks.get(toolsId);
     if (!entry) return false;
     // ★ 跨会话审批熔断：A 会话的请求不得被以 B 会话身份批准。
-    //   但允许父会话批准其子 agent（subSessionId 形如 `${parent}__sub__${uuid}`）的工具——
-    //   子 agent 派生自同一用户会话，前端若回传父 sessionId（而非 sub）也不应死锁。
-    const isOwner = entry.sessionId === sessionId || entry.sessionId.startsWith(`${sessionId}__sub__`);
+    //   但允许会话批准其血缘内的子 agent（subSessionId 形如 `${parent}__sub__${uuid}`）的工具——
+    //   子 agent 派生自同一用户会话，前端若回传父 sessionId（而非 sub）也不应死锁；
+    //   血缘含 fork 链（state.forkedFrom）：fork 出的新会话可批准原时间线子 agent（如续跑旧子会话），
+    //   语义单一真相见 session/lineage.ts，此处禁止手写前缀匹配。
+    const isOwner = ownerCanApprove(entry.sessionId, sessionId);
     if (!isOwner) return false;
 
     entry.resolver(decision); // ✨ 激活底层被 Await 挂起的代码块
