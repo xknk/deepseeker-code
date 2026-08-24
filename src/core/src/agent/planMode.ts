@@ -20,6 +20,7 @@ export const PLAN_ALLOWED_TOOLS = new Set<string>([
     "search_grep", "glob",
     "get_git_diff", "git_status", "git_log", "inspect_dependencies",
     "get_diagnostics", "goto_definition", // ★ P0-A 补漏：LSP 导航/诊断恰是调研阶段最需要的（原白名单漂移漏登记，schema 档与 runtime 档共用此表）
+    "recall", // 只读检索本会话历史（长调研中早前轮次可能已被压缩归档，调研阶段恰是 recall 主场景）
     "web_fetch", "web_search", // 只读研究类（虽为 DANGER 但不写本地状态；仍走各自审批）
 ]);
 

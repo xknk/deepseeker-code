@@ -87,6 +87,7 @@ export const readMessages = async (sessionId: string): Promise<OpenAI.Chat.ChatC
 
 type MessageWithId = OpenAI.Chat.ChatCompletionMessageParam & {
     id?: string;
+    ts?: string; // 落盘时刻（recall staleness 校验基准；cleanMsg 回传模型前剥离）
     sessionId: string;
     is_compaction_checkpoint?: boolean, // 该条消息是否为摘要
     last_compressed_id?: string, // 最后压缩id
@@ -121,7 +122,9 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
 
         // 用展开保留全部字段（含 tool_calls / tool_call_id），不要手动列举字段以免遗漏配对键
         const { sessionId, ...rest } = entry;
-        const line = { id: createUUID(), ...rest };
+        // ★ ts 盖章：recall 检索的 staleness 校验基准（观察时刻 vs 文件 mtime）。事件行有 ts、消息行原先没有，
+        //   此处统一补齐；cleanMsg 发往模型前剥离，不污染 API 消息体。
+        const line = { id: createUUID(), ts: new Date().toISOString(), ...rest };
 
         const p = getTranscriptPath(sessionId);
         const payload = JSON.stringify(line) + "\n";

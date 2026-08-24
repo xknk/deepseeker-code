@@ -102,9 +102,11 @@ export function microcompactTextContent(raw: string): string {
  * @description: 工具返回消息超过最大值时，去除中间留头尾信息（自适应预算分配版）
  * @param {string} result 原始工具返回内容
  * @param {number} maxChars 最大允许字符数（选填，缺省时取 appConfig.MAX_TOOL_RESULT_CHARS）
+ * @param {string} sidecarNote 侧车存档提示（选填）：toolExecution 已把截断前全文落盘时传入，
+ *   拼进省略标记行，告知模型可用 recall 的 with_full 取回——截断不再是信息单方面丢失。
  * @return {string} 整形后的文本内容
  */
-export const truncateToolResult = (result: string, maxChars?: number): string => {
+export const truncateToolResult = (result: string, maxChars?: number, sidecarNote?: string): string => {
     // 默认上限取 appConfig.MAX_TOOL_RESULT_CHARS。此前用 (MAX_HISTORY_TOKENS*0.06)*4.5 反推字符，
     // 既绕过了该配置项（使其沦为死配置、与 web 等工具的 16000 口径不一致），
     // 又依赖“1 token≈4.5 字符”的英文经验——对中文（≈1 字符/token）严重失真，已废弃。
@@ -117,8 +119,9 @@ export const truncateToolResult = (result: string, maxChars?: number): string =>
     const tail = newResult.slice(-half);
     const totalLines = newResult.split("\n").length;
     const omitted = Math.max(0, totalLines - head.split("\n").length - tail.split("\n").length);
+    const note = sidecarNote ? `；${sidecarNote}` : '';
 
-    return [head, "", `…(已省略中间约 ${omitted} 行，共 ${totalLines} 行)…`, "", tail].join("\n");
+    return [head, "", `…(已省略中间约 ${omitted} 行，共 ${totalLines} 行${note})…`, "", tail].join("\n");
 }
 
 
@@ -149,12 +152,108 @@ export const truncateApprovalDetail = (detail: string, maxChars = 2000): string 
  * @return {*}
  */
 export const compactBatch = async (batch: Msg[], signal?: AbortSignal): Promise<string> => {
+    // ★ prompt 三要素：概要骨架（任务/决策/文件/进度）+ 实体保留（文件名/函数名/报错关键词——
+    //   recall 检索的命中词来源）+ 不确定感显式化（细节不臆测、标注已归档，逼模型需要精确内容时去
+    //   recall 检索，而不是基于模糊摘要直接行动）。
     const resp = await chatWithModelWithSummary(
-        [...batch, { role: 'user', content: '用一行话概括以上对话与工具调用：任务目标、关键决策、动过的文件、当前进度。不要调用工具。' }],
+        [...batch, { role: 'user', content: '用一行话概括以上对话与工具调用：任务目标、关键决策、动过的文件、当前进度。必须原样保留关键实体名（文件路径、函数/类名、报错关键词）以便后续检索。对记不准的细节不要臆测，标注"(细节已归档)"即可。不要调用工具。' }],
         [],
         { signal }
     );
     return `- ${resp.choices[0].message.content || ''}`;
+}
+
+// ==================== 滚动摘要槽 · 双段结构（实体索引 + 叙述） ====================
+//
+// ★ 设计动机：摘要自收敛（摘要的摘要）几乎必然丢实体名，而实体名恰是 recall 检索的查询词来源——
+//   索引系统会在最需要它的超长会话里率先失效。故摘要槽分两段分别治理：
+//   · ⟦DSC:ARCHIVE-INDEX⟧ 实体索引：代码侧正则从被压缩原文【确定性提取】，只去重合并、永不送 LLM
+//     压缩——检索索引无损是硬约束；
+//   · ⟦DSC:ARCHIVE-NOTES⟧ 叙述：LLM 生成的行式摘要，可自由追加与自收敛。
+//   槽格式（parseSummarySlot 容忍无标记的旧格式——整体当叙述，实体索引为空，向后兼容）：
+//     ⟦DSC:ARCHIVE-INDEX⟧ <实体1> | <实体2> | ...
+//     ⟦DSC:ARCHIVE-NOTES⟧
+//     - 叙述行…
+
+/** 实体索引去重后的全局上限（超限保新弃旧：近期的路径/符号对后续检索更有价值） */
+const ARCHIVE_INDEX_MAX_ENTRIES = 120;
+/** 单批次提取的实体数上限（防一个巨型工具结果把索引撑爆） */
+const ARCHIVE_INDEX_BATCH_CAP = 60;
+
+/**
+ * 从待压缩消息中确定性提取检索实体：文件路径（含分隔符+扩展名）与反引号/引号包裹的强调词。
+ *  纯代码提取（零 token、零 LLM 依赖），提取不到就算了——索引是尽力而为的检索辅助，不是承诺。
+ */
+export const extractArchiveEntities = (batch: Msg[]): string[] => {
+    let text = '';
+    for (const m of batch) {
+        if (m.content) text += ` ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
+        const calls = (m as any).tool_calls;
+        if (Array.isArray(calls)) for (const c of calls) text += ` ${c?.function?.name ?? ''} ${c?.function?.arguments ?? ''}`;
+    }
+    const found: string[] = [];
+    const seen = new Set<string>();
+    const push = (raw: string) => {
+        const s = raw.trim();
+        if (!s || s.length < 3 || s.length > 60 || seen.has(s)) return;
+        seen.add(s);
+        found.push(s);
+    };
+    // 文件路径：须含路径分隔符且带扩展名（裸词如 node.js 的散文误报不收；示例避免 glob 星号写法）
+    for (const m of text.match(/(?:[A-Za-z]:)?[\w.\-]+(?:[/\\][\w.\-]+)+\.[A-Za-z0-9]{1,6}/g) ?? []) push(m);
+    // 反引号包裹的强调词（模型自己标注的实体，置信度高）
+    for (const m of text.match(/`([^`\n]{2,48})`/g) ?? []) push(m.slice(1, -1));
+    return found.slice(0, ARCHIVE_INDEX_BATCH_CAP);
+}
+
+/** 解析摘要槽为 { index, notes }。无标记的旧格式（或空槽）→ 全部当叙述，索引为空。 */
+export const parseSummarySlot = (content: string): { index: string[]; notes: string } => {
+    const raw = content ?? '';
+    const idxMark = raw.indexOf('⟦DSC:ARCHIVE-INDEX⟧');
+    const notesMark = raw.indexOf('⟦DSC:ARCHIVE-NOTES⟧');
+    if (idxMark === -1 || notesMark === -1 || notesMark < idxMark) return { index: [], notes: raw };
+    const indexText = raw.slice(idxMark + '⟦DSC:ARCHIVE-INDEX⟧'.length, notesMark);
+    // 标记行内嵌使用指引（首行，供模型阅读），实体列表自第二行起按 | 分隔——指引不得混入实体元素
+    const entityText = indexText.includes('\n') ? indexText.slice(indexText.indexOf('\n') + 1) : '';
+    const notes = raw.slice(notesMark + '⟦DSC:ARCHIVE-NOTES⟧'.length).replace(/^\n+/, '');
+    const index = entityText.split('|').map(s => s.trim()).filter(Boolean);
+    return { index, notes };
+}
+
+/** 合并一轮新归档：实体索引去重合并（新实体优先、封顶保新弃旧），叙述行追加。 */
+export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[]): string => {
+    const { index, notes } = parseSummarySlot(oldContent);
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const e of [...newEntities, ...index]) {
+        if (!e || seen.has(e)) continue;
+        seen.add(e);
+        merged.push(e);
+        if (merged.length >= ARCHIVE_INDEX_MAX_ENTRIES) break;
+    }
+    const newNotes = notes ? `${notes}\n${noteLine}` : noteLine;
+    return [
+        '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
+        merged.join(' | '),
+        '⟦DSC:ARCHIVE-NOTES⟧',
+        newNotes,
+    ].join('\n');
+}
+
+/**
+ * 摘要自收敛（仅叙述段）：把整个旧槽作为上下文送摘要模型，但输出只【替换】叙述段——
+ *  实体索引段原样保留，永不被 LLM 改写（索引无损硬约束）。不经 mergeSummarySlot（那是追加语义）。
+ */
+export const compactSlotNarrative = async (slotContent: string, modelWindow: number, signal?: AbortSignal): Promise<string> => {
+    const { index } = parseSummarySlot(slotContent);
+    // 整槽（含实体索引）作为摘要上下文送出——索引给摘要模型提供实体线索；输出 '- ' 行式即为新叙述
+    const compactedNotes = await compactToLine([{ role: 'system', content: slotContent } as Msg], modelWindow, signal);
+    return [
+        '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
+        index.join(' | '),
+        '⟦DSC:ARCHIVE-NOTES⟧',
+        compactedNotes,
+    ].join('\n');
 }
 
 /**
@@ -260,13 +359,15 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         try {
             if (toCompact.length > 0) {
                 const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 获取全量的摘要
-                const old: string = summaryMsg?.content || ''; // 旧的消息摘要
-                summaryMsg.content = old ? `${old}\n${line}` : line; // 拼接新的消息摘要
-                // ★ P2 摘要自收敛：摘要只追加不自收敛会越长越大，最终侵蚀窗口、形成"摘要越大→越早
-                //   触发压缩→又追加新摘要"的怪圈。每轮压缩后若摘要自身超阈值，就地再压一次收敛。
+                // ★ 双段合并：实体索引（代码从被压缩原文确定性提取，永不送 LLM 压缩）+ 叙述（LLM 行式摘要，追加）。
+                //   索引是 recall 检索的查询词来源——旧“纯叙述槽”在自收敛后实体名必丢，检索入口随之失效。
+                summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', line, extractArchiveEntities(toCompact));
+                // ★ P2 摘要自收敛（仅叙述段）：摘要只追加不自收敛会越长越大，最终侵蚀窗口、形成"摘要越大→越早
+                //   触发压缩→又追加新摘要"的怪圈。每轮压缩后若摘要槽自身超阈值，就地再压一次收敛；
+                //   实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
                 if (estimateTokens([summaryMsg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
-                    summaryMsg.content = await compactToLine([summaryMsg], event.modelWindow, event.signal);
+                    summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal);
                 }
                 const endTime = performance.now();
 
@@ -309,7 +410,8 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 keep--;
                 continue;
             } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
-                summaryMsg.content = await compactToLine([summaryMsg], event.modelWindow, event.signal);
+                // 同样走仅叙述段自收敛（实体索引保留）
+                summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal);
                 event.messageArr.length = 0;
                 event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
                 const store = await getRollingState(event.sessionId);

@@ -94,7 +94,8 @@ export const estimateTokens = (messagesArr: Msg[]): number => {
  * @return {*}
  */
 export const cleanMsg = (m: any): Msg => {
-    const { id, sessionId, ...rest } = m;
+    // ts 为 transcript 侧元数据（recall staleness 基准），不随消息回传模型 API
+    const { id, sessionId, ts, ...rest } = m;
     return rest as Msg;
 }
 /**

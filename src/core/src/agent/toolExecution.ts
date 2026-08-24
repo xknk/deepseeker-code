@@ -19,6 +19,9 @@ import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
 import { runAutoCheck, matchCommandDeny, isReadOnlyCommand } from "@/tool/autoPermission.ts";
 import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
+import fs from "fs/promises";
+import path from "path";
+import { getSessionsDirPath } from "@/session/store.ts";
 import { PLAN_ALLOWED_TOOLS } from "./planMode.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
@@ -313,7 +316,25 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     }
     // 脱敏（verifyResult 之后、truncate 之前；只影响发往云端模型的视图）
     result = applyPrivacyMasking(matchedTool?.function?.privacyMaskingRules, calledArgs, result);
-    result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters);
+    // ★ 侧车原文存档（recall 配套）：此处 result 已脱敏、尚未截断——transcript 落盘的是截断后视图，
+    //   被去中间的原文若不另存将无处可寻。仅在确会触发截断时落盘（缓存定位、非真相源；recall 的
+    //   with_full 按需取回）。判定条件是“原始长度超预算”的超集（microcompact 只缩不涨，故截断必命中
+    //   本条件；反之可能白存一份无人引用的缓存，无害）。失败仅降级为普通截断提示，绝不阻断回灌。
+    let sidecarNote: string | undefined;
+    const truncBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
+    if (result.length > truncBudget) {
+        try {
+            const sidecarDir = path.join(getSessionsDirPath(sessionId), 'tool-outputs');
+            await fs.mkdir(sidecarDir, { recursive: true });
+            // tool_call.id 来自模型（通常形如 call_0_xxx），白名单清洗防路径注入
+            const safeId = String(toolCall.id).replace(/[^A-Za-z0-9_-]/g, '');
+            await fs.writeFile(path.join(sidecarDir, `${safeId}.txt`), result, 'utf-8');
+            sidecarNote = `完整原文已存档，recall 工具传 with_full="${toolCall.id}" 可取回`;
+        } catch (e) {
+            console.warn(`⚠️ [sidecar] 工具原文存档失败（已降级为普通截断提示）:`, e instanceof Error ? e.message : e);
+        }
+    }
+    result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters, sidecarNote);
     const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
     const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
     // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
