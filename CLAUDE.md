@@ -36,6 +36,7 @@ DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek �
 ## 架构要点
 
 - **agent 主循环**：`src/core/src/agent/runAgent.ts`（流式 `AsyncGenerator`）。硬约定：`message[0]=system`、`message[1]=summary 槽`，被 `ensureSummarySlot`/`ensureFitsWindow` 强依赖——**勿改前两个下标**，提示词注入一律追加到 `message[0].content`。
+- **压缩归档与召回**（truncate.ts / recall.ts）：摘要槽为双段结构——`⟦DSC:ARCHIVE-INDEX⟧` 实体索引由代码正则确定性提取、**永不送 LLM 压缩**（索引无损是硬约束），`⟦DSC:ARCHIVE-NOTES⟧` 叙述可自收敛；被归档消息经 `recall` 工具检索取回（文件类命中现场 stat 标 staleness）；超长工具结果在**脱敏后、截断前**落盘 `<会话目录>/tool-outputs/<tool_call_id>.txt` 侧车缓存（位置顺序是安全红线）。
 - **工具注册**：`src/core/src/tool/index.ts` 聚合 `agentTools`；新增工具在 `tool/registry/` 加文件并 `push`；工具协议见 `tool/type.ts`（`CustomTool`，含 safetyLevel/审批/锁/环境断言等）。
 - **扩展机制**：
   - Hooks：`src/core/src/hooks/`，6 类生命周期事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd），声明式配置 + 程序化注册。
