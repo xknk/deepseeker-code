@@ -50,12 +50,13 @@ describe("dumpEffectiveConfig 结构与脱敏（in-process）", () => {
         assert.equal(dump.sources.traceRetentionDays, "default");
     });
 
-    it("envVars 表：字段 → 变量名映射完整（12 项 spot check）", () => {
+    it("envVars 表：字段 → 变量名映射完整（13 项 spot check）", () => {
         const dump = dumpEffectiveConfig();
         assert.equal(dump.envVars.hookRewrite, "DEEP_SEEK_HOOK_REWRITE");
         assert.equal(dump.envVars.inboxSteering, "DEEP_SEEK_INBOX");
         assert.equal(dump.envVars.dataDir, "DEEPSEEKER_CODE_DATA_DIR");
-        assert.equal(Object.keys(dump.envVars).length, 12);
+        assert.equal(dump.envVars.runCommandAutoBgMs, "RUN_COMMAND_AUTO_BG_MS");
+        assert.equal(Object.keys(dump.envVars).length, 13);
     });
 
     it("settingsFiles：全局 = dataDir/settings.json；项目 = cwd/.deepseeker-code/settings.json；存在性现查", async () => {

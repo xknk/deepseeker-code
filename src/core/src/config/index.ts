@@ -44,6 +44,12 @@ export const appConfig = {
     /** 后台工具（isSync:false）兜底超时（ms）：超时强制收尾释放互斥锁，防 generator 卡死导致锁永久泄漏。
      *  abort 仍是主取消通道，此值仅作最后防线；默认 30min 远超合理后台任务时长，正常任务不受影响。 */
     MAX_BACKGROUND_TOOL_MS: 30 * 60 * 1000,
+    /** ★ run_command 运行时看门狗（自动转后台阈值 ms）：前台流式超过此时长仍未退出 → 进程自动收编进
+     *  后台任务注册表并返回 task_id（get_background_output / stop_background_task 接管），不再阻塞主循环、
+     *  也不杀进程。与内部空闲看门狗（RUN_COMMAND_IDLE_TIMEOUT_MS，默认 60s）共用降级路径。
+     *  env RUN_COMMAND_AUTO_BG_MS 覆盖。勿把 IDLE 调到高于 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS
+     *  （空闲分支到期会产出降级消息喂流，不会饿死 collectToolResult 的 idle 熔断）。 */
+    runCommandAutoBgMs: Number(process.env.RUN_COMMAND_AUTO_BG_MS) || 120_000,
     userWorkspaceDir: (() => {
         // 1. 获取当前 Node.js 的规范化绝对工作目录
         let cwd = process.cwd().replace(/\\/g, '/'); // 强行把 Windows 的反斜杠 \ 换成正斜杠 / 
@@ -139,6 +145,7 @@ export const ENV_SOURCES: Record<string, string> = {
     parallelSafeTools: "DEEP_SEEK_PARALLEL_SAFE_TOOLS",
     workflowConcurrency: "DEEP_SEEK_WORKFLOW_CONCURRENCY",
     workflowMaxSteps: "DEEP_SEEK_WORKFLOW_MAX_STEPS",
+    runCommandAutoBgMs: "RUN_COMMAND_AUTO_BG_MS",
     planEnforcement: "DEEP_SEEK_PLAN_ENFORCEMENT",
     mcpExposeMode: "DEEP_SEEK_MCP_EXPOSE_MODE",
     transcriptEvents: "DEEP_SEEK_TRANSCRIPT_EVENTS",

@@ -1,16 +1,20 @@
 /**
  * @file tool/registry/background.ts
- * @description 后台任务工具集（自管理进程注册表，方案 A，不动 runAgent 执行模型）：
+ * @description 后台任务工具集（自管理进程注册表）：
  *  - run_in_background（DANGER，spawn detached 常驻进程，立即返回 task_id 不阻塞）
- *  - get_background_output（SAFE，读取最近日志 + 运行状态/退出码）
+ *  - get_background_output（SAFE，读取最近日志 + 运行状态/退出码，wait_seconds 阻塞等待退出）
  *  - stop_background_task（MUTATION，按 task_id 跨平台终止进程树）
+ *  - adoptRunningProcess（框架 API，非工具）：run_command 前台超时自动转后台时收编在跑进程，
+ *    无锁、不占 isSync:false 通道——降级任务的退出码语义由消息文本承载（不伪造哨兵）。
  *
  *  设计要点：
- *  1) isSync 仍为 true——execute 内 spawn 后立即返回 task_id，框架无需 isSync:false 分支；
- *     isSync:false / exclusiveLock 的原生挂起语义留作后续硬化（见 工具扩充计划.md）。
+ *  1) run_in_background 为 isSync:false——execute 返回 AsyncGenerator，首个 yield 立即返回
+ *     task_id，generator 挂起承载进程生命周期（结束/中止 → attachTaskLifecycle 收尾 → 释放互斥锁）。
  *  2) 注册表为模块级 Map（内存态）：进程本身 detached+unref 随宿主存活，但句柄不跨进程重启
  *     持久化——服务重启后旧任务无法再用工具管理（v1 已知限制）。
  *  3) 输出走环形缓冲（每任务上限 MAX_BUFFER_CHARS），防止 dev server 长连接日志吃爆内存。
+ *  4) 任务生命周期（close/error/abort → 幂等 finish）由 attachTaskLifecycle 统一挂接：
+ *     run_in_background await 它（generator 挂起 = 任务存活），收编路径 fire-and-forget。
  */
 import { spawn, execFileSync } from "child_process";
 import fsSync from "fs";
@@ -97,14 +101,120 @@ export async function killTree(proc: any): Promise<void> {
         }
     } catch { /* 进程可能已自然退出 */ }
     try { proc.kill(); } catch { /* 兜底 */ }
+};
+
+/** 流式解码器接口：decode 延续 stream 模式状态（跨块多字节尾字节）；flush 收尾残留（close 时必须调用一次）。 */
+export interface StreamCodec {
+    decode(buf: Buffer): string;
+    flush(): string;
 }
+
+/** 构造并注册一个后台任务条目（run_in_background 与 adoptRunningProcess 共用的注册工厂）。 */
+const createBgTask = (proc: any, command: string, cwd: string, sessionId: string | undefined): BgTask => {
+    const task: BgTask = {
+        taskId: createUUID(), command, cwd, sessionId: sessionId ?? "", proc,
+        startedAt: new Date().toISOString(),
+        status: "running", exitCode: null, outputBuffer: "",
+    };
+    registry.set(task.taskId, task);
+    return task;
+};
+
+/**
+ * 挂接任务生命周期（close/error/abort → 幂等 finish：标记状态、60s 延迟 registry.delete、
+ * 摘除 signal 监听与 proc 全部监听、resolve）。
+ * @returns 完成 Promise（永不 reject）。需要挂起语义的调用方 await 它（run_in_background：
+ *   generator 挂起 = 后台任务存活，结束才释放互斥锁）；收编路径 fire-and-forget（void）——
+ *   进程寿命超过 run_command 前台阶段，完成事件无人等待。
+ */
+const attachTaskLifecycle = (
+    task: BgTask,
+    proc: any,
+    opts: { signal?: AbortSignal; codec?: StreamCodec } = {},
+): Promise<void> => {
+    return new Promise<void>((resolve) => {
+        let finished = false; // 守卫：abort 与 close 可能先后触发 finish，仅首次生效（防 exitCode 被覆盖 / 日志双写）
+        const finish = (apply: () => void): void => {
+            if (finished) return;
+            finished = true;
+            apply();
+            // 退出后延迟清理注册表（留 60s 供查询退出码），避免长期累积死任务
+            setTimeout(() => registry.delete(task.taskId), 60_000);
+            opts.signal?.removeEventListener("abort", onAbort);
+            // 清理 proc 上的 listener，打破 listener→task→proc 循环引用（否则 60s 持有窗口内累积）
+            try { proc?.stdout?.removeAllListeners?.(); } catch { /* */ }
+            try { proc?.stderr?.removeAllListeners?.(); } catch { /* */ }
+            try { proc?.removeAllListeners?.(); } catch { /* */ }
+            resolve();
+        };
+        // 用户主动中断：杀进程树并标记 killed（确保 generator 完成 → 释放 exclusiveLock，杜绝死锁）
+        const onAbort = (): void => {
+            killTree(proc).finally(() => {
+                finish(() => {
+                    if (task.status === "running") task.status = "killed";
+                    task.exitCode = task.exitCode ?? -1;
+                    appendOutput(task, `\n[用户中止，进程树已终止]`);
+                });
+            });
+        };
+        opts.signal?.addEventListener("abort", onAbort, { once: true });
+        proc.on("close", (code: number | null) => {
+            finish(() => {
+                // flush 解码器末尾残留的多字节序列（stream 模式尾字节，不 flush 丢最后一个字符）
+                if (opts.codec) { try { appendOutput(task, opts.codec.flush()); } catch { /* decoder 已失效 */ } }
+                task.status = task.status === "killed" ? "killed" : "exited";
+                task.exitCode ??= code ?? 0; // 已被 abort 设为 -1 时不覆盖，保持 killed 语义
+                appendOutput(task, `\n[进程结束 exit=${code}]`);
+            });
+        });
+        proc.on("error", (e: Error) => {
+            // spawn 失败等场景：更新状态避免永远卡 running
+            finish(() => {
+                if (task.status === "running") task.status = "exited";
+                task.exitCode = task.exitCode ?? -1;
+                appendOutput(task, `\n[spawn error: ${e.message}]`);
+            });
+        });
+    });
+};
+
+/**
+ * 收编一个已 spawn、仍在运行的前台进程（run_command 超时自动转后台）进注册表。
+ * ★ 从注册到换绑监听全程同步（无 await）→ 零丢块/零重放：换绑前到达的块由调用方并入
+ *   seedOutput，换绑后的块直达环形缓冲；JS 单线程保证同步块内不会插入 data 事件。
+ * ★ codec 必须传入调用方的原 decodeChunk 闭包：流式 TextDecoder 持有跨块尾字节状态，
+ *   换新解码器会乱码（GBK 中文截断典型）。旧 data 监听必须摘除——它们会向已废弃的
+ *   前台延迟队列无限推送（活进程下内存泄漏）；旧 close/error 监听会双 flush 解码器。
+ * ★ 无锁：exclusiveLock 仅 isSync:false 工具参与（toolExecution 只对 isSync:false 算锁），
+ *   收编任务不占锁（同命令重复进程理论可能，v1 取舍）。
+ * @returns taskId（调用方 yield 给模型作句柄）
+ */
+export const adoptRunningProcess = (
+    proc: any,
+    meta: { command: string; cwd: string; sessionId?: string; signal?: AbortSignal },
+    seedOutput: string,
+    codec: StreamCodec,
+): string => {
+    const task = createBgTask(proc, meta.command, meta.cwd, meta.sessionId);
+    if (seedOutput) appendOutput(task, seedOutput); // 环形封顶：超限自动保最新
+    // —— 原子换绑（同步块）——
+    try { proc?.stdout?.removeAllListeners?.("data"); } catch { /* */ }
+    try { proc?.stderr?.removeAllListeners?.("data"); } catch { /* */ }
+    try { proc?.removeAllListeners?.("close"); } catch { /* */ }
+    try { proc?.removeAllListeners?.("error"); } catch { /* */ }
+    const onData = (d: Buffer) => appendOutput(task, codec.decode(d));
+    proc.stdout?.on("data", onData);
+    proc.stderr?.on("data", onData);
+    void attachTaskLifecycle(task, proc, { signal: meta.signal, codec });
+    return task.taskId;
+};
 
 export const backgroundTools: CustomTool[] = [
     {
         type: "function",
         function: {
             name: "run_in_background",
-            description: "在后台启动一个长连接/常驻 shell 命令（如 dev server、watch、tail -f），立即返回 task_id，不阻塞后续推理。常用于先起服务再继续干别的活。用 get_background_output 查日志与状态，stop_background_task 终止。",
+            description: "在后台启动一个长时 shell 命令并立即返回 task_id，不阻塞后续推理。适用两类场景：① 长连接/常驻进程（dev server、watch、tail -f）——先起服务再继续干别的活；② 预计运行数分钟以上、无需实时盯看的有限长任务（全量测试 / 大构建 / 大体积安装——跑完用 get_background_output 带 wait_seconds 等结果，不要用前台 run_command 干等）。用 get_background_output 查日志与状态，stop_background_task 终止。",
             parameters: {
                 type: "object",
                 properties: {
@@ -156,65 +266,29 @@ export const backgroundTools: CustomTool[] = [
                     return;
                 }
 
-                const taskId = createUUID();
-                const task: BgTask = {
-                    taskId, command: args.command, cwd, sessionId: ctx?.sessionId ?? "", proc,
-                    startedAt: new Date().toISOString(),
-                    status: "running", exitCode: null, outputBuffer: ""
+                const codec: StreamCodec = {
+                    decode: decodeChunk,
+                    // flush：close 时收尾两个 stream 解码器的尾字节（GBK/UTF-8 残留，不 flush 丢最后一个字符）
+                    flush: () => {
+                        let s = "";
+                        if (decoder) s += decoder.decode();
+                        s += pendingUtf8.decode();
+                        return s;
+                    },
                 };
-                registry.set(taskId, task);
+                const task = createBgTask(proc, args.command, cwd, ctx?.sessionId);
+                const taskId = task.taskId;
 
-                proc.stdout?.on("data", (d: Buffer) => appendOutput(task, decodeChunk(d)));
-                proc.stderr?.on("data", (d: Buffer) => appendOutput(task, decodeChunk(d)));
-                // ★ spawn error 由下方 Promise 内监听统一处理（删除此处重复监听，防日志双写）
+                proc.stdout?.on("data", (d: Buffer) => appendOutput(task, codec.decode(d)));
+                proc.stderr?.on("data", (d: Buffer) => appendOutput(task, codec.decode(d)));
+                // ★ spawn error 由 attachTaskLifecycle 内监听统一处理（删除此处重复监听，防日志双写）
 
                 // ★ 首个 yield：即时返回 task_id（runBackgroundTool 取此为结果，agent 不阻塞、继续下一轮）
                 yield `✅ [后台任务已启动]\ntask_id: ${taskId}\n命令: ${args.command}\n用 get_background_output(task_id="${taskId}") 查日志，stop_background_task(task_id="${taskId}") 终止。`;
 
-                // ★ 后台挂起：等进程退出。generator 挂起期间 = 后台任务存活；
-                //   proc 退出 / 被 stop_background_task 杀掉 / 用户 abort → resolve → generator 完成 → 自动释放 exclusiveLock
-                await new Promise<void>((resolve) => {
-                    let finished = false; // 守卫：abort 与 close 可能先后触发 finish，仅首次生效（防 exitCode 被覆盖 / 日志双写）
-                    const finish = (apply: () => void): void => {
-                        if (finished) return;
-                        finished = true;
-                        apply();
-                        // 退出后延迟清理注册表（留 60s 供查询退出码），避免长期累积死任务
-                        setTimeout(() => registry.delete(taskId), 60_000);
-                        ctx?.abortSignal?.removeEventListener("abort", onAbort);
-                        // 清理 proc 上的 listener，打破 listener→task→proc 循环引用（否则 60s 持有窗口内累积）
-                        try { proc?.stdout?.removeAllListeners?.(); } catch { /* */ }
-                        try { proc?.stderr?.removeAllListeners?.(); } catch { /* */ }
-                        try { proc?.removeAllListeners?.(); } catch { /* */ }
-                        resolve();
-                    };
-                    // 用户主动中断：杀进程树并标记 killed（确保 generator 完成 → 释放 exclusiveLock，杜绝死锁）
-                    const onAbort = (): void => {
-                        killTree(proc).finally(() => {
-                            finish(() => {
-                                if (task.status === "running") task.status = "killed";
-                                task.exitCode = task.exitCode ?? -1;
-                                appendOutput(task, `\n[用户中止，进程树已终止]`);
-                            });
-                        });
-                    };
-                    ctx?.abortSignal?.addEventListener("abort", onAbort, { once: true });
-                    proc.on("close", (code: number | null) => {
-                        finish(() => {
-                            task.status = task.status === "killed" ? "killed" : "exited";
-                            task.exitCode ??= code ?? 0; // 已被 abort 设为 -1 时不覆盖，保持 killed 语义
-                            appendOutput(task, `\n[进程结束 exit=${code}]`);
-                        });
-                    });
-                    proc.on("error", (e: Error) => {
-                        // spawn 失败等场景：更新状态避免永远卡 running
-                        finish(() => {
-                            if (task.status === "running") task.status = "exited";
-                            task.exitCode = task.exitCode ?? -1;
-                            appendOutput(task, `\n[spawn error: ${e.message}]`);
-                        });
-                    });
-                });
+                // ★ 后台挂起：等任务生命周期结束（proc 退出 / 被 stop_background_task 杀掉 / 用户 abort）。
+                //   generator 挂起期间 = 后台任务存活；attachTaskLifecycle resolve → generator 完成 → 自动释放 exclusiveLock
+                await attachTaskLifecycle(task, proc, { signal: ctx?.abortSignal, codec });
             }
         }
     },
@@ -226,7 +300,7 @@ export const backgroundTools: CustomTool[] = [
             parameters: {
                 type: "object",
                 properties: {
-                    task_id: { type: "string", description: "run_in_background 返回的 task_id" },
+                    task_id: { type: "string", description: "后台任务的 task_id（run_in_background 返回，或 run_command 超时自动转后台返回）" },
                     tail_lines: { type: "number", description: "只返回最后 N 行日志（默认 50，避免一次灌入过多）" },
                     wait_seconds: { type: "number", description: "阻塞等待任务退出（或到达此时长）后再返回，上限 120 秒；任务已在跑且需要等结果时使用，不需要等就省略" }
                 },
@@ -272,7 +346,7 @@ export const backgroundTools: CustomTool[] = [
             parameters: {
                 type: "object",
                 properties: {
-                    task_id: { type: "string", description: "run_in_background 返回的 task_id" }
+                    task_id: { type: "string", description: "后台任务的 task_id（run_in_background 返回，或 run_command 超时自动转后台返回）" }
                 },
                 required: ["task_id"]
             },

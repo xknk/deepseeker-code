@@ -7,7 +7,8 @@
 import { spawn } from "child_process";
 import { CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
-import { killTree, resolveWinShell } from "./background.ts";
+import { adoptRunningProcess, killTree, resolveWinShell, StreamCodec } from "./background.ts";
+import { appConfig } from "@/config/index.ts";
 
 /**
  * 退出码哨兵：用罕用数学括号 ⟦⟧ 界定 + 私有前缀 DSC_EXIT，避免被 stdout 中的字面量 "[exit: 0]"
@@ -32,7 +33,7 @@ export const commandTools: CustomTool[] = [
         type: "function",
         function: {
             name: "run_command",
-            description: "在工作区执行 shell 命令（跑测试 / 构建 / git 等），流式返回 stdout/stderr 并附带退出码。属于高危操作，每次执行都需要用户审批。",
+            description: "在工作区执行 shell 命令（短平快的测试 / 构建 / git 等），流式返回 stdout/stderr 并附带退出码。属于高危操作，每次执行都需要用户审批。预计运行数分钟以上的长任务（全量测试 / 大构建 / 大体积安装）请改用 run_in_background 后台执行；若本工具执行过久仍未结束，系统会自动把进程转入后台并返回 task_id（用 get_background_output 查结果、stop_background_task 终止）。",
             parameters: {
                 type: "object",
                 properties: {
@@ -83,6 +84,12 @@ export const commandTools: CustomTool[] = [
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : getActiveWorkspaceRoot();
                 const maxChars = RUN_COMMAND_MAX_CHARS; // 对应配置的 maxOutputCharacters（单一来源）
                 let totalYieldedChars = 0;
+                // ★ 自动转后台（auto-degrade）状态：fullOutput 累积已 drain 产出（降级时整体 seed 进后台环形缓冲，
+                //   ≤ maxChars+单块，有界）；degraded 标记让末尾绝不追加 EXIT 哨兵（退出码未知，不伪造 0/-1）
+                let fullOutput = "";
+                let degraded = false;
+                let degradeDue = false; // 运行时看门狗到期标志
+                let degradeReason: "runtime" | "idle" | null = null;
 
                 // 💡 优化 2：非 Windows 下开启 detached 属性，以便后续能以进程组（Process Group）形式彻底剿灭子进程树
                 const isWin = process.platform === "win32";
@@ -143,6 +150,17 @@ export const commandTools: CustomTool[] = [
                     }
                     return (decoder ?? pendingUtf8).decode(buf, { stream: true });
                 };
+                // ★ codec：把 decodeChunk 闭包 + 双解码器 flush 包装成 StreamCodec，供自动转后台收编时
+                //   延续 stream 解码状态（换新解码器会因跨块尾字节丢失而乱码，GBK 中文截断典型）
+                const codec: StreamCodec = {
+                    decode: decodeChunk,
+                    flush: () => {
+                        let s = "";
+                        if (decoder) s += decoder.decode();
+                        s += pendingUtf8.decode();
+                        return s;
+                    },
+                };
 
                 proc.stdout?.on("data", (d: Buffer) => {
                     queue.push(decodeChunk(d));
@@ -175,30 +193,40 @@ export const commandTools: CustomTool[] = [
                 const onAbort = () => { void killTree(proc); };
                 ctx?.abortSignal?.addEventListener("abort", onAbort);
 
+                // ★ 空闲看门狗阈值：60s 内既无新输出也未退出 → 判定常驻/挂起，转后台。env 可调（测试用）。
+                //   勿调到高于 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS：空闲到期会产出降级消息喂流，不饿死外层 idle 熔断的前提。
+                const IDLE_TIMEOUT_MS = Number(process.env.RUN_COMMAND_IDLE_TIMEOUT_MS) || 60_000;
+                // ★ 运行时看门狗：前台流式持续超过 runCommandAutoBgMs 仍未退出 → 自动转后台（不杀进程）。
+                //   到期置标志并 notifyNewData 唤醒可能的空转等待；unref 防止定时器拖住进程退出。
+                const autoBgMs = Math.max(1, appConfig.runCommandAutoBgMs); // execute 内读单例 → 测试可按次覆盖
+                const runtimeTimer: NodeJS.Timeout = setTimeout(() => { degradeDue = true; notifyNewData(); }, autoBgMs);
+                runtimeTimer.unref?.();
+
                 let overLimit = false;
                 try {
-                    // 基于条件唤醒的高级流式循环（overLimit 命中后彻底退出两层循环，避免逐 chunk 重复吐警告 / 反复 onAbort）
-                    while ((!settled || queue.length > 0) && !overLimit) {
+                    // 基于条件唤醒的高级流式循环（overLimit/degraded 命中后彻底退出两层循环，避免逐 chunk 重复吐警告 / 反复 onAbort）
+                    while ((!settled || queue.length > 0) && !overLimit && !degraded) {
+                        // ① 排空期间运行时看门狗到期（持续吐日志的 chatty 构建永远进不了空闲分支，靠这里+④兜住）
+                        if (degradeDue && !settled) { degraded = true; degradeReason = "runtime"; break; }
                         if (queue.length === 0) {
-                            // 空闲看门狗：60s 内既无新输出也未退出 → 判定常驻命令（应改用 run_in_background），主动终止释放主循环
-                            const IDLE_TIMEOUT_MS = 60_000;
                             let timedOut = false;
                             await new Promise<void>((r) => {
                                 resolveWaiter = r;
                                 idleTimer = setTimeout(() => { timedOut = true; r(); }, IDLE_TIMEOUT_MS);
                             });
-                            if (timedOut && !settled && queue.length === 0) {
-                                yield `\n\n⏱️ [看门狗]：命令连续 ${IDLE_TIMEOUT_MS / 1000}s 无输出且未退出，判定为常驻进程（如 dev server / tail -f）。已主动终止以释放主循环——常驻命令请改用 run_in_background。\n`;
-                                onAbort();
-                                settled = true;
-                                overLimit = true;
-                                break;
-                            }
+                            // ② 空转等待被运行时定时器唤醒（notifyNewData 解除阻塞）
+                            if (degradeDue && !settled) { degraded = true; degradeReason = "runtime"; break; }
+                            // ③ 空闲看门狗：既无新输出也未退出 → 转后台（旧行为是杀进程——静默 install/dev server
+                            //    正是后台候选，杀掉会打断 mid-install；挂起命令退化为注册表僵尸，可 stop/宿主退出清理）
+                            if (timedOut && !settled && queue.length === 0) { degraded = true; degradeReason = "idle"; break; }
                         }
 
                         while (queue.length > 0) {
+                            // ④ 降级优先于字符上限：到期即转，时序正确（上限单独命中仍走原杀进程路径）
+                            if (degradeDue && !settled) { degraded = true; degradeReason = "runtime"; break; }
                             const chunk = queue.shift() as string;
                             totalYieldedChars += chunk.length;
+                            fullOutput += chunk;
 
                             // 💡 优化 5：严格践行最大字符限制阻断，防止巨型依赖树构建日志撑爆大模型上下文
                             if (totalYieldedChars > maxChars) {
@@ -211,7 +239,24 @@ export const commandTools: CustomTool[] = [
                             yield chunk;
                         }
                     }
-                    if (overLimit) {
+                    if (degraded) {
+                        // ★ 自动转后台收编：seed = 已 drain 全文 + 未 drain 队列（模型不丢任何字节，get_background_output
+                        //   可见全史，环形缓冲自动封顶）。收编后进程由后台注册表接管（get/stop/宿主退出清理）。
+                        //   注意：spawn 时绑定的 ctx.abortSignal 无法摘除——run 中止仍会杀掉收编进程（与原生
+                        //   run_in_background 的跨 run 存活语义不同，v1 取舍）；注册表侧 bookkeeping 由 lifecycle 标记 killed。
+                        const taskId = adoptRunningProcess(
+                            proc,
+                            { command: args.command, cwd, sessionId: ctx?.sessionId, signal: ctx?.abortSignal },
+                            fullOutput + queue.join(""),
+                            codec,
+                        );
+                        const why = degradeReason === "idle"
+                            ? `连续 ${Math.round(IDLE_TIMEOUT_MS / 1000)}s 无输出且未退出`
+                            : `已持续运行超过 ${Math.round(autoBgMs / 1000)}s`;
+                        // ★ 不 yield EXIT 哨兵：进程仍在运行，退出码未知（伪造 0/-1 都会误导 verifyResult）；
+                        //   verifyResult 无哨兵默认 SUCCESS，"仍在运行"语义由本消息文本承载
+                        yield `\n\n⏳ [自动转后台]：命令 [${args.command}] ${why}，已自动转为后台任务（前台流式结束，未消费的剩余输出已并入后台缓冲）。\ntask_id: ${taskId}\n⚠️ 进程仍在运行，退出码未知（不判定成功/失败）——用 get_background_output(task_id="${taskId}", wait_seconds=…) 等待/查看结果；若确认无需继续，用 stop_background_task(task_id="${taskId}") 终止。\n`;
+                    } else if (overLimit) {
                         // ★ 输出被截断视为失败：显式 yield 哨兵 exit:-1，让 verifyResult 判 FAILED，
                         //   避免模型对超长失败构建/测试产生"成功幻觉"（截断场景恰是失败高发区）
                         yield EXIT_SENTINEL(-1);
@@ -220,7 +265,12 @@ export const commandTools: CustomTool[] = [
                     }
                 } finally {
                     if (idleTimer) clearTimeout(idleTimer);
+                    clearTimeout(runtimeTimer);
                     ctx?.abortSignal?.removeEventListener("abort", onAbort);
+                    // ★ 兜底：generator 被外部提前 return()（collectToolResult 的 idle 熔断路径）且进程
+                    //   未结束也未收编 → 主动杀树——否则进程带着写向死队列的监听器永久存活（预存漏洞，顺手关闭）。
+                    //   degraded 时进程已归注册表管理，不能杀。
+                    if (!settled && !degraded) void killTree(proc);
                 }
             },
         },
