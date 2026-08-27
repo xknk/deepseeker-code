@@ -18,6 +18,7 @@ import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
 import { createUUID, getFileName, assertSafeSessionId, isSafeSessionId, readJSONFile } from "@/common/index.ts"
+import { msgText } from "@/session/contentParts.ts";
 import type { Todo } from "@/observability/type.ts";
 
 /** 获取全局 sessions 文件夹的绝对/相对路径 */
@@ -330,8 +331,9 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
                 try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
                 if (typeof msg?.dscEvent === 'string') continue; // ★ 事件行（事件日志化）不计入消息数
                 messageCount++;
- if (!preview && msg?.role === "user" && typeof msg.content === "string") {
- const t = msg.content.replace(/\s+/g, " ").trim();
+ if (!preview && msg?.role === "user" && msg.content != null) {
+ // ★ 多模态：content 可能是 parts 数组（贴图轮），取纯文本视图做预览
+ const t = (msgText(msg.content) || "（该条消息带图片附件）").replace(/\s+/g, " ").trim();
  // ★ 乱码预览过滤：被错误解码的输入/输出会产生 U+FFFD 替换符（乱码不可恢复），
  // 从 preview 中剥离并打标记，避免历史列表整片「�」影响可读性。
  if (t.includes("\uFFFD")) {

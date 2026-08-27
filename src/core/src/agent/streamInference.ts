@@ -19,6 +19,7 @@ import type { ProviderUsage } from "@/llm/provider.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
+import { msgText } from "@/session/contentParts.ts";
 
 /** 推理结果（判别联合）：
  *  - completed —— 流式正常结束，携带拼装好的 assistantMessage（provider 产物，含厂商扩展字段如 reasoning_content），主循环落盘后继续；
@@ -66,7 +67,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             eventType: 'llm.request',
             metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round },
             usage: { prompt_tokens: estimateTokens(inferenceMessages) },
-            payload: { input: message[message.length - 1].content as string },
+            payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
         });
         console.log(`🔄 代理推理第 ${round} 轮（流式）...`);
 
@@ -217,7 +218,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                 prompt_cache_hit_tokens: lastUsage?.cached_tokens,
                 prompt_cache_miss_tokens: (lastUsage?.prompt_tokens || 0) - (lastUsage?.cached_tokens || 0),
             },
-            payload: { input: message[message.length - 1].content as string },
+            payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
         });
         console.log(`[DSC-DIAG] streamInference round ${round} 完成: content=${contentBuf.length}chars reasoning=${reasoningBuf.length}chars toolCalls=${toolCallsBuf.size}`);
         // ★ 带出本轮真实 usage（prompt_tokens/cached_tokens）：供 runAgent 维护「估算校准系数」
@@ -234,7 +235,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             sessionId,
             eventType: 'llm.error',
             metadata: { depth, decisionSource: llmDecisionSource, ok: false, durationMs: performance.now() - startTime, attempt: round },
-            payload: { input: message[message.length - 1].content as string, output: err.message },
+            payload: { input: msgText(message[message.length - 1].content), output: err.message },   // ★ 多模态：文本视图
         });
         console.log(`[DSC-DIAG] streamInference round ${round} ═══ ERROR: ${err.message}`);
         return { kind: 'error', error: err };

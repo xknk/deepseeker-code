@@ -46,7 +46,8 @@ export const createServer = () => {
     //   避免未授权者借大体积 body 拖累服务端（/health 保持开放便于存活探活）。
     app.use("/api", requireAuth);
     app.use("/createJson", requireAuth);
-    app.use(express.json({ limit: "5mb" }));
+    // ★ 多模态：上限放宽到 20mb——attachments 以 base64 随 JSON 携带（约 1.33 倍膨胀，8MB 原图 ≈ 10.7MB payload）
+    app.use(express.json({ limit: "20mb" }));
 
     // 会话级 AbortController 仓库：/api/chat 按 sessionId 注册，/api/abort 据此主动中止 agent 任务
     const activeControllers = new Map<string, AbortController>();
@@ -65,6 +66,18 @@ export const createServer = () => {
         if (typeof raw?.content !== "string") {
             res.status(400).json({ error: "content 必须为字符串" });
             return;
+        }
+
+        // ★ 多模态：attachments 可选，存在时校验形状（数组、元素含 mime/base64 字符串）——
+        //   形状非法直接 400；业务级有效性（image/* 前缀 / 尺寸上限）由 contentParts.toWireUserContent 宽容降级处理
+        if (raw?.attachments !== undefined) {
+            const ok = Array.isArray(raw.attachments)
+                && raw.attachments.every((a: any) => a && typeof a === "object"
+                    && typeof a.mime === "string" && typeof a.base64 === "string");
+            if (!ok) {
+                res.status(400).json({ error: "attachments 必须为 {name?, mime, base64} 对象数组" });
+                return;
+            }
         }
 
         // ★ 安全①：sessionId 若由客户端传入，先过白名单（防路径穿越），非法直接 400（尚未进入 SSE）

@@ -23,6 +23,7 @@
 import { appConfig } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
+import { msgText, degradeImagesForAux } from "@/session/contentParts.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
@@ -156,7 +157,8 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal): Promise<
     //   recall 检索的命中词来源）+ 不确定感显式化（细节不臆测、标注已归档，逼模型需要精确内容时去
     //   recall 检索，而不是基于模糊摘要直接行动）。
     const resp = await chatWithModelWithSummary(
-        [...batch, { role: 'user', content: '用一行话概括以上对话与工具调用：任务目标、关键决策、动过的文件、当前进度。必须原样保留关键实体名（文件路径、函数/类名、报错关键词）以便后续检索。对记不准的细节不要臆测，标注"(细节已归档)"即可。不要调用工具。' }],
+        // ★ 辅助模型是 text-only：送前把 image part 降级为占位符——base64 绝不能进摘要批（烧钱且无意义）
+        [...batch.map(degradeImagesForAux), { role: 'user', content: '用一行话概括以上对话与工具调用：任务目标、关键决策、动过的文件、当前进度。必须原样保留关键实体名（文件路径、函数/类名、报错关键词）以便后续检索。对记不准的细节不要臆测，标注"(细节已归档)"即可。不要调用工具。' }],
         [],
         { signal }
     );
@@ -187,7 +189,8 @@ const ARCHIVE_INDEX_BATCH_CAP = 60;
 export const extractArchiveEntities = (batch: Msg[]): string[] => {
     let text = '';
     for (const m of batch) {
-        if (m.content) text += ` ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`;
+        // ★ 多模态防泄漏：只扫 text 视图——JSON.stringify 会把 dataURL base64 灌进正则扫描面
+        if (m.content) text += ` ${msgText(m.content)}`;
         const calls = (m as any).tool_calls;
         if (Array.isArray(calls)) for (const c of calls) text += ` ${c?.function?.name ?? ''} ${c?.function?.arguments ?? ''}`;
     }

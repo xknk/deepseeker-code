@@ -17,6 +17,7 @@
  */
 import fs from "fs/promises";
 import { createUUID, assertSafeSessionId } from "@/common/index.ts";
+import { msgText, hasImagePart } from "./contentParts.ts";
 import { readTranscriptLines, isEventLine, appendEvent, TranscriptLine } from "./transcript.ts";
 import { getTranscriptPath, ensureSessionsDir, readStore, writeStore, getRollingState } from "./store.ts";
 
@@ -56,7 +57,8 @@ export const listForkAnchors = (lines: TranscriptLine[]): ForkAnchor[] => {
         if (isEventLine(l)) continue;
         const row = l as any;
         if (row?.role === "user") {
-            lastUser = typeof row.content === "string" ? row.content : "";
+            // ★ 多模态：数组 content（贴图轮）取纯文本视图；空文本兜底占位，锚点列表不出现空 preview
+            lastUser = msgText(row.content) || (hasImagePart(row.content) ? "🖼 [图片消息]" : "");
         } else if (row?.role === "assistant") {
             const content = typeof row.content === "string" ? row.content : "";
             const names = Array.isArray(row.tool_calls)

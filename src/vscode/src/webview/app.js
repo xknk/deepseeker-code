@@ -40,6 +40,8 @@ replaying: false, // 回放中：抑制逐条滚动，replayDone 一次性落底
 sessions: [],
 customCommands: [], // core 注册的自定义斜杠命令（引擎就绪后经 "commands" 消息送达，合并进 / 菜单）
 forkAnchors: [], // 当前会话可分叉锚点（各轮 assistant 检查点，host 经 listForkAnchors 回推）
+vision: false, // ★ 多模态：视觉开关（host 经 state.vision 下发）——true=贴图走原生附件直达模型
+pendingImages: [], // ★ 多模态：待发送贴图 [{name,mime,base64,dataUrl}]（仅 vision=true 时积累，随 submit 上送后清空）
 showTodos: false,
 todos: [],
 roundSeq: 0,
@@ -350,6 +352,21 @@ turnHeaderBySeq: new Map(),
     switch (row.kind) {
       case "user": {
         wrap.innerHTML = `<div class="user-bubble">${escapeHtml(row.text)}</div>`;
+        // ★ 多模态：随行缩略图（实时回显与历史回放同构；dataURL 直出，CSP img-src data: 已放行）
+        const atts = Array.isArray(row.attachments) ? row.attachments : [];
+        if (atts.length) {
+          const box = document.createElement("div");
+          box.className = "user-attachments";
+          for (const a of atts) {
+            const img = document.createElement("img");
+            img.className = "attach-thumb";
+            img.src = String(a.dataUrl || "");
+            img.alt = String(a.name || "图片");
+            img.title = String(a.name || "图片");
+            box.appendChild(img);
+          }
+          wrap.appendChild(box);
+        }
         break;
       }
       case "assistant": {
@@ -616,11 +633,12 @@ case "info":
   }
 
   // ★ 图片预览 chip：上传后、存盘回包前，在 composer 上方显示缩略图 + 文件名（data URL，CSP img-src data: 已放行）
-  function appendImagePreview(dataUrl, name) {
+  //   vision 模式下 chip 可点击移除（撤回待发送附件）；MCP 中转兜底模式 chip 纯视觉（行为不变）。
+  function appendImagePreview(dataUrl, name, removable) {
     const box = $("#composer-attachments");
     if (!box) return;
     const chip = document.createElement("div");
-    chip.className = "attach-chip";
+    chip.className = "attach-chip" + (removable ? " attach-removable" : "");
     const img = document.createElement("img");
     img.src = dataUrl;
     img.alt = name;
@@ -628,7 +646,21 @@ case "info":
     span.textContent = name;
     chip.appendChild(img);
     chip.appendChild(span);
+    if (removable) {
+      chip.title = "点击移除";
+      chip.addEventListener("click", () => {
+        state.pendingImages = state.pendingImages.filter((p) => p.dataUrl !== dataUrl || p.name !== name);
+        chip.remove();
+      });
+    }
     box.appendChild(chip);
+  }
+
+  /** 清空待发送贴图（vision 模式）：chip DOM + 待发数组一并重置（新会话/发送成功后调用）。 */
+  function clearPendingImages() {
+    state.pendingImages = [];
+    const box = $("#composer-attachments");
+    if (box) box.innerHTML = "";
   }
 
   function clearMessages() {
@@ -660,6 +692,8 @@ row.args = evt.args;
 row.status = evt.status || "running";
 }
 if (evt.kind === "thinking") row.expanded = false;
+// ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
+if (Array.isArray(evt.attachments)) row.attachments = evt.attachments;
 appendRow(row);
 } else {
 if (evt.key) updateRow(evt.key, evt.patch || {});
@@ -804,6 +838,8 @@ switch (evt.type) {
           row.status = msg.status || "running";
         }
         if (msg.kind === "thinking") row.expanded = false;
+        // ★ 多模态：用户行的贴图缩略图字段透传
+        if (Array.isArray(msg.attachments)) row.attachments = msg.attachments;
         appendRow(row);
         break;
       }
@@ -816,6 +852,8 @@ switch (evt.type) {
         state.planMode = !!msg.state?.planMode;
         state.autoMode = !!msg.state?.autoMode;
         state.projectRoot = String(msg.state?.projectRoot ?? "");
+        // ★ 多模态开关（决定贴图按钮行为：原生附件 vs MCP 中转兜底）
+        state.vision = !!msg.state?.vision;
         syncToolbar();
  renderInitError(String(msg.state?.initError ?? ""));
         break;
@@ -851,6 +889,7 @@ switch (evt.type) {
         break;
       case "sessionReset":
         clearMessages();
+        clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
         break;
       case "imageSaved": {
         // extension 已把图片存到工作区临时目录，把路径 + 引导填入输入框
@@ -1733,14 +1772,25 @@ el.addEventListener("click", () => runSlash(slashItems[Number(el.dataset.i)]));
 
 const doSend = () => {
 const text = input.value;
-if (!text.trim()) return;
+const hasPending = (state.pendingImages || []).length > 0;
+if (!text.trim() && !hasPending) return;
 if (maybeLocalCommand(text)) {
 input.value = "";
 autoGrow(input);
 updateSlashMenu();
 return;
 }
+// ★ 多模态：待发贴图随 submit 上送（vision 开启时才有积累），随后清空 chip 与暂存
+if (hasPending) {
+vscode.postMessage({
+type: "submit",
+text,
+attachments: state.pendingImages.map((p) => ({ name: p.name, mime: p.mime, base64: p.base64 })),
+});
+clearPendingImages();
+} else {
 vscode.postMessage({ type: "submit", text });
+}
 input.value = "";
 autoGrow(input);
 input.focus();
@@ -1789,7 +1839,11 @@ const fileInput = $("#file-input");
 const imageInput = $("#image-input");
 btnFile.addEventListener("click", () => fileInput.click());
 btnImage.addEventListener("click", () => {
+if (state.vision) {
+addInfo("🖼 已选择视觉模式：图片将随消息直达模型（点击 chip 可移除待发送的图）。");
+} else {
 addInfo("🖼 图片识别需配置图像理解 MCP（settings.json 的 mcpServers，如能读图返回文字描述的 server）；未配置则助手无法“看到”图片。");
+}
 imageInput.click();
 });
 fileInput.addEventListener("change", () => {
@@ -1808,8 +1862,9 @@ addInfo(`📎 已入库文件：${f.name}`);
 reader.onerror = () => addInfo(`📎 读取文件失败：${f.name}`);
 reader.readAsText(f);
 });
-// ★ 图片上传（MCP 中转）：webview 读 base64 显示预览 → 发给 extension 存到工作区临时目录 →
-//   extension 回路径 → 把“图片路径 + 引导调图像 MCP”填入消息。底座非 vision 模型，靠 MCP 把图转文字。
+// ★ 贴图双模式：
+//   vision 开启 → 原生多模态：base64 暂存待发（不落 tmp、不经 MCP 中转），随 submit 直达模型；
+//   vision 关闭（兜底，= 改造前行为）→ 上传 extension 存工作区 tmp → 回路径注入文本 + 引导 MCP 读图。
 imageInput.addEventListener("change", () => {
 const f = imageInput.files && imageInput.files[0];
 imageInput.value = "";
@@ -1818,10 +1873,17 @@ if (f.size > 8 * 1024 * 1024) { addInfo(`🖼 图片 ${f.name} 过大（>8MB）�
 const reader = new FileReader();
 reader.onload = () => {
 const dataUrl = String(reader.result ?? "");
-appendImagePreview(dataUrl, f.name);
 const commaIdx = dataUrl.indexOf(",");
 const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : "";
-vscode.postMessage({ type: "uploadImage", name: f.name, mime: f.type || "image/png", base64 });
+const mime = f.type || "image/png";
+if (state.vision) {
+state.pendingImages.push({ name: f.name, mime, base64, dataUrl });
+appendImagePreview(dataUrl, f.name, true);
+addInfo(`🖼 已添加待发送图片：${f.name}（当前模型支持视觉，随消息直达）`);
+return;
+}
+appendImagePreview(dataUrl, f.name);
+vscode.postMessage({ type: "uploadImage", name: f.name, mime, base64 });
 };
 reader.onerror = () => addInfo(`🖼 读取图片失败：${f.name}`);
 reader.readAsDataURL(f);

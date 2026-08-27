@@ -1659,3 +1659,30 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ★ 多模态：用户消息行内贴图缩略图（实时回显与历史回放同构；dataURL 直出） */
+.user-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+
+.attach-thumb {
+  max-width: 180px;
+  max-height: 120px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, var(--border, rgba(128, 128, 128, 0.35)));
+  object-fit: contain;
+  background: rgba(128, 128, 128, 0.08);
+}
+
+/* vision 模式：待发送 chip 可点击移除 */
+.attach-removable {
+  cursor: pointer;
+}
+
+.attach-removable:hover {
+  outline: 1px solid var(--vscode-focusBorder, #0078d4);
+}

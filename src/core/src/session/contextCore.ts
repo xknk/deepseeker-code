@@ -14,6 +14,7 @@
  *  按单元切分（splitUntils：分离待压缩区与保留区）。
  */
 import OpenAI from "openai";
+import { msgText, imageUrlsOf, estimateImageTokens } from "@/session/contentParts.ts";
 export type Msg = OpenAI.Chat.ChatCompletionMessageParam
 
 /** 判定码点是否属于 CJK 系（按 1:1 计 token，DeepSeek 中文/日文压缩率基本在此范围）。
@@ -59,10 +60,18 @@ const estimateTextTokens = (text: string, divisor = 4.8): number => {
 export const estimateTokens = (messagesArr: Msg[]): number => {
     return messagesArr.reduce((total, m) => {
         let pureText = '';
+        let imageCount = 0;
         // 1. 核心防御：显式捕获并还原最重的两个代码吞吐大户
         // A. 捕获基础文本内容
         if (m.content) {
-            pureText += typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+            if (typeof m.content === 'string') {
+                pureText += m.content;
+            } else if (Array.isArray(m.content)) {
+                // ★ 多模态：数组 content 只折算 text part，image part 固定计价——
+                //   绝不能 JSON.stringify 整个数组（dataURL base64 会把估算撑成天文数字 → 压缩风暴）
+                pureText += msgText(m.content);
+                imageCount += imageUrlsOf(m.content).length;
+            }
         }
         // B. 捕获大模型发出的工具调用参数（Search/Replace 块等巨型 JSON 字符串）
         if ((m as any).tool_calls && Array.isArray((m as any).tool_calls)) {
@@ -84,7 +93,8 @@ export const estimateTokens = (messagesArr: Msg[]): number => {
         //   （Search/Replace 等巨型 JSON）都是代码/结构化内容，BPE token 密度远高于散文（≈÷4）。
         //   原统一 ÷4.8 对这类内容系统性低估，导致压缩阈值被估算偏差吃掉、靠 API 400 兜底。
         const isStructured = m.role === 'tool' || (Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0);
-        const tokens = estimateTextTokens(pureText, isStructured ? 4 : 4.8) + 4; // 4 为消息结构开销
+        // ★ image part 固定计价（估算口径见 contentParts.estimateImageTokens），与文本折算分列相加
+        const tokens = estimateTextTokens(pureText, isStructured ? 4 : 4.8) + imageCount * estimateImageTokens() + 4; // 4 为消息结构开销
         return total + (isNaN(tokens) ? 0 : tokens);
     }, 0);
 }

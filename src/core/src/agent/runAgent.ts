@@ -26,6 +26,7 @@ import { appendMessage, appendEvent, UsageSnapshot } from "@/session/transcript.
 import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
 import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
+import { msgText } from "@/session/contentParts.ts";
 import { getRollingState, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions } from "./type.ts";
@@ -84,7 +85,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const firstPrompt = (() => {
         if (depth !== 0) return "";
         const m = (message as any[]).find((x) => x?.role === "user");
-        return typeof m?.content === "string" ? m.content : "";
+        // ★ 多模态：user content 可能是 parts 数组，取纯文本视图（兼容贴图轮的 PLAN_FIRST 判定）
+        return msgText(m?.content);
     })();
     const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode, noEarlyFinal: !!options.noEarlyFinal });
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
@@ -245,7 +247,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             message.push(assistantMessage);
             await appendMessage({ ...assistantMessage, sessionId } as any);
             // 存储最后一条消息，以供后面返回使用
-            if (assistantMessage.content) {
+            // ★ 多模态防御：assistant content 按协议恒 string（数组会污染后续字符串拼接/回显），非 string 不入
+            if (typeof assistantMessage.content === 'string' && assistantMessage.content) {
                 lastContent = assistantMessage.content;
             }
 

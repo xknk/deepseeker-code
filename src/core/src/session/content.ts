@@ -21,6 +21,7 @@
  *     （transcript 永远 append-only）。
  */
 import { cleanMsg, groupUnits, Msg } from "./contextCore.ts";
+import { hasImagePart, replaceImageParts, isVisionEnabled, collapseToText } from "./contentParts.ts";
 import { readTranscriptLines, isEventLine } from "./transcript.ts";
 import { getRollingState } from "./store.ts";
 import { appConfig } from "@/config/index.ts";
@@ -36,25 +37,48 @@ const decayOldToolResults = (msgs: Msg[]): Msg[] => {
     const units = groupUnits(msgs); // assistant(tool_calls)+紧跟 tool = 不可分割单元
     const cutoffUnitIdx = Math.max(0, units.length - appConfig.KEEP_RECENT_UNITS);
     if (cutoffUnitIdx === 0) return msgs; // 全部落在保留区，无需衰减
-    // 标记「保留区之前」单元里的 tool_call_id（按单元边界，配对完整）
+    // 标记「保留区之前」单元里的 tool_call_id 与老图持有者（按单元边界，配对完整）
     const decayIds = new Set<string>();
+    let hasOldImage = false;
     for (let u = 0; u < cutoffUnitIdx; u++) {
         for (const m of units[u]) {
             const mm = m as any;
             if (mm.role === 'tool' && typeof mm.tool_call_id === 'string') decayIds.add(mm.tool_call_id);
+            // ★ 多模态：老单元的 image part 也属衰减对象（跨 run 每轮重发整段 base64 是纯浪费）
+            if (hasImagePart((m as any).content)) hasOldImage = true;
         }
     }
-    if (decayIds.size === 0) return msgs;
+    if (decayIds.size === 0 && !hasOldImage) return msgs;
     const keep = appConfig.BOUNDARY_TOOL_KEEP_CHARS;
+    // ★ 衰减归属判定：按单元收敛出的消息引用集合（保留区之外），避免误伤最新 KEEP_RECENT_UNITS 区
+    const oldRefs = new Set<any>();
+    for (let u = 0; u < cutoffUnitIdx; u++) for (const m of units[u]) oldRefs.add(m);
     return msgs.map((m) => {
+        if (!oldRefs.has(m)) return m;
         const mm = m as any;
         if (mm.role === 'tool' && decayIds.has(mm.tool_call_id) && typeof mm.content === 'string' && mm.content.length > keep) {
             const head = mm.content.slice(0, keep);
             return { ...mm, content: `${head}\n\n[… 该历史工具输出已折叠（共 ${mm.content.length} 字符），如需细节请重新调用工具 …]` } as Msg;
         }
-        return m;
+        // ★ 多模态折叠：老单元的贴图消息 image part → 占位文本（内存视图，transcript 原件不动）
+        return replaceImageParts(mm, '[历史图片已折叠：原图仍在会话归档中，如需再次查看请重新提供该图片]') as Msg;
     });
 };
+/** vision 关闭时重建视图的图片占位文案（告知模型图存在但本轮不可见）。 */
+const NO_VISION_IMAGE_NOTE = "[图片未送达：当前未开启视觉能力（DEEP_SEEK_VISION），模型看不到该图；原图保留在会话归档中，如需分析请让用户重新提供]";
+
+/**
+ * ★ 多模态重建闸门：vision 关闭时，transcript 里已落盘的 parts 数组（含 decay 未覆盖的
+ *  保留区近图）一律折叠回纯 string——否则 image_url parts 直发非 vision 端点 → API 400，
+ *  贴图会话续跑每轮必死（parts 永久留在 transcript，每轮重建都会带出）。
+ *  与 chatProcessing 入站闸门（只管本轮新输入）互补：本闸门管「历史里已落盘的 parts」。
+ *  内存视图操作（transcript 原件不动）；无数组消息零开销直通；vision 开启时整体直通。
+ *  调用时读 env（isVisionEnabled 非缓存）——运行期切换 DEEP_SEEK_VISION 立即生效。
+ */
+const enforceVisionGate = (msgs: Msg[]): Msg[] => isVisionEnabled()
+    ? msgs
+    : msgs.map((m) => collapseToText(m, NO_VISION_IMAGE_NOTE) as Msg);
+
 /**
  * 跨会话构建发给模型的上下文视图：
  * - 输出布局 [system, 摘要槽, ...active, user]，与 runAgent.ensureSummarySlot 一致
@@ -82,7 +106,7 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     const messageAll = all.slice(archivedMessageCount)
     if (messageAll.length === 0) {
         result.push(currentUserMsg)
-        return result
+        return enforceVisionGate(result)
     }
     // ★ 先 slice 后 repair（顺序不可换）：孤儿占位行会插入消息流，若先修后切会移位归档计数基准。
     //   confirmedCrash 由事件判定升级档位：崩溃确认 → 占位文案精确；legacy/闭合 → 与改造前文案一致。
@@ -90,5 +114,5 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     const repair = repairOrphanToolCalls(messageAll, recovery.interruption.kind === 'crashed')
     result.push(...decayOldToolResults(repair.msgs))
     result.push(currentUserMsg);
-    return result;
+    return enforceVisionGate(result);
 }

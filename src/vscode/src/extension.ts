@@ -13,6 +13,8 @@ import { randomUUID } from "crypto";
 // ★ type-only：host 及其 core 依赖必须在 process.chdir(workspaceRoot) 之后动态加载，
 // 否则模块加载期按「插件安装目录」cwd 初始化（createModel 等），导致读取/执行错目录。
 import type { ChatHost, ChatHostCallbacks } from "./host";
+import { isVisionEnabled } from "@/session/contentParts.ts";
+import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 
 let host: ChatHost | null = null;
 let engineDispose: (() => void) | null = null;
@@ -113,6 +115,8 @@ function postState(): void {
       autoMode: host.currentAutoMode,
       initError: initError ?? "",
       projectRoot: workspaceRoot ?? "",
+      // ★ 多模态：视觉开关下发 webview——决定贴图走原生附件（true）还是既有 MCP 中转兜底（false）
+      vision: isVisionEnabled(),
     },
   });
 }
@@ -340,10 +344,17 @@ function handleMessage(msg: Record<string, unknown>): void {
     }
     case "submit": {
       const text = String(msg.text ?? "");
-      if (!text.trim()) break;
+      // ★ 多模态：webview 随 submit 携带的贴图附件（vision 开启时）；形状非法的元素直接剔除
+      const rawAtt = Array.isArray(msg.attachments) ? (msg.attachments as unknown[]) : [];
+      const attachments: InboundImageAttachment[] | undefined = rawAtt.length
+        ? rawAtt
+          .filter((a): a is Record<string, unknown> => !!a && typeof a === "object" && typeof (a as any).base64 === "string" && !!(a as any).base64)
+          .map((a) => ({ name: String((a as any).name ?? "image"), mime: String((a as any).mime ?? "image/png"), base64: String((a as any).base64) }))
+        : undefined;
+      if (!text.trim() && !(attachments && attachments.length)) break;
       // ★ 无切换·全可见：不按活动编辑器切根。主根 activate 时定（selectProjectRoot 可显式切换），
       //   agent 经绝对路径访问所有 folder；切项目无需切编辑器/关对话。
-      void h.submit(text);
+      void h.submit(text, attachments);
       break;
     }
     case "abort":

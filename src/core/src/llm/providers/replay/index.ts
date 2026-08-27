@@ -26,6 +26,7 @@
  *  DeepSeek 兼容 wire（含 reasoning_content 扩展字段），使「从 transcript 录制 → 回放 → 再落盘」round-trip。
  */
 import { Msg } from "@/session/contextCore.ts";
+import { msgText } from "@/session/contentParts.ts";
 import { outMsg, toolMsg } from "../../type.ts";
 import { AssistantParts, LLMProvider, ProviderStreamChunk, ProviderStreamOpts, ProviderUsage } from "../../provider.ts";
 
@@ -201,7 +202,9 @@ export const scriptFromMessages = (messages: any[]): ReplayScript => ({
             }
             return {
                 kind: 'reply' as const,
-                content: typeof m.content === 'string' ? m.content : null,
+                // ★ 多模态：数组 content（理论上 assistant 恒 string，防御性取文本视图）——
+                //   避免回放侧把整轮当空 content 过滤成 PHANTOM 空轮
+                content: typeof m.content === 'string' ? m.content : (msgText(m.content) || null),
                 reasoning: typeof m.reasoning_content === 'string' ? m.reasoning_content : undefined,
                 toolCalls,
             };
