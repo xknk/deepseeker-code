@@ -37,6 +37,7 @@ code --install-extension deepseeker-code-<version>.vsix
 ## 功能特性
 
 - **流式输出**：逐字打字效果 + 可折叠的思考过程块。
+- **图片贴图提问**（需 `DEEP_SEEK_VISION=1` 开启）：输入框直接上传/粘贴图片（单张 ≤8MB）随消息进入模型上下文，用户消息行内联缩略图回显；不贴图时请求体逐字节不变。
 - **长任务细节不丢**：上下文自动压缩，被压缩归档的原始消息与工具结果经 `recall` 工具按需检索取回（文件类结果带实时 mtime 校验，防过期盲改），超长工具结果脱敏侧车存档、分页取回。
 - **工具调用**：读/写/编辑文件 + 符号大纲、运行命令（前台/后台）、ripgrep 搜索 + glob、Git 操作集、网页抓取与搜索、HTTP 客户端（联调）、TypeScript 诊断与跳转、Word/PDF/Excel 阅读，每步以工具卡展示。
 - **审批网关**：写操作 / 危险命令弹内联审批（允许本次 / 总是允许 / 拒绝）；「总是允许」会智能落成 glob 规则持久化。
@@ -88,6 +89,8 @@ code --install-extension deepseeker-code-<version>.vsix
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max`（`low`/`medium` 已废弃） | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |
+| `DEEP_SEEK_VISION` | 视觉多模态开关，设 `1`/`true` 开启（开启后聊天支持贴图附件） | 关 |
+| `DEEP_SEEK_IMAGE_TOKENS` | 单张图片折算 token 数（下限 100） | `1500` |
 
 #### 产品行为（`DEEPSEEKER_CODE_*` / `DEEP_SEEK_*`）
 
@@ -97,6 +100,7 @@ code --install-extension deepseeker-code-<version>.vsix
 | `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `0` 关闭同轮只读工具并发（默认开） | 开（并发） |
 | `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
 | `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
+| `RUN_COMMAND_AUTO_BG_MS` | run_command 前台超时自动转后台阈值（ms）；到期进程收编进后台注册表返回 task_id，不杀进程 | `120000` |
 | `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |
 | `TAVILY_API_KEY` | Tavily 搜索密钥 | — |
 | `WEB_FETCH_ALLOW_PRIVATE` | 设 `1` 放行 web_fetch 访问内网/回环（云元数据端点仍硬拦） | 关（SSRF 安全） |

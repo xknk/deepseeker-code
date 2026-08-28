@@ -139,6 +139,8 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max` | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |
+| `DEEP_SEEK_VISION` | 视觉多模态开关，设 `1`/`true` 开启（开启后聊天支持贴图附件） | 关 |
+| `DEEP_SEEK_IMAGE_TOKENS` | 单张图片折算 token 数（下限 100） | `1500` |
 
 #### 产品行为
 
@@ -148,6 +150,7 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | `DEEP_SEEK_PARALLEL_SAFE_TOOLS` | 设 `0` 关闭同轮只读工具并发（默认开） | 开（并发） |
 | `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
 | `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
+| `RUN_COMMAND_AUTO_BG_MS` | run_command 前台超时自动转后台阈值（ms）；到期进程收编进后台注册表返回 task_id，不杀进程 | `120000` |
 | `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |
 | `TAVILY_API_KEY` | Tavily 搜索密钥 | — |
 | `WEB_FETCH_ALLOW_PRIVATE` | 设 `1` 放行 web_fetch 访问内网/回环（云元数据端点仍硬拦） | 关（SSRF 安全） |

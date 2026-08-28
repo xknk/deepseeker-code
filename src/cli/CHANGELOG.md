@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-代码变更红绿 diff 预览 + 计划模式交互对齐 Claude Code；斜杠菜单滚动 + 启动顿挫治理。
+图片附件多模态支持 + 命令运行时看门狗（自动转后台）；代码变更红绿 diff 预览 + 计划模式交互对齐 Claude Code；斜杠菜单滚动 + 启动顿挫治理。
+
+### 多模态与后台任务
+
+- **图片附件多模态**（需 `DEEP_SEEK_VISION=1` 开启）：聊天消息可携带图片附件随提问进入模型上下文（OpenAI `image_url` parts，单张 ≤8MB）；无附件消息保持纯 string，行为逐字节不变。token 估算对图片固定计价（默认 1500/张，`DEEP_SEEK_IMAGE_TOKENS` 可调）；base64 三不进红线——绝不进 token 估算的 stringify 分支、归档索引正则扫描面、辅助模型摘要批（text-only 请求图片自动折叠占位）。
+- **run_command 运行时看门狗（自动转后台）**：前台流式超过 120s（`RUN_COMMAND_AUTO_BG_MS` 可调）仍未退出 → 进程自动收编进后台任务注册表并返回 task_id（`get_background_output` 查结果 / `stop_background_task` 终止），主循环即刻释放、**进程不杀**、已产出字节全量保留。60s 空闲看门狗从「杀进程」反转为「转后台」——静默 install / dev server 不再被一刀切断。
 
 ### 斜杠菜单与启动
 

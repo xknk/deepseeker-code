@@ -53,7 +53,8 @@ npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
 
 - **流式 agent 主循环**：逐字输出 + 可折叠思考过程，自动上下文压缩（重复检索检测 + token 估算校准，针对 DeepSeek-V4 调过甜点区）。
 - **压缩归档可召回**：摘要槽双段结构（实体索引无损 + 叙述可压）；被归档的原始消息/工具结果经 `recall` 工具按需检索取回（文件类结果带 mtime staleness 校验，防过期盲改），超长工具结果脱敏后侧车存档、分页取回——长任务压缩后细节不丢、免重跑工具。
-- **完整工具链**：读/写/编辑/移动/删除文件 + 符号大纲（AST）、运行命令（前台/后台进程）、ripgrep 内容搜索 + glob 文件名搜索、Git 操作集（status/log/diff/commit）、网页抓取与搜索、全方法 HTTP 客户端（本地联调）、TypeScript/JS 代码导航与类型诊断、Word/PDF/Excel 文档阅读、依赖清单检查、worktree 管理、子 agent 编排（run_workflow）。
+- **图片附件多模态**（需 `DEEP_SEEK_VISION=1` 开启）：聊天消息可直接贴图提问（单张 ≤8MB），随消息进入模型上下文；无附件消息行为逐字节不变，token 估算对图片固定计价，base64 绝不进估算/索引/摘要链路。
+- **完整工具链**：读/写/编辑/移动/删除文件 + 符号大纲（AST）、运行命令（前台/后台进程，前台超时自动转后台看门狗）、ripgrep 内容搜索 + glob 文件名搜索、Git 操作集（status/log/diff/commit）、网页抓取与搜索、全方法 HTTP 客户端（本地联调）、TypeScript/JS 代码导航与类型诊断、Word/PDF/Excel 文档阅读、依赖清单检查、worktree 管理、子 agent 编排（run_workflow）。
 - **审批网关**：SAFE 只读免审、MUTATION/DANGER 弹审；「总是允许」智能落成 glob 权限规则持久化。
 - **两阶段计划模式**：只读调研 →「准备开始编码？」方案审批（是并自动接受编辑 / 是并手动审批编辑 / 编辑方案 / 否——留在计划模式继续迭代修订）→ 落地实现。
 - **代码变更 diff 视图**：文件修改工具内联展示变更对比（CLI 红绿上下文式 / VS Code 左右对比栅格），VS Code 端可点击放大全屏阅读，亦可一键打开原生 `vscode.diff` 编辑器长期对照。
