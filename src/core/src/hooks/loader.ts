@@ -229,9 +229,12 @@ export const validateRule = (raw: any, event: EventType, src: string, idx: numbe
  */
 export const parseStdoutDecision = (stdout: string): HookResult | undefined => {
     const s = (stdout ?? "").trim();
-    if (!s || !s.startsWith("{")) return undefined;
+    if (!s) return undefined;
+    const match = s.match(/\{[\s\S]*\}$/); 
+    if (!match) return undefined;
+    const jsonStr = match[0]
     try {
-        const parsed = JSON.parse(s);
+        const parsed = JSON.parse(jsonStr);
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
         const out: { deny?: boolean; reason?: string; argsOverride?: any; resultOverride?: string } = {};
         if (parsed.deny === true) {
