@@ -13,7 +13,7 @@ import { CustomTool, ToolSafetyLevel } from "../type.ts";
 // typescript 模块惰性加载（view_symbol_outline 的 AST + 代码导航/诊断的 LanguageService 共用）已收敛到 tsHost，
 //   本文件不再持私有副本。CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩；
 //   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
-import { getTs } from "../tsHost.ts";
+import { getTs, checkSupportedSourceExt } from "../tsHost.ts";
 import {
     getActiveWorkspaceRoot,
     resolveSafePath,
@@ -810,7 +810,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "view_symbol_outline",
-            description: "通过抽象语法树(AST)快速提取指定文件中的符号大纲（类、接口、函数名、导出项、入参签名等）。适合在不读取几千行具体代码的前提下，宏观了解文件架构。",
+            description: "通过抽象语法树(AST)快速提取指定 TS/JS 源文件中的符号大纲（类、接口、函数名、导出项、入参签名等）。适合在不读取几千行具体代码的前提下，宏观了解文件架构。仅支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；其他类型文件（.java/.vue/.py 等）直接拒绝，请改用 read_file。",
             parameters: {
                 type: "object",
                 properties: {
@@ -827,6 +827,10 @@ export const fsTools: CustomTool[] = [
                     // ★ 读保护闸（与 read_file 对称）：敏感凭证文件拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
                     const readBlock = await assertReadable(absPath, args.path);
                     if (readBlock) return readBlock;
+                    // ★ 扩展名闸门：createSourceFile 对任意文本硬按 TS 语法解析且无视 parseDiagnostics，
+                    //   非 TS/JS 文件（.java 等）会静默产出残缺伪大纲误导模型——白名单外诚实拒绝。
+                    const extBlock = checkSupportedSourceExt(args.path);
+                    if (extBlock) return extBlock;
                     // ★ 体积熔断（防 OOM）：超大 JS/TS 文件全量 readFile + AST 全量驻留会吃内存，
                     //   read_file 已分片，本工具补同口径防护（1MB 上限）。
                     const statForSize = await fs.stat(absPath);

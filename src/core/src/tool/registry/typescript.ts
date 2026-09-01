@@ -14,7 +14,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative } from "../tsHost.ts";
+import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative, checkSupportedSourceExt } from "../tsHost.ts";
 import { resolveReadablePath, getContainingRoot } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
@@ -28,10 +28,12 @@ const toDisplayPath = (wsRoot: string, abs: string): string => {
     return abs.replace(/\\/g, "/").split("/").slice(-3).join("/");
 };
 
-/** 读门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示串或 null（放行）。 */
+/** 读门 + 扩展名闸门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示串或 null（放行）。 */
 const precheck = async (displayPath: string, absPath: string): Promise<string | null> => {
     const readBlock = await assertReadable(absPath, displayPath);
     if (readBlock) return readBlock;
+    const extBlock = checkSupportedSourceExt(displayPath);
+    if (extBlock) return extBlock;
     const stat = await fs.stat(absPath);
     if (stat.size > MAX_FILE_BYTES) {
         return `⚠️ [文件过大]：[${displayPath}] 约 ${Math.round(stat.size / 1024)}KB，超过 ${MAX_FILE_BYTES / 1024}KB 上限（防全量 type-check 吃内存）。`;
@@ -108,7 +110,7 @@ export const typescriptTools: CustomTool[] = [
             description:
                 "对一个或多个 TS/JS 文件取 TypeScript 语法 + 语义诊断（类型错误、未用变量、不可达代码等），输出带行号/列/严重度/TS 错误码，" +
                 "格式对齐 tsc。用于精准定位编译/类型问题，替代手动跑 tsc 再解析输出。★ 改完多个文件后验证：传 paths 数组一次诊断全部（最多 20 个），勿逐文件多次调用。" +
-                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 不支持（需 vue-tsc）。项目级全量诊断请用 run_command 跑 `tsc --noEmit`。" +
+                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 不支持（需 vue-tsc），其余扩展名（.java/.py/.go 等）直接拒绝、勿传入。项目级全量诊断请用 run_command 跑 `tsc --noEmit`。" +
                 "依赖 typescript 模块（VSCode 扩展内可用；缺失则本工具自动隐藏）。",
             parameters: {
                 type: "object",
@@ -163,7 +165,7 @@ export const typescriptTools: CustomTool[] = [
             name: "goto_definition",
             description:
                 "跳转到指定 TS/JS 文件某行某列符号的定义位置，返回 rel/path:line:col（可多处）。用于跨文件追踪函数/类型/变量的来源，" +
-                "替代 grep 猜测。支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 不支持。落点在 node_modules 或 .d.ts 时标注 (declaration/library)。" +
+                "替代 grep 猜测。支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 不支持，其余扩展名（.java/.py/.go 等）直接拒绝、勿传入。落点在 node_modules 或 .d.ts 时标注 (declaration/library)。" +
                 "行/列为 1-based（与编辑器一致）。依赖 typescript 模块（VSCode 扩展内可用；缺失则本工具自动隐藏）。",
             parameters: {
                 type: "object",

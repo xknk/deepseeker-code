@@ -204,6 +204,22 @@ export const posToLineCol = (ts: TsModule, sf: ts.SourceFile, pos: number): { li
     return { line: line + 1, column: character + 1 };
 };
 
+/** TS 引擎可解析的源文件扩展名白名单（.d.ts 被 .ts 覆盖）。单一来源，get_diagnostics/goto_definition/view_symbol_outline 共用。 */
+const SUPPORTED_SOURCE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+
+/**
+ * 源文件扩展名闸门：非 TS/JS 文件返回诚实拦截提示，白名单返回 null 放行。
+ * 必要性（.java 实测）：LanguageService 对未知扩展名不纳入 program——get_diagnostics 抛
+ * "Could not find source file"（误导性报错）；createSourceFile 则无视 parseDiagnostics 静默
+ * 按 TS 语法硬解，产出残缺伪大纲（[Class] 碰巧对、方法签名错乱），比报错更误导模型。
+ */
+export const checkSupportedSourceExt = (displayPath: string): string | null => {
+    const ext = path.extname(displayPath).toLowerCase();
+    if (SUPPORTED_SOURCE_EXTS.has(ext)) return null;
+    return `❌ [文件类型不支持]：[${displayPath}] 的扩展名 ${ext || "(无)"} 不在 TS 引擎支持范围（仅 .ts/.tsx/.js/.jsx/.mjs/.cjs）。` +
+        `请改用 read_file/grep 查看内容；编译/类型类验证用 run_command 跑对应语言工具链（如 mvn compile / tsc --noEmit）。`;
+};
+
 /** 1-based { line, column } → 0-based offset（goto_definition 输入转 TS 位置）。 */
 export const lineColToPos = (ts: TsModule, sf: ts.SourceFile, line1: number, col1: number): number =>
     ts.getPositionOfLineAndCharacter(sf, Math.max(0, line1 - 1), Math.max(0, col1 - 1));
