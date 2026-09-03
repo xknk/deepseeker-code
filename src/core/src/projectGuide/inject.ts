@@ -2,10 +2,10 @@
  * @file projectGuide/inject.ts
  * @description 把项目指引幂等注入系统提示词（message[0].content）。
  *
- *  逐字复刻 skills/inject.ts 的「追加 + 唯一标记」幂等模式：
+ *  逐字复刻 skills/inject.ts 的 fence 幂等注入模式（统一走 common.injectMarkedBlock）：
  *   - 只追加到 message[0].content，绝不新增数组元素、绝不改下标 0/1
  *     （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary槽）；
- *   - 用唯一标记【项目指引】幂等：已含则切除旧块再重接（支持热更新）。
+ *   - run 内零漂移：指引变化不替换 + warn，下轮重建 message[0] 时生效（不支持热更新）。
  */
 import { injectMarkedBlock } from "@/common/index.ts";
 import { getProjectGuide } from "./loader.ts";

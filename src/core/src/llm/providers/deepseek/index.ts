@@ -3,8 +3,9 @@
  * @description DeepSeek LLMProvider 实现：聚合 client + stream，搬迁 model.ts 的
  *  summarize / classifyRisk / 错误分类，实现 buildAssistantMessage（挂 reasoning_content 扩展字段）。
  *
- *  ★ reasoning_content 字段名全局只在两处出现：stream.ts（读取映射）+ 此处 buildAssistantMessage（写入挂载）。
- *    通用 agent 层零感知该字段——为多厂商铺路（换 provider 即换思考字段协议）。
+ *  ★ reasoning_content 字段名在 deepseek provider 内仅两处出现：stream.ts（读取映射）+ 此处
+ *    buildAssistantMessage（写入挂载）。通用 agent 层零感知该字段——为多厂商铺路（换 provider 即换思考字段协议）。
+ *    （ReplayProvider 回放 DeepSeek wire 格式，自带同名字段读写，不在此约束内。）
  */
 import { LLMProvider, AssistantParts } from "../../provider.ts";
 import { Msg } from "@/session/contextCore.ts";

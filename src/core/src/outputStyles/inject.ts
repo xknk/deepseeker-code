@@ -1,7 +1,8 @@
 /**
  * @file outputStyles/inject.ts
  * @description 把选用的输出风格 persona 幂等注入系统提示词（P2-16）。
- *  镜像 skills/agents/projectGuide 的 injectMarkedBlock 模式（fence 机制，会话内不变 → 不破坏前缀缓存）。
+ *  镜像 skills/agents/projectGuide 的 injectMarkedBlock 模式（fence 机制，run 内锁定零漂移；
+ *  跨 run 源不变则重建逐字节复现 → 不破坏前缀缓存）。
  */
 import { injectMarkedBlock } from "@/common/index.ts";
 import { getOutputStyle } from "./registry.ts";

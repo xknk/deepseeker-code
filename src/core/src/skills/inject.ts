@@ -2,10 +2,11 @@
  * @file skills/inject.ts
  * @description 把"技能目录"清单幂等注入系统提示词（message[0].content）。
  *
- *  复刻 planMode 的追加 + 唯一标记模式（agent/planMode.ts:23 + runAgent.ts:74-80）：
+ *  追加 + 唯一标记模式，幂等统一走 common.injectMarkedBlock（P0-B 会话首锁）：
  *   - 只追加到 message[0].content，绝不新增数组元素、绝不改下标 0/1
  *     （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary槽）；
- *   - 用唯一标记【可用技能目录】幂等：已含则切除旧块再重接（支持清单热更新）。
+ *   - run 内块级比对零漂移：清单变化不替换 + warn，下轮重建 message[0] 时生效
+ *     （替换会击穿 DeepSeek 前缀缓存，已废弃早期「切除旧块再重接」的热更新方案）。
  */
 import { injectMarkedBlock } from "@/common/index.ts";
 import { getSkillCatalog } from "./registry.ts";

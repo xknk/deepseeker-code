@@ -9,7 +9,7 @@ export type UndoOperationType = 'edit_file' | 'write_file' | 'create_file' | 'de
 /**
  * 备份内容形态：
  *  - file_content   单文件全文备份（edit/write 覆盖、delete 删文件）
- *  - directory_tree 整目录树快照（delete_path 删目录，cpSync 还原结构）
+ *  - directory_tree 整目录树快照（delete_path 删目录，异步 fs.cp 还原结构，避免 cpSync 阻塞事件循环）
  *  - creation_marker 仅作"新建标记"（create_file 或 write_file 新建）：原文件不存在，回退=删除新建文件
  */
 export type BackupKind = 'file_content' | 'directory_tree' | 'creation_marker';

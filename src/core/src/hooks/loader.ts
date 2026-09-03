@@ -344,7 +344,8 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                         : { deny: false };
                 }
                 // 响应体为 JSON 且含 { deny: true, reason } → 直接采纳对端决策；
-                // ★ 改写协议（第二梯队 #3）：argsOverride / resultOverride 亦经此通道（2xx 才采纳）
+                // ★ 改写协议（第二梯队 #3）：argsOverride / resultOverride 亦经此通道——响应体为含已知字段的
+                //   JSON 即采纳（无论状态码）；非 JSON/无改写字段才落到下方非 2xx 的 denyOnNonZero 决策
                 try {
                     const parsed = JSON.parse(res.responseBody);
                     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {

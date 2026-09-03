@@ -94,7 +94,8 @@ export const prepareToolsAndInjections = async (
     })();
     const effLocale = detectTextLocale(lastUserText) ?? locale;
     if (effLocale) injectMarkedBlock(message, "⟦DSC:LOCALE⟧", LOCALE_HINTS[effLocale]);
-    // ★ P2-16 输出风格：按 outputStyle 幂等注入 persona 正文（fence 机制，会话内不变 → 不破坏前缀缓存）
+    // ★ P2-16 输出风格：按 outputStyle 幂等注入 persona 正文（fence 机制，run 内锁定零漂移；
+    //   跨 run 源不变则重建逐字节复现 → 不破坏前缀缓存）
     injectOutputStyle(message, outputStyle);
     // ★ Skills：把【可用技能目录】幂等注入系统提示词（fence 机制，不动 message 下标）
     injectSkillCatalog(message);

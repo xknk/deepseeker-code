@@ -39,7 +39,7 @@ DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek �
 - **压缩归档与召回**（truncate.ts / recall.ts）：摘要槽为双段结构——`⟦DSC:ARCHIVE-INDEX⟧` 实体索引由代码正则确定性提取、**永不送 LLM 压缩**（索引无损是硬约束），`⟦DSC:ARCHIVE-NOTES⟧` 叙述可自收敛；被归档消息经 `recall` 工具检索取回（文件类命中现场 stat 标 staleness）；超长工具结果在**脱敏后、截断前**落盘 `<会话目录>/tool-outputs/<tool_call_id>.txt` 侧车缓存（位置顺序是安全红线）。
 - **工具注册**：`src/core/src/tool/index.ts` 聚合 `agentTools`；新增工具在 `tool/registry/` 加文件并 `push`；工具协议见 `tool/type.ts`（`CustomTool`，含 safetyLevel/审批/锁/环境断言等）。
 - **扩展机制**：
-  - Hooks：`src/core/src/hooks/`，6 类生命周期事件（SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd），声明式配置 + 程序化注册。
+  - Hooks：`src/core/src/hooks/`，11 类生命周期事件（核心 6 类 SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/SessionEnd + SubagentStart/SubagentStop/PreCompact/PostCompact/PermissionRequest），声明式配置 + 程序化注册。
   - Skills：`src/core/src/skills/`，目录发现（builtin/global/project）+ `load_skill` 按需加载；内置 skill 放 `skills/builtin/<name>/SKILL.md`。
   - MCP：`src/core/src/tool/mcp/`，动态发现外部工具。
 - **文档索引**：架构与计划见 `.ai-docs/`（下一步计划 / 子代理委派指南）+ `src/core/src/memory/`（持久记忆系统：loader/inject/registry）。

@@ -3,7 +3,7 @@
  * @description DeepSeek 流式对话：包 model.chat.completions.create，保留 idle stall 超时，
  *  yield 前把 ChatCompletionChunk 映射为标准化 ProviderStreamChunk。
  *
- *  ★ reasoning_content 字符串【全局只在此处出现】（窄化读取 delta.reasoning_content → {kind:'reasoning'}），
+ *  ★ reasoning_content 字符串【deepseek provider 内只在此处读取】（窄化 delta.reasoning_content → {kind:'reasoning'}），
  *    通用层（streamInference）不再知道该字段名。从 llm/model.ts 的 chatWithModelWithTools 搬迁 + chunk 标准化改造。
  *  协议限制不变：tool_call.arguments 是增量分片，须流完拼整才能执行（"边吐字边调工具"做不到）。
  */

@@ -132,8 +132,11 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
 
         /**
          * 敏感数据动态脱敏标记（数据隐私与防外泄护城河）
-         * 场景：DeepSeek 是云端模型，当本工具（如 read_file）读到 .env 或含有密码的文件时，
-         * 执行层在把文本发给云端前，会根据此策略将密钥替换为 `[MASKED_SECRET]`。
+         * 场景：DeepSeek 是云端模型，当本工具（如 read_file）读到**非敏感名文件**（如 config.js）
+         * 中的内联密钥（apiKey/token 等）时，执行层在把文本发给云端前，会根据此策略将密钥替换为
+         * `[MASKED_SECRET]`。
+         * 注意：.env/.npmrc/.netrc/私钥/credentials 等敏感凭证文件不走本脱敏——read_file 在
+         * isSensitiveReadTarget/assertReadable 处直接硬拒读取（模型拿不到内容），防泄密更彻底。
          */
         privacyMaskingRules?: RegExp[] | ((args: any, rawOutput: string) => string);
 
@@ -159,14 +162,14 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 场景：执行 `npm install` 产生了 2000 行依赖下载进度条。
          * - toUser: 终端用户需要实时看到的酷炫安装动画/流式字符。
          * - toModel: 真正喂给大模型上下文的纯净结论（例如：`"Successfully installed 45 packages."`）。
-         * 已接线：runAgent 据此把结果分为 toModel（写回 message 与 transcript）与 toUser（yield 给前端），见 runAgent.ts:608-624。
+         * 已接线：toolExecution 据此把结果分为 toModel（写回 message 与 transcript）与 toUser（yield 给前端）。
          */
         outputFilter?: (rawOutput: string) => { toModel: string; toUser: string };
         /* ================= 3.5 环境自适应与引导 (Environment & Tool Hints) ================= */
         /**
          * 工具前置物理环境断言 (Environment Assertion)
          * 在把工具喂给大模型之前，先在本地执行此断言。如果返回 false，runAgent 会直接从工具列表中剔除该工具。
-         * 场景：如 `view_webpage` 工具需要本地装有 chrome 浏览器，若断言失败则根本不暴露给大模型，避免无效调用。
+         * 场景：如 typescript 工具需要本地安装 typescript 包、web_search 需要配置 TAVILY_API_KEY，断言失败则根本不暴露给大模型，避免无效调用。
          */
         validateEnvironment?: (ctx: ToolContext) => boolean | Promise<boolean>;
 
@@ -182,7 +185,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 确定性状态断言（硬编码防幻觉护城河）
          * 场景：工具运行完后，由工具底层逻辑直接分析 stdout/stderr，并强行返回状态。
          * 执行层如果收到 FAILED，会在给模型的 ToolResult 中置顶插入一行警告：
-         * “【系统判定】：该工具执行结果为失败，请停止乐观盲目幻想，立刻仔细阅读下方报错并修正参数！”
+         * "【系统判定：执行失败】<verdict.summary>\n请正视下方输出，不要乐观假设成功。"
          */
         verifyResult?: (rawOutput: string, ctx: ToolContext) => {
             status: ToolExecutionResultStatus;

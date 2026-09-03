@@ -311,8 +311,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 return;
             }
             // completed：继续下一轮推理
-            // ★ 事件日志化：本轮 assistant + 全部 tool 结果已完整 flush → round 闭合（completed 路径独有；
-            //   abort/error/repeat/terminal 不写 round.end，缺失即取证信号）。
+            // ★ 事件日志化：本轮 assistant + 全部 tool 结果已完整 flush → round 闭合（两条正常路径都写：
+            //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
         }
     } catch (toolErr) {

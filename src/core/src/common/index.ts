@@ -144,10 +144,13 @@ export const createSemaphore = (max: number) => {
  *  - 只追加到 system 消息，绝不新增数组元素、绝不改下标 0/1
  *    （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary 槽）；
  *  - fence 已存在时做【块级比对】（本块 = fence 起 → 下一个 ⟦…⟧ fence 块或串尾）：内容一致 → 字节级不动；
- *  - ★ P0-B 会话首锁：内容变化（如会话中途切 output-style / 记忆索引更新）→ 保留旧块 + 告警，
- *    新内容下个新会话生效。改写 message[0] 任意字节都会击穿 DeepSeek 前缀缓存（其后全部历史
- *    re-prefill），故「会话内不变」从注释假设升级为机制强制。代价：fence 清单（skills/agents/
- *    memory 等）不再会话内热更新，接受（L1 稳定优先）。
+ *  - ★ P0-B 会话首锁（run 内零漂移）：同一 message 数组生命周期内（≈ 一次 run）比对出内容变化
+ *    → 保留旧块 + 告警，绝不替换。改写 message[0] 任意字节都会击穿 DeepSeek 前缀缓存（其后全部
+ *    历史 re-prefill），「run 内不变」从注释假设升级为机制强制。
+ *  - ★ 作用范围须知：比对分支只在「同一数组被二次 setup」（热重载/测试重入）时触发。正常对话流
+ *    每条用户消息经 buildContextMessages 全新重建 message[0]（fence 不存在）→ 走建块分支带上
+ *    最新内容——源变化在同会话下一条消息即生效（击穿一次缓存，此后按新字节稳定）；跨 run 的
+ *    稳定靠「源不变 + 纯函数重建逐字节复现」达成，不是本锁承诺的。
  *  - fence 用罕用串而非人可读标题，避免标题被内容复述导致边界误判。
  * @param message 上下文数组（原地修改 message[0].content）
  * @param fence   块锚点（罕用串，约定 ⟦DSC:XXX⟧ 形态）
@@ -158,14 +161,14 @@ export const injectMarkedBlock = (message: any[], fence: string, body: string): 
     if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return;
     const idx = sys.content.indexOf(fence);
     if (idx === -1) {
-        sys.content += `\n\n${fence}\n${body}`; // 首次创建（会话首轮）：追加即建块
+        sys.content += `\n\n${fence}\n${body}`; // 首次创建（每轮重建后的 message[0] 首注）：追加即建块
         return;
     }
     const after = sys.content.slice(idx + fence.length);
     const next = after.match(/\n\n⟦[^\n]*?⟧/); // 本块边界 = 下一个 fence 块起点或串尾
     const oldBody = next?.index !== undefined ? after.slice(0, next.index) : after;
     if (oldBody === `\n${body}`) return; // 幂等：字节级一致，不动 content
-    console.warn(`⚠️ ${fence} 已锁定（会话内不变以保前缀缓存），内容变化将于下个新会话生效。`);
+    console.warn(`⚠️ ${fence} 已锁定（run 内不变以保前缀缓存），内容变化将于下轮重建 message[0] 时生效。`);
 };
 
 // ============ Windows 子进程输出编码兜底（GBK OEM 代码页防乱码） ============

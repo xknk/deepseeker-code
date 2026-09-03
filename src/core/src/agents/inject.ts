@@ -1,11 +1,11 @@
 /**
  * @file agents/inject.ts
  * @description 把"子 Agent 目录"清单幂等注入系统提示词（message[0].content）。
- *  镜像 skills/inject.ts 的唯一标记 + split 切除模式：
+ *  镜像 skills/inject.ts 的 fence 注入模式（统一走 common.injectMarkedBlock）：
  *   - 只追加到 message[0].content，绝不新增数组元素、绝不改下标 0/1
  *     （ensureSummarySlot / ensureFitsWindow 强依赖 [0]=system [1]=summary 槽）；
- *   - 用唯一标记【可用子 Agent 目录】幂等：已含则切除旧块再重接（支持清单热更新）。
- *  缓存安全：catalog 不变时 split-reappend 产出字节稳定内容，跨轮/跨 turn 命中 DeepSeek 前缀缓存。
+ *   - run 内块级比对零漂移：catalog 变化不替换 + warn，下轮重建 message[0] 时生效。
+ *  缓存安全：catalog 不变时重建逐字节复现，跨轮/跨 turn 命中 DeepSeek 前缀缓存。
  */
 import { injectMarkedBlock } from "@/common/index.ts";
 import { getAgentCatalog } from "./registry.ts";
