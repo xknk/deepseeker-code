@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.58
+
+TS/JS 代码工具源文件扩展名闸门 + hooks stdout 决议解析健壮性 + 系统提示词注入缓存语义澄清。
+
+### TS/JS 代码工具扩展名闸门（诚实拒绝替代误导输出）
+
+- `get_diagnostics` / `goto_definition` / `view_symbol_outline` 三个 TS 引擎工具统一接入源文件扩展名闸门（`checkSupportedSourceExt`，白名单单一来源：`.ts/.tsx/.js/.jsx/.mjs/.cjs`）。
+- 非白名单扩展名（.java/.py/.go 及 .vue SFC 等）在进 TS 引擎前即被拦下：此前 `get_diagnostics` 对未知扩展名抛误导性 `Could not find source file`；`view_symbol_outline` 的 `createSourceFile` 无视 parseDiagnostics 硬按 TS 语法解析，静默产出残缺伪大纲（类名碰巧对、方法签名错乱）——比报错更误导模型。现统一返回拦截提示，引导改用 read_file/grep 查看内容、编译验证走对应语言工具链（如 `mvn compile` / `tsc --noEmit`）。
+- 三个工具的 description 同步收紧（「仅支持 TS/JS 扩展名，其余直接拒绝、勿传入」），降低模型试错调用。
+- 新增单元测试 `typescript-gate.test.ts` 覆盖闸门矩阵。
+
+### hooks stdout 决议解析健壮性
+
+- `parseStdoutDecision` 不再要求 stdout 整体是纯 JSON：改为提取文本尾部的 `{...}` 块解析。hook 脚本在 JSON 决议前打印日志/横幅不再导致 deny/改写决议被静默丢弃；无 JSON 时行为不变（静默忽略）。
+
+### 系统提示词注入与前缀缓存语义澄清
+
+- `injectMarkedBlock`（P0-B 会话首锁）注释与 warn 文案修正：锁实际只在「同一 message 数组被二次 setup」（热重载/测试重入）时拦截；正常对话流每轮经 buildContextMessages 全新重建 message[0]（fence 不存在 → 走建块分支），skills/agents/memory 等源变化在同会话**下一条消息即生效**（击穿一次缓存，此后按新字节稳定）——原「下个新会话生效」表述过宽。
+- runAgent 事件日志注释修正：`round.end` 在两条正常收尾路径（completed 与无工具收尾）都写；abort/error/repeat/terminal 不写，缺失即取证信号。
+
 ## 1.0.56
 
 图片附件多模态 + 命令运行时看门狗（自动转后台）+ 会话历史召回（recall）+ 滚动摘要双段结构 + 超长工具结果侧车存档：被上下文压缩归档的内容可按需检索取回，摘要不再丢检索入口。
