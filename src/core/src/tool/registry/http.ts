@@ -25,9 +25,9 @@ export const httpTools: CustomTool[] = [
         function: {
             name: "http_request",
             description: [
-                "全方法 HTTP 客户端，用于本地前后端联调、API 测试、调用 REST 接口。支持 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS，可自定义请求头与请求体，返回原始响应（HTTP 状态码 + 响应头 + body 原文，不转 Markdown）。",
-                "与 web_fetch 的区别：web_fetch 是 GET 抓网页转 Markdown（查文档用、默认拦内网）；本工具是调接口取原始响应（联调用、默认放行 localhost/内网）。",
-                "SSRF：默认放行 loopback 与内网段（本地联调必需，含 docker/k8s 内网），但始终拦截云元数据端点 169.254.169.254；仅 http/https。"
+                "全方法 HTTP 客户端：本地前后端联调、API 测试、调 REST 接口。返回原始响应（状态码+响应头+body 原文，不转 Markdown）。",
+                "与 web_fetch 区别：web_fetch GET 抓网页转 Markdown（查文档、默认拦内网）；本工具调接口取原始响应（联调、默认放行 localhost/内网）。",
+                "SSRF：始终拦云元数据端点 169.254.169.254；仅 http/https。"
             ].join(" "),
             parameters: {
                 type: "object",

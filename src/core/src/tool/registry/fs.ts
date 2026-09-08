@@ -544,23 +544,23 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "edit_file",
-            description: "针对指定的文件进行局部精准修改。★ 同一文件有多处要改时，务必一次调用传 edits 数组全部完成（按序应用、整体原子：任一处失败则全部不写入），勿逐处多次调用。old_str 必须与文件中的原始代码逐字符一致：请去掉 read_file 返回的「<行号>: 」前缀，并保留原有缩进（Tab/空格）与行尾空白；默认要求在全文中唯一，若设 replace_all=true 则替换全部匹配处（适合批量重命名/统一改写）。",
+            description: "对文件做局部精准修改。★ 同一文件多处要改时一次传 edits 数组全部完成（按序应用、整体原子：任一处失败全部不写入），勿逐处多次调用。old_str 须与文件原文逐字符一致：去掉 read_file 返回的「<行号>: 」前缀，保留原缩进（Tab/空格）与行尾空白。默认须全文唯一；replace_all=true 替换全部匹配（批量重命名/统一改写）。",
             parameters: {
                 type: "object",
                 properties: {
-                    path: { type: "string", description: "准备修改的文件相对路径" },
-                    old_str: { type: "string", description: "文件中现有的完整旧代码块（单处修改用；多处修改请改用 edits 数组一次完成）" },
-                    new_str: { type: "string", description: "准备替换进去的新代码块（单处修改用）" },
-                    replace_all: { type: "boolean", description: "是否替换全文所有匹配处（默认 false 仅替换唯一匹配；批量重命名/统一改写时设 true）。顶层参数仅作用于单条 old_str/new_str；edits 内每条可独立设置" },
+                    path: { type: "string", description: "目标文件路径" },
+                    old_str: { type: "string", description: "现有旧代码块（单处修改用；多处改用 edits）" },
+                    new_str: { type: "string", description: "替换后的新代码块（单处修改用）" },
+                    replace_all: { type: "boolean", description: "替换全文所有匹配（默认 false 仅唯一匹配）。顶层仅作用单条 old_str/new_str；edits 内每条可独立设置" },
                     edits: {
                         type: "array",
-                        description: "★ 同一文件多处修改时优先使用：一次调用按序完成全部替换，省去逐处往返。第 N 条的 old_str 须基于前 N-1 条应用后的文件内容构造；任一条未命中则整体不写入（原子），修正该条后整组重试",
+                        description: "★ 同文件多处修改首选：一次按序完成全部替换。第 N 条 old_str 基于前 N-1 条应用后的内容构造；任一条未命中则整组不写入（原子），修正后整组重试",
                         items: {
                             type: "object",
                             properties: {
-                                old_str: { type: "string", description: "文件中现有的完整旧代码块" },
-                                new_str: { type: "string", description: "准备替换进去的新代码块" },
-                                replace_all: { type: "boolean", description: "该条是否替换全文所有匹配处（默认 false）" }
+                                old_str: { type: "string", description: "现有旧代码块" },
+                                new_str: { type: "string", description: "新代码块" },
+                                replace_all: { type: "boolean", description: "替换全部匹配（默认 false）" }
                             },
                             required: ["old_str", "new_str"]
                         }

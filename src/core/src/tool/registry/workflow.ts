@@ -52,13 +52,9 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
         function: {
             name: "run_workflow",
             description: [
-                "多子 agent 并行编排（P0-3）：把一个可分解的大任务一次性派给多个独立子 agent 并发执行，或串成数据流水线逐级精炼。突破 spawn_agent 只能串行单派生的上限，适用于大规模代码审查、迁移分析、多方案并行调研等。",
-                "两种模式：",
-                "• parallel（默认）：各步骤互不依赖、并发执行，结果按序聚合。适合互相独立的只读/分析任务（如审查 5 个模块、对 3 个技术方案各派一个调研 agent）。强烈建议 parallel 用于读/分析类任务（并行改同一批文件易冲突）。",
-                "• pipeline：步骤串行，阶段 N 自动接收阶段 N-1 的产出作为输入上下文，逐级精炼。适合分阶段加工（如：阶段1 抽取要点 → 阶段2 归类 → 阶段3 汇总结论）。",
-                "每个步骤可指定 name 套用声明式子 Agent（见【可用子 Agent 目录】）、role 补充角色、key 作为结果标签。",
-                "并行写安全：parallel 模式默认共享工作区（并行改同一批文件会冲突，建议仅用于读/分析）。设 isolation=\"worktree\" 后，每个步骤在独立 git worktree 里执行，互不污染——结束后收割各 worktree 的 diff 供合并，实现安全的并行迁移/改造。",
-                "与 spawn_agent 的关系：spawn_agent = 串行派生单个；run_workflow = 并行/流水线编排多个。任务可分解、彼此独立或呈流水线时用本工具，否则用 spawn_agent。",
+                "多子 agent 编排：把可分解的大任务派给多个独立子 agent。parallel（默认）=各步骤并发执行、结果按序聚合，适合互相独立的只读/分析任务；pipeline=步骤串行，前阶段产出自动作为后阶段输入，适合分阶段加工（抽取→归类→汇总）。",
+                "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；并行写/迁移用 isolation=\"worktree\"（每步独立 git worktree，结束后收割各步 diff）。",
+                "与 spawn_agent 的分工：单任务串行委派用 spawn_agent；任务可分解、多分支或流水线式时用本工具。",
             ].join("\n"),
             parameters: {
                 type: "object",
@@ -66,18 +62,18 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     mode: {
                         type: "string",
                         enum: ["parallel", "pipeline"],
-                        description: "编排模式：parallel=并发扇出（默认，互不依赖的任务）；pipeline=串行流水线（阶段间有数据依赖，逐级精炼）。",
+                        description: "parallel=并发扇出（默认，步骤互不依赖）；pipeline=串行流水线（前阶段产出作后阶段输入）。",
                     },
                     steps: {
                         type: "array",
-                        description: "编排步骤列表（parallel：每个是一个独立子 agent 任务；pipeline：按顺序为各阶段，前阶段产出自动作为后阶段输入）。",
+                        description: "步骤列表（parallel=每个是独立子 agent 任务；pipeline=按序各阶段）。",
                         items: {
                             type: "object",
                             properties: {
-                                task: { type: "string", description: "交给该子 agent 的具体任务描述（parallel 必须自包含、不依赖其它步骤；pipeline 只写本阶段职责，前阶段产出会自动拼入）" },
-                                name: { type: "string", description: "声明式子 Agent 名称（可选，套用其专长系统词/工具白名单/model）" },
-                                role: { type: "string", description: "角色/专长补充（可选）" },
-                                key: { type: "string", description: "结果标签（可选，默认用任务首句；parallel 结果按此标识各子 agent 产出）" },
+                                task: { type: "string", description: "子 agent 任务描述（parallel 须自包含；pipeline 只写本阶段职责）" },
+                                name: { type: "string", description: "声明式子 Agent 名（可选，套用其系统词/工具白名单/model）" },
+                                role: { type: "string", description: "角色补充（可选）" },
+                                key: { type: "string", description: "结果标签（可选，默认取任务首句）" },
                             },
                             required: ["task"],
                         },
@@ -85,12 +81,12 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     },
                     concurrency: {
                         type: "number",
-                        description: "parallel 模式最大并发子 agent 数（可选，默认 4，上限受全局配置约束）。任务彼此独立时调大可加速；为 1 则退化为串行。",
+                        description: "parallel 最大并发数（默认 4，受全局上限约束；1=串行）。",
                     },
                     isolation: {
                         type: "string",
                         enum: ["none", "worktree"],
-                        description: "隔离模式（可选，默认 none）：none=共享工作区（仅适合读/分析）；worktree=每步独立 git worktree（适合并行写/迁移，互不污染，结束后收割各 worktree diff）。仅 parallel 模式支持 worktree。",
+                        description: "none=共享工作区（默认，只读/分析）；worktree=每步独立 git worktree（并行写/迁移）。仅 parallel 支持。",
                     },
                 },
                 required: ["steps"],

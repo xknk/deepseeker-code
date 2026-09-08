@@ -29,14 +29,14 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
         type: "function",
         function: {
             name: "spawn_agent",
-            description: "创建一个拥有独立执行环境的子 agent 处理隔离的特定子任务，子任务完成后自动汇总改动点与结论返回。可通过 name 指定声明式子 Agent（见系统提示词【可用子 Agent 目录】）以套用其专长系统词/工具白名单/model；不传 name 走默认通用子 agent。支持续跑：传 resume_session_id（此前返回的 agent_id）复用该子 Agent 的完整历史记忆，适合追问、继续未完成的任务。",
+            description: "派生拥有独立执行环境的子 agent 处理隔离子任务，完成后自动汇报改动点与结论。name 可指定声明式子 Agent（见系统提示词【可用子 Agent 目录】，套用其系统词/工具白名单/model）；缺省走通用模板。续跑：传 resume_session_id（此前返回的 agent_id）复用该子 Agent 完整历史记忆，适合追问/继续未完任务。",
             parameters: {
                 type: "object",
                 properties: {
-                    task: { type: "string", description: "交给子 agent 的具体微观任务描述（如 '编写 Button 组件的单元测试'）；续跑时为新指令（如 '继续完成剩余用例'）" },
-                    name: { type: "string", description: "声明式子 Agent 名称（须与系统提示词中【可用子 Agent 目录】一致）。提供时按其声明加载系统词/工具白名单/model；不提供则走默认通用子 agent。" },
-                    role: { type: "string", description: "子 agent 的角色/专长（可选，如 '测试专家'、'重构先锋'）。声明式 agent 自带 role 时作补充。" },
-                    resume_session_id: { type: "string", description: "续跑既有子 Agent：传此前 spawn_agent 返回的 agent_id，其磁盘上的历史与记忆将完整恢复。注意：子 Agent 状态不随主会话 fork 回滚——fork 只分叉对话，续跑拿到的是子会话磁盘最新状态。缺省则新建子 Agent。" },
+                    task: { type: "string", description: "子 agent 的具体任务（如 '编写 Button 组件的单元测试'）；续跑时为新指令" },
+                    name: { type: "string", description: "声明式子 Agent 名（须与【可用子 Agent 目录】一致）；缺省通用子 agent" },
+                    role: { type: "string", description: "角色/专长补充（可选）；声明式 agent 自带 role 时作补充" },
+                    resume_session_id: { type: "string", description: "续跑既有子 Agent：传此前返回的 agent_id（恢复其磁盘历史与记忆）。注意子 Agent 状态不随主会话 fork 回滚。缺省新建" },
                 },
                 required: ["task"],
             },

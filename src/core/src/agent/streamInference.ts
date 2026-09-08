@@ -11,6 +11,7 @@
  *    reasoning_content 字段名——映射在 provider.streamChat 内（Step 8 切换完成）。拼装 assistantMessage 委托
  *    provider.buildAssistantMessage（DeepSeek 在其内挂 reasoning_content 扩展字段），杜绝手工列举漏挂。
  */
+import { createHash } from "node:crypto";
 import { Msg } from "@/session/contextCore.ts";
 import { AgentEvent, RunAgentEvents, ThinkingLevel } from "./type.ts";
 import { TraceDecisionSource } from "@/observability/type.ts";
@@ -20,6 +21,9 @@ import { ensureFitsWindow } from "./truncate.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
+
+/** sha1 前 10 位短哈希：前缀分段指纹用（只入 trace 供跨会话对比，不上模型）。 */
+const sha1short = (s: string): string => createHash('sha1').update(s).digest('hex').slice(0, 10);
 
 /** 推理结果（判别联合）：
  *  - completed —— 流式正常结束，携带拼装好的 assistantMessage（provider 产物，含厂商扩展字段如 reasoning_content），主循环落盘后继续；
@@ -50,6 +54,9 @@ export type StreamInferenceContext = {
     keepRecentUnits: number;
     compactRatio: number;
     modelWindow: number;
+    /** ★ 工具 schema 常数项（token，P2 口径修正）：真实 prompt_tokens 含 cleanedToolSchemas 段而
+     *  estimateTokens(messages) 不含。llm.request 估算与校准分母都须加上，缺省 0（兼容旧调用方）。 */
+    toolsTokens?: number;
 };
 
 /**
@@ -58,15 +65,27 @@ export type StreamInferenceContext = {
  */
 export const streamInference = async function* (ctx: StreamInferenceContext): AsyncGenerator<AgentEvent, InferenceResult> {
     const { message, nudgeMsg, sessionId, depth, round, startTime, userDecisionSource, llmDecisionSource,
-        signal, cleanedToolSchemas, model, thinkingLevel, events, keepRecentUnits, compactRatio, modelWindow } = ctx;
+        signal, cleanedToolSchemas, model, thinkingLevel, events, keepRecentUnits, compactRatio, modelWindow,
+        toolsTokens = 0 } = ctx;
     let inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
     let assistantMessage: Msg = { role: 'assistant', content: null } as Msg;
     try {
+        // ★ 前缀分段指纹（P0 缓存诊断）：tools 段 / system 段 / 摘要槽各记 sha1 短哈希 + 消息数。
+        //   DS 前缀缓存按序列化字节匹配，跨会话对比这四个字段即可二分定位「fresh-session 首轮 miss」的分歧点：
+        //   toolsHash 变 → 工具表分歧（env 门控漂移 / 版本迭代）；sysHash 变 → message[0] 注入漂移（locale/
+        //   skills/memory）；全同仍 miss → DS 服务端缓存 TTL/LRU 驱逐，非本地前缀问题。
+        const prefixFingerprint = {
+            toolsHash: sha1short(JSON.stringify(cleanedToolSchemas)),
+            sysHash: sha1short(String((message[0] as any)?.content ?? '')),
+            sumHash: sha1short(String((message[1] as any)?.content ?? '')),
+            msgCount: message.length,
+        };
         events({
             sessionId,
             eventType: 'llm.request',
-            metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round },
-            usage: { prompt_tokens: estimateTokens(inferenceMessages) },
+            metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round, ...prefixFingerprint },
+            // ★ P2 口径：估算加上工具 schema 常数项（与 API 真实 prompt_tokens 同口径，trace 里 est/real 才可比）
+            usage: { prompt_tokens: estimateTokens(inferenceMessages) + toolsTokens },
             payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
         });
         console.log(`🔄 代理推理第 ${round} 轮（流式）...`);
@@ -173,6 +192,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                         events,
                         depth,
                         signal,
+                        toolsTokens,
                     });
                     inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
                     compactedThisRound = true;

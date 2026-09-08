@@ -331,7 +331,12 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     //   避免长任务真实逼近窗口、估算仍以为安全 → 漏压缩 → 靠 API 400 兜底（每次漏判是一次完整失败的付费请求）。
     //   缺省 1.4：首轮/无反馈时的保守偏高值（偏早压缩，安全侧）。
     const correctionRatio = event.correctionRatio ?? 1.4;
-    const estReal = (arr: Msg[]) => estimateTokens(arr) * correctionRatio;
+    // ★ P2 口径修正：工具 schema 是 messageArr 之外的恒定段（44 工具实测约 9-10K token），API 真实
+    //   prompt_tokens 含它、estimateTokens 不含。压缩判定显式加常数项后，correctionRatio 的 EMA 只需
+    //   修正角色折算误差（收敛 ≈1.0-1.5），不再把 schema 常数吸收成乘数——旧行为下该乘数随对话增长
+    //   系统性虚高，导致提前压缩、无谓击穿前缀缓存（缓存命中率越高击穿越亏，见下方 cacheFactor）。
+    const toolsTokens = event.toolsTokens ?? 0;
+    const estReal = (arr: Msg[]) => estimateTokens(arr) * correctionRatio + toolsTokens;
     // ★ 缓存感知阈值：DS 前缀缓存命中时，压缩会改写 message[1] 摘要槽 → 从 message[1] 往后的缓存全部击穿
     //   （message[0] 系统提示词段保住，P0-4 前缀稳定性不受影响）。故命中率越高，压缩的击穿机会成本越高，越倾向推迟；
     //   命中率越低（已在 miss 区），压缩越接近纯赚，越早压。

@@ -57,32 +57,32 @@ export const memoryTools: CustomTool[] = [
         function: {
             name: "memory_save",
             description:
-                "保存一条持久记忆（跨会话保留）。用于记录非显然的事实、用户偏好、工作方式反馈、项目约束或外部资源指针——" +
-                "即那些「不应每次重新发现」「代码/git 不会直接告诉你」的信息。勿保存会话内即抛的临时信息。" +
-                "保存后系统提示词的记忆索引会自动更新。同名记忆会被覆盖。",
+                "保存一条持久记忆（跨会话保留）：非显然的事实、用户偏好、工作方式反馈、项目约束、外部资源指针——" +
+                "「不应每次重新发现」「代码/git 不会直接告诉你」的信息。勿存会话内即抛的临时信息。" +
+                "保存后记忆索引自动更新；同名记忆被覆盖。",
             parameters: {
                 type: "object",
                 properties: {
                     name: {
                         type: "string",
-                        description: "记忆唯一键，仅小写字母/数字/连字符（如 user-prefers-arrow-fns）。建议具描述性的 kebab-case。",
+                        description: "唯一键，小写字母/数字/连字符（描述性 kebab-case，如 user-prefers-arrow-fns）",
                     },
                     description: {
                         type: "string",
-                        description: "一句话概括本条记忆内容（注入记忆索引时展示，供日后判断是否需要召回）。勿换行。",
+                        description: "一句话概括（注入索引供日后判断是否召回）。勿换行",
                     },
                     body: {
                         type: "string",
-                        description: "记忆正文（事实本身）。可多行。上限 64KB。",
+                        description: "记忆正文，可多行，上限 64KB",
                     },
                     type: {
                         type: "string",
                         enum: ["user", "feedback", "project", "reference"],
-                        description: "user=用户画像/偏好；feedback=工作方式反馈（含原因与做法）；project=项目目标/约束；reference=外部资源指针（URL/dashboard/ticket）。默认 reference。",
+                        description: "user=用户画像/偏好；feedback=工作方式反馈（含原因与做法）；project=项目目标/约束；reference=外部资源指针。默认 reference",
                     },
                     project: {
                         type: "boolean",
-                        description: "是否写入项目记忆目录（<项目>/.deepseeker-code/memory，可提交 git 团队共享）。默认 false（写全局 ~/.deepseeker-code/memory，仅本机）。",
+                        description: "true=写入项目 .deepseeker-code/memory（可提交 git 共享）；默认 false（全局，仅本机）",
                     },
                 },
                 required: ["name", "description", "body"],

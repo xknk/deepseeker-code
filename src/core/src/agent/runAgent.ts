@@ -70,7 +70,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ setup：工具表裁剪（planMode/env）+ schema 清洗 + 摘要槽 + fence 注入（locale/outputStyle/skills/
     //   agents/projectGuide/memory）。抽出到 systemInjections.ts；validationCtx 在其内部构造。
     //   fence 注入幂等、不动 message 下标——保 DeepSeek 隐式前缀缓存（P0-4）。
-    const { rawTools, cleanedToolSchemas } = await prepareToolsAndInjections(message, options, events);
+    const { rawTools, cleanedToolSchemas, toolsTokens } = await prepareToolsAndInjections(message, options, events);
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
@@ -183,6 +183,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         correctionRatio: calibRatio,
                         lastRealPromptTokens,
                         lastCachedTokens,
+                        toolsTokens,
                     }
 
                 );
@@ -211,7 +212,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 message, nudgeMsg, sessionId, depth, round, startTime,
                 userDecisionSource, llmDecisionSource, signal,
                 cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
-                events, keepRecentUnits, compactRatio, modelWindow,
+                events, keepRecentUnits, compactRatio, modelWindow, toolsTokens,
             });
             if (infResult.kind === 'aborted') {
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
@@ -226,8 +227,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // ★ 用本轮真实 usage 校准估算系数 + 记录缓存数据（供下一轮 ensureFitsWindow 缓存感知判定）。
             //   message 此时正是推理时的上下文（push assistant 在下文），与真实 prompt_tokens 时序对齐；
             //   EMA（历史 0.6 / 新观测 0.4）平滑单轮抖动，estAtInfer>1000 过滤极小上下文的噪声。
+            //   ★ P2 口径修正：分母加上工具 schema 常数项（toolsTokens）——真实 prompt_tokens 含这段而
+            //   estimateTokens(message) 不含（实测 44 工具 ≈9-10K，首轮曾致观测比 3.9x）。常数显式计入后
+            //   EMA 只修正角色折算误差（收敛 ≈1.0-1.5），不再把常数吸收成漂移乘数。
+            //   过渡期：旧会话持久化的 calibRatio（旧口径含常数）会短暂双重计入 → 偏早压缩（安全侧），
+            //   按 0.4/轮的观测权重数轮内收敛到新口径，随后 updateCalibration 持久化新口径值。
             if (infResult.usage?.prompt_tokens) {
-                const estAtInfer = estimateTokens(message);
+                const estAtInfer = estimateTokens(message) + toolsTokens;
                 if (estAtInfer > 1000) {
                     const observed = infResult.usage.prompt_tokens / estAtInfer;
                     calibRatio = calibRatio * 0.6 + observed * 0.4;

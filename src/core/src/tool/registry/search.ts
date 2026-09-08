@@ -30,14 +30,14 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "search_grep",
-            description: "在工作区的所有文件中检索匹配的代码行，每个命中默认带前后各 2 行上下文（可直接判断用法、免紧跟一次 read_file；构造 edit_file 的 old_str 前可用 context 参数调大一次拿足）；默认按字面量关键词匹配，如需正则传 is_regex=true。★ 检索多个关键词时，用 is_regex=true 以 | 合并（如 'uploadVisible|uploadTip'）一次查完，勿逐个关键词多次调用。path 可限定到目录或具体文件（在单个大文件内多处定位时传文件路径最高效）。多根工作区下：可传项目目录名（如 'frontend'）自动匹配工作区根，或传绝对路径 / 相对默认根的 ../兄弟目录。★ 当用户在对话里指明了某个项目时，务必把该项目作为 path 传入——否则只会搜索 IDE 头部所示的活动根，常与用户意图不符。",
+            description: "在工作区文件中检索匹配的代码行，每个命中默认带前后各 2 行上下文（可直接判断用法；构造 edit_file 的 old_str 前可用 context 调大一次拿足）。默认字面量匹配，正则传 is_regex=true。★ 多关键词用 is_regex=true 以 | 合并（如 'uploadVisible|uploadTip'）一次查完，勿逐词多次调用。path 可限定目录或文件（单大文件多处定位传文件路径最高效）。多根工作区：path 可传项目目录名（如 'frontend'）、绝对路径或 ../兄弟目录。★ 用户指明了项目时务必把该项目作为 path 传入——缺省只搜活动根，常与意图不符。",
             parameters: {
                 type: "object",
                 properties: {
-                    query: { type: "string", description: "检索内容。默认为字面量关键词（如 'function runAgent'）；is_regex=true 时按正则解析（如 'function\\s+runAgent'，多关键词用 | 合并）" },
-                    is_regex: { type: "boolean", description: "是否将 query 作为正则表达式解析，默认 false（字面量匹配，自动转义特殊字符）" },
-                    path: { type: "string", description: "限定搜索的目录或具体文件（可选）。传具体文件路径时相当于该文件内全文检索（大文件多处定位首选）。默认搜索 IDE 头部所示活动根。多根场景下：传项目目录名（如 'frontend'）自动匹配工作区根；或传绝对路径 / 相对默认根的 ../<兄弟目录>；均经沙箱校验。用户提到具体项目时必填。" },
-                    context: { type: "number", description: "每个命中附带的前后上下文行数（0-10，默认 2）。需要拿足一段完整代码作 edit_file 的 old_str 时可调大（如 5-8），免得二次检索" }
+                    query: { type: "string", description: "检索词。默认字面量（如 'function runAgent'）；is_regex=true 时按正则（多关键词用 | 合并）" },
+                    is_regex: { type: "boolean", description: "query 按正则解析（默认 false，字面量自动转义特殊字符）" },
+                    path: { type: "string", description: "限定搜索的目录或文件（可选）。传文件=该文件内检索（大文件多处定位首选）。默认活动根；多根下可传项目目录名（如 'frontend'）/绝对路径/../兄弟目录。用户提到具体项目时必填。" },
+                    context: { type: "number", description: "每命中附带上下文行数（0-10，默认 2）。要拿足完整代码作 old_str 时调大（如 5-8）" }
                 },
                 required: ["query"],
             },

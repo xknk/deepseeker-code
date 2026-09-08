@@ -110,6 +110,10 @@ export interface ensureOptions  {
     lastRealPromptTokens?: number,
     /** 上一轮 API 前缀缓存命中 token 数（cached_tokens）。与 lastRealPromptTokens 配对算命中率。 */
     lastCachedTokens?: number,
+    /** ★ 工具 schema 常数项（token，P2 口径修正）：cleanedToolSchemas 序列化的 token 粗估（≈字节数/4）。
+     *  API 真实 prompt_tokens 含此段而 estimateTokens(messageArr) 不含——压缩阈值须显式加上，
+     *  否则校准 EMA 被迫把它吸收成乘数（长对话后期乘数虚高 → 提前压缩 → 无谓击穿前缀缓存）。缺省 0。 */
+    toolsTokens?: number,
 }
 
 /**
