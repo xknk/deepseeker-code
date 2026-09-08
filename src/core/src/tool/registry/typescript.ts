@@ -3,8 +3,9 @@
  * @description TS/JS 代码导航 + 类型诊断工具（LanguageService）。补 view_symbol_outline 仅语法 AST 的缺口——
  *  get_diagnostics：单文件语法 + 语义诊断（类型错误/未用变量等，带行号/列/严重度/TS 码）。
  *  goto_definition：符号跳转，返回定义位置 rel/path:line:col。
+ *  find_references：符号反向引用，全项目调用/导入/读写位置 + 读写标注 + 行摘录（类型感知，免 grep 同名误报）。
  *
- *  两者均 SAFE 只读，复用 tsHost 的 in-process LanguageService（无 tsserver 进程、无 LSP 协议）。
+ *  三者均 SAFE 只读，复用 tsHost 的 in-process LanguageService（无 tsserver 进程、无 LSP 协议）。
  *  ★ typescript 非 core 运行时依赖：validateEnvironment 在模块加载失败时返 false → runAgent 把工具从
  *    模型工具表移除（自隐藏，零干扰）。VSCode 扩展内 esbuild 打包 typescript → 可用；CLI/发布版未必。
  *
@@ -28,6 +29,10 @@ const toDisplayPath = (wsRoot: string, abs: string): string => {
     return abs.replace(/\\/g, "/").split("/").slice(-3).join("/");
 };
 
+/** 定义/声明落在 node_modules 或 .d.ts → 第三方库标注（goto_definition / find_references 共用）。 */
+const isLibFile = (abs: string): boolean =>
+    /(?:^|\/)node_modules\//.test(abs.replace(/\\/g, "/")) || /\.d\.ts$/i.test(abs);
+
 /** 读门 + 扩展名闸门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示串或 null（放行）。 */
 const precheck = async (displayPath: string, absPath: string): Promise<string | null> => {
     const readBlock = await assertReadable(absPath, displayPath);
@@ -46,6 +51,12 @@ const MAX_DIAG_ENTRIES = 300;
 
 /** 批量诊断单次文件数上限（防一次传几十个文件把输出/耗时打爆；更多请分批或跑 tsc）。 */
 const MAX_DIAG_FILES = 20;
+
+/** 引用条目上限（符号过热时防数千行引用撑爆输出；超出尾部提示 + 中心 truncateToolResult 双重兜底）。 */
+const MAX_REF_ENTRIES = 200;
+
+/** 引用行摘录截断长度（过长行只留前缀，细节让模型按需 read_file 补）。 */
+const REF_SNIPPET_MAX = 160;
 
 type TsModule = NonNullable<Awaited<ReturnType<typeof getTs>>>;
 
@@ -209,7 +220,7 @@ export const typescriptTools: CustomTool[] = [
                             const lc = posToLineCol(TS, defSf, def.textSpan.start);
                             loc = `${toDisplayPath(wsRoot, def.fileName)}:${lc.line}:${lc.column}`;
                         }
-                        const isLib = /(?:^|\/)node_modules\//.test(def.fileName.replace(/\\/g, "/")) || /\.d\.ts$/i.test(def.fileName);
+                        const isLib = isLibFile(def.fileName);
                         const name = def.name || "(anonymous)";
                         const kind = def.kind ? ` [${def.kind}]` : "";
                         return `${name}${kind} → ${loc}${isLib ? "  (declaration/library)" : ""}`;
@@ -217,6 +228,101 @@ export const typescriptTools: CustomTool[] = [
                     return `[Goto Definition: ${displayPath}:${line}:${column}]\n${out.join("\n")}`;
                 } catch (e: any) {
                     return `❌ 跳转定义失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`;
+                }
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "find_references",
+            description:
+                "查找指定 TS/JS 文件某行某列符号在全项目的所有引用位置（调用/导入/读写），输出 rel/path:line:col + 读写标注 + 所在行代码摘录。" +
+                "类型感知：只返回真实绑定，不含注释/字符串里的同名词（grep 的核心误报源）。用于改签名/重命名前的影响面排查、追踪调用方，" +
+                "与 goto_definition 互为反向（一个查来源、一个查去向）。支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 不支持，其余扩展名（.java/.py 等）直接拒绝、勿传入。" +
+                "行/列为 1-based（与编辑器一致）。引用覆盖以 program 内文件为界（tsconfig include 文件 + import 链可解析文件）；单符号超 200 处引用截断。" +
+                "依赖 typescript 模块（VSCode 扩展内可用；缺失则本工具自动隐藏）。",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "目标文件相对路径（如 'src/index.ts'）" },
+                    line: { type: "integer", description: "符号所在行号（1-based）" },
+                    column: { type: "integer", description: "符号所在列号（1-based）" },
+                },
+                required: ["path", "line", "column"],
+            },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
+            maxOutputCharacters: 48000, // 200 条引用 × ~160 字符摘录的理论上界之内；中心 truncateToolResult 仍是最终兜底
+            privacyMaskingRules: maskSecretsInContent,
+            validateEnvironment: async () => !!(await getTs()),
+            async execute(args: { path: string; line: number; column: number }, _ctx?: ToolContext): Promise<string> {
+                const { path: displayPath, line, column } = args;
+                try {
+                    const TS = await getTs();
+                    if (!TS) return `⚠️ [查找引用不可用]：typescript 模块未加载（VSCode 扩展内可用；CLI 环境未必安装 typescript）。`;
+                    const absPath = realpathNative(resolveReadablePath(displayPath));
+                    const block = await precheck(displayPath, absPath);
+                    if (block) return block;
+
+                    const { ls } = await getLanguageService(TS, absPath);
+                    const program = ls.getProgram();
+                    if (!program) return `❌ 无法取得 TS program（内部错误）。`;
+                    const sf = program.getSourceFile(absPath);
+                    if (!sf) return `❌ 文件未纳入 program：${displayPath}（可能无对应 tsconfig 或解析失败）。`;
+
+                    const pos = lineColToPos(TS, sf, line, column);
+                    const groups = ls.findReferences(absPath, pos);
+                    if (!groups || groups.length === 0) {
+                        return `No references found at ${displayPath}:${line}:${column}（确认定位在标识符上，非空白/字面量/关键字）。`;
+                    }
+
+                    const wsRoot = getContainingRoot(absPath);
+                    // 引用行摘录：每文件整读一次按行缓存，取目标行 trim 后截断（读失败/空行省略摘录段）。
+                    //   引用文件本身不经 precheck（已进 program 且多数为项目内源码）；中心截断 + 条目上限双重兜底体积。
+                    const lineTextCache = new Map<string, string[]>();
+                    const lineSnippet = async (abs: string, line1: number): Promise<string> => {
+                        let lines = lineTextCache.get(abs);
+                        if (!lines) {
+                            try { lines = (await fs.readFile(abs, "utf-8")).split(/\r?\n/); } catch { lines = []; }
+                            lineTextCache.set(abs, lines);
+                        }
+                        const text = (lines[line1 - 1] ?? "").trim();
+                        if (!text) return "";
+                        return "  " + (text.length > REF_SNIPPET_MAX ? text.slice(0, REF_SNIPPET_MAX) + "…" : text);
+                    };
+
+                    // 逐声明组输出（重载/多声明符号会有多组；跨文件符号另有 import [alias] 别名组）。
+                    //   组内引用行：[def] 定义项（TS 部分声明记 (write)）、(write)/(read) 其余。
+                    const sections: string[] = [];
+                    let shown = 0, overflow = 0;
+                    for (const g of groups) {
+                        const defSf = program.getSourceFile(g.definition.fileName);
+                        let defLoc = toDisplayPath(wsRoot, g.definition.fileName);
+                        if (defSf && g.definition.textSpan) {
+                            const lc = posToLineCol(TS, defSf, g.definition.textSpan.start);
+                            defLoc = `${defLoc}:${lc.line}:${lc.column}`;
+                        }
+                        const defLib = isLibFile(g.definition.fileName) ? "  (declaration/library)" : "";
+                        // definition.name 可能含换行（别名组带 "(alias) <签名>" 前缀）——压平成单行防输出折断
+                        const defName = (g.definition.name || "(anonymous)").replace(/\s+/g, " ");
+                        const header = `${defName}${g.definition.kind ? ` [${g.definition.kind}]` : ""} — ${g.references.length} 处引用（声明 ${defLoc}）${defLib}`;
+                        const bodyLines: string[] = [];
+                        for (const r of g.references) {
+                            if (shown >= MAX_REF_ENTRIES) { overflow++; continue; }
+                            shown++;
+                            const refSf = program.getSourceFile(r.fileName);
+                            const lc = refSf ? posToLineCol(TS, refSf, r.textSpan.start) : { line: 0, column: 0 };
+                            const tag = r.isDefinition ? "[def]" : r.isWriteAccess ? "(write)" : "(read)";
+                            const snippet = r.isDefinition ? "" : await lineSnippet(r.fileName, lc.line);
+                            bodyLines.push(`  ${toDisplayPath(wsRoot, r.fileName)}:${lc.line}:${lc.column}  ${tag}${snippet}`);
+                        }
+                        sections.push([header, ...bodyLines].join("\n"));
+                    }
+                    const tail = overflow > 0 ? `\n…(另有 ${overflow} 处引用未显示；符号过热可改用 grep 按调用名扫描，或分文件缩小范围)…` : "";
+                    return `[References: ${displayPath}:${line}:${column}]\n${sections.join("\n")}${tail}`;
+                } catch (e: any) {
+                    return `❌ 查找引用失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`;
                 }
             },
         },
