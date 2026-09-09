@@ -19,7 +19,7 @@ import type { ThinkingLevel } from "@/agent/type.ts";
 import { useChatState, type ChatRow } from "./useChatState.ts";
 import { THEME } from "./theme.ts";
 import { S, LOCAL_COMMAND_NAMES, getLocale, setLocale } from "./strings.ts";
-import { writeLocale } from "./prefs.ts";
+import { writeLocale, readModelPref } from "./prefs.ts";
 import type { Locale } from "@/common/index.ts";
 import { dimRule, truncateMiddle } from "./util.ts";
 import { MessageBlock } from "./components/MessageBlock.tsx";
@@ -32,13 +32,13 @@ import { PlanModal } from "./components/PlanModal.tsx";
 import { PlanEditor } from "./components/PlanEditor.tsx";
 import { SessionPicker } from "./components/SessionPicker.tsx";
 import { ForkPicker } from "./components/ForkPicker.tsx";
+import { ModelPicker } from "./components/ModelPicker.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
 import { TopPanel } from "./components/TopPanel.tsx";
 import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHooks, inspectDebug } from "@/observability/inspect.ts";
 
-const KNOWN_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
 const CWD = process.cwd();
 
 /** 单行渲染分发：tool/thinking/todos 走专用组件，其余走 MessageBlock。 */
@@ -153,6 +153,15 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             await refreshStatusLineRef.current();
         })();
     }, []);
+    // 启动恢复上次 /model 选择（prefs.json.model）：runOnce 每次 submit 才读 modelRef，首刷前完成即可，无竞态
+    useEffect(() => {
+        void (async () => {
+            const saved = await readModelPref();
+            if (saved) { state.setModelOverride(saved); setModelDisplay(saved); }
+        })();
+        // 仅挂载时执行一次
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
     // 轮次边界（busy/aborting/模型 翻转）刷新
     useEffect(() => { void refreshStatusLineRef.current(); }, [state.busy, state.aborting, modelDisplay]);
     // 慢速 idle 轮询（5s），让状态栏反映命令内部的时间敏感信息（如 git 分支/时钟）
@@ -209,15 +218,23 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         return menuEntries.filter((c) => c.name.toLowerCase().startsWith(q));
     }, [input, menuEntries]);
 
-    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null;
+    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null || state.pendingModel != null;
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
     // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, state.pendingModel, slashVisible, filteredCommands.length]);
     // ★ 提问模态打开/切换时重置光标与已勾选
     useEffect(() => { setQCursor(0); setQChecked(new Set()); }, [state.pendingQuestion]);
+    // ★ 模型选择器打开时初始定位到当前模型所在行（不在清单则落 0）
+    useEffect(() => {
+        if (state.pendingModel) {
+            const idx = state.pendingModel.models.indexOf(modelDisplay);
+            setSelectIdx(idx >= 0 ? idx : 0);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [state.pendingModel]);
 
     // —— 本地斜杠命令（异步：可观测性命令需读 trace / MCP / store）——
     const runLocalSlash = async (text: string): Promise<boolean> => {
@@ -289,12 +306,12 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             }
             case "/model":
                 if (!arg) {
-                    state.pushInfo(`当前模型：${modelDisplay}\n可选：${KNOWN_MODELS.join("、")} 或任意模型 id。`);
+                    void state.openModelPicker(); // 内置候选清单选择器（任意模型 id 仍可 /model <id> 直输）
                     return true;
                 }
                 state.setModelOverride(arg);
                 setModelDisplay(arg);
-                state.pushInfo(`模型已切换：${arg}`);
+                state.pushInfo(S.modelSwitched(arg));
                 return true;
             case "/thinking": {
                 const lvl = arg.toLowerCase();
@@ -473,6 +490,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             else if (key.escape || (key.ctrl && ch === "g")) state.resolveFork(null);
             return;
         }
+        if (state.pendingModel) {
+            const list = state.pendingModel.models;
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + list.length) % list.length);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % list.length);
+            else if (key.return) {
+                const sel = list[Math.min(selectIdxRef.current, list.length - 1)];
+                state.resolveModel(sel ?? null);
+            }
+            else if (key.escape || (key.ctrl && ch === "g")) state.resolveModel(null);
+            return;
+        }
         if (key.ctrl && ch === "t") { state.toggleShowThinking(); return; }
         if (key.ctrl && ch === "g") { state.abortCurrent(); return; }
         if (slashVisible) {
@@ -553,6 +581,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                     ) : null}
                     {state.pendingFork ? (
                         <ForkPicker anchors={state.pendingFork.anchors} selectedIndex={selectIdx} wrapW={wrapW} />
+                    ) : null}
+                    {state.pendingModel ? (
+                        <ModelPicker models={state.pendingModel.models} currentModel={modelDisplay} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {slashVisible ? (
                         <SlashMenu entries={filteredCommands} selectedIndex={selectIdx} cols={cols} />

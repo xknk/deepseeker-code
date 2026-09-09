@@ -531,6 +531,10 @@ export class ChatHost {
   setModel(m: string): void {
     this.model = m;
   }
+  /** 当前模型覆盖（""=未覆盖，走 env DEEP_SEEK_MODEL 默认）；模型组选择器/状态快照用。 */
+  get currentModel(): string {
+    return this.model;
+  }
   setPlanMode(on: boolean): void {
     this.planMode = on;
   }

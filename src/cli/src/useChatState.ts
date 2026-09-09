@@ -17,10 +17,11 @@ import { pushSessionInbox } from "@/agent/inbox.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
 import type { ApprovalDecision, ApprovalMeta, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
-import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
+import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT, SELECTABLE_MODELS } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
 import { createCliRequestApproval, createCliRequestQuestion } from "./cliHost.ts";
+import { writePrefs } from "./prefs.ts";
 import { S, getLocale } from "./strings.ts";
 import { truncateMiddle, findTool } from "./util.ts";
 import { buildReplayRows, type ChatRow } from "./replay.ts";
@@ -43,6 +44,8 @@ export type PendingPlan = { plan: string; resolve: (r: PlanResolution) => void }
 export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string | null) => void };
 /** 待选择的分叉锚点（/fork 选择器）。resolve(null)=取消。 */
 export type PendingFork = { anchors: ForkAnchor[]; resolve: (anchor: ForkAnchor | null) => void };
+/** 待选择的模型（/model 选择器，内置候选清单）。resolve(null)=取消。 */
+export type PendingModel = { models: string[]; resolve: (model: string | null) => void };
 
 /** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
  *  120ms≈8fps：在 Windows Terminal 上进一步减闪（帧数较 80ms 再降约 33%），流式文本/打字延迟仍可接受。
@@ -81,6 +84,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
     const [pendingSessions, setPendingSessions] = useState<PendingSessions | null>(null);
     const [pendingFork, setPendingFork] = useState<PendingFork | null>(null);
+    const [pendingModel, setPendingModel] = useState<PendingModel | null>(null);
 
     const nextId = useRef(1);
     const assistantStreamingId = useRef<number | null>(null);
@@ -617,8 +621,24 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
     }, [pushInfo, loadSession]);
 
-    /** /model 设置模型覆盖（透传 RunAgentOptions.model）。 */
-    const setModelOverride = useCallback((m: string) => { modelRef.current = m; }, []);
+    /** /model 设置模型覆盖（透传 RunAgentOptions.model）并持久化到 prefs.json（重启恢复，picker 与直输两条路都经此）。 */
+    const setModelOverride = useCallback((m: string) => {
+        modelRef.current = m;
+        void writePrefs({ model: m });
+    }, []);
+    /** 关闭模型选择器并回传结果（null=取消）。 */
+    const resolveModel = useCallback((model: string | null) => {
+        setPendingModel((prev) => { prev?.resolve(model); return null; });
+    }, []);
+    /** 唤出 /model 选择器：内置候选清单（对标 Claude Code /model 的固定选项，任意模型 id 仍可直输）
+     *  → 模态选择 → 选定即 setModelOverride（切换 + 持久化）。 */
+    const openModelPicker = useCallback(async () => {
+        const picked = await new Promise<string | null>((resolve) => setPendingModel({ models: SELECTABLE_MODELS, resolve }));
+        if (picked) {
+            setModelOverride(picked);
+            pushInfo(S.modelSwitched(picked));
+        }
+    }, [pushInfo, setModelOverride]);
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
     const setPlanMode = useCallback((on: boolean) => { planModeRef.current = on; }, []);
     const getPlanMode = useCallback(() => planModeRef.current, []);
@@ -634,7 +654,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork,
+        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
         sessionIdRef,
         // 动作
         submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent,
@@ -642,6 +662,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork,
+        openModelPicker, resolveModel,
     };
 };
 

@@ -851,6 +851,8 @@ switch (evt.type) {
         state.busy = !!msg.state?.busy;
         state.planMode = !!msg.state?.planMode;
         state.autoMode = !!msg.state?.autoMode;
+        // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题
+        state.model = String(msg.state?.model ?? state.model);
         state.projectRoot = String(msg.state?.projectRoot ?? "");
         // ★ 多模态开关（决定贴图按钮行为：原生附件 vs MCP 中转兜底）
         state.vision = !!msg.state?.vision;
@@ -1551,10 +1553,10 @@ case "model":
 if (arg) {
 state.model = arg;
 vscode.postMessage({ type: "setModel", model: arg });
-addInfo(`模型：${arg}`);
+addInfo(`模型：${arg}（下次回复生效，重载窗口后保持）`);
 syncToolbar();
 } else {
-addInfo(`当前模型：${state.model || "默认（deepseek-v4-flash）"}\n用法：/model <模型名>，如 /model deepseek-v4`);
+vscode.postMessage({ type: "pickModel" }); // 无参 → 原生 QuickPick 模型组选择器（分组来自 settings.json modelGroups）
 }
 return true;
 case "thinking":
@@ -1710,7 +1712,7 @@ const SLASH = [
 { cmd: "/status", hint: "查看当前模型/会话/模式", arg: false },
 { cmd: "/plan", hint: "切换计划模式（只读调研→审批→实现）", arg: false },
 { cmd: "/auto", hint: "切换自动模式（编辑分类器放行，高危转人工）", arg: false },
-{ cmd: "/model", hint: "切换模型：/model <deepseek-v4|…>", arg: true },
+{ cmd: "/model", hint: "切换模型：无参弹模型组选择器；/model <模型id> 直输", arg: true },
 { cmd: "/thinking", hint: "切换思考等级：/thinking <off|high|max>", arg: true },
 { cmd: "/lang", hint: "切换界面语言：/lang <zh|en>", arg: true },
 { cmd: "/output-style", hint: "切换输出风格：/output-style <name|off>", arg: true, obs: true },

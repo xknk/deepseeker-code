@@ -97,6 +97,11 @@ interface StringDict {
     forkEmpty: string;
     forkDone: (id: string, roundNo: number) => string;
     forkFailed: (e: string) => string;
+    /** /model 模型选择器 */
+    modelPickerTitle: (current: string) => string;
+    modelPickerPrompt: string;
+    modelCurrentTag: string;
+    modelSwitched: (m: string) => string;
     /** 本地化的相对时间（"3 分钟前" / "3m ago"）；iso 非法/空 → 空串。 */
     relTime: (iso: string) => string;
     /** /lang 与启动期信任询问 */
@@ -187,7 +192,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdStatus: "查看当前模型/会话/模式",
         cmdPlan: "切换计划模式（只读调研→审批→实现）",
         cmdAuto: "切换自动模式（文件编辑分类器自动放行，高危转人工）",
-        cmdModel: "切换模型：/model <deepseek-v4|deepseek-v4-flash|…>",
+        cmdModel: "切换模型：/model 弹出选择器；/model <模型id> 直输任意模型",
         cmdThinking: "切换思考等级：/thinking <off|high|max>",
         cmdLang: "切换界面语言：/lang <zh|en>",
         cmdOutputStyle: "切换输出风格：/output-style <name|off>",
@@ -211,6 +216,10 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "（当前会话暂无可分叉的检查点）",
         forkDone: (id, roundNo) => `已从第 ${roundNo} 轮分叉 → 新会话 ${id}（已载入，后续对话写入新会话，原会话不变）`,
         forkFailed: (e) => `分叉失败：${e}`,
+        modelPickerTitle: (current) => `🧠 选择模型（当前：${current || "默认"}）`,
+        modelPickerPrompt: "↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id>）",
+        modelCurrentTag: "当前",
+        modelSwitched: (m) => `模型已切换：${m}（下次回复生效，重启后保持）`,
         relTime: (iso) => {
             const t = Date.parse(iso);
             if (!t) return "";
@@ -239,7 +248,7 @@ const STRINGS: Record<Locale, StringDict> = {
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — 切换计划模式（只读调研 → 方案审批 → 实现）",
-            `/model [deepseek-v4|deepseek-v4-flash|<任意>] — 切换模型（当前 ${model}）`,
+            `/model [<模型id>] — 切换模型（无参弹出选择器；当前 ${model}）`,
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
@@ -323,7 +332,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdStatus: "Show current model/session/mode",
         cmdPlan: "Toggle plan mode (read-only research → review → implement)",
         cmdAuto: "Toggle auto mode (classifier auto-approves file edits, escalates risky)",
-        cmdModel: "Switch model: /model <deepseek-v4|deepseek-v4-flash|…>",
+        cmdModel: "Switch model: /model opens the picker; /model <model-id> for any model",
         cmdThinking: "Switch thinking level: /thinking <off|high|max>",
         cmdLang: "Switch interface language: /lang <zh|en>",
         cmdOutputStyle: "Switch output style: /output-style <name|off>",
@@ -347,6 +356,10 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "(no checkpoints to fork from in this session)",
         forkDone: (id, roundNo) => `Forked from round ${roundNo} → new session ${id} (loaded; new messages go to the fork, source untouched)`,
         forkFailed: (e) => `Fork failed: ${e}`,
+        modelPickerTitle: (current) => `🧠 Pick a model (current: ${current || "default"})`,
+        modelPickerPrompt: "↑↓ pick · Enter switch · Esc cancel (any other model: /model <id>)",
+        modelCurrentTag: "current",
+        modelSwitched: (m) => `Model switched: ${m} (takes effect on next reply, persists across restarts)`,
         relTime: (iso) => {
             const t = Date.parse(iso);
             if (!t) return "";
@@ -375,7 +388,7 @@ const STRINGS: Record<Locale, StringDict> = {
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — Toggle plan mode (read-only research → review → implement)",
-            `/model [deepseek-v4|deepseek-v4-flash|<any>] — Switch model (current ${model})`,
+            `/model [<model-id>] — Switch model (no arg opens the picker; current ${model})`,
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",

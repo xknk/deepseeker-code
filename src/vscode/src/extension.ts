@@ -30,6 +30,10 @@ let listCommandsForWebview: () => Array<{ name: string; description: string }> =
 let listOutputStylesForWebview: () => Array<{ name: string; description: string }> = () => [];
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
 let untrustDirFn: (dir: string) => Promise<boolean> = async () => false;
+/** /model 选择器的内置候选清单（activate 第 4 步动态 import 后赋值）。 */
+let selectableModels: string[] = ["deepseek-v4", "deepseek-v4-flash"];
+/** per-workspace 持久化（模型选择等）；activate 赋值。 */
+let workspaceState: vscode.Memento | null = null;
 
 // —— 引擎后台加载状态（治启动顿挫：activate 不再 await initEngine，见 activate 第 8 步） ——
 /** 引擎就绪闸门：activate 启动后台 initEngine，host 首轮 runAgent 前等待（失败也放行，仅缺 MCP/skills）。 */
@@ -113,12 +117,38 @@ function postState(): void {
       busy: host.isBusy,
       planMode: host.currentPlanMode,
       autoMode: host.currentAutoMode,
+      model: host.currentModel,
       initError: initError ?? "",
       projectRoot: workspaceRoot ?? "",
       // ★ 多模态：视觉开关下发 webview——决定贴图走原生附件（true）还是既有 MCP 中转兜底（false）
       vision: isVisionEnabled(),
     },
   });
+}
+
+/**
+ * 模型选择器（命令面板 deepseekerCode.selectModel / webview /model 无参共用，对标 Claude Code /model）：
+ * 内置候选清单的扁平 QuickPick（当前模型标注），选中即 host.setModel + workspaceState 持久化
+ * （重载窗口后恢复）；任意其它模型 id 可在 webview 输 `/model <id>` 直输。
+ */
+async function pickModel(): Promise<void> {
+  if (!host) return;
+  const cur = host.currentModel;
+  const items: (vscode.QuickPickItem & { model?: string })[] = selectableModels.map((m) => ({
+    label: m,
+    description: m === cur ? "当前" : undefined,
+    picked: m === cur,
+    model: m,
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    title: "DeepSeeker-Code：选择模型",
+    placeHolder: `当前模型：${cur || "默认（DEEP_SEEK_MODEL / 设置项）"}；其它模型可 /model <id> 直输（↑↓ 选择，Esc 取消）`,
+  });
+  if (!picked?.model) return;
+  host.setModel(picked.model);
+  void workspaceState?.update("deepseekerCode.model", picked.model);
+  deliver({ type: "info", text: `🧠 模型已切换：${picked.model}（下次回复生效，重载窗口后保持）` });
+  postState();
 }
 
 // —— panel 销毁期间的事件缓冲（断链修复）——
@@ -421,6 +451,11 @@ function handleMessage(msg: Record<string, unknown>): void {
       break;
     case "setModel":
       h.setModel(String(msg.model ?? ""));
+      void workspaceState?.update("deepseekerCode.model", String(msg.model ?? "")); // 持久化收口：/model <id> 直输与选择器两条路都落盘
+      postState();
+      break;
+    case "pickModel":
+      void pickModel(); // /model 无参 → 原生 QuickPick 模型组选择器（当前模型在其 placeHolder 呈现）
       break;
     case "setPlanMode":
       h.setPlanMode(!!msg.on);
@@ -518,7 +553,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
@@ -526,6 +561,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     import("@/commands/registry.ts"),
     import("@/observability/inspect.ts"),
     import("@/outputStyles/registry.ts"),
+    import("@/llm/createModel.ts"),
   ]);
   // 观测/命令目录函数提升为模块级（handleMessage 是模块级函数，webview 的 /usage 等命令要用）
   inspectUsage = inspect.inspectUsage;
@@ -538,6 +574,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   listOutputStylesForWebview = listOutputStyles;
   readTrustedDirsFn = readTrustedDirs;
   untrustDirFn = untrustDir;
+  selectableModels = SELECTABLE_MODELS;
 
   // ★ 多根沙箱：注册工作区所有文件夹 → core 的 resolveSafePath 放行「落在任一文件夹内」的绝对路径，
   //   仅拦截逃出整个工作区的路径。多根工作区下 agent 可直接读写任意项目，不再被锁死在 folder[0]。
@@ -567,8 +604,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   };
   host = new ChatHost(callbacks);
+  workspaceState = context.workspaceState;
   const localeCfg = cfg.get<string>("locale");
   if (localeCfg === "en" || localeCfg === "zh") host?.setLocale(localeCfg);
+  // ★ 模型选择恢复（workspaceState，per-workspace 跨重载）：显式选择 > 设置项/env 的默认模型。
+  const savedModel = context.workspaceState.get<string>("deepseekerCode.model");
+  if (savedModel) host.setModel(savedModel);
 
   // ★ 「打开左右对比」虚拟文档供给：deepseeker-diff:/<safeKey>/<文件名> → 修改前快照内容
   //  （文件名带真实扩展名，左侧虚拟文档的语言高亮与右侧一致）。
@@ -618,6 +659,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!host) return;
       revealPanel(context);
       await sendSessions();
+    }),
+    vscode.commands.registerCommand("deepseekerCode.selectModel", async () => {
+      if (!host) return;
+      revealPanel(context);
+      await pickModel();
     }),
     vscode.commands.registerCommand("deepseekerCode.abort", () => {
       host?.abort();

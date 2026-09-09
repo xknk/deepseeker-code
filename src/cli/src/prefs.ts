@@ -1,7 +1,7 @@
 /**
  * @file cli/src/prefs.ts
- * @description 用户界面偏好持久化（当前仅 locale）。存 ~/.deepseeker-code/prefs.json，复用 core 的 readJSONFile/atomicWriteJSON。
- *  与 settings.json 分离：settings.json 是 engine 声明式配置（engine/hooks/permissions/statusLine），prefs 是 UI 偏好。
+ * @description 用户界面偏好持久化（locale + 模型覆盖）。存 ~/.deepseeker-code/prefs.json，复用 core 的 readJSONFile/atomicWriteJSON。
+ *  与 settings.json 分离：settings.json 是 engine 声明式配置（engine/hooks/permissions/statusLine/modelGroups），prefs 是 UI 偏好。
  */
 import path from "path";
 import fs from "fs/promises";
@@ -12,12 +12,20 @@ const PREFS_FILE = path.join(appConfig.dataDir, "prefs.json");
 
 interface Prefs {
     locale?: Locale;
+    /** /model（或模型组 picker）最近一次选择的模型 id；启动时恢复到 modelRef。 */
+    model?: string;
 }
 
 /** 读取偏好；文件缺失/损坏返回空对象，绝不抛错阻断启动。 */
 export const readPrefs = async (): Promise<Prefs> => {
     const p = await readJSONFile<Prefs>(PREFS_FILE);
     return p && typeof p === "object" ? p : {};
+};
+
+/** 读取已存的模型覆盖（未设/非法返回 null）。 */
+export const readModelPref = async (): Promise<string | null> => {
+    const { model } = await readPrefs();
+    return typeof model === "string" && model.trim() ? model.trim() : null;
 };
 
 /** 读取已存的 locale（未设/非法返回 null）。 */

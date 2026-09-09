@@ -51,6 +51,10 @@
         "icon": "$(history)"
       },
       {
+        "command": "deepseekerCode.selectModel",
+        "title": "DeepSeeker-Code: 切换模型"
+      },
+      {
         "command": "deepseekerCode.selectProjectRoot",
         "title": "DeepSeeker-Code: 选择项目根",
         "icon": "$(root-folder)"

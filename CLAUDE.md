@@ -31,7 +31,7 @@ DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek �
   npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
   ```
 - 默认监听 `127.0.0.1:3000`；`HOST`/`PORT` 环境变量可覆盖。鉴权：设 `DEEPSEEKER_CODE_TOKEN` 跨重启稳定，否则启动时随机生成并打印到 stdout。
-- 配置位置：声明式 hooks → `~/.deepseeker-code/settings.json` 或 `<项目>/.deepseeker-code/settings.json`；skills → 对应目录下的 `skills/<name>/SKILL.md`；输出风格（output-styles）→ `~/.deepseeker-code/output-styles/<name>.md` 或 `<项目>/.deepseeker-code/output-styles/<name>.md`（frontmatter `name`+`description` + persona 正文，`/output-style <name>` 选用）；状态栏（statusline）→ settings.json 的 `statusLine` 段：`{"statusLine":{"command":"<shell 命令>","padding":0}}`，命令经 stdin 收 JSON 上下文、stdout 首行作底部状态栏。
+- 配置位置：声明式 hooks → `~/.deepseeker-code/settings.json` 或 `<项目>/.deepseeker-code/settings.json`；skills → 对应目录下的 `skills/<name>/SKILL.md`；输出风格（output-styles）→ `~/.deepseeker-code/output-styles/<name>.md` 或 `<项目>/.deepseeker-code/output-styles/<name>.md`（frontmatter `name`+`description` + persona 正文，`/output-style <name>` 选用）；状态栏（statusline）→ settings.json 的 `statusLine` 段：`{"statusLine":{"command":"<shell 命令>","padding":0}}`，命令经 stdin 收 JSON 上下文、stdout 首行作底部状态栏；`/model` 模型选择器 → 内置候选清单（core `SELECTABLE_MODELS`，对标 Claude Code `/model`，任意模型 id 可直输），选择跨重启记住（CLI 存 prefs.json、VSCode 存 workspaceState）。
 
 ## 架构要点
 
