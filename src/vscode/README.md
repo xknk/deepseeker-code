@@ -37,7 +37,7 @@ code --install-extension deepseeker-code-<version>.vsix
 ## 功能特性
 
 - **流式输出**：逐字打字效果 + 可折叠的思考过程块。
-- **图片贴图提问**（需 `DEEP_SEEK_VISION=1` 开启）：输入框直接上传/粘贴图片（单张 ≤8MB）随消息进入模型上下文，用户消息行内联缩略图回显；不贴图时请求体逐字节不变。
+- **图片贴图提问**：输入框支持 Ctrl+V 直接粘贴截图（微信/QQ 等截图工具）或点击按钮上传（单张 ≤8MB），chip 悬停显 × 可移除，发送后用户消息气泡内联缩略图回显，历史会话回放同样还原。视觉能力按当前模型自动判定（模型 id 含 vision/vlm/-vl 即视为多模态，`/switch` 切模型即时生效、用户无感）：vision 模型图片随消息直达模型上下文；非 vision 模型图片自动存用户临时目录 `~/.deepseeker-code/tmp/paste/`（不进项目目录、不污染 git，>24h 自动清扫），落盘路径随消息尾注带给模型，由已配置的图像识别 MCP 工具中转读图（用户输入框保持零文本）。env `DEEP_SEEK_VISION` 可显式强开（=1）/强关（=0）覆盖自动判定。不贴图时请求体逐字节不变。
 - **长任务细节不丢**：上下文自动压缩，被压缩归档的原始消息与工具结果经 `recall` 工具按需检索取回（文件类结果带实时 mtime 校验，防过期盲改），超长工具结果脱敏侧车存档、分页取回。
 - **工具调用**：读/写/编辑文件 + 符号大纲、运行命令（前台/后台）、ripgrep 搜索 + glob、Git 操作集、网页抓取与搜索、HTTP 客户端（联调）、TypeScript 诊断与跳转、Word/PDF/Excel 阅读，每步以工具卡展示。
 - **审批网关**：写操作 / 危险命令弹内联审批（允许本次 / 总是允许 / 拒绝）；「总是允许」会智能落成 glob 规则持久化。
@@ -61,7 +61,7 @@ code --install-extension deepseeker-code-<version>.vsix
 | 设置项 | 说明 |
 |---|---|
 | `deepseekerCode.apiKey` | DeepSeek API Key。**留空**则回退读取环境变量 `DEEP_SEEK_API_KEY`。 |
-| `deepseekerCode.model` | 默认模型（如 `deepseek-v4` / `deepseek-v4-flash`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.model` | 默认模型（如 `deepseek-v4-flash` / `deepseek-v4-pro`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-v4-flash`。 |
 | `deepseekerCode.apiUrl` | API 基址（兼容 OpenAI 协议的代理可改）。留空回退 `DEEP_SEEK_API_URL`，再缺省 `https://api.deepseek.com`。 |
 | `deepseekerCode.auxModel` | 辅助模型（摘要等轻量任务）。留空回退 `DEEP_SEEK_AUX_MODEL`，再缺省 `deepseek-v4-flash`。 |
 | `deepseekerCode.reasoningEffort` | 推理力度：`high` / `max`（low/medium 已废弃）。留空回退环境变量，缺省 `high`。 |

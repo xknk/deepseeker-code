@@ -9,6 +9,7 @@
  */
 
 import OpenAI from "openai";
+import { MODEL_NAME } from "@/llm/createModel.ts";
 
 /** 入站图片附件（webview/HTTP 随 UnifiedInboundMessage.attachments 携带）。 */
 export interface InboundAttachment {
@@ -18,6 +19,8 @@ export interface InboundAttachment {
     mime: string;
     /** 纯 base64 数据（不含 dataURL 前缀）。 */
     base64: string;
+    /** 已落盘的工作区绝对路径（webview vision 关闭时经 uploadImage 存档回填）；有值时非 vision wire 尾注携带，供图像识别 MCP 读图。 */
+    path?: string;
 }
 
 /** OpenAI 协议单条 content part（直接复用 SDK 官方联合类型——与 Msg 的 content 字段天然兼容）。 */
@@ -56,12 +59,25 @@ export const imageUrlsOf = (content: unknown): string[] => {
 export const hasImagePart = (content: unknown): boolean => imageUrlsOf(content).length > 0;
 
 /**
- * 视觉能力开关：env DEEP_SEEK_VISION ∈ {'1','true'} 视为开启，其余（含未设）关闭。
- * ★ 调用时读取（非模块加载期缓存）：单测可注入、运行期改 env 立即生效。
+ * 模型名视觉能力启发式：id 带 vision / vlm / qwen 式 -vl 段视为支持图片输入。
+ * 覆盖 DeepSeek 在售（deepseek-v4-flash-vision-exp）与常见开源命名（qwen-vl-*、internvl 等）；
+ * 误判兜底：DEEP_SEEK_VISION env 可显式强开/强关（见 isVisionEnabled）。
  */
-export const isVisionEnabled = (): boolean => {
+export const modelSupportsVision = (modelId: string): boolean =>
+    /vision|vlm|(^|[-_.])vl([-_.0-9]|$)/i.test(modelId || "");
+
+/**
+ * 视觉能力开关（判定优先级）：
+ * 1. env DEEP_SEEK_VISION 显式设置强开/强关（'1'/'true' 开，'0'/'false' 关）——用户覆盖权最高；
+ * 2. 未设 → 按「生效模型名」自动判定（无感）：modelId（调用方传入的 per-agent/会话覆盖）|| 全局 MODEL_NAME。
+ * ★ 调用时读取（非模块加载期缓存）：运行期 /model 切换、改 env 均立即生效。
+ */
+export const isVisionEnabled = (modelId?: string): boolean => {
     const v = process.env.DEEP_SEEK_VISION;
-    return v === "1" || v === "true";
+    if (v === "1" || v === "true") return true;
+    if (v === "0" || v === "false") return false;
+    const effective = typeof modelId === "string" && modelId.trim() ? modelId.trim() : MODEL_NAME;
+    return modelSupportsVision(effective);
 };
 
 /** 单张图片折算 token 数（压缩判定 / EMA 校准口径）；env DEEP_SEEK_IMAGE_TOKENS 可覆盖，默认 1500。 */
@@ -106,6 +122,38 @@ export const toWireUserContent = (text: string, attachments?: InboundAttachment[
         ...accepted.map((p): WirePart => ({ type: "image_url", image_url: { url: p.url } })),
     ];
     return parts;
+};
+
+/**
+ * 入站 ingest 的双视图构造：同一条 user 消息拆出「模型所见（wire）」与「会话归档（archive）」。
+ * - archive = toWireUserContent(text, attachments) —— 入站原件（含 image parts），落 transcript：
+ *   供历史回放还原缩略图 / 会话列表预览 / 日后换 vision 模型复见；坏图的跳过原因也留在原件文本里。
+ * - wire = 模型所见，喂 buildContextMessages：vision 开启时与 archive 同引用（行为与单轨制一致）；
+ *   vision 关闭时降级为纯 string——原文 + 指引性尾注（当前模型无视觉；已落盘路径可经图像识别
+ *   MCP 工具读取理解），绝不给非 vision 端点发 parts。
+ * - modelId：生效模型名（调用方传 per-agent/会话覆盖，缺省回退全局 MODEL_NAME），供 vision 自动判定。
+ * 无附件时两者均为原 string 引用（「今天行为零变化」的延续点）。
+ */
+export const toIngestContents = (
+    text: string,
+    attachments?: InboundAttachment[],
+    modelId?: string,
+): { wire: string | WirePart[]; archive: string | WirePart[] } => {
+    const archive = toWireUserContent(text, attachments);
+    if (!Array.isArray(attachments) || attachments.length === 0) return { wire: archive, archive };
+    if (isVisionEnabled(modelId)) return { wire: archive, archive };
+    const names = (attachments as InboundAttachment[]).map((a) => a?.name || "image").join("、");
+    // 已落盘路径随 wire 尾注给模型（MCP 中转读图的线索）——只进模型视图，不回灌用户输入框
+    const paths = (attachments as InboundAttachment[])
+        .map((a) => (typeof a?.path === "string" && a.path ? `  ${a?.name || "image"} → ${a.path}` : ""))
+        .filter(Boolean);
+    const relay = paths.length
+        ? `图片已存工作区：\n${paths.join("\n")}\n若已配置图像识别 MCP 工具，可读取上述路径理解图片内容。`
+        : "若消息中包含图片文件路径且已配置图像识别 MCP 工具，可读取该路径理解图片。";
+    return {
+        wire: `${text}\n\n🖼 收到图片附件（${names}）：当前模型无视觉能力，无法直接查看图片内容（可切换 vision 模型或设 DEEP_SEEK_VISION=1 强开）；${relay}`,
+        archive,
+    };
 };
 
 /**

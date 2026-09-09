@@ -181,7 +181,7 @@ export const runSubagent = async (
     activeSubagents.add(subSessionId); // 同 ID 并发护栏（新建 UUID 天然不撞，续跑同会话在此拦住）
     try {
         // 构建并初始化子智能体的独立消息队列
-        const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem);
+        const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
         await appendMessage({ sessionId: subSessionId, role: 'user', content: task });
 
         let subResult = "";

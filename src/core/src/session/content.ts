@@ -65,7 +65,7 @@ const decayOldToolResults = (msgs: Msg[]): Msg[] => {
     });
 };
 /** vision 关闭时重建视图的图片占位文案（告知模型图存在但本轮不可见）。 */
-const NO_VISION_IMAGE_NOTE = "[图片未送达：当前未开启视觉能力（DEEP_SEEK_VISION），模型看不到该图；原图保留在会话归档中，如需分析请让用户重新提供]";
+const NO_VISION_IMAGE_NOTE = "[图片未送达：当前模型无视觉能力，看不到该图；原图保留在会话归档中，如需分析请让用户重新提供或切换 vision 模型]";
 
 /**
  * ★ 多模态重建闸门：vision 关闭时，transcript 里已落盘的 parts 数组（含 decay 未覆盖的
@@ -73,18 +73,21 @@ const NO_VISION_IMAGE_NOTE = "[图片未送达：当前未开启视觉能力（D
  *  贴图会话续跑每轮必死（parts 永久留在 transcript，每轮重建都会带出）。
  *  与 chatProcessing 入站闸门（只管本轮新输入）互补：本闸门管「历史里已落盘的 parts」。
  *  内存视图操作（transcript 原件不动）；无数组消息零开销直通；vision 开启时整体直通。
- *  调用时读 env（isVisionEnabled 非缓存）——运行期切换 DEEP_SEEK_VISION 立即生效。
+ *  判定按「本轮生效模型」（modelId 覆盖 || env 显式 || 全局 MODEL_NAME 自动推断）——会话中途
+ *  换模型（vision-exp ↔ flash）下一轮立即按新模型能力重建，无需重启。
  */
-const enforceVisionGate = (msgs: Msg[]): Msg[] => isVisionEnabled()
+const enforceVisionGate = (msgs: Msg[], modelId?: string): Msg[] => isVisionEnabled(modelId)
     ? msgs
     : msgs.map((m) => collapseToText(m, NO_VISION_IMAGE_NOTE) as Msg);
 
 /**
  * 跨会话构建发给模型的上下文视图：
  * - 输出布局 [system, 摘要槽, ...active, user]，与 runAgent.ensureSummarySlot 一致
+ * - modelId：本轮生效模型名（chatProcessing 传宿主 /model 覆盖、subagent 传 manifest.model，
+ *   缺省回退全局 MODEL_NAME）——vision 重建闸门与实际发请求的模型（opts.model ?? MODEL_NAME）同源。
  * 必须在 appendMessage(本次user) 之前调用，否则本次 user 被重复读入。
  */
-export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string) => {
+export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string, modelId?: string) => {
     const lines = await readTranscriptLines(sessionId);
     const store = await getRollingState(sessionId);
     // ★ 恢复层接线（事件日志化）：开关开（或既存文件已含事件行——中途关开关的会话仍按事件恢复）→
@@ -106,7 +109,7 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     const messageAll = all.slice(archivedMessageCount)
     if (messageAll.length === 0) {
         result.push(currentUserMsg)
-        return enforceVisionGate(result)
+        return enforceVisionGate(result, modelId)
     }
     // ★ 先 slice 后 repair（顺序不可换）：孤儿占位行会插入消息流，若先修后切会移位归档计数基准。
     //   confirmedCrash 由事件判定升级档位：崩溃确认 → 占位文案精确；legacy/闭合 → 与改造前文案一致。
@@ -114,5 +117,5 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     const repair = repairOrphanToolCalls(messageAll, recovery.interruption.kind === 'crashed')
     result.push(...decayOldToolResults(repair.msgs))
     result.push(currentUserMsg);
-    return enforceVisionGate(result);
+    return enforceVisionGate(result, modelId);
 }

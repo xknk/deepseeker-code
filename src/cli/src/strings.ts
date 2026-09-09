@@ -97,7 +97,9 @@ interface StringDict {
     forkEmpty: string;
     forkDone: (id: string, roundNo: number) => string;
     forkFailed: (e: string) => string;
-    /** /model 模型选择器 */
+    /** /model 直输切换；/switch 选择器 */
+    cmdSwitch: string;
+    modelUsage: (current: string) => string;
     modelPickerTitle: (current: string) => string;
     modelPickerPrompt: string;
     modelCurrentTag: string;
@@ -192,7 +194,8 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdStatus: "查看当前模型/会话/模式",
         cmdPlan: "切换计划模式（只读调研→审批→实现）",
         cmdAuto: "切换自动模式（文件编辑分类器自动放行，高危转人工）",
-        cmdModel: "切换模型：/model 弹出选择器；/model <模型id> 直输任意模型",
+        cmdModel: "切换模型（直输）：/model <模型id>，无参查看当前模型",
+        cmdSwitch: "弹出候选模型选择器（↑↓ 选择）",
         cmdThinking: "切换思考等级：/thinking <off|high|max>",
         cmdLang: "切换界面语言：/lang <zh|en>",
         cmdOutputStyle: "切换输出风格：/output-style <name|off>",
@@ -216,6 +219,7 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "（当前会话暂无可分叉的检查点）",
         forkDone: (id, roundNo) => `已从第 ${roundNo} 轮分叉 → 新会话 ${id}（已载入，后续对话写入新会话，原会话不变）`,
         forkFailed: (e) => `分叉失败：${e}`,
+        modelUsage: (current) => `当前模型：${current || "默认（DEEP_SEEK_MODEL）"}\n用法：/model <模型id> 直输切换，或 /switch 弹出候选选择器`,
         modelPickerTitle: (current) => `🧠 选择模型（当前：${current || "默认"}）`,
         modelPickerPrompt: "↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id>）",
         modelCurrentTag: "当前",
@@ -248,7 +252,8 @@ const STRINGS: Record<Locale, StringDict> = {
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — 切换计划模式（只读调研 → 方案审批 → 实现）",
-            `/model [<模型id>] — 切换模型（无参弹出选择器；当前 ${model}）`,
+            `/model <模型id> — 切换模型（直输，当前 ${model}）`,
+            "/switch — 弹出候选模型选择器",
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
@@ -332,7 +337,8 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdStatus: "Show current model/session/mode",
         cmdPlan: "Toggle plan mode (read-only research → review → implement)",
         cmdAuto: "Toggle auto mode (classifier auto-approves file edits, escalates risky)",
-        cmdModel: "Switch model: /model opens the picker; /model <model-id> for any model",
+        cmdModel: "Switch model (direct): /model <model-id>; no arg shows current",
+        cmdSwitch: "Open the model picker (↑↓ to pick)",
         cmdThinking: "Switch thinking level: /thinking <off|high|max>",
         cmdLang: "Switch interface language: /lang <zh|en>",
         cmdOutputStyle: "Switch output style: /output-style <name|off>",
@@ -356,6 +362,7 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "(no checkpoints to fork from in this session)",
         forkDone: (id, roundNo) => `Forked from round ${roundNo} → new session ${id} (loaded; new messages go to the fork, source untouched)`,
         forkFailed: (e) => `Fork failed: ${e}`,
+        modelUsage: (current) => `Current model: ${current || "default (DEEP_SEEK_MODEL)"}\nUsage: /model <model-id> to switch directly, or /switch for the picker`,
         modelPickerTitle: (current) => `🧠 Pick a model (current: ${current || "default"})`,
         modelPickerPrompt: "↑↓ pick · Enter switch · Esc cancel (any other model: /model <id>)",
         modelCurrentTag: "current",
@@ -388,7 +395,8 @@ const STRINGS: Record<Locale, StringDict> = {
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — Toggle plan mode (read-only research → review → implement)",
-            `/model [<model-id>] — Switch model (no arg opens the picker; current ${model})`,
+            `/model <model-id> — Switch model (direct input; current ${model})`,
+            "/switch — Open the model picker",
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",
@@ -419,4 +427,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "thinking", "lang", "output-style", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;

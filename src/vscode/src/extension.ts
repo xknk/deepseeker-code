@@ -8,6 +8,7 @@
  */
 import * as vscode from "vscode";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { randomUUID } from "crypto";
 // ★ type-only：host 及其 core 依赖必须在 process.chdir(workspaceRoot) 之后动态加载，
@@ -31,7 +32,7 @@ let listOutputStylesForWebview: () => Array<{ name: string; description: string 
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
 let untrustDirFn: (dir: string) => Promise<boolean> = async () => false;
 /** /model 选择器的内置候选清单（activate 第 4 步动态 import 后赋值）。 */
-let selectableModels: string[] = ["deepseek-v4", "deepseek-v4-flash"];
+let selectableModels: string[] = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"];
 /** per-workspace 持久化（模型选择等）；activate 赋值。 */
 let workspaceState: vscode.Memento | null = null;
 
@@ -99,13 +100,34 @@ const getAllWorkspaceRoots = (): string[] =>
   (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
 
 /**
- * 清理图片上传临时文件（<workspaceRoot>/.deepseeker-code/tmp/）。图片落盘仅因模型非视觉、需 MCP 工具读取；
- * agent 消费后无保留价值，新会话/插件卸载时清空，避免临时文件堆积。失败静默（目录不存在等）。
+ * 贴图临时目录：用户级数据目录 ~/.deepseeker-code/tmp/paste/（env DEEPSEEKER_CODE_DATA_DIR 可整体改址）。
+ * ★ 刻意不落工作区：临时产物进项目目录会污染 git status（甚至被误提交进仓库）；用户目录对项目零感知。
+ * 路径为绝对路径，MCP 图像识别工具按参数直读（MCP 参数不做工作区根校验），与落盘位置无关。
+ */
+const imageTmpDir = (): string => {
+  const base = process.env.DEEPSEEKER_CODE_DATA_DIR || path.join(os.homedir(), ".deepseeker-code");
+  return path.join(base, "tmp", "paste");
+};
+
+/** 贴图临时文件最长保留时长：超过即被清扫（激活/新会话/插件关闭时执行）。 */
+const IMAGE_TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 清扫贴图临时文件（<dataDir>/tmp/paste/ 下 mtime 超 24h 的文件）。
+ * 按 mtime 定向删而非整目录 rm -rf：多窗口共存不互删在用文件、崩溃/强杀残留由下次激活兜底。
+ * 图片落盘仅因模型非视觉、需 MCP 工具读取，agent 消费后无保留价值。失败静默（目录不存在等）。
  */
 const cleanImageTmp = (): void => {
-  if (!workspaceRoot) return;
-  const dir = path.join(workspaceRoot, ".deepseeker-code", "tmp");
-  fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+  const dir = imageTmpDir();
+  fs.promises.readdir(dir)
+    .then((files) => Promise.all(files.map(async (f) => {
+      const p = path.join(dir, f);
+      try {
+        const st = await fs.promises.stat(p);
+        if (Date.now() - st.mtimeMs > IMAGE_TMP_MAX_AGE_MS) await fs.promises.rm(p, { force: true });
+      } catch { /* 单文件失败不影响其余 */ }
+    })))
+    .catch(() => { /* 目录尚不存在 = 无残留 */ });
 };
 
 /** 通知前端一次状态快照（busy/模式/模型…）。 */
@@ -118,37 +140,41 @@ function postState(): void {
       planMode: host.currentPlanMode,
       autoMode: host.currentAutoMode,
       model: host.currentModel,
+      // ★ 候选清单随快照下发：webview /switch 面板内选择器无需往返即可渲染
+      models: modelCandidates(),
       initError: initError ?? "",
       projectRoot: workspaceRoot ?? "",
-      // ★ 多模态：视觉开关下发 webview——决定贴图走原生附件（true）还是既有 MCP 中转兜底（false）
-      vision: isVisionEnabled(),
+      // ★ 多模态：视觉开关下发 webview——决定贴图走原生附件（true）还是 MCP 中转兜底（false）。
+      //   按当前生效模型自动判定（env DEEP_SEEK_VISION 仍可显式强开/强关）：切 vision 模型即原生贴图，无感。
+      vision: isVisionEnabled(host.currentModel || undefined),
     },
   });
 }
 
 /**
- * 模型选择器（命令面板 deepseekerCode.selectModel / webview /model 无参共用，对标 Claude Code /model）：
- * 内置候选清单的扁平 QuickPick（当前模型标注），选中即 host.setModel + workspaceState 持久化
- * （重载窗口后恢复）；任意其它模型 id 可在 webview 输 `/model <id>` 直输。
+ * 模型候选清单（内置 SELECTABLE_MODELS + 设置项 deepseekerCode.models 追加去重，现读即生效）。
+ * 脏条目防护：设置 UI 里容易把整个 JSON 数组文本当成一个条目粘进来（含 [ ] " , 等字符），
+ * 这类字符串不可能是合法模型 id，直接跳过，避免选择器出现垃圾候选。
  */
-async function pickModel(): Promise<void> {
+function modelCandidates(): string[] {
+  const extra = vscode.workspace.getConfiguration("deepseekerCode").get<unknown[]>("models") ?? [];
+  const list = [...selectableModels];
+  for (const m of extra) {
+    if (typeof m === "string" && m.trim() && !/[[\]",]/.test(m) && !list.includes(m)) list.push(m.trim());
+  }
+  return list;
+}
+
+/**
+ * 模型选择器（命令面板 deepseekerCode.selectModel / webview /switch 共用）：
+ * 不弹原生 QuickPick——向聊天面板投递 openModelPicker，由 webview 渲染面板内选择器
+ * （与 / 命令菜单、提问条同一套 ↑↓/Enter/Esc 交互）。选中后 webview 走 setModel 消息回环
+ * （setModel 分支统一做 host.setModel + workspaceState 持久化）。`/model <id>` 是另一条路：直输切换。
+ */
+async function pickModel(context?: vscode.ExtensionContext): Promise<void> {
   if (!host) return;
-  const cur = host.currentModel;
-  const items: (vscode.QuickPickItem & { model?: string })[] = selectableModels.map((m) => ({
-    label: m,
-    description: m === cur ? "当前" : undefined,
-    picked: m === cur,
-    model: m,
-  }));
-  const picked = await vscode.window.showQuickPick(items, {
-    title: "DeepSeeker-Code：选择模型",
-    placeHolder: `当前模型：${cur || "默认（DEEP_SEEK_MODEL / 设置项）"}；其它模型可 /model <id> 直输（↑↓ 选择，Esc 取消）`,
-  });
-  if (!picked?.model) return;
-  host.setModel(picked.model);
-  void workspaceState?.update("deepseekerCode.model", picked.model);
-  deliver({ type: "info", text: `🧠 模型已切换：${picked.model}（下次回复生效，重载窗口后保持）` });
-  postState();
+  if (context) revealPanel(context); // 命令面板入口：先把聊天面板调到前台再弹选择器
+  deliver({ type: "openModelPicker", models: modelCandidates() });
 }
 
 // —— panel 销毁期间的事件缓冲（断链修复）——
@@ -280,12 +306,12 @@ async function sendSessions(): Promise<void> {
 }
 
 /**
- * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到工作区 .deepseeker-code/tmp/<uuid>.<ext> → 回传绝对路径。
- * 底座 deepseek-v4 非 vision 模型，无法直接"看"图；图片落到工作区后，由 agent 调用用户配置的图像理解
+ * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到用户目录 <dataDir>/tmp/paste/<uuid>.<ext> → 回传绝对路径。
+ * 非 vision 模型无法直接"看"图；图片落到用户临时目录后，由 agent 调用用户配置的图像理解
  * MCP 工具读取该路径、把图转成文字描述（走现有 mcp__* 工具链路，core 不感知二进制）。
  */
 async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
-  if (!workspaceRoot || !panel) return;
+  if (!panel) return;
   const base64 = String(msg.base64 ?? "");
   if (!base64) return;
   const mime = String(msg.mime ?? "image/png");
@@ -293,7 +319,7 @@ async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
   // 扩展名按 mime 推断（image/png→png）；非法回退 png
   const ext = (mime.split("/")[1] || "png").split(";")[0] || "png";
   try {
-    const dir = path.join(workspaceRoot, ".deepseeker-code", "tmp");
+    const dir = imageTmpDir();
     await fs.promises.mkdir(dir, { recursive: true });
     const filePath = path.join(dir, `${randomUUID()}.${ext}`);
     await fs.promises.writeFile(filePath, Buffer.from(base64, "base64"));
@@ -379,7 +405,13 @@ function handleMessage(msg: Record<string, unknown>): void {
       const attachments: InboundImageAttachment[] | undefined = rawAtt.length
         ? rawAtt
           .filter((a): a is Record<string, unknown> => !!a && typeof a === "object" && typeof (a as any).base64 === "string" && !!(a as any).base64)
-          .map((a) => ({ name: String((a as any).name ?? "image"), mime: String((a as any).mime ?? "image/png"), base64: String((a as any).base64) }))
+          .map((a) => ({
+            name: String((a as any).name ?? "image"),
+            mime: String((a as any).mime ?? "image/png"),
+            base64: String((a as any).base64),
+            // 已落盘路径（imageSaved 回填）：随附件上送，core 在非 vision wire 尾注给模型 MCP 读图线索
+            ...(typeof (a as any).path === "string" && (a as any).path ? { path: String((a as any).path) } : {}),
+          }))
         : undefined;
       if (!text.trim() && !(attachments && attachments.length)) break;
       // ★ 无切换·全可见：不按活动编辑器切根。主根 activate 时定（selectProjectRoot 可显式切换），
@@ -455,7 +487,7 @@ function handleMessage(msg: Record<string, unknown>): void {
       postState();
       break;
     case "pickModel":
-      void pickModel(); // /model 无参 → 原生 QuickPick 模型组选择器（当前模型在其 placeHolder 呈现）
+      void pickModel(); // /switch → 面板内模型选择器（openModelPicker 消息，webview 渲染）
       break;
     case "setPlanMode":
       h.setPlanMode(!!msg.on);
@@ -525,6 +557,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   if (!applyProjectRoot(initialRoot)) return;
   void context.workspaceState.update("deepseekerCode.activeProjectRoot", initialRoot);
+  cleanImageTmp(); // 激活期清扫：上次会话/崩溃残留在用户临时目录里的过期贴图（>24h）
 
   // —— 2. API Key 校验 + 注入（★ 必须在 step 4 动态 import core 之前——core 加载期即把 env 拍成定值）——
   const cfg = vscode.workspace.getConfiguration("deepseekerCode");
@@ -662,8 +695,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("deepseekerCode.selectModel", async () => {
       if (!host) return;
-      revealPanel(context);
-      await pickModel();
+      await pickModel(context); // 先 reveal 面板，再投递面板内选择器
     }),
     vscode.commands.registerCommand("deepseekerCode.abort", () => {
       host?.abort();
@@ -738,7 +770,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
-  cleanImageTmp(); // 插件卸载/窗口关闭时清空图片上传临时文件
+  cleanImageTmp(); // 插件卸载/窗口关闭时清扫过期贴图临时文件（>24h，见 cleanImageTmp 注释）
   try {
     engineDispose?.();
   } catch {

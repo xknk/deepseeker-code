@@ -17,5 +17,6 @@ export {
 } from "./providers/deepseek/client.ts";
 
 /** /model 选择器的内置候选清单（对标 Claude Code /model 的固定选项列表）。
+ *  与 DeepSeek 官方当前在售模型同步（2026-09 核对：api-docs.deepseek.com）；vision-exp 为实验性多模态。
  *  仅作快捷选择展示，不构成白名单——任意模型 id 仍可 `/model <id>` 直输。 */
-export const SELECTABLE_MODELS = ["deepseek-v4", "deepseek-v4-flash"];
+export const SELECTABLE_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"];

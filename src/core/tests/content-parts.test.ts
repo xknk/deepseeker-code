@@ -22,8 +22,8 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 
 const {
     msgText, imageUrlsOf, hasImagePart,
-    toWireUserContent, replaceImageParts, degradeImagesForAux,
-    isVisionEnabled, estimateImageTokens, MAX_IMAGE_BYTES,
+    toWireUserContent, replaceImageParts, degradeImagesForAux, toIngestContents,
+    isVisionEnabled, modelSupportsVision, estimateImageTokens, MAX_IMAGE_BYTES,
 } = await import("@/session/contentParts.ts");
 const { estimateTokens, groupUnits } = await import("@/session/contextCore.ts");
 const { extractArchiveEntities } = await import("@/agent/truncate.ts");
@@ -79,6 +79,56 @@ describe("toWireUserContent（wire 组装与字节级兼容承诺）", () => {
     });
 });
 
+describe("toIngestContents（ingest 双视图：wire=模型所见 / archive=入站原件）", () => {
+    it("无附件：wire 与 archive 均为原 string 同一引用（「今天行为零变化」延续）", () => {
+        const s = "修复登录 bug";
+        const r1 = toIngestContents(s);
+        assert.ok(Object.is(r1.wire, s) && Object.is(r1.archive, s));
+        const r2 = toIngestContents(s, []);
+        assert.ok(Object.is(r2.wire, s) && Object.is(r2.archive, s));
+    });
+
+    it("vision 开启：wire 与 archive 同引用（模型所见=原件，parts 直达）", () => {
+        process.env.DEEP_SEEK_VISION = "1";
+        try {
+            const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }]);
+            assert.ok(r.wire === r.archive, "vision 开时 wire 应复用 archive 引用");
+            assert.equal(imageUrlsOf(r.archive).length, 1);
+        } finally {
+            delete process.env.DEEP_SEEK_VISION;
+        }
+    });
+
+    it("vision 关闭：archive 保留 image parts（transcript 原件 → 回放缩略图/日后复见），wire 降级纯 string 带 MCP 指引尾注", () => {
+        delete process.env.DEEP_SEEK_VISION;
+        const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }]);
+        // archive：原件含图——落 transcript 供 UI 回放还原缩略图；context 视图由 enforceVisionGate 兜底折叠
+        assert.ok(Array.isArray(r.archive));
+        assert.equal(imageUrlsOf(r.archive).length, 1);
+        assert.match(msgText(r.archive), /\[图片: shot\.png\]/);
+        // wire：纯 string（绝不给非 vision 端点发 parts），原文开头 + 指引尾注
+        assert.equal(typeof r.wire, "string");
+        assert.match(r.wire as string, /^看图/);
+        assert.match(r.wire as string, /DEEP_SEEK_VISION/);
+        assert.match(r.wire as string, /图像识别 MCP/);
+        assert.doesNotMatch(r.wire as string, /data:/);
+    });
+
+    it("vision 关闭 + 附件带已存路径：wire 尾注携带落盘路径（MCP 读图线索只给模型，不回灌用户输入）", () => {
+        delete process.env.DEEP_SEEK_VISION;
+        const r = toIngestContents("看图", [
+            { name: "shot.png", mime: "image/png", base64: "QUJD", path: "d:\\w\\.deepseeker-code\\tmp\\a.png" },
+            { name: "bare.png", mime: "image/png", base64: "QUJD" },
+        ]);
+        assert.equal(typeof r.wire, "string");
+        assert.match(r.wire as string, /shot\.png → d:\\w\\\.deepseeker-code\\tmp\\a\.png/);
+        assert.doesNotMatch(r.wire as string, /bare\.png →/);
+        assert.match(r.wire as string, /图像识别 MCP/);
+        // archive 原件不受路径影响（仍含两张图的 parts）
+        assert.equal(imageUrlsOf(r.archive).length, 2);
+    });
+});
+
 describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
     it("DEEP_SEEK_VISION 开关矩阵：'1'/'true' 开，未设/'0'/'false' 关", async () => {
         const cases: Array<[string | undefined, boolean]> = [
@@ -102,6 +152,35 @@ describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
         process.env.DEEP_SEEK_IMAGE_TOKENS = "-5";
         assert.equal(estimateImageTokens(), 1500);
         delete process.env.DEEP_SEEK_IMAGE_TOKENS;
+    });
+
+    it("modelSupportsVision 命名启发式：vision/vlm/-vl 命中，普通模型与 vllm 不命中", () => {
+        assert.ok(modelSupportsVision("deepseek-v4-flash-vision-exp"));
+        assert.ok(modelSupportsVision("qwen-vl-max"));
+        assert.ok(modelSupportsVision("Qwen2-VL-7B"));
+        assert.ok(modelSupportsVision("some-vlm-model"));
+        assert.ok(!modelSupportsVision("deepseek-v4-flash"));
+        assert.ok(!modelSupportsVision("deepseek-v4-pro"));
+        assert.ok(!modelSupportsVision("vllm"), "vllm 是推理运行时不是 vision 模型");
+        assert.ok(!modelSupportsVision(""));
+    });
+
+    it("isVisionEnabled 无感判定：env 未设按生效模型名推断；env 显式设置优先级最高", () => {
+        delete process.env.DEEP_SEEK_VISION;
+        assert.ok(isVisionEnabled("deepseek-v4-flash-vision-exp"), "vision 模型自动开");
+        assert.ok(!isVisionEnabled("deepseek-v4-flash"), "普通模型自动关");
+        process.env.DEEP_SEEK_VISION = "0";
+        assert.ok(!isVisionEnabled("deepseek-v4-flash-vision-exp"), "env 显式关压过模型名命中");
+        process.env.DEEP_SEEK_VISION = "1";
+        assert.ok(isVisionEnabled("deepseek-v4-flash"), "env 显式开压过模型名不命中");
+        delete process.env.DEEP_SEEK_VISION;
+    });
+
+    it("toIngestContents：vision 模型（env 未设）wire 与 archive 同引用——贴图直达零尾注", () => {
+        delete process.env.DEEP_SEEK_VISION;
+        const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }], "deepseek-v4-flash-vision-exp");
+        assert.ok(r.wire === r.archive, "vision 模型应复用 archive 引用（parts 直达）");
+        assert.equal(imageUrlsOf(r.archive).length, 1);
     });
 });
 

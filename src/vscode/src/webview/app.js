@@ -27,6 +27,9 @@ autoMode: false,
 thinkingLevel: "high",
 locale: "zh",
 model: "",
+models: [], // 模型候选清单（host 经 state 快照下发；/switch 面板内选择器渲染用）
+modelPicker: false, // 面板内模型选择器开关（↑↓/Enter/Esc，交互与提问条一致）
+modelPickerSel: 0,
 pendingApproval: null,
 approvalSel: 0,
 pendingQuestion: null,
@@ -632,13 +635,13 @@ case "info":
     appendRow({ key: nextKey(), kind: "info", text });
   }
 
-  // ★ 图片预览 chip：上传后、存盘回包前，在 composer 上方显示缩略图 + 文件名（data URL，CSP img-src data: 已放行）
-  //   vision 模式下 chip 可点击移除（撤回待发送附件）；MCP 中转兜底模式 chip 纯视觉（行为不变）。
+  // ★ 图片预览 chip：上传后在 composer 上方显示缩略图 + 文件名 + 可见 × 删除钮（data URL，CSP img-src data: 已放行）
+  //   待发送附件一律可移除（点 ×），与 Claude Code 贴图 chip 一致；× 只在 hover chip 时显形防误触。
   function appendImagePreview(dataUrl, name, removable) {
     const box = $("#composer-attachments");
     if (!box) return;
     const chip = document.createElement("div");
-    chip.className = "attach-chip" + (removable ? " attach-removable" : "");
+    chip.className = "attach-chip";
     const img = document.createElement("img");
     img.src = dataUrl;
     img.alt = name;
@@ -647,11 +650,16 @@ case "info":
     chip.appendChild(img);
     chip.appendChild(span);
     if (removable) {
-      chip.title = "点击移除";
-      chip.addEventListener("click", () => {
-        state.pendingImages = state.pendingImages.filter((p) => p.dataUrl !== dataUrl || p.name !== name);
+      const btn = document.createElement("button");
+      btn.className = "attach-remove";
+      btn.title = "移除图片";
+      btn.innerHTML = '<span class="codicon codicon-close"></span>';
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.pendingImages = state.pendingImages.filter((p) => !(p.dataUrl === dataUrl && p.name === name));
         chip.remove();
       });
+      chip.appendChild(btn);
     }
     box.appendChild(chip);
   }
@@ -853,6 +861,8 @@ switch (evt.type) {
         state.autoMode = !!msg.state?.autoMode;
         // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题
         state.model = String(msg.state?.model ?? state.model);
+        // ★ 候选清单随快照下发：/switch 面板内选择器无需往返即可渲染
+        if (Array.isArray(msg.state?.models)) state.models = msg.state.models.map(String);
         state.projectRoot = String(msg.state?.projectRoot ?? "");
         // ★ 多模态开关（决定贴图按钮行为：原生附件 vs MCP 中转兜底）
         state.vision = !!msg.state?.vision;
@@ -885,6 +895,11 @@ switch (evt.type) {
         state.customCommands = Array.isArray(msg.commands) ? msg.commands : [];
         updateSlashMenu();
         break;
+      case "openModelPicker":
+        // 命令面板「切换模型」入口：host 已 reveal 面板，这里渲染面板内选择器（与 /switch 同一路）
+        if (Array.isArray(msg.models)) state.models = msg.models.map(String);
+        openModelPicker();
+        break;
       case "forkAnchors":
         state.forkAnchors = Array.isArray(msg.anchors) ? msg.anchors : [];
         renderForkPanel();
@@ -894,16 +909,15 @@ switch (evt.type) {
         clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
         break;
       case "imageSaved": {
-        // extension 已把图片存到工作区临时目录，把路径 + 引导填入输入框
+        // extension 已把图片存到工作区临时目录：路径只回填到待发附件（submit 随 attachments 上送，
+        // core 在非 vision wire 尾注里给模型 MCP 读图线索）——不再注入输入框，贴图交互与 Claude Code 一致（零文本）。
         const p = String(msg.path ?? "");
-        const ins = $("#input");
-        if (p && ins) {
-          ins.value += `\n\n🖼 图片已上传：${p}\n如需理解图片内容，请调用已配置的图像识别 MCP 工具读取该路径并描述。\n`;
-          autoGrow(ins);
-          ins.focus();
-        } else {
+        if (!p) {
           addInfo(`🖼 图片存盘失败：${String(msg.error ?? "未知错误")}`);
+          break;
         }
+        const pending = (state.pendingImages || []).find((x) => x.name === String(msg.name ?? "") && !x.savedPath);
+        if (pending) pending.savedPath = p;
         break;
       }
       default:
@@ -1094,6 +1108,84 @@ el.textContent = "⚠️ " + msg;
       else sendQuestion({ selected: [] });
     });
     bindQuestionKeydown();
+  }
+
+  // ———————— 模型选择器（面板内：与提问条同一套 modal + ↑↓/Enter/Esc + 点击交互） ————————
+  function openModelPicker() {
+    if (!state.models.length) {
+      addInfo("候选清单为空：/model <模型id> 直输切换，或在设置 deepseekerCode.models 里追加模型 id");
+      return;
+    }
+    state.modelPicker = true;
+    state.modelPickerSel = Math.max(0, state.models.indexOf(state.model)); // 当前模型不在候选里则落在首项
+    renderModelPicker();
+  }
+  function closeModelPicker() {
+    state.modelPicker = false;
+    renderModelPicker();
+  }
+  function pickModelLocal(i) {
+    const m = state.models[i];
+    if (!m) return;
+    state.model = m;
+    // setModel 分支统一 host.setModel + workspaceState 持久化（/model 直输与选择器两条路同收口）
+    vscode.postMessage({ type: "setModel", model: m });
+    addInfo(`🧠 模型已切换：${m}（下次回复生效，重载窗口后保持）`);
+    syncToolbar();
+    closeModelPicker();
+  }
+  function renderModelPicker() {
+    let anchor = $("#model-picker-anchor");
+    if (!anchor) {
+      anchor = document.createElement("div");
+      anchor.id = "model-picker-anchor";
+      document.getElementById("app").insertBefore(anchor, document.getElementById("composer"));
+    }
+    if (!state.modelPicker) {
+      anchor.innerHTML = "";
+      return;
+    }
+    const cur = state.model;
+    const sel = Math.min(state.modelPickerSel ?? 0, state.models.length - 1);
+    anchor.innerHTML = `
+      <div class="modal model-picker">
+        <div class="modal-title">🧠 选择模型${cur ? `（当前：${escapeHtml(cur)}）` : ""}</div>
+        <div class="modal-options"></div>
+        <div class="modal-hint">${escapeHtml("↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id> 直输）")}</div>
+      </div>`;
+    const optBox = anchor.querySelector(".modal-options");
+    state.models.forEach((m, i) => {
+      const isCur = m === cur;
+      const btn = document.createElement("button");
+      btn.className = ["btn", "opt", i === sel && "selected"].filter(Boolean).join(" ");
+      btn.innerHTML = `${isCur ? "● " : ""}${escapeHtml(m)}${isCur ? `<span class="opt-desc">当前</span>` : ""}`;
+      btn.addEventListener("click", () => pickModelLocal(i));
+      optBox.appendChild(btn);
+    });
+    bindModelPickerKeydown();
+  }
+  let modelPickerKeydownBound = false;
+  /** 注册一次选择器键盘导航：↑↓ 移动高亮、Enter 切换、Esc 取消（document 级，与提问条同构）。 */
+  function bindModelPickerKeydown() {
+    if (modelPickerKeydownBound) return;
+    modelPickerKeydownBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (!state.modelPicker) return;
+      const n = state.models.length;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        state.modelPickerSel = e.key === "ArrowUp"
+          ? (state.modelPickerSel <= 0 ? n - 1 : state.modelPickerSel - 1)
+          : (state.modelPickerSel + 1) % n;
+        renderModelPicker();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        pickModelLocal(state.modelPickerSel);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeModelPicker();
+      }
+    });
   }
 
   // ———————— 计划方案条 ————————
@@ -1556,8 +1648,14 @@ vscode.postMessage({ type: "setModel", model: arg });
 addInfo(`模型：${arg}（下次回复生效，重载窗口后保持）`);
 syncToolbar();
 } else {
-vscode.postMessage({ type: "pickModel" }); // 无参 → 原生 QuickPick 模型组选择器（分组来自 settings.json modelGroups）
+addInfo(`当前模型：${state.model || "默认（DEEP_SEEK_MODEL）"}\n用法：/model <模型id> 直输切换，或 /switch 弹出候选选择器`);
 }
+return true;
+case "switch":
+// ★ 延迟一拍再开：执行命令的这次 Enter 还会冒泡到 document 级选择器键盘监听，
+//   同步打开会被同一事件立刻当「确认选中」（选择器闪现即切到第 0 项）。快照缺失时走 host 回环。
+if (state.models.length) setTimeout(openModelPicker, 0);
+else vscode.postMessage({ type: "pickModel" });
 return true;
 case "thinking":
 if (["off", "high", "max"].includes(arg)) {
@@ -1712,7 +1810,8 @@ const SLASH = [
 { cmd: "/status", hint: "查看当前模型/会话/模式", arg: false },
 { cmd: "/plan", hint: "切换计划模式（只读调研→审批→实现）", arg: false },
 { cmd: "/auto", hint: "切换自动模式（编辑分类器放行，高危转人工）", arg: false },
-{ cmd: "/model", hint: "切换模型：无参弹模型组选择器；/model <模型id> 直输", arg: true },
+{ cmd: "/model", hint: "切换模型（直输）：/model <模型id>", arg: true },
+{ cmd: "/switch", hint: "切换模型：弹出候选选择器", arg: false },
 { cmd: "/thinking", hint: "切换思考等级：/thinking <off|high|max>", arg: true },
 { cmd: "/lang", hint: "切换界面语言：/lang <zh|en>", arg: true },
 { cmd: "/output-style", hint: "切换输出风格：/output-style <name|off>", arg: true, obs: true },
@@ -1787,7 +1886,7 @@ if (hasPending) {
 vscode.postMessage({
 type: "submit",
 text,
-attachments: state.pendingImages.map((p) => ({ name: p.name, mime: p.mime, base64: p.base64 })),
+attachments: state.pendingImages.map((p) => ({ name: p.name, mime: p.mime, base64: p.base64, ...(p.savedPath ? { path: p.savedPath } : {}) })),
 });
 clearPendingImages();
 } else {
@@ -1842,7 +1941,7 @@ const imageInput = $("#image-input");
 btnFile.addEventListener("click", () => fileInput.click());
 btnImage.addEventListener("click", () => {
 if (state.vision) {
-addInfo("🖼 已选择视觉模式：图片将随消息直达模型（点击 chip 可移除待发送的图）。");
+addInfo("🖼 已选择视觉模式：图片将随消息直达模型（chip 上的 × 可移除待发送的图）。");
 } else {
 addInfo("🖼 图片识别需配置图像理解 MCP（settings.json 的 mcpServers，如能读图返回文字描述的 server）；未配置则助手无法“看到”图片。");
 }
@@ -1864,12 +1963,11 @@ addInfo(`📎 已入库文件：${f.name}`);
 reader.onerror = () => addInfo(`📎 读取文件失败：${f.name}`);
 reader.readAsText(f);
 });
-// ★ 贴图双模式：
-//   vision 开启 → 原生多模态：base64 暂存待发（不落 tmp、不经 MCP 中转），随 submit 直达模型；
-//   vision 关闭（兜底，= 改造前行为）→ 上传 extension 存工作区 tmp → 回路径注入文本 + 引导 MCP 读图。
-imageInput.addEventListener("change", () => {
-const f = imageInput.files && imageInput.files[0];
-imageInput.value = "";
+// ★ 贴图统一入口（file picker 与 Ctrl+V 粘贴共用 ingestImageFile）：
+//   两模式一致：图片进 pendingImages 待发（chip 带 × 可移除），随 submit 上送——用户气泡缩略图回显 +
+//   transcript 落 parts 供历史回放（vision 关闭时 core 侧降级文本注、原件照存归档）。
+//   vision 关闭额外 uploadImage 落工作区 tmp：回包路径只回填到待发附件，随 submit 走 wire 尾注给模型（MCP 中转读图）。
+const ingestImageFile = (f) => {
 if (!f) return;
 if (f.size > 8 * 1024 * 1024) { addInfo(`🖼 图片 ${f.name} 过大（>8MB），已忽略`); return; }
 const reader = new FileReader();
@@ -1878,17 +1976,44 @@ const dataUrl = String(reader.result ?? "");
 const commaIdx = dataUrl.indexOf(",");
 const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : "";
 const mime = f.type || "image/png";
-if (state.vision) {
 state.pendingImages.push({ name: f.name, mime, base64, dataUrl });
 appendImagePreview(dataUrl, f.name, true);
+if (state.vision) {
 addInfo(`🖼 已添加待发送图片：${f.name}（当前模型支持视觉，随消息直达）`);
-return;
-}
-appendImagePreview(dataUrl, f.name);
+} else {
 vscode.postMessage({ type: "uploadImage", name: f.name, mime, base64 });
+addInfo(`🖼 已添加图片：${f.name}（当前模型无视觉，已存本地临时目录供图像识别 MCP 读取）`);
+}
 };
 reader.onerror = () => addInfo(`🖼 读取图片失败：${f.name}`);
 reader.readAsDataURL(f);
+};
+imageInput.addEventListener("change", () => {
+const f = imageInput.files && imageInput.files[0];
+imageInput.value = "";
+ingestImageFile(f);
+});
+// ★ Ctrl+V 粘贴贴图：截图工具（微信/QQ/Snipaste 等）的剪贴板位图直接粘贴入待发；
+//   只拦截图片项，文本粘贴不受影响。剪贴板位图无业务文件名（Chromium 恒为 image.png），兜底 pasted-<时间戳>.png。
+input.addEventListener("paste", (e) => {
+const items = e.clipboardData && e.clipboardData.items;
+if (!items) return;
+const images = [];
+for (const it of items) {
+if (it.kind === "file" && it.type && it.type.startsWith("image/")) {
+const f = it.getAsFile();
+if (f) images.push(f);
+}
+}
+if (!images.length) return;
+e.preventDefault();
+const ts = new Date();
+const pad = (n) => String(n).padStart(2, "0");
+const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+images.forEach((f, i) => {
+const name = f.name && f.name !== "image.png" ? f.name : `pasted-${stamp}${images.length > 1 ? `-${i + 1}` : ""}.png`;
+ingestImageFile(new File([f], name, { type: f.type || "image/png" }));
+});
 });
 // —— 模式胶囊按钮：切换弹出配置面板（toggle）——
 btnMode.addEventListener("click", (e) => {

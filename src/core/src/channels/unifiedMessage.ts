@@ -13,6 +13,7 @@ export interface InboundImageAttachment {
     name?: string; // 展示用文件名（可缺省）
     mime: string; // MIME 类型（须 image/* 才被接受）
     base64: string; // 纯 base64 数据（不含 dataURL 前缀）
+    path?: string; // 已落盘工作区绝对路径（vision 关闭时 uploadImage 存档回填，随非 vision wire 尾注供 MCP 读图）
 }
 
 /**

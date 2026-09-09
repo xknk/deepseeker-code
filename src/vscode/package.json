@@ -2,12 +2,21 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.58",
+  "version": "1.0.64",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
-  "categories": ["Machine Learning", "Other"],
-  "keywords": ["ai", "deepseek", "coding-assistant", "agent", "chat"],
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "deepseek",
+    "coding-assistant",
+    "agent",
+    "chat"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/xknk/deepSeekCode.git",
@@ -95,7 +104,15 @@
         "deepseekerCode.model": {
           "type": "string",
           "default": "",
-          "description": "默认模型（如 deepseek-v4 / deepseek-v4-flash）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
+          "description": "默认模型（如 deepseek-v4-flash / deepseek-v4-pro）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
+        },
+        "deepseekerCode.models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "「切换模型」选择器的候选模型清单：在此添加模型 id（追加在内置候选 deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp 之后并去重）。改完即生效，无需重启。"
         },
         "deepseekerCode.locale": {
           "type": "string",
@@ -119,13 +136,21 @@
         },
         "deepseekerCode.reasoningEffort": {
           "type": "string",
-          "enum": ["", "high", "max"],
+          "enum": [
+            "",
+            "high",
+            "max"
+          ],
           "default": "",
           "description": "推理力度。留空回退 DEEP_SEEK_REASONING_EFFORT，再缺省 high。（low/medium 已废弃）"
         },
         "deepseekerCode.thinking": {
           "type": "string",
-          "enum": ["", "on", "off"],
+          "enum": [
+            "",
+            "on",
+            "off"
+          ],
           "default": "",
           "description": "深度思考开关。默认开；选 off 关闭（等价 DEEP_SEEK_THINKING=0）。"
         },

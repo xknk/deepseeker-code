@@ -1453,6 +1453,32 @@ body {
   white-space: nowrap;
 }
 
+/* chip 删除钮（×）：hover chip 时显形、hover 钮本体标红——与 Claude Code 贴图 chip 的移除交互一致 */
+.attach-remove {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.attach-chip:hover .attach-remove {
+  display: inline-flex;
+}
+
+.attach-remove:hover {
+  background: rgba(232, 80, 91, 0.4);
+  color: #fff;
+}
+
 /* 弹出配置面板（双层结构：Modes 单选 + 思考等级滑动开关） */
 .mode-popover {
   position: absolute;
@@ -1676,13 +1702,4 @@ body {
   border: 1px solid var(--vscode-panel-border, var(--border, rgba(128, 128, 128, 0.35)));
   object-fit: contain;
   background: rgba(128, 128, 128, 0.08);
-}
-
-/* vision 模式：待发送 chip 可点击移除 */
-.attach-removable {
-  cursor: pointer;
-}
-
-.attach-removable:hover {
-  outline: 1px solid var(--vscode-focusBorder, #0078d4);
 }

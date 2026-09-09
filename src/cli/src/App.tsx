@@ -187,6 +187,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "plan": return S.cmdPlan;
                 case "auto": return S.cmdAuto;
                 case "model": return S.cmdModel;
+                case "switch": return S.cmdSwitch;
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
                 case "output-style": return S.cmdOutputStyle;
@@ -306,12 +307,15 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             }
             case "/model":
                 if (!arg) {
-                    void state.openModelPicker(); // 内置候选清单选择器（任意模型 id 仍可 /model <id> 直输）
+                    state.pushInfo(S.modelUsage(modelDisplay)); // /model 本义=直输模型名；无参只提示
                     return true;
                 }
                 state.setModelOverride(arg);
                 setModelDisplay(arg);
                 state.pushInfo(S.modelSwitched(arg));
+                return true;
+            case "/switch":
+                void state.openModelPicker(); // 候选模型选择器（内置清单；VSCode 端可经设置项 deepseekerCode.models 扩充）
                 return true;
             case "/thinking": {
                 const lvl = arg.toLowerCase();
