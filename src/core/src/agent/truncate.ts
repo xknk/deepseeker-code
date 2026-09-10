@@ -147,18 +147,35 @@ export const truncateApprovalDetail = (detail: string, maxChars = 2000): string 
 
 
 /**
+ * 批次摘要指令构造（纯函数，便于单测钉住契约）。
+ *  ★ 状态序「完成了什么 → 正在做什么 → 下一步/受阻」：行式摘要自带检查点语义——这些行将来会被
+ *    compactSlotNarrative 改写为结构化检查点，按状态写的行是更好的改写素材（旧版「用一行话」
+ *    只压时间线，规划性信息在行内无固定位置）。
+ *  ★ tailContext（贴尾框定）：紧邻保留区的最后一批，摘要模型明确知道自己在「为保留区补背景」，
+ *    才会写出"改 export_csv 所需：CSV 为 GBK、价格列第 5 列"这种可直接用的背景，而非"讨论了
+ *    CSV 编码问题"这种正确但无用的流水账。
+ * @param tailContext 本批是否紧邻未压缩的保留区
+ * @return 摘要指令文本
+ */
+export const batchSummaryPrompt = (tailContext?: boolean): string =>
+    '概括以上对话与工具调用，按「完成了什么 → 正在做什么 → 下一步/受阻」的顺序写成一段。'
+    + '必须原样保留关键实体名（文件路径、函数/类名、报错关键词）以便后续检索；'
+    + (tailContext
+        ? '这批摘要紧邻未压缩的保留区，请额外写明其中对紧随其后的近期工作有用的背景（已确认的约束、数据、结论）。'
+        : '')
+    + '对记不准的细节不要臆测，标注"(细节已归档)"即可。不要调用工具。';
+
+/**
  * @description: 获取摘要
  * @param {Msg} batch // 需要形成摘要的上下文
  * @param {AbortSignal} signal // 是否停止
+ * @param {boolean} tailContext // 是否紧邻保留区（贴尾批次附加「为保留区补背景」框定）
  * @return {*}
  */
-export const compactBatch = async (batch: Msg[], signal?: AbortSignal): Promise<string> => {
-    // ★ prompt 三要素：概要骨架（任务/决策/文件/进度）+ 实体保留（文件名/函数名/报错关键词——
-    //   recall 检索的命中词来源）+ 不确定感显式化（细节不臆测、标注已归档，逼模型需要精确内容时去
-    //   recall 检索，而不是基于模糊摘要直接行动）。
+export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailContext?: boolean): Promise<string> => {
     const resp = await chatWithModelWithSummary(
         // ★ 辅助模型是 text-only：送前把 image part 降级为占位符——base64 绝不能进摘要批（烧钱且无意义）
-        [...batch.map(degradeImagesForAux), { role: 'user', content: '用一行话概括以上对话与工具调用：任务目标、关键决策、动过的文件、当前进度。必须原样保留关键实体名（文件路径、函数/类名、报错关键词）以便后续检索。对记不准的细节不要臆测，标注"(细节已归档)"即可。不要调用工具。' }],
+        [...batch.map(degradeImagesForAux), { role: 'user', content: batchSummaryPrompt(tailContext) }],
         [],
         { signal }
     );
@@ -171,7 +188,8 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal): Promise<
 //   索引系统会在最需要它的超长会话里率先失效。故摘要槽分两段分别治理：
 //   · ⟦DSC:ARCHIVE-INDEX⟧ 实体索引：代码侧正则从被压缩原文【确定性提取】，只去重合并、永不送 LLM
 //     压缩——检索索引无损是硬约束；
-//   · ⟦DSC:ARCHIVE-NOTES⟧ 叙述：LLM 生成的行式摘要，可自由追加与自收敛。
+//   · ⟦DSC:ARCHIVE-NOTES⟧ 叙述：LLM 每轮压缩合成的结构化检查点（整段重写；行式摘要只是中间交换
+//     格式，不落槽——见下方「检查点式摘要合成」）。
 //   槽格式（parseSummarySlot 容忍无标记的旧格式——整体当叙述，实体索引为空，向后兼容）：
 //     ⟦DSC:ARCHIVE-INDEX⟧ <实体1> | <实体2> | ...
 //     ⟦DSC:ARCHIVE-NOTES⟧
@@ -199,6 +217,10 @@ export const extractArchiveEntities = (batch: Msg[]): string[] => {
     const push = (raw: string) => {
         const s = raw.trim();
         if (!s || s.length < 3 || s.length > 60 || seen.has(s)) return;
+        // ★ 版本号形态过滤：末段纯数字/点（如 UA 碎片 AppleWebKit/537.36、Chrome/152.0.0.0）恰似
+        //   「路径+数字扩展名」会被路径正则误收，挤占 120 条实体名额（真实索引中曾占 ~10 条）。
+        const lastSeg = s.split(/[\\/]/).pop() ?? '';
+        if (/^[\d.]+$/.test(lastSeg)) return;
         seen.add(s);
         found.push(s);
     };
@@ -223,7 +245,11 @@ export const parseSummarySlot = (content: string): { index: string[]; notes: str
     return { index, notes };
 }
 
-/** 合并一轮新归档：实体索引去重合并（新实体优先、封顶保新弃旧），叙述行追加。 */
+/**
+ * 合并一轮新归档的实体索引：去重合并（新实体优先、封顶保新弃旧）。
+ *  noteLine 为空 → 仅做索引合并，叙述原样保留（检查点路线下叙述由 synthesizeSlotNarrative
+ *  整段重写，不再逐行追加；传行只为兼容旧调用形态）。
+ */
 export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[]): string => {
     const { index, notes } = parseSummarySlot(oldContent);
     const merged: string[] = [];
@@ -234,7 +260,7 @@ export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntiti
         merged.push(e);
         if (merged.length >= ARCHIVE_INDEX_MAX_ENTRIES) break;
     }
-    const newNotes = notes ? `${notes}\n${noteLine}` : noteLine;
+    const newNotes = noteLine ? (notes ? `${notes}\n${noteLine}` : noteLine) : notes;
     return [
         '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
         merged.join(' | '),
@@ -243,21 +269,79 @@ export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntiti
     ].join('\n');
 }
 
+// ==================== 检查点式摘要合成（借 pi 的 checkpoint / SUMMARIZATION+UPDATE 语义） ====================
+//
+// ★ 每轮压缩的叙述段产出统一为「结构化检查点」，行式摘要降级为纯中间交换格式、不落槽：
+//     旧消息 ──16K 分批(compactToLine)──▶ 状态序行 ──合成──▶ 检查点（槽叙述段唯一形态）
+//   合成 = 本轮新行 + 旧检查点（system 档案的 ⟦DSC:ARCHIVE-NOTES⟧ 段）→ 整段重写。
+//   首轮无旧检查点走生成语义，后续走更新语义（保留已有、已完成移入"已完成"、刷新下一步、丢过期）——
+//   同一 prompt 的两个变体，无分支路径。旧实现（行追加 + 槽超 2000 才自收敛）有两处硬伤：
+//   首轮起槽里就是行堆、全局状态靠续接模型自行归纳；自收敛复用「一行话概括对话」任务书压一摞摘要行，
+//   ~2000 token 压到百余 token 无差别蒸发。检查点整段重写把信息分级保留（丢过期时间线、留决策框架）。
+//   实体索引段原样保留、永不进 LLM（无损红线不越界）；2000 token 自收敛阈值保留作安全网。
+
+/** 检查点输出字数预算：防合成结果膨胀吃窗口（中文 1 字≈1 token，约对应 800 token）。 */
+const CHECKPOINT_MAX_CHARS = 800;
+
+/** ensureSummarySlot 塞的占位文本——出现在叙述段位置时不算既有检查点（防被当上下文喂给合成模型）。 */
+const SLOT_PLACEHOLDER = 'SYSTEM_ROLLING_SUMMARY_SLOT';
+
 /**
- * 摘要自收敛（仅叙述段）：把整个旧槽作为上下文送摘要模型，但输出只【替换】叙述段——
- *  实体索引段原样保留，永不被 LLM 改写（索引无损硬约束）。不经 mergeSummarySlot（那是追加语义）。
+ * 检查点合成指令构造（纯函数，便于单测钉住契约）。
+ * @param hasPrevious 槽内是否已有有效叙述：true=更新语义（合并旧检查点与新归档行），false=生成语义
  */
-export const compactSlotNarrative = async (slotContent: string, modelWindow: number, signal?: AbortSignal): Promise<string> => {
-    const { index } = parseSummarySlot(slotContent);
-    // 整槽（含实体索引）作为摘要上下文送出——索引给摘要模型提供实体线索；输出 '- ' 行式即为新叙述
-    const compactedNotes = await compactToLine([{ role: 'system', content: slotContent } as Msg], modelWindow, signal);
+export const checkpointPrompt = (hasPrevious: boolean): string =>
+    (hasPrevious
+        ? '以上是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点。请把既有检查点与用户消息中的本轮新归档摘要行合并改写为一份新的结构化检查点，供后续模型续接工作。'
+        : '用户消息是本会话本轮归档出的摘要行。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引由系统另行确定性维护，无需你输出）。')
+    + '严格按以下格式输出：\n\n'
+    + '## 目标\n[用户要完成什么；多任务分段列出]\n'
+    + '## 约束与偏好\n- [用户明示的约束、偏好与技术要求；无则写"(无)"]\n'
+    + '## 进度\n### 已完成\n- [x] [已完成的事项]\n### 进行中\n- [ ] [进行中的事项及其最新状态]\n### 受阻\n- [卡点；无则写"(无)"]\n'
+    + '## 关键决策\n- **[决策]**: [简要理由]\n'
+    + '## 下一步\n1. [按顺序列出接下来该做什么]\n'
+    + '## 关键上下文\n- [续接所需的数据、结论与参照；无则写"(无)"]\n\n'
+    + '规则：'
+    + (hasPrevious
+        ? '保留既有检查点与新归档行中的全部有效信息，只整理、不改写事实；已完成事项移入"已完成"，进行中事项刷新到最新状态；被取代的过期细节可删除（细节可经 recall 检索，无需恋战）；'
+        : '对记不准的细节不要臆测，标注"(细节已归档)"即可（细节可经 recall 检索）；')
+    + '原样保留文件路径、函数/类名、报错关键词等实体名；全文不超过 ' + CHECKPOINT_MAX_CHARS + ' 字；直接输出检查点，不要任何解释。';
+
+/**
+ * 槽叙述段合成：本轮归档行（可空）+ 旧叙述 → 新检查点，输出只【替换】叙述段——
+ *  实体索引段原样保留，永不被 LLM 改写（索引无损硬约束）。输出不守格式时由 parseSummarySlot
+ *  的宽容解析兜底（整体当叙述，不影响槽结构）。
+ *  调用时机：每轮压缩末尾（newLines = compactToLine 产出的状态序行）；
+ *  自收敛安全网复用同一路径（newLines='' → 纯改写既有叙述）。
+ */
+export const synthesizeSlotNarrative = async (slotContent: string, newLines: string, signal?: AbortSignal): Promise<string> => {
+    const { index, notes } = parseSummarySlot(slotContent);
+    const trimmedNotes = notes.trim();
+    const hasPrevious = trimmedNotes.length > 0 && trimmedNotes !== SLOT_PLACEHOLDER;
+    const lines = newLines.trim();
+    const resp = await chatWithModelWithSummary(
+        [
+            { role: 'system', content: slotContent } as Msg,
+            { role: 'user', content: `${lines ? `本轮新归档的摘要行：\n${lines}\n\n` : ''}${checkpointPrompt(hasPrevious)}` },
+        ],
+        [],
+        { signal }
+    );
+    const newNotes = (resp.choices[0].message.content || '').trim();
     return [
         '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
         index.join(' | '),
         '⟦DSC:ARCHIVE-NOTES⟧',
-        compactedNotes,
+        newNotes,
     ].join('\n');
 }
+
+/**
+ * 自收敛安全网（仅叙述段）：槽自身超 SUMMARY_SELF_COMPACT_THRESHOLD 时就地再收敛。
+ *  检查点路线下正常恒低于阈值，此函数几乎只在异常膨胀时触发；newLines 为空 → 纯改写既有叙述。
+ */
+export const compactSlotNarrative = async (slotContent: string, _modelWindow: number, signal?: AbortSignal): Promise<string> =>
+    synthesizeSlotNarrative(slotContent, '', signal);
 
 /**
  * @description: 根据上下文的token数量，来计算是否生成摘要
@@ -295,7 +379,9 @@ export const compactToLine = async (toCompact: Msg[], _modelWindow: number, sign
     // ★ 批次间无依赖，并行压缩：map 保序 + Promise.all 保序 → join 顺序与原串行完全一致。
     //   compactBatch → chatWithModelWithSummary 每次独立请求、无共享状态，并行安全；abort 经 signal
     //   传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
-    const lines = await Promise.all(batches.map(b => compactBatch(b, signal)));
+    //   ★ 末批（紧邻保留区）传 tailContext 框定：摘要模型知道自己在「为保留区补背景」，写出的
+    //   背景才可直接被续接模型使用（否则只是正确但无用的流水账）。
+    const lines = await Promise.all(batches.map((b, i) => compactBatch(b, signal, i === batches.length - 1)));
     return lines.join("\n"); // 返回最后的摘要信息
 }
 /**
@@ -310,7 +396,7 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
         messageArr.unshift({ role: 'system', content: 'SYSTEM_META_CONTEXT_START' } as any); // 向上下文中添加系统提示词
     }
     if (messageArr.length < 2 || (messageArr[1] as any)?.role !== 'system') {
-        messageArr.splice(1, 0, { role: 'system', content: 'SYSTEM_ROLLING_SUMMARY_SLOT' } as any);
+        messageArr.splice(1, 0, { role: 'system', content: SLOT_PLACEHOLDER } as any);
     }
 }
 
@@ -366,13 +452,15 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
         try {
             if (toCompact.length > 0) {
-                const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 获取全量的摘要
-                // ★ 双段合并：实体索引（代码从被压缩原文确定性提取，永不送 LLM 压缩）+ 叙述（LLM 行式摘要，追加）。
-                //   索引是 recall 检索的查询词来源——旧“纯叙述槽”在自收敛后实体名必丢，检索入口随之失效。
-                summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', line, extractArchiveEntities(toCompact));
-                // ★ P2 摘要自收敛（仅叙述段）：摘要只追加不自收敛会越长越大，最终侵蚀窗口、形成"摘要越大→越早
-                //   触发压缩→又追加新摘要"的怪圈。每轮压缩后若摘要槽自身超阈值，就地再压一次收敛；
-                //   实体索引段原样保留（索引无损硬约束）。
+                const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 本轮各批次的状态序行
+                // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先、永不送 LLM）——与叙述合成
+                //   解耦；noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
+                summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact));
+                // ★ 检查点合成：本轮状态序行 + 旧叙述 → 新检查点（首轮生成语义、后续更新语义），整段替换叙述段。
+                //   行是批量归档的交换格式、不落槽——槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
+                summaryMsg.content = await synthesizeSlotNarrative(summaryMsg.content, line, event.signal);
+                // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
+                //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
                 if (estimateTokens([summaryMsg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
                     summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal);
