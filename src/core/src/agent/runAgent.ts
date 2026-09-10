@@ -244,9 +244,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             addUsage(infResult.usage); // completed 轮用量累计进 run.end（事件日志化）
             // assistantMessage 已由 streamInference 委托 provider.buildAssistantMessage 构造完成（含厂商扩展字段，
             //   如 DeepSeek 的 reasoning_content）。此处整体落盘 + ...spread 透传，杜绝手工列举字段名漏挂——
-            //   DeepSeek 思考模式下含工具调用的轮次必须回传 reasoning_content，否则 API 返回 400；
+            //   落盘保留 reasoning_content（UI 思考展示 / recall 依赖）；API 回传侧由 provider 出口的
+            //   stripHistoricalReasoning 统一剥离（2026-09-10 探针证实不强制回传，剥历史省 ~25%）；
             //   cleanMsg / appendMessage 均 ...rest 透传，保证会话恢复后 buildContextMessages 重建的上下文
-            //   仍带该字段，回传链不中断。
+            //   仍带该字段，UI 链路不中断。
             // as any：Msg(ChatCompletionMessageParam) 是联合类型，.content/.tool_calls 不在所有成员上，
             //   直接访问触发「不存在属性」；此处一律按 any 窄化访问（与原 .tool_calls as any 同惯法）。
             const assistantMessage = infResult.assistantMessage as any;

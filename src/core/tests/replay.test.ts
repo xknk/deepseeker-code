@@ -295,7 +295,9 @@ describe("runAgent harness 回归（PHANTOM / EARLY_FINAL / TOOL_DIGEST / repeat
         assert.equal(finalTextOf(ret.events).startsWith('已完成：'), true, '最终 final 是实质总结（第 3 轮）');
         assert.equal(handle.calls.length, 3, '短收尾被拦 → 多跑一轮推理');
         const thirdCallTail: any = handle.calls[2].messages[handle.calls[2].messages.length - 1];
-        assert.equal(thirdCallTail.role, 'system');
+        // ★ nudge 跟在 assistant 草稿后 → 角色改写为 user（DS thinking 严格档规避：续写形状下
+        //   任何 assistant 缺 reasoning_content 即 400，见 streamInference.withNudgeTail 注释）
+        assert.equal(thirdCallTail.role, 'user');
         assert.match(thirdCallTail.content, /⟦DSC:TOOL_DIGEST⟧/, 'nudge 以推理时尾部副本注入（模型可见）');
         const assistants = ret.lines.filter((l: any) => l.role === 'assistant');
         assert.equal(assistants.length, 3, '被拦轮同样落盘（round.end 闭合）');

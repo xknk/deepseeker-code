@@ -43,7 +43,9 @@ describe("skills/registry（allowed-tools/context/triggers 元数据）", () => 
         registerSkill(mk({ name: "plain", description: "无触发词技能" }));
         const c = getSkillCatalog();
         assert.match(c, /- tdd：测试驱动开发（触发：TDD、 测试驱动）/);
-        assert.match(c, /- plain：无触发词技能$/, "triggers 为空时不追加括号");
+        assert.match(c, /^- plain：无触发词技能$/m, "triggers 为空时不追加括号");
+        // ★ 目录按 name 排序（顺序确定性：保 fresh-session 的 DeepSeek 前缀缓存命中），与注册序无关
+        assert.deepEqual(c.split("\n"), ["- plain：无触发词技能", "- tdd：测试驱动开发（触发：TDD、 测试驱动）"]);
     });
 
     it("getSkillCatalog：无 skill 返回空串", () => {

@@ -11,7 +11,7 @@ import { LLMProvider, AssistantParts } from "../../provider.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { outMsg, toolMsg, MsgParams } from "../../type.ts";
 import { model, AUX_MODEL_NAME } from "./client.ts";
-import { streamChat } from "./stream.ts";
+import { streamChat, stripHistoricalReasoning } from "./stream.ts";
 
 /**
  * 非流式摘要（走辅助模型 AUX_MODEL_NAME、关思考）：用于上下文压缩等不需流式的场景。
@@ -24,7 +24,7 @@ const summarize = async (
 ): Promise<outMsg> => {
     try {
         const requestBody = {
-            messages: messages,
+            messages: stripHistoricalReasoning(messages),   // ★ 出口剥离历史思考记录（压缩输入全价计费，省得最实）
             model: AUX_MODEL_NAME,
             tool_choice: "auto",
             tools: tools,
@@ -108,8 +108,9 @@ const isTransientError = (e: any): boolean => {
 
 /**
  * 构造 DeepSeek wire assistant 消息：把推理 / 工具调用零件序列化成 DeepSeek 协议格式。
- * ★ 挂 reasoning_content 扩展字段——思考模式下含 tool_calls 的 assistant 消息后续必须完整回传，
- *   否则 API 返回 400。落盘时直接用此产物（message.push / appendMessage），杜绝手工列举字段漏挂。
+ * ★ 挂 reasoning_content 扩展字段——此产物用于【落盘】（message.push / appendMessage），UI 思考过程
+ *   展示与 recall 归档召回依赖它。API 回传侧由 stream.ts 的 stripHistoricalReasoning 统一剥离
+ *   （2026-09-10 协议探针证实服务端不强制回传，剥历史省 ~25% 请求体积），杜绝手工列举字段漏挂。
  */
 const buildAssistantMessage = (parts: AssistantParts): Msg => ({
     role: 'assistant',

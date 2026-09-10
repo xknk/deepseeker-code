@@ -65,7 +65,12 @@ export const getSkillManifest = (name: string): SkillManifest | undefined => ski
 export const getSkillCatalog = (): string => {
     const all = listSkills();
     if (all.length === 0) return "";
+    // ★ 按 name 排序：listSkills 是插入序（= loader readdir 序，隐式依赖文件系统返回顺序），
+    //   FS 顺序一变 → 目录字节漂移 → sysHash 变 → fresh-session 首轮 DeepSeek 前缀缓存 miss。
+    //   排序使注入内容只随「注册了什么」变化、不随「以什么顺序发现」变化（与 memory 索引同法）。
     return all
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
         .map(s => `- ${s.name}：${s.description}${s.triggers.length ? `（触发：${s.triggers.join("、 ")}）` : ""}`)
         .join("\n");
 };

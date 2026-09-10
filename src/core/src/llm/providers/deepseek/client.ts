@@ -10,8 +10,9 @@ export const model = new OpenAI({
     baseURL: process.env.DEEP_SEEK_API_URL || 'https://api.deepseek.com',
     apiKey: process.env.DEEP_SEEK_API_KEY,
     // ★ 瞬态错误自动指数退避重试（SDK 内置：408/409/429/500/502/503/504 + 连接错误），
-    //   避免单次 429 限流 / 网关抖动 / 网络超时直接终止整轮 agent（长任务几十轮工具调用体验极差）。
-    //   注：SDK 重试已覆盖瞬态错误，runAgent 不再叠加第二层重试（否则会放大负载）。
+    //   覆盖非流式 helper（summarize / classifyRisk）。★ 流式对话不在此列：stream.ts 按
+    //   maxRetries: 0 关掉 SDK 层，瞬态重试单层归 streamInference 应用层（Retry-After 感知 +
+    //   text.reset/abort/超长降级语义，SDK 层不具备）——两层同开会把 429 放大成 5×3=15 次请求。
     maxRetries: 4,
     timeout: 120_000, // 单次请求 120s 兜底（长上下文 / 长生成场景）
 });

@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "web_fetch(https://api-docs.deepseek.com/guides/thinking)"
+    ]
+  }
+}

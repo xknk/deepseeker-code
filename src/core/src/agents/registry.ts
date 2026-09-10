@@ -51,7 +51,11 @@ export const getAgent = agents.get;
 export const getAgentCatalog = (): string => {
     const all = listAgents();
     if (all.length === 0) return "";
+    // ★ 按 name 排序：插入序 = loader readdir 序（文件系统隐式依赖），漂移即击穿 fresh-session
+    //   DeepSeek 前缀缓存（sysHash 变）——注入内容只随「注册了什么」稳定变化（与 memory 索引同法）。
     return all
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
         .map(a => `- ${a.name}：${a.description}${a.role ? `（角色：${a.role}）` : ""}`)
         .join("\n");
 };

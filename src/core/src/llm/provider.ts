@@ -67,7 +67,9 @@ export interface LLMProvider {
     classifyRisk: (toolName: string, args: any, detail: string, signal?: AbortSignal) => Promise<'safe' | 'risky'>;
 
     /** 把推理/工具调用零件构造成厂商特定 wire 消息（DeepSeek 挂 reasoning_content）。
-     *  streamInference 落盘时直接 push/append 此产物，杜绝手工列举字段漏挂 reasoning_content（400 回归点）。 */
+     *  streamInference 落盘时直接 push/append 此产物，杜绝手工列举字段漏挂 reasoning_content。
+     *  注意：此产物面向落盘（UI/recall 依赖）；API 回传侧由 provider 出口统一剥离（DeepSeek 的
+     *  stripHistoricalReasoning，2026-09-10 探针证实不强制回传）。 */
     buildAssistantMessage: (parts: AssistantParts) => Msg;
 
     /** 识别「上下文超长」错误（context_length_exceeded）→ 降级压缩后重试。 */

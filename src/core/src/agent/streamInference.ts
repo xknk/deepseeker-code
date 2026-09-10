@@ -25,6 +25,34 @@ import { msgText } from "@/session/contentParts.ts";
 /** sha1 前 10 位短哈希：前缀分段指纹用（只入 trace 供跨会话对比，不上模型）。 */
 const sha1short = (s: string): string => createHash('sha1').update(s).digest('hex').slice(0, 10);
 
+/** 退避上限（ms）：服务器给天价 Retry-After 时封顶，防止 agent 被单次限流冻结半小时+。 */
+const RETRY_BACKOFF_CAP_MS = 30_000;
+
+/**
+ * 从 API 错误中提取 Retry-After 头（毫秒）。SDK 的 APIError.headers 可能是 Headers 实例或普通对象，
+ * 头名可能是 `retry-after`（HTTP 日期或秒数）或 `retry-after-ms`（毫秒，OpenAI 系扩展）。
+ * 解析不了（缺失 / HTTP 日期形式 / 非数字）→ 返回 null，调用方回落固定指数退避。导出供测试。
+ */
+export const extractRetryAfterMs = (e: any): number | null => {
+    try {
+        const h = e?.headers;
+        if (!h) return null;
+        const get = (k: string): string | undefined =>
+            typeof h.get === 'function' ? (h.get(k) ?? undefined) : (h[k] ?? h[k.toLowerCase()]);
+        const ms = get('retry-after-ms');
+        if (ms != null) {
+            const n = Number(ms);
+            if (Number.isFinite(n) && n >= 0) return n;
+        }
+        const sec = get('retry-after');
+        if (sec != null) {
+            const n = Number(sec);
+            if (Number.isFinite(n) && n >= 0) return n * 1000; // 仅数字秒；HTTP 日期形式不解析（罕见），回落指数退避
+        }
+    } catch { /* 头读取容错 */ }
+    return null;
+};
+
 /** 推理结果（判别联合）：
  *  - completed —— 流式正常结束，携带拼装好的 assistantMessage（provider 产物，含厂商扩展字段如 reasoning_content），主循环落盘后继续；
  *  - aborted   —— 用户中止；若仅有 partial 文本（无半截 tool_call）已在本模块内落盘，partialText 供主循环拼 final；
@@ -60,6 +88,20 @@ export type StreamInferenceContext = {
 };
 
 /**
+ * nudge 尾附（ephemeral，不进 message 数组）。
+ * ★ DS thinking 严格档规避：nudge 跟在 assistant 草稿之后时（EARLY_FINAL/PHANTOM 守护轮线形状
+ *   [.., 草稿 assistant, nudge]），请求落入「续写」严格校验档（最后一条非 system 消息为 assistant）——
+ *   任何一条 assistant 缺 reasoning_content 都 400，而模型简答时草稿天然无思考字段（round 1
+ *   reasoning=0chars 实测），stripHistoricalReasoning 的「全量回传」无从保留。把 nudge 角色改成 user
+ *   （请求以 user 结尾 → 宽松档）从根上绕开；语义不变（推模型继续的指令），纯 wire 层，落盘不动。
+ */
+const withNudgeTail = (base: Msg[], nudge: { role: string; content: string } | null): Msg[] => {
+    if (!nudge) return base;
+    const lastRole = (base[base.length - 1] as any)?.role;
+    return [...base, lastRole === "assistant" ? { ...nudge, role: "user" } : nudge] as Msg[];
+};
+
+/**
  * 流式推理一轮。yield 流式事件，return InferenceResult。
  * 三道有限重试（idle stall / API 瞬时 / context_length 降级）均内置；耗尽或不可重试异常 → return error/aborted。
  */
@@ -67,7 +109,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
     const { message, nudgeMsg, sessionId, depth, round, startTime, userDecisionSource, llmDecisionSource,
         signal, cleanedToolSchemas, model, thinkingLevel, events, keepRecentUnits, compactRatio, modelWindow,
         toolsTokens = 0 } = ctx;
-    let inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
+    let inferenceMessages = withNudgeTail(message, nudgeMsg);
     let assistantMessage: Msg = { role: 'assistant', content: null } as Msg;
     try {
         // ★ 前缀分段指纹（P0 缓存诊断）：tools 段 / system 段 / 摘要槽各记 sha1 短哈希 + 消息数。
@@ -100,9 +142,10 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
         //   （emit llm.error + return error → 主循环 yield final，busy 自动清零，杜绝永久卡死）。
         const MAX_STREAM_RETRIES = 2;
-        // ★ API 瞬时错误（429/5xx/网络复位）的有限重试预算（上线前 P0-2）：与 idle 重试独立计数，
-        //   互不挤占。每轮重置，避免一次长任务被偶发限流永久中断。
-        const MAX_API_RETRIES = 2;
+        // ★ API 瞬时错误（429/5xx/网络复位）的有限重试预算：与 idle 重试独立计数，互不挤占。每轮重置，
+        //   避免一次长任务被偶发限流永久中断。★ 流式请求已关 SDK 内建重试（stream.ts maxRetries: 0，
+        //   单层化防 15 次放大），本层是唯一重试通道，预算 2→3（1+3=4 次尝试，对齐原 SDK 侧 5 次的量级）。
+        const MAX_API_RETRIES = 3;
         let apiRetries = 0;
         // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
         let compactedThisRound = false;
@@ -156,19 +199,24 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;
                 }
-                // ★ API 瞬时错误重试（上线前 P0-2）：429 限流 / 5xx 服务端错误 / 连接级网络复位 → 原请求重试 + 指数退避。
+                // ★ API 瞬时错误重试：429 限流 / 5xx 服务端错误 / 连接级网络复位 → 原请求重试 + 退避。
                 //   缘由：原逻辑对这类错误直接 throw → 外层 catch final 终结整轮，单用户依赖云端模型场景下，一次偶发
-                //   限流/抖动就中断长 coding 任务且不可自动恢复（只能手动续接）。现补有限重试（默认 2 次，1s→2s 指数退避），
-                //   与 idle 重试独立计数（apiRetries）。重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃，
-                //   避免重试重新生成时重复显示（与 idle 重试同处理）。退避 sleep 期间用户中止 → sleep reject →
-                //   冒泡至外层 catch 的 signal.aborted 分支优雅收尾（partial 文本落盘 + final）。
-                //   （Retry-After 头解析为后续增强项，当前固定指数退避已覆盖绝大多数瞬时抖动。）
+                //   限流/抖动就中断长 coding 任务且不可自动恢复（只能手动续接）。重试前若已向前端推过文本/思考，
+                //   发 text.reset 让前端丢弃，避免重试重新生成时重复显示（与 idle 重试同处理）。退避 sleep 期间用户
+                //   中止 → sleep reject → 冒泡至外层 catch 的 signal.aborted 分支优雅收尾（partial 文本落盘 + final）。
+                //   ★ Retry-After 感知：服务器明确给出等待时长（retry-after / retry-after-ms）时以其为准
+                //   （DS 限流是账号级的，盲目短退避只会连续撞墙）；未给则指数退避 1s→2s→4s；统一 30s 封顶。
                 if (activeProvider.isTransientError(streamErr) && apiRetries < MAX_API_RETRIES && !signal?.aborted) {
                     apiRetries++;
-                    const backoffMs = 1000 * Math.pow(2, apiRetries - 1); // 第 1 次 1s、第 2 次 2s
+                    const retryAfterMs = extractRetryAfterMs(streamErr);
+                    const backoffMs = Math.min(
+                        Math.max(1000 * Math.pow(2, apiRetries - 1), retryAfterMs ?? 0),
+                        RETRY_BACKOFF_CAP_MS,
+                    );
                     if (!noOutputYet) yield { type: 'text.reset' };
                     const statusHint = (streamErr as any)?.status ? `${(streamErr as any).status} ` : '';
-                    console.warn(`⚠️ API 瞬时错误（${statusHint}${streamErr instanceof Error ? streamErr.message : String(streamErr)}），${backoffMs}ms 后第 ${apiRetries}/${MAX_API_RETRIES} 次重试...`);
+                    const raHint = retryAfterMs != null ? `，遵 Retry-After=${retryAfterMs}ms` : '';
+                    console.warn(`⚠️ API 瞬时错误（${statusHint}${streamErr instanceof Error ? streamErr.message : String(streamErr)}），${backoffMs}ms 后第 ${apiRetries}/${MAX_API_RETRIES} 次重试${raHint}...`);
                     await new Promise<void>((resolve, reject) => {
                         const t = setTimeout(resolve, backoffMs);
                         signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
@@ -194,7 +242,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                         signal,
                         toolsTokens,
                     });
-                    inferenceMessages = nudgeMsg ? [...message, nudgeMsg] : message;
+                    inferenceMessages = withNudgeTail(message, nudgeMsg);
                     compactedThisRound = true;
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;
@@ -213,9 +261,10 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         }
 
         // 流式拼接出 assistantMessage（委托 provider 构造厂商特定 wire 格式）。
-        // ★ reasoning_content 回传：DeepSeek 思考模式下，进行了工具调用的轮次在后续所有请求中必须完整回传
-        //   reasoning_content，否则 API 返回 400（官方 thinking_mode 文档）。provider.buildAssistantMessage 内统一挂载，
-        //   本处不再手工列举字段名（杜绝漏挂 reasoning_content 的 400 回归点）。
+        // ★ reasoning_content 落盘：思考增量拼进 assistantMessage 供 UI 思考展示 / recall 归档召回；
+        //   provider.buildAssistantMessage 内统一挂载，本处不再手工列举字段名（杜绝漏挂的回归点）。
+        //   API 回传侧由 provider 出口的 stripHistoricalReasoning 统一剥离（2026-09-10 探针证实
+        //   DeepSeek 不强制回传——官方「必须完整回传否则 400」口径比服务端实际校验严格，剥历史省 ~25%）。
         const toolCallsArr = toolCallsBuf.size > 0
             ? Array.from(toolCallsBuf.entries())
                 .sort((a, b) => a[0] - b[0])
