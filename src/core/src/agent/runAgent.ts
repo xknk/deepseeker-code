@@ -354,11 +354,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const reason = signal?.aborted ? 'aborted' : stopReason;
             // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
-        } catch { /* ignore */ }
+        } catch (e) { console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
         // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
         //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
         try {
             await updateCalibration(sessionId, { calibRatio, lastRealPromptTokens, lastCachedTokens });
-        } catch { /* ignore */ }
+        } catch (e) { console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
     }
 }
