@@ -15,6 +15,8 @@ import { readTranscriptLines } from "@/session/transcript.ts";
 import { forkSession, listForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
+import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
+import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import type { TraceBase, Todo } from "@/observability/type.ts";
 import type { ApprovalDecision, ApprovalMeta, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT, SELECTABLE_MODELS } from "@/llm/createModel.ts";
@@ -540,6 +542,21 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
     }, [busy, initialSessionId, pushUser, pushInfo, runOnce, runPlanStage, takeEnterPlanRequest, takeProposedPlan, approveAndImplement]);
 
+    /** `!` shell 直执行：不经模型/审批，本机 shell 跑完回显；输出以 user 消息落 transcript（下轮模型可见）。
+     *  首轮即可用（不依赖引擎闸门——不走 MCP/commands，只需 sessionId 落盘）。 */
+    const runBangCommand = useCallback(async (raw: string) => {
+        const cmd = raw.replace(/^!/, "").trim();
+        if (!cmd) { pushInfo("用法：!<shell 命令>（如 !git status）；输出会带入下轮对话上下文。"); return; }
+        pushUser(raw);
+        if (sessionIdRef.current == null) {
+            sessionIdRef.current = await getOrCreateSessionId(initialSessionId ?? undefined);
+        }
+        const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
+        const head = r.timedOut ? `⏱ 超时中止` : r.ok ? `✅ 退出码 0` : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : `❌ 已中止`;
+        pushInfo(`${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || "(无输出)"}`);
+        await recordBashEntry(sessionIdRef.current, formatBashEntry(cmd, r));
+    }, [initialSessionId, pushUser, pushInfo]);
+
     /** 中止当前轮（Esc / Ctrl+G）。
      *  ★ 安全网：abort 后若宽限期内本轮仍未结束（底层 run 忽略 abort 信号、真挂起——如卡在不查 signal 的
      *    工具/钩子里、或模型流 stall），强制复位 busy/aborting/currentAc，避免 CLI 被永久卡死。
@@ -657,7 +674,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
         sessionIdRef,
         // 动作
-        submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent,
+        submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent, runBangCommand,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,

@@ -397,9 +397,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         const v = inputRef.current.trim();
         if (!v) return;
         if (busyRef.current) {
-            // ★ inbox steering：busy 期间普通输入排队至回合边界送达模型；斜杠命令不排队
+            // ★ inbox steering：busy 期间普通输入排队至回合边界送达模型；斜杠命令/`!` 直执行不排队
             //   （需本地立即执行，与"发给模型的补充指示"语义不符），仍走 busy 提示（输入框不清）。
-            if (!v.startsWith("/") && state.queueInput(v)) {
+            if (!v.startsWith("/") && !v.startsWith("!") && state.queueInput(v)) {
                 setInput("");
                 setCursor(0);
             } else {
@@ -409,6 +409,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         }
         setInput("");
         setCursor(0);
+        if (v.startsWith("!")) { await state.runBangCommand(v); return; }
         if (v.startsWith("/")) { await executeSlash(v); return; }
         await ensureEngine();
         await state.submit(v);

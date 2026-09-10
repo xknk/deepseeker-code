@@ -13,6 +13,8 @@ import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 import { msgText, imageUrlsOf } from "@/session/contentParts.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
+import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
+import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { getOrCreateSessionId, listSessions, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
 import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
@@ -340,6 +342,24 @@ export class ChatHost {
     return await this.presentPlanAndImplement(plan);
   }
 
+  /** `!` shell 直执行（对齐 CLI runBangCommand）：不经模型/审批，本机 shell 跑完回显；
+   *  输出以 user 消息落 transcript（下轮模型可见）。首轮即可用（不依赖引擎闸门，只需 sessionId 落盘）。 */
+  private async runBangCommand(raw: string): Promise<void> {
+    const cmd = raw.slice(1).trim();
+    if (!cmd) {
+      this.sink({ type: "info", text: "用法：!<shell 命令>（如 !git status）；输出会带入下轮对话上下文。" });
+      return;
+    }
+    if (this.sessionId == null) {
+      this.setSessionId(await getOrCreateSessionId(undefined));
+    }
+    this.sink({ type: "row", kind: "user", text: raw, key: `u-${Date.now()}` });
+    const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
+    const head = r.timedOut ? "⏱ 超时中止" : r.ok ? "✅ 退出码 0" : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : "❌ 已中止";
+    this.sink({ type: "info", text: `${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || "(无输出)"}` });
+    await recordBashEntry(this.sessionId!, formatBashEntry(cmd, r));
+  }
+
   /** 提交一轮对话（UI 输入框 Enter 触发）。★ 多模态：attachments 为本次贴图（vision 开启时随消息进 core）。 */
   async submit(content: string, attachments?: InboundImageAttachment[]): Promise<void> {
     const text = content.trim();
@@ -358,6 +378,11 @@ export class ChatHost {
       } else {
         this.sink({ type: "info", text: "⏳ 生成中，输入未发送。" });
       }
+      return;
+    }
+    // ★ `!` shell 直执行：不经模型/审批，本机 shell 跑完回显；输出以 user 消息落 transcript（下轮模型可见）。
+    if (text.startsWith("!")) {
+      await this.runBangCommand(text);
       return;
     }
     if (this.sessionId == null) {
