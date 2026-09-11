@@ -50,9 +50,11 @@ const NUDGE_TEXT = (round: number): string =>
     `你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
 
 // —— 首轮 PLAN_FIRST 启发式（判断用户首条 prompt 是否疑似非平凡实现任务）——
-const COMPLEX_VERBS = /实现|新增|添加|重构|改造|迁移|重写|拆分|升级|开发|编写|构建|集成|支持|完善/;
-const COMPLEX_OBJECTS = /功能|模块|系统|架构|流程|机制|组件|服务|页面|接口|能力|特性|面板/;
-const COMPLEX_MARKERS = /多个文件|多文件|整体|全套|端到端|从零|重新设计|一整套|跨[^，。\s]{1,6}/;
+//   ★ 中英双语词表（2026-09-11）：原纯中文词表对英文 prompt 永不命中（detectTextLocale 已按支持英文用户
+//   设计，启发式却中文偏科）。英文动词刻意不收 add/write/change 等泛词（误命中率高），只收强实现动词。
+const COMPLEX_VERBS = /实现|新增|添加|重构|改造|迁移|重写|拆分|升级|开发|编写|构建|集成|支持|完善|implement|refactor|migrate|rewrite|rebuild|restructure|split|upgrade|integrate|develop/i;
+const COMPLEX_OBJECTS = /功能|模块|系统|架构|流程|机制|组件|服务|页面|接口|能力|特性|面板|feature|module|system|architecture|pipeline|component|service|page|api\b|interface|panel|workflow|endpoint/i;
+const COMPLEX_MARKERS = /多个文件|多文件|整体|全套|端到端|从零|重新设计|一整套|跨[^，。\s]{1,6}|multiple files|multi-file|end-to-end|from scratch|across\s+\S+/i;
 const QUERY_LEAD = /^(请)?\s*(解释|说明|查(一下|询)?|搜索|搜一下|怎么看|如何(用|使用|配置|启动)|怎么用|为什么|是什么|帮我看看|分析一下|检查|review|对比|评价)/i;
 /** 首条 prompt 疑似非平凡实现任务 → 命中即在首轮注入「先规划」nudge（仅引导，模型可自决；误判代价低）。 */
 const looksComplex = (text: string): boolean => {
@@ -87,7 +89,7 @@ const normPath = (p: unknown): string => {
 /** 检索词归一：trim + 小写 + 折叠空白（"Foo  bar" 与 "foo bar" 视为同一检索）。 */
 const normQuery = (q: unknown): string => String(q ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 const REPEAT_READ_TEXT = (p: string, n: number): string =>
-    `你已第 ${n} 次读取「${p}」——该文件内容你早已拥有，无需整文件重读。如需某处细节请回看之前的工具结果；若该文件刚被改动、确需确认，只读改动附近几行即可，不要整文件重读。`;
+    `你已第 ${n} 次读取「${p}」——该文件内容你早已拥有，无需整文件重读。如需某处细节请回看之前的工具结果（早前读取可能已被归档，可用 recall 工具检索取回原文）；若该文件刚被改动、确需确认，只读改动附近几行即可，不要整文件重读。`;
 const REPEAT_GREP_TEXT = (q: string, n: number): string =>
     `你已第 ${n} 次检索「${q}」——之前的结果你已拥有。请改用 read_file 读完整目标文件理解上下文，或缩小/调整检索范围，不要重复同一检索。`;
 

@@ -760,7 +760,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "write_file",
-            description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。★ 仅用于【新建文件】或【彻底重写整个文件】——修改既有文件一律改用 edit_file（精准局部替换、保留原缩进、最小 diff）。用 write_file 覆盖既有文件会丢失原有 Tab/空格缩进，产生大量无关 diff，用户强烈反感。",
+            description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。★ 仅用于【新建文件】或【彻底重写整个文件】；修改既有文件一律改用 edit_file（局部精准替换、最小 diff）。",
             parameters: {
                 type: "object",
                 properties: {

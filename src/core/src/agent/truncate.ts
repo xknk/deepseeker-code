@@ -88,15 +88,23 @@ export function stripAnsi(text: string): string {
     return text.replace(ANSI_ESCAPE, "");
 }
 /**
- * 单条消息内容微压缩：ANSI、多余空白、HTML 注释；路径相对化
+ * 单条消息内容微压缩：ANSI、多余空行、路径相对化。
+ * ★ 刻意不做两类「破坏性压缩」（2026-09-11 缩进压塌修复）：
+ *  - `[ \t]{3,}` → " " 空白压缩已摘除：read_file 输出为「padStart(5)行号: 原始行」，行号后那 1 个空格
+ *    会与代码自身缩进连成连续空白串一起被压——任意 ≥2 空格缩进在模型视图中塌成 0~1 空格，嵌套层级
+ *    信息彻底抹平（Python/YAML 缩进即语义、4 空格后端代码、Vue 模板深层嵌套全受灾）。曾是 edit_file
+ *    多级容错层、「顶格」问题、同文件反复 read 的共同根因（自伤而非模型缺陷）。
+ *  - `<!--...-->` 注释剥离已摘除：read_file 读 .vue/.html/.md 时模板注释/文档注释会被静默吞掉
+ *    （模型看到只剩行号的空行）；web_fetch 已自带 htmlToMarkdown 转换，注释在那里已处理，无需通用剥离。
+ * 保留的压缩均不伤代码结构：ANSI 转义（终端噪音）、连续 ≥3 空行折叠（罕见且不影响行号）、
+ * 绝对路径相对化（纯省 token，信息无损）。
  * @param raw 原始内容
  * @return 压缩后的干净文本
  */
 export function microcompactTextContent(raw: string): string {
     let s = stripAnsi(raw || "");
-    s = s.replace(/<!--[\s\S]*?-->/g, "");
     s = relativizeWorkspacePathsInText(s);
-    s = s.replace(/\n{3,}/g, "\n\n").replace(/[ \t]{3,}/g, " ").trim();
+    s = s.replace(/\n{3,}/g, "\n\n").trim();
     return s;
 }
 /**
@@ -286,6 +294,24 @@ const CHECKPOINT_MAX_CHARS = 800;
 /** ensureSummarySlot 塞的占位文本——出现在叙述段位置时不算既有检查点（防被当上下文喂给合成模型）。 */
 const SLOT_PLACEHOLDER = 'SYSTEM_ROLLING_SUMMARY_SLOT';
 
+/** 检查点输出格式骨架（行式/直通两路线共享；缺段即静默丢类信息）。 */
+const CHECKPOINT_FORMAT =
+    '严格按以下格式输出：\n\n'
+    + '## 目标\n[用户要完成什么；多任务分段列出]\n'
+    + '## 约束与偏好\n- [用户明示的约束、偏好与技术要求；无则写"(无)"]\n'
+    + '## 进度\n### 已完成\n- [x] [已完成的事项]\n### 进行中\n- [ ] [进行中的事项及其最新状态]\n### 受阻\n- [卡点；无则写"(无)"]\n'
+    + '## 关键决策\n- **[决策]**: [简要理由]\n'
+    + '## 下一步\n1. [按顺序列出接下来该做什么]\n'
+    + '## 关键上下文\n- [续接所需的数据、结论与参照；无则写"(无)"]\n\n';
+
+/** 合并/整理规则。isRaw=true（直通语义）：新归档物是对话原文而非行式摘要，措辞随之。 */
+const checkpointRules = (hasPrevious: boolean, isRaw = false): string =>
+    '规则：'
+    + (hasPrevious
+        ? `保留既有检查点与新归档${isRaw ? '原文' : '行'}中的全部有效信息，只整理、不改写事实；已完成事项移入"已完成"，进行中事项刷新到最新状态；被取代的过期细节可删除（细节可经 recall 检索，无需恋战）；`
+        : '对记不准的细节不要臆测，标注"(细节已归档)"即可（细节可经 recall 检索）；')
+    + '原样保留文件路径、函数/类名、报错关键词等实体名；全文不超过 ' + CHECKPOINT_MAX_CHARS + ' 字；直接输出检查点，不要任何解释。';
+
 /**
  * 检查点合成指令构造（纯函数，便于单测钉住契约）。
  * @param hasPrevious 槽内是否已有有效叙述：true=更新语义（合并旧检查点与新归档行），false=生成语义
@@ -294,18 +320,20 @@ export const checkpointPrompt = (hasPrevious: boolean): string =>
     (hasPrevious
         ? '以上是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点。请把既有检查点与用户消息中的本轮新归档摘要行合并改写为一份新的结构化检查点，供后续模型续接工作。'
         : '用户消息是本会话本轮归档出的摘要行。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引由系统另行确定性维护，无需你输出）。')
-    + '严格按以下格式输出：\n\n'
-    + '## 目标\n[用户要完成什么；多任务分段列出]\n'
-    + '## 约束与偏好\n- [用户明示的约束、偏好与技术要求；无则写"(无)"]\n'
-    + '## 进度\n### 已完成\n- [x] [已完成的事项]\n### 进行中\n- [ ] [进行中的事项及其最新状态]\n### 受阻\n- [卡点；无则写"(无)"]\n'
-    + '## 关键决策\n- **[决策]**: [简要理由]\n'
-    + '## 下一步\n1. [按顺序列出接下来该做什么]\n'
-    + '## 关键上下文\n- [续接所需的数据、结论与参照；无则写"(无)"]\n\n'
-    + '规则：'
-    + (hasPrevious
-        ? '保留既有检查点与新归档行中的全部有效信息，只整理、不改写事实；已完成事项移入"已完成"，进行中事项刷新到最新状态；被取代的过期细节可删除（细节可经 recall 检索，无需恋战）；'
-        : '对记不准的细节不要臆测，标注"(细节已归档)"即可（细节可经 recall 检索）；')
-    + '原样保留文件路径、函数/类名、报错关键词等实体名；全文不超过 ' + CHECKPOINT_MAX_CHARS + ' 字；直接输出检查点，不要任何解释。';
+    + CHECKPOINT_FORMAT
+    + checkpointRules(hasPrevious);
+
+/**
+ * 单批直通合成指令：归档原文以对话消息形式附在请求中部（未经行式中转），其余语义与 checkpointPrompt 对齐。
+ * 单批必然紧邻保留区 → 恒带贴尾框定（对齐 batchSummaryPrompt(true) 的「为保留区补背景」）。
+ */
+const checkpointDirectPrompt = (hasPrevious: boolean): string =>
+    (hasPrevious
+        ? 'system 消息是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点；其后的对话消息是本轮新归档的会话原文（未经行式压缩）。请把既有检查点与这些原文合并改写为一份新的结构化检查点，供后续模型续接工作。'
+        : '本轮归档出的会话原文以对话消息形式附后（未经行式压缩）。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引由系统另行确定性维护，无需你输出）。')
+    + '这批原文紧邻未压缩的保留区，请额外写明其中对紧随其后的近期工作有用的背景（已确认的约束、数据、结论）。'
+    + CHECKPOINT_FORMAT
+    + checkpointRules(hasPrevious, true);
 
 /**
  * 槽叙述段合成：本轮归档行（可空）+ 旧叙述 → 新检查点，输出只【替换】叙述段——
@@ -314,10 +342,24 @@ export const checkpointPrompt = (hasPrevious: boolean): string =>
  *  调用时机：每轮压缩末尾（newLines = compactToLine 产出的状态序行）；
  *  自收敛安全网复用同一路径（newLines='' → 纯改写既有叙述）。
  */
-export const synthesizeSlotNarrative = async (slotContent: string, newLines: string, signal?: AbortSignal): Promise<string> => {
+/** 槽装配（索引段原样保留 + 新叙述段替换）——行式与直通两条合成路线共用（索引无损硬约束）。 */
+const assembleSlot = (index: string[], newNotes: string): string =>
+    [
+        '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
+        index.join(' | '),
+        '⟦DSC:ARCHIVE-NOTES⟧',
+        newNotes,
+    ].join('\n');
+
+const parseSlotNarrativeState = (slotContent: string) => {
     const { index, notes } = parseSummarySlot(slotContent);
     const trimmedNotes = notes.trim();
     const hasPrevious = trimmedNotes.length > 0 && trimmedNotes !== SLOT_PLACEHOLDER;
+    return { index, hasPrevious };
+};
+
+export const synthesizeSlotNarrative = async (slotContent: string, newLines: string, signal?: AbortSignal): Promise<string> => {
+    const { index, hasPrevious } = parseSlotNarrativeState(slotContent);
     const lines = newLines.trim();
     const resp = await chatWithModelWithSummary(
         [
@@ -328,12 +370,28 @@ export const synthesizeSlotNarrative = async (slotContent: string, newLines: str
         { signal }
     );
     const newNotes = (resp.choices[0].message.content || '').trim();
-    return [
-        '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
-        index.join(' | '),
-        '⟦DSC:ARCHIVE-NOTES⟧',
-        newNotes,
-    ].join('\n');
+    return assembleSlot(index, newNotes);
+}
+
+/**
+ * 单批直通合成：归档批次原文以对话消息形式直接交检查点合成，跳过行式中转——
+ *  省 1 次 LLM 调用与一轮串行延迟，且少一次「原文→行式摘要」的有损转手（行式只是多批并行时的交换格式）。
+ *  批次消息按对话单元封批（groupUnits 保证 assistant(tool_calls)+tool 成对完整），插在 system 档案与
+ *  user 指令之间 API 序列合法；贴图已降级占位（base64 绝不进摘要批）。
+ */
+export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batch: Msg[], signal?: AbortSignal): Promise<string> => {
+    const { index, hasPrevious } = parseSlotNarrativeState(slotContent);
+    const resp = await chatWithModelWithSummary(
+        [
+            { role: 'system', content: slotContent } as Msg,
+            ...batch.map(degradeImagesForAux),
+            { role: 'user', content: checkpointDirectPrompt(hasPrevious) },
+        ],
+        [],
+        { signal }
+    );
+    const newNotes = (resp.choices[0].message.content || '').trim();
+    return assembleSlot(index, newNotes);
 }
 
 /**
@@ -344,22 +402,12 @@ export const compactSlotNarrative = async (slotContent: string, _modelWindow: nu
     synthesizeSlotNarrative(slotContent, '', signal);
 
 /**
- * @description: 根据上下文的token数量，来计算是否生成摘要
- * @param {Msg} toCompact
- * @param {number} modelWindow
- * @param {AbortSignal} signal
- * @return {*}
+ * 按对话单元封批（纯函数）：16K token/批上限；assistant(tool_calls)+紧跟的 tool 结果 = 不可分割单元，
+ * 复用 splitUntils 同款 groupUnits，保证一个工具调用回合永不跨批（跨批即产生
+ * "tool_calls must be followed by tool messages" 类 400 → 多批同失败 → 物理熔断）。
  */
-export const compactToLine = async (toCompact: Msg[], _modelWindow: number, signal?: AbortSignal): Promise<string> => {
-    // ★ 批次上限固定 16K token（对齐 appConfig.MAX_TOOL_RESULT_CHARS 口径）：原 modelWindow*0.25≈62.5K
-    //   一批过大，摘要模型在超长输入下注意力稀释、丢细节——而摘要恰是用来保细节的。16K 保摘要质量，
-    //   批次数通常 1–3。（_modelWindow 保留入参位置以兼容调用方，批次大小不再依赖它。）
+export const splitIntoBatches = (toCompact: Msg[]): Msg[][] => {
     const MAX_BATCH_TOKENS = 16000;
-    // ★ 按对话单元（assistant(tool_calls)+紧跟的 tool 结果 = 不可分割）封批：原逐条按 token 封批，
-    //   批次边界会落在 tool_calls 与 tool 结果之间，产生两类 400——
-    //   "tool_calls must be followed by tool messages" / "tool must follow a tool_calls"——
-    //   多批同时失败 → Promise.all reject → 连续失败计数 → 物理熔断，agent 直接死。
-    //   复用 splitUntils 同款 groupUnits，保证一个工具调用回合永不跨批。
     const units = groupUnits(toCompact);
     const batches: Msg[][] = [];
     let batch: Msg[] = []; // 当前累积的待压缩批次
@@ -376,14 +424,30 @@ export const compactToLine = async (toCompact: Msg[], _modelWindow: number, sign
         batchTokens += size;
     }
     if (batch.length > 0) batches.push(batch);
-    // ★ 批次间无依赖，并行压缩：map 保序 + Promise.all 保序 → join 顺序与原串行完全一致。
-    //   compactBatch → chatWithModelWithSummary 每次独立请求、无共享状态，并行安全；abort 经 signal
-    //   传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
-    //   ★ 末批（紧邻保留区）传 tailContext 框定：摘要模型知道自己在「为保留区补背景」，写出的
-    //   背景才可直接被续接模型使用（否则只是正确但无用的流水账）。
-    const lines = await Promise.all(batches.map((b, i) => compactBatch(b, signal, i === batches.length - 1)));
-    return lines.join("\n"); // 返回最后的摘要信息
+    return batches;
 }
+
+/**
+ * 各批次并行行式压缩（交换格式，不落槽）：map 保序 + Promise.all 保序 → join 顺序确定。
+ * compactBatch → chatWithModelWithSummary 每次独立请求、无共享状态，并行安全；abort 经 signal
+ * 传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
+ * 末批（紧邻保留区）传 tailContext 框定：摘要模型知道自己在「为保留区补背景」，写出的背景才可
+ * 直接被续接模型使用（否则只是正确但无用的流水账）。
+ */
+const compactBatches = async (batches: Msg[][], signal?: AbortSignal): Promise<string> => {
+    const lines = await Promise.all(batches.map((b, i) => compactBatch(b, signal, i === batches.length - 1)));
+    return lines.join("\n");
+}
+
+/**
+ * @description: 根据上下文的token数量，来计算是否生成摘要
+ * @param {Msg} toCompact
+ * @param {number} modelWindow
+ * @param {AbortSignal} signal
+ * @return {*}
+ */
+export const compactToLine = async (toCompact: Msg[], _modelWindow: number, signal?: AbortSignal): Promise<string> =>
+    compactBatches(splitIntoBatches(toCompact), signal);
 /**
  * @description: 预留系统提示词和摘要区域
  *  约定：messageArr[0] = 系统提示词、messageArr[1] = 滚动摘要槽。
@@ -452,13 +516,17 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
         try {
             if (toCompact.length > 0) {
-                const line = await compactToLine(toCompact, event.modelWindow, event.signal); // 本轮各批次的状态序行
                 // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先、永不送 LLM）——与叙述合成
                 //   解耦；noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
                 summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact));
-                // ★ 检查点合成：本轮状态序行 + 旧叙述 → 新检查点（首轮生成语义、后续更新语义），整段替换叙述段。
-                //   行是批量归档的交换格式、不落槽——槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
-                summaryMsg.content = await synthesizeSlotNarrative(summaryMsg.content, line, event.signal);
+                // ★ 检查点合成（首轮生成语义、后续更新语义），整段替换叙述段。行是批量归档的交换格式、不落槽——
+                //   槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
+                //   ★ 单批直通：常见形态（1–3 批中的单批）批次原文直接交合成，跳过行式中转——
+                //   省 1 次 LLM 调用与一轮串行延迟，少一次「原文→行」有损转手；多批保持并行行式路线。
+                const batches = splitIntoBatches(toCompact);
+                summaryMsg.content = batches.length === 1
+                    ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal)
+                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal), event.signal);
                 // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
                 //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。

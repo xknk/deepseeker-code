@@ -131,6 +131,23 @@ export const handleUnifiedChat = async (
         // ★ 点明项目级配置仅主根生效（多根 trustDir/initEngine 二期再放开），免 agent 误用其他根配置。
         sysPrompt = sysPrompt + `\n\n【工作区（多项目）】\n无需切换项目，以下所有根都可直接用绝对路径访问；跨项目用绝对路径或相对默认根的 ../<兄弟目录>:\n${lines.join("\n")}\n★ 路径锚定铁律：工具缺省只作用于默认根（${path.basename(activeReal) || activeReal} = IDE 头部所示根）。当用户在对话中指明了某个项目（如「在 A 项目」「改前端的 xxx」「搜后端」），该轮所有带 path 参数的工具调用（read_file / edit_file / search_grep / glob / list_dir / read_xlsx / read_docx 等）必须把对应项目根作为 path 传入（绝对路径、../<兄弟目录>、或项目目录名），否则只会读写/搜索默认根，与用户意图不符。\n注意：项目级配置（.deepseeker-code/）仅在默认根 ${path.basename(activeReal) || activeReal} 生效。`;
     }
+    // ★ ENV 块（2026-09-11 缩进修复同批）：向模型声明环境事实（工作区根/OS/shell/今天日期）。此前模型全程
+    //   无感知，只能靠工具结果反推——首次构造路径前瞎猜（Windows 盘符大小写漂移）、相对日期推理（「最近
+    //   一周的提交」）全靠蒙。多根模式不重复根行（上方【工作区（多项目）】块已含默认根与跨根规则）。
+    //   缓存代价：日期按天变化 → 每天首个 run 击穿一次前缀，同日内字节稳定；根/OS 恒定。
+    const osName = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const shellNote = process.platform === 'win32'
+        ? '经 shell 执行（优先 Git Bash，POSIX 语义；缺省回退 cmd.exe）'
+        : '经 POSIX shell（sh）执行';
+    const envLines = [
+        ...(roots.length > 1 ? [] : [`- 工作区根（工具相对路径的基准）: ${getActiveWorkspaceRoot()}`]),
+        `- 操作系统: ${osName}（${process.platform}）`,
+        `- 命令执行: ${shellNote}`,
+        `- 今天: ${today}`,
+    ];
+    sysPrompt = sysPrompt + `\n\n【环境】\n${envLines.join("\n")}`;
     let replyText = "";
     // ★ 多模态 ingest（双视图）：attachments 经 toIngestContents 拆出「模型所见（wire）」与「入站原件（archive）」。
     //   wire 喂 buildContextMessages（vision 关时降级为文本注，绝不给非 vision 端点发 parts——宿主门控
