@@ -6,3 +6,4 @@ dist/
 # AI 相关设计文档，不进 git（本地保留）
 .ai-docs/
 src/文章示例/*
+src/core/tests/evals/.results/*
