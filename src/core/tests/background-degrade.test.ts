@@ -154,9 +154,17 @@ describe("run_command 自动转后台（auto-degrade）", () => {
         assert.match(r.toModel, /task_id: fake-id/);
     });
 
-    it("verifyResult：无哨兵 → SUCCESS（退出码未知契约锁）", () => {
+    it("verifyResult：无哨兵 + 自动转后台标记 → SUCCESS（仍在运行语义由文本承载，退出码未知契约锁）", () => {
         const out = "\n⏳ [自动转后台]：命令 [x] ...\ntask_id: abc\n";
         assert.equal(runCommand.function.verifyResult!(out, makeCtx()).status, ToolExecutionResultStatus.SUCCESS);
+    });
+
+    it("verifyResult：无哨兵且无降级标记 → FAILED（P0 修复：进程被杀/输出中断按失败呈现，防成功幻觉）", () => {
+        // 典型来源：generator 被 idle 熔断提前 return（进程被杀树、无 close 收尾）、输出管道损坏
+        const out = "some partial output without sentinel";
+        const verdict = runCommand.function.verifyResult!(out, makeCtx());
+        assert.equal(verdict.status, ToolExecutionResultStatus.FAILED);
+        assert.match(verdict.summary ?? "", /缺少退出码哨兵/);
     });
 
     needShell("abort 回归：中途中止 → 哨兵 -1，不降级", async () => {

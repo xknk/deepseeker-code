@@ -18,6 +18,10 @@ import { appConfig } from "@/config/index.ts";
 const EXIT_SENTINEL = (code: number) => `\n⟦DSC_EXIT:${code}⟧`;
 const EXIT_SENTINEL_RE = /⟦DSC_EXIT:(-?\d+)⟧/g;
 
+/** 自动转后台标记（单一真相源）：degrade 分支的提示语与 verifyResult 的「仍在运行」识别共用，
+ *  防两处文案漂移后 verifyResult 误判。 */
+const AUTO_BG_NOTICE = "[自动转后台]";
+
 /** run_command 输出字符上限（maxOutputCharacters 字段与 execute 内 maxChars 的单一真相源，避免两处漂移） */
 const RUN_COMMAND_MAX_CHARS = 20000;
 
@@ -51,8 +55,18 @@ export const commandTools: CustomTool[] = [
                 // ★ 防伪造：取最后一个哨兵匹配（真正的退出码由 execute 在末尾追加）。
                 //   旧的 [exit: N] 嗅探会被 stdout 里的字面量骗过，已废弃。
                 const matches = [...rawOutput.matchAll(EXIT_SENTINEL_RE)];
-                const code = matches.length ? parseInt(matches[matches.length - 1][1], 10) : 0;
+                const last = matches[matches.length - 1];
+                const code = last ? parseInt(last[1], 10) : null;
                 if (code === 0) return { status: ToolExecutionResultStatus.SUCCESS };
+                if (code === null) {
+                    // ★ 无哨兵分两类（原缺省按 0 判 SUCCESS，恰在失败高发区喂「成功幻觉」，已改）：
+                    //   - 自动转后台（AUTO_BG_NOTICE 标记）：进程仍在运行、退出码未知，「仍在运行」语义由
+                    //     消息文本承载 → 不判失败（get_background_output 后续按真实退出码呈现）；
+                    //   - 其余（generator 被 idle 熔断提前 return、进程被外力杀死未走 close 收尾、输出中断）：
+                    //     结果不完整不可信 → 按 FAILED 呈现，逼模型正视「未验证成功」，不要乐观假设。
+                    if (rawOutput.includes(AUTO_BG_NOTICE)) return { status: ToolExecutionResultStatus.SUCCESS };
+                    return { status: ToolExecutionResultStatus.FAILED, summary: "输出中缺少退出码哨兵——进程被强制终止或输出不完整，结果不可信，按失败处理。" };
+                }
                 // 退出码语义提示：帮模型/用户定位（255 常为 Unix 命令在非 POSIX shell 缺失、或 exit(-1/255)）
                 const hint =
                     code === 9009 ? "（Windows：命令未被识别——命令不存在或 PATH 缺失）"
@@ -254,8 +268,8 @@ export const commandTools: CustomTool[] = [
                             ? `连续 ${Math.round(IDLE_TIMEOUT_MS / 1000)}s 无输出且未退出`
                             : `已持续运行超过 ${Math.round(autoBgMs / 1000)}s`;
                         // ★ 不 yield EXIT 哨兵：进程仍在运行，退出码未知（伪造 0/-1 都会误导 verifyResult）；
-                        //   verifyResult 无哨兵默认 SUCCESS，"仍在运行"语义由本消息文本承载
-                        yield `\n\n⏳ [自动转后台]：命令 [${args.command}] ${why}，已自动转为后台任务（前台流式结束，未消费的剩余输出已并入后台缓冲）。\ntask_id: ${taskId}\n⚠️ 进程仍在运行，退出码未知（不判定成功/失败）——用 get_background_output(task_id="${taskId}", wait_seconds=…) 等待/查看结果；若确认无需继续，用 stop_background_task(task_id="${taskId}") 终止。\n`;
+                        //   verifyResult 凭 AUTO_BG_NOTICE 标记识别「仍在运行」语义不判失败，语义由本消息文本承载
+                        yield `\n\n⏳ ${AUTO_BG_NOTICE}：命令 [${args.command}] ${why}，已自动转为后台任务（前台流式结束，未消费的剩余输出已并入后台缓冲）。\ntask_id: ${taskId}\n⚠️ 进程仍在运行，退出码未知（不判定成功/失败）——用 get_background_output(task_id="${taskId}", wait_seconds=…) 等待/查看结果；若确认无需继续，用 stop_background_task(task_id="${taskId}") 终止。\n`;
                     } else if (overLimit) {
                         // ★ 输出被截断视为失败：显式 yield 哨兵 exit:-1，让 verifyResult 判 FAILED，
                         //   避免模型对超长失败构建/测试产生"成功幻觉"（截断场景恰是失败高发区）

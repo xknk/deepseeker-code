@@ -45,7 +45,7 @@ const ex = (user: string, assistant: string): Msg[] => [
 
 /** 无关填充轮（撑出多批次压力；实体名丰富，模拟真实工作对话的检索面） */
 const filler = (i: number): [string, string] => {
-    const topics = [
+    const topics: Array<[string, string]> = [
         [`utils/date.ts 的 formatDate 在跨时区下多算了 8 小时，帮我看下`, `定位到 utils/date.ts:42 的 formatDate 用了本地时区构造 Date。已改为 toISOString 截断 UTC，并补了跨时区回归用例 date.test.ts。`],
         [`csvExport.ts 导出 10 万行时内存暴涨`, `csvExport.ts 是一次性 join 全部行。改为流式写入（每 1000 行 flush），内存峰值从 ~800MB 降到 ~60MB，导出耗时基本不变。`],
         [`日志里手机号明文打出来了`, `在 logger.ts 加 maskLog 脱敏管道：手机号/身份证/银行卡正则替换为掩码。注意 logger.ts 是全局单例，改动影响所有模块的输出。`],
@@ -91,7 +91,7 @@ const scenarioKeyContext = (): Msg[] =>
 /** 产线同款新路径：行式摘要（交换格式）→ 索引确定性合并 → 检查点合成（镜像 ensureFitsWindow 主分支）。 */
 const compactCheckpoint = async (convo: Msg[]): Promise<string> => {
     const arr: Msg[] = [{ role: "system", content: "SYSTEM_META_CONTEXT_START" }, { role: "system", content: "SYSTEM_ROLLING_SUMMARY_SLOT" }, ...convo];
-    ensureSummarySlot(arr);
+    ensureSummarySlot(arr as any);
     const lines = await compactToLine(convo as any, 65536);
     const slot = mergeSummarySlot(arr[1].content as string, "", extractArchiveEntities(convo as any));
     return synthesizeSlotNarrative(slot, lines);

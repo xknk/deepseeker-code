@@ -1,0 +1,42 @@
+{
+  "createdAt": "2026-09-11T01:34:59.288Z",
+  "model": "deepseek/DeepSeek",
+  "tasks": {
+    "discount-bugfix": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 63287,
+      "durationMs": 9404
+    },
+    "median-implement": {
+      "pass": true,
+      "rounds": 6,
+      "totalTokens": 74437,
+      "durationMs": 11163
+    },
+    "rename-api": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 63482,
+      "durationMs": 10862
+    },
+    "mask-privacy": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 62269,
+      "durationMs": 9818
+    },
+    "async-race-fix": {
+      "pass": true,
+      "rounds": 4,
+      "totalTokens": 47685,
+      "durationMs": 6103
+    },
+    "config-extract": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 62598,
+      "durationMs": 11967
+    }
+  }
+}

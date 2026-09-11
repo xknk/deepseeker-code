@@ -16,7 +16,7 @@ import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
 import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
-import { runAutoCheck, matchCommandDeny, isReadOnlyCommand } from "@/tool/autoPermission.ts";
+import { runAutoCheck, matchCommandDeny, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
 import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
@@ -178,7 +178,10 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         if (appConfig.hookRewrite) {
             preHooksAdvanced = true;
             let veto: { deny: boolean; reason?: string; argsOverride?: any };
-            try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
+            // ★ P1-MCP 对称性：hook 匹配与权限层同用合成名（mcp_call → mcp__<server>__<tool>），
+            //   声明式 PreToolUse 规则才能按 mcp__server__tool（或尾部 * 通配）精准拦截单个 MCP 工具，
+            //   而非只能拦 mcp_call 整体。其余工具 resolveMcpPermissionName 原样返回，行为不变。
+            try { veto = await runPreHooks(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx); }
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
             if (veto.deny) {
                 denied = true;
@@ -211,11 +214,19 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             else if (perm === 'ask') { needApproval = true; }
         } catch { perm = null; /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
         // ★ 默认模式只读命令免审（P1-8）：仅 run_command、且用户未设显式权限规则（perm===null）时，
-        //   对只读命令（git 只读子命令 / ls / npm test 等无 shell 元字符的纯查看+验证类）直接免审，消除审批疲劳。
+        //   对只读命令（git 只读子命令 / ls / tsc --noEmit 等无 shell 元字符的纯查看+验证类）直接免审，消除审批疲劳。
         //   安全：COMMAND_DENY 硬闸门（下方紧接判定）+ hasShellMetachars（isReadOnlyCommand 内）双闸兜底；
         //         收紧：permissions.ask/deny 优先级始终更高（perm!==null 时本判定不生效，用户可 opt-out）；
-        //         不含 run_in_background（后台任务持续运行，免审风险更高）。
-        if (perm === null && needApproval && !denied && calledName === 'run_command'
+        //         不含 run_in_background（后台任务持续运行，免审风险更高）；
+        //         npm/pnpm/npx/yarn「跑脚本」类被 scriptRunnerBlocked 单独拦下（供应链面，见下），不再免审。
+        // ★ 供应链免审防绕过（P0 修复）：scriptRunnerBlocked 命令同时关闭只读免审（本判定）与 auto 分类器
+        //   （下方 runAutoCheck）——package.json scripts 与 npx 未装包拉取是仓库作者的任意代码，
+        //   hasShellMetachars 只验证命令串本身、拦不到脚本内容，分类器同样看不见脚本内容。
+        //   perm 为 null（无用户显式规则）时强制转人工审批一次；用户选 allow-always 后由 buildScopedAllowRule
+        //   落【精确命令串】allow 规则，之后 perm==='allow' 自然免审——即「首次确认，记住」语义。
+        const scriptRunnerBlocked = perm === null && (calledName === 'run_command' || calledName === 'run_in_background')
+            && isScriptRunnerCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '');
+        if (perm === null && needApproval && !denied && !scriptRunnerBlocked && calledName === 'run_command'
             && isReadOnlyCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
             needApproval = false;
         }
@@ -227,7 +238,9 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             denied = true;
             result = `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`;
         }
-        // ★ isSync:false 后台工具的互斥锁快速失败（审批前判断，避免无谓弹窗）
+        // ★ isSync:false 后台工具的互斥锁（快查）：锁被持有则直接拒绝，省去一次无谓审批弹窗。
+        //   真正的获锁在 runBackgroundTool 启动时执行、其 finalize 必定释放——
+        //   check-then-act 形态为有意设计（单人本地工具，并发窗口无害），勿改预占式。
         const isBgTool = matchedTool.function.isSync === false;
         const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;
         if (lockKey && isLockHeld(lockKey)) {
@@ -243,8 +256,10 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         //   两档共用：safe→免审放行、risky/异常/超时→转人工、敏感文件/高危命令 deny 清单→硬拒（fail-closed，绝不静默放行）。
         //   想对某项目/工具强制人工：配 permissions.ask（优先级高于分类器）。
         //   优先级：保护路径 > checkPermission 显式规则（上方已判）> deny 清单 > 分类器 > requestApproval 人工。
-        if (needApproval && !denied) {
+        if (needApproval && !denied && !scriptRunnerBlocked) {
             // ★ P1-MCP：同上，auto 分类器亦按合成名参与（isMcpTool / aggressive 档判定与旧逐工具名路径一致）
+            //   scriptRunnerBlocked 命令跳过分类器：分类器只见命令串、看不见 scripts 内容，无法负责任地判 safe
+            //   （含 /auto 档——供应链面不因 opt-in 激进档而豁免人工首验；用户可预配 allow 规则跳过）。
             const auto = await runAutoCheck(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx, permissionMode === 'auto');
             if (auto === 'allow') { needApproval = false; }
             else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
@@ -266,7 +281,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         //   开关开时已在分支顶部前置执行（deny+改写），此处跳过防重复执行。
         if (!denied && !preHooksAdvanced) {
             let veto: { deny: boolean; reason?: string };
-            try { veto = await runPreHooks(calledName, calledArgs, toolCtx); }
+            // ★ P1-MCP 对称性：同上方改写位，hook 匹配用合成名（见 runPreHooks 首个调用点注释）
+            try { veto = await runPreHooks(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx); }
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
             if (veto.deny) { denied = true; result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`; }
         }
@@ -303,7 +319,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             // ★ post-hooks：执行后观察（不拦截，自身异常仅告警）+ 开关开时收集 resultOverride
             //   （改写模型视图；hook 观察到的 result 是 4K 截断视图，其自写回的 override 不受该截断）
             try {
-                const post = await runPostHooks(calledName, calledArgs, result, toolCtx);
+                // ★ P1-MCP 对称性：hook 匹配用合成名（见 runPreHooks 首个调用点注释）
+                const post = await runPostHooks(resolveMcpPermissionName(calledName, calledArgs), calledArgs, result, toolCtx);
                 postHookOverride = post?.resultOverride;
             } catch (e: any) {
                 console.warn(`⚠️ post-hook [${calledName}] 异常（已忽略）:`, e?.message ?? e);

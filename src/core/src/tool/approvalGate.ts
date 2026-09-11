@@ -20,8 +20,8 @@ const pendingLocks = new Map<string, PendingApproval>();
  * 工具层调用：原地制造一个阻塞栅栏，挂起当前大模型工具执行协程
  * @param sessionId 本次工具调用所属会话（用于跨会话审批越权校验）
  * @param toolsId   对应 TraceBase 的唯一埋点凭证
- * @param signal    用户主动中断信号（cc 风格：不靠定时器超时判拒绝，改为监听中断）；
- *   signal abort 时立即判拒绝并清理门锁，杜绝失联导致协程永久挂起。
+ * @param signal    用户主动中断信号（cc 风格：监听中断为主，不靠短超时判拒绝）；
+ *   signal abort 时立即判拒绝并清理门锁。刻意无超时：单人本地工具，用户走开多久回来都应能补批。
  */
 export const waitForUserApproval = async (sessionId: string, toolsId: string, signal?: AbortSignal): Promise<ApprovalDecision> => {
     // 已中断：直接判拒绝，不挂起
@@ -33,7 +33,7 @@ export const waitForUserApproval = async (sessionId: string, toolsId: string, si
             const stale = pendingLocks.get(toolsId);
             if (stale) { stale.resolver('deny'); pendingLocks.delete(toolsId); }
             pendingLocks.set(toolsId, { sessionId, resolver: resolve });
-            // 用户主动中断（断开/停止）唤醒挂起的审批，取代旧的超时自动熔断
+            // 用户主动中断（断开/停止）唤醒挂起的审批
             if (signal) {
                 onAbort = (): void => {
                     resolve('deny');
@@ -44,7 +44,7 @@ export const waitForUserApproval = async (sessionId: string, toolsId: string, si
             }
         });
     } finally {
-        // ★ 正常 resolve（用户批准/拒绝）后主动移除 abort 监听器，避免残留挂在 signal 上
+        // ★ 正常 resolve（用户批准/拒绝/abort）后主动清理：移除 abort 监听器，避免残留挂在 signal 上
         if (onAbort && signal) signal.removeEventListener("abort", onAbort);
     }
 };

@@ -139,12 +139,39 @@ const READONLY_HEADS: RegExp[] = [
     // —— 版本号 ——
     /^(node|npm|pnpm|npx|git|tsc|python|python3)\s+(-v|-V|--version)\b/,
     // —— 验证类（跑项目代码但不改源码）——
-    /^npm test\b/,
-    /^npm run (test|lint|typecheck|type-check)\b/,
-    /^pnpm (test|lint|typecheck)\b/,
-    /^npx (vitest|jest|eslint|tsc)\b/,
+    // ★ npm/pnpm/npx/yarn 系「跑脚本」命令已整类移出免审清单（isScriptRunnerCommand 单独治理，见下方）：
+    //   package.json scripts 是仓库作者的任意代码、npx 未装包时还会从 registry 拉取执行——
+    //   hasShellMetachars 检查的是命令串本身，拦不到脚本内容（恶意 repo 投毒面）。
+    //   改走「首次人工确认 + allow-always 按精确命令串记住」路径（toolExecution 的 scriptRunnerBlocked 门）。
     /^tsc --noEmit\b/,
 ];
+
+/**
+ * 供应链面：包管理器「跑脚本」命令（npm test / pnpm run lint / npx vitest 等）。
+ *  ★ 与只读免审分轨治理：这类命令免审的本质是执行仓库作者的任意代码（scripts.test 可写任何东西；
+ *    npx 未装包时还会从 registry 拉取执行），hasShellMetachars 只能验证命令串本身、拦不到脚本内容。
+ *    故不再直接免审，也不再交给分类器放行（分类器只见命令串、同样看不见脚本内容），改走：
+ *    - toolExecution 对 scriptRunnerBlocked 命令同时关闭只读免审与 auto 分类器，强制转人工审批一次；
+ *    - 用户选 allow-always 后由 buildScopedAllowRule 落【精确命令串】allow 规则（permissions.ts），
+ *      之后 perm==='allow' 自然跳过审批与分类器——即「首次确认，记住」语义；
+ *    - 同命令的变体（不同 flag/子命令）重新确认（shell 类工具的正确安全姿态）。
+ */
+const SCRIPT_RUNNER_HEADS: RegExp[] = [
+    /^npm (test|run\s+\S+)\b/,
+    /^pnpm (test|lint|typecheck|type-check|run\s+\S+)\b/,
+    /^yarn (test|run\s+\S+)\b/,
+    /^npx\s+\S+\b/,                       // npx 未装包时从 registry 拉取执行——按供应链面治理
+];
+
+/**
+ * 判定命令是否为包管理器「跑脚本」类（npm test / pnpm run lint / npx vitest 等）。
+ * 此类命令不参与只读免审与分类器放行，首次执行强制人工确认（见 SCRIPT_RUNNER_HEADS 上方说明）。
+ */
+export const isScriptRunnerCommand = (cmd: string): boolean => {
+    const c = (cmd || "").trim();
+    if (!c || hasShellMetachars(c)) return false;
+    return SCRIPT_RUNNER_HEADS.some(re => re.test(c));
+};
 
 /**
  * 只读命令的写选项检测：sed 的 -i（原地写）、find 的 -delete/-exec/-ok（销毁/执行子句）是写操作，命中即不免审。

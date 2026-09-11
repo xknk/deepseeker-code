@@ -38,7 +38,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
-import { registerHooks } from "./registry.ts";
+import { replaceDeclarativeHooks } from "./registry.ts";
 import { executeHookCommand } from "./shellExecutor.ts";
 import { executeHttpHook } from "./httpExecutor.ts";
 import { runSubagent } from "@/agent/subagent.ts";
@@ -409,9 +409,10 @@ export const loadHooks = async (includeProject: boolean): Promise<number> => {
         if (!list || list.length === 0) continue;
         for (const raw of list) compiled.push(compileRule(event, raw));
     }
-    if (compiled.length > 0) {
-        registerHooks(compiled);
-    }
+    // ★ 热重载幂等（修复叠加 bug）：replaceDeclarativeHooks 先摘除上一轮声明式规则再挂新——
+    //   原实现 registerHooks 纯追加，重复调用（进程内 serve 重启 / 未来 /hooks reload）规则翻倍、
+    //   同一事件跑两遍。程序化注册的规则（不带 DECLARATIVE_RULE 标记）不受重载影响。
+    replaceDeclarativeHooks(compiled);
     return compiled.length;
 };
 

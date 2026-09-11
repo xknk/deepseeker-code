@@ -1,204 +1,204 @@
 {
-  "name": "deepseeker-code",
-  "displayName": "DeepSeeker-Code",
-  "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
-  "version": "1.0.64",
-  "publisher": "deepseeker-code",
-  "license": "MIT",
-  "icon": "media/icon.png",
-  "categories": [
-    "Machine Learning",
-    "Other"
-  ],
-  "keywords": [
-    "ai",
-    "deepseek",
-    "coding-assistant",
-    "agent",
-    "chat"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/xknk/deepSeekCode.git",
-    "directory": "src/vscode"
-  },
-  "bugs": {
-    "url": "https://github.com/xknk/deepSeekCode/issues"
-  },
-  "homepage": "https://github.com/xknk/deepSeekCode/blob/main/src/vscode/README.md",
-  "engines": {
-    "vscode": "^1.90.0"
-  },
-  "main": "./dist/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "deepseekerCode.openChat",
-        "title": "DeepSeeker-Code: 打开聊天",
-        "icon": "$(sparkle)"
-      },
-      {
-        "command": "deepseekerCode.newSession",
-        "title": "DeepSeeker-Code: 新会话",
-        "icon": "$(add)"
-      },
-      {
-        "command": "deepseekerCode.abort",
-        "title": "DeepSeeker-Code: 中止生成"
-      },
-      {
-        "command": "deepseekerCode.togglePlanMode",
-        "title": "DeepSeeker-Code: 切换计划模式"
-      },
-      {
-        "command": "deepseekerCode.toggleAutoMode",
-        "title": "DeepSeeker-Code: 切换自动模式"
-      },
-      {
-        "command": "deepseekerCode.listSessions",
-        "title": "DeepSeeker-Code: 历史会话",
-        "icon": "$(history)"
-      },
-      {
-        "command": "deepseekerCode.selectModel",
-        "title": "DeepSeeker-Code: 切换模型"
-      },
-      {
-        "command": "deepseekerCode.selectProjectRoot",
-        "title": "DeepSeeker-Code: 选择项目根",
-        "icon": "$(root-folder)"
-      },
-      {
-        "command": "deepseekerCode.manageTrust",
-        "title": "DeepSeeker-Code: 管理信任目录"
-      }
+    "name": "deepseeker-code",
+    "displayName": "DeepSeeker-Code",
+    "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
+    "version": "1.0.66",
+    "publisher": "deepseeker-code",
+    "license": "MIT",
+    "icon": "media/icon.png",
+    "categories": [
+        "Machine Learning",
+        "Other"
     ],
-    "menus": {
-      "editor/title": [
-        {
-          "command": "deepseekerCode.openChat",
-          "group": "navigation@1",
-          "when": "resourceScheme != 'output'"
-        },
-        {
-          "command": "deepseekerCode.listSessions",
-          "group": "navigation@2",
-          "when": "resourceScheme != 'output'"
-        },
-        {
-          "command": "deepseekerCode.newSession",
-          "group": "navigation@3",
-          "when": "resourceScheme != 'output'"
-        }
-      ]
+    "keywords": [
+        "ai",
+        "deepseek",
+        "coding-assistant",
+        "agent",
+        "chat"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/xknk/deepSeekCode.git",
+        "directory": "src/vscode"
     },
-    "configuration": {
-      "title": "DeepSeeker-Code",
-      "properties": {
-        "deepseekerCode.apiKey": {
-          "type": "string",
-          "default": "",
-          "scope": "machine",
-          "markdownDescription": "DeepSeek API Key。**推荐留空**，改为设环境变量 `DEEP_SEEK_API_KEY`（密钥不落 settings.json、不随机器迁移）。留空时自动回退读取该环境变量。此配置 scope 为 `machine`，不会被 Settings Sync 同步到云端。"
+    "bugs": {
+        "url": "https://github.com/xknk/deepSeekCode/issues"
+    },
+    "homepage": "https://github.com/xknk/deepSeekCode/blob/main/src/vscode/README.md",
+    "engines": {
+        "vscode": "^1.90.0"
+    },
+    "main": "./dist/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "deepseekerCode.openChat",
+                "title": "DeepSeeker-Code: 打开聊天",
+                "icon": "$(sparkle)"
+            },
+            {
+                "command": "deepseekerCode.newSession",
+                "title": "DeepSeeker-Code: 新会话",
+                "icon": "$(add)"
+            },
+            {
+                "command": "deepseekerCode.abort",
+                "title": "DeepSeeker-Code: 中止生成"
+            },
+            {
+                "command": "deepseekerCode.togglePlanMode",
+                "title": "DeepSeeker-Code: 切换计划模式"
+            },
+            {
+                "command": "deepseekerCode.toggleAutoMode",
+                "title": "DeepSeeker-Code: 切换自动模式"
+            },
+            {
+                "command": "deepseekerCode.listSessions",
+                "title": "DeepSeeker-Code: 历史会话",
+                "icon": "$(history)"
+            },
+            {
+                "command": "deepseekerCode.selectModel",
+                "title": "DeepSeeker-Code: 切换模型"
+            },
+            {
+                "command": "deepseekerCode.selectProjectRoot",
+                "title": "DeepSeeker-Code: 选择项目根",
+                "icon": "$(root-folder)"
+            },
+            {
+                "command": "deepseekerCode.manageTrust",
+                "title": "DeepSeeker-Code: 管理信任目录"
+            }
+        ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "deepseekerCode.openChat",
+                    "group": "navigation@1",
+                    "when": "resourceScheme != 'output'"
+                },
+                {
+                    "command": "deepseekerCode.listSessions",
+                    "group": "navigation@2",
+                    "when": "resourceScheme != 'output'"
+                },
+                {
+                    "command": "deepseekerCode.newSession",
+                    "group": "navigation@3",
+                    "when": "resourceScheme != 'output'"
+                }
+            ]
         },
-        "deepseekerCode.model": {
-          "type": "string",
-          "default": "",
-          "description": "默认模型（如 deepseek-v4-flash / deepseek-v4-pro）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
-        },
-        "deepseekerCode.models": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "「切换模型」选择器的候选模型清单：在此添加模型 id（追加在内置候选 deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp 之后并去重）。改完即生效，无需重启。"
-        },
-        "deepseekerCode.locale": {
-          "type": "string",
-          "enum": [
-            "",
-            "zh",
-            "en"
-          ],
-          "default": "",
-          "description": "界面/回复语言。留空表示首次询问。"
-        },
-        "deepseekerCode.apiUrl": {
-          "type": "string",
-          "default": "",
-          "description": "DeepSeek 兼容 API 接入点。留空回退环境变量 DEEP_SEEK_API_URL，再缺省 https://api.deepseek.com。"
-        },
-        "deepseekerCode.auxModel": {
-          "type": "string",
-          "default": "",
-          "description": "辅助模型（摘要等轻量任务）。留空回退 DEEP_SEEK_AUX_MODEL，再缺省 deepseek-v4-flash。"
-        },
-        "deepseekerCode.reasoningEffort": {
-          "type": "string",
-          "enum": [
-            "",
-            "high",
-            "max"
-          ],
-          "default": "",
-          "description": "推理力度。留空回退 DEEP_SEEK_REASONING_EFFORT，再缺省 high。（low/medium 已废弃）"
-        },
-        "deepseekerCode.thinking": {
-          "type": "string",
-          "enum": [
-            "",
-            "on",
-            "off"
-          ],
-          "default": "",
-          "description": "深度思考开关。默认开；选 off 关闭（等价 DEEP_SEEK_THINKING=0）。"
-        },
-        "deepseekerCode.parallelSafeTools": {
-          "type": "boolean",
-          "default": true,
-          "description": "同轮 SAFE 只读工具并发执行（写工具/审批/终结类/后台工具仍串行）。默认开；关掉回退完全串行。"
-        },
-        "deepseekerCode.workflowConcurrency": {
-          "type": "number",
-          "default": 0,
-          "description": "run_workflow 子 agent 并发上限。留空(0)回退 DEEP_SEEK_WORKFLOW_CONCURRENCY，缺省 4。"
-        },
-        "deepseekerCode.workflowMaxSteps": {
-          "type": "number",
-          "default": 0,
-          "description": "run_workflow 单次最大步骤数。留空(0)回退 DEEP_SEEK_WORKFLOW_MAX_STEPS，缺省 8。"
-        },
-        "deepseekerCode.streamIdleTimeoutMs": {
-          "type": "number",
-          "default": 0,
-          "description": "流式 idle 超时(ms)。留空(0)回退 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS，缺省 120000。"
-        },
-        "deepseekerCode.openBeside": {
-          "type": "boolean",
-          "default": true,
-          "description": "打开聊天面板时自动并排到当前编辑器右侧（ViewColumn.Beside）。关掉则回到第一列。"
+        "configuration": {
+            "title": "DeepSeeker-Code",
+            "properties": {
+                "deepseekerCode.apiKey": {
+                    "type": "string",
+                    "default": "",
+                    "scope": "machine",
+                    "markdownDescription": "DeepSeek API Key。**推荐留空**，改为设环境变量 `DEEP_SEEK_API_KEY`（密钥不落 settings.json、不随机器迁移）。留空时自动回退读取该环境变量。此配置 scope 为 `machine`，不会被 Settings Sync 同步到云端。"
+                },
+                "deepseekerCode.model": {
+                    "type": "string",
+                    "default": "",
+                    "description": "默认模型（如 deepseek-v4-flash / deepseek-v4-pro）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
+                },
+                "deepseekerCode.models": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "「切换模型」选择器的候选模型清单：在此添加模型 id（追加在内置候选 deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp 之后并去重）。改完即生效，无需重启。"
+                },
+                "deepseekerCode.locale": {
+                    "type": "string",
+                    "enum": [
+                        "",
+                        "zh",
+                        "en"
+                    ],
+                    "default": "",
+                    "description": "界面/回复语言。留空表示首次询问。"
+                },
+                "deepseekerCode.apiUrl": {
+                    "type": "string",
+                    "default": "",
+                    "description": "DeepSeek 兼容 API 接入点。留空回退环境变量 DEEP_SEEK_API_URL，再缺省 https://api.deepseek.com。"
+                },
+                "deepseekerCode.auxModel": {
+                    "type": "string",
+                    "default": "",
+                    "description": "辅助模型（摘要等轻量任务）。留空回退 DEEP_SEEK_AUX_MODEL，再缺省 deepseek-v4-flash。"
+                },
+                "deepseekerCode.reasoningEffort": {
+                    "type": "string",
+                    "enum": [
+                        "",
+                        "high",
+                        "max"
+                    ],
+                    "default": "",
+                    "description": "推理力度。留空回退 DEEP_SEEK_REASONING_EFFORT，再缺省 high。（low/medium 已废弃）"
+                },
+                "deepseekerCode.thinking": {
+                    "type": "string",
+                    "enum": [
+                        "",
+                        "on",
+                        "off"
+                    ],
+                    "default": "",
+                    "description": "深度思考开关。默认开；选 off 关闭（等价 DEEP_SEEK_THINKING=0）。"
+                },
+                "deepseekerCode.parallelSafeTools": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "同轮 SAFE 只读工具并发执行（写工具/审批/终结类/后台工具仍串行）。默认开；关掉回退完全串行。"
+                },
+                "deepseekerCode.workflowConcurrency": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "run_workflow 子 agent 并发上限。留空(0)回退 DEEP_SEEK_WORKFLOW_CONCURRENCY，缺省 4。"
+                },
+                "deepseekerCode.workflowMaxSteps": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "run_workflow 单次最大步骤数。留空(0)回退 DEEP_SEEK_WORKFLOW_MAX_STEPS，缺省 8。"
+                },
+                "deepseekerCode.streamIdleTimeoutMs": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "流式 idle 超时(ms)。留空(0)回退 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS，缺省 120000。"
+                },
+                "deepseekerCode.openBeside": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "打开聊天面板时自动并排到当前编辑器右侧（ViewColumn.Beside）。关掉则回到第一列。"
+                }
+            }
         }
-      }
+    },
+    "scripts": {
+        "build": "node build.mjs",
+        "dev": "node build.mjs --watch",
+        "package": "npm run build && vsce package",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "vscode-ripgrep": "^1.13.2"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.90.0",
+        "@vscode/codicons": "^0.0.36",
+        "@vscode/vsce": "^3.2.1",
+        "esbuild": "^0.25.0",
+        "ignore": "^7.0.5",
+        "openai": "^6.42.0",
+        "typescript": "^6.0.3",
+        "undici": "^8.8.0"
     }
-  },
-  "scripts": {
-    "build": "node build.mjs",
-    "dev": "node build.mjs --watch",
-    "package": "npm run build && vsce package",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "vscode-ripgrep": "^1.13.2"
-  },
-  "devDependencies": {
-    "@types/vscode": "^1.90.0",
-    "@vscode/codicons": "^0.0.36",
-    "@vscode/vsce": "^3.2.1",
-    "esbuild": "^0.25.0",
-    "ignore": "^7.0.5",
-    "openai": "^6.42.0",
-    "typescript": "^6.0.3",
-    "undici": "^8.8.0"
-  }
 }

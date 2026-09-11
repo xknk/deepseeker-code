@@ -24,9 +24,16 @@ import { appConfig } from "@/config/index.ts";
 /** 全局规则表（程序化注册 + 声明式配置共同写入） */
 const rules: HookRule[] = [];
 
-/** 匹配判定（沿用旧 tool/hooks.ts 语义）：string 支持精确名与通配 '*' */
+/** 匹配判定（沿用旧 tool/hooks.ts 语义）：string 支持精确名、'*' 全匹配与尾部 '*' 前缀通配。
+ *  尾部通配（如 mcp__server__*）与 permissions 规则的通配习惯对齐——dispatcher 模式下 MCP 工具
+ *  经 resolveMcpPermissionName 合成名参与 Pre/PostToolUse 匹配，可按 server 维度精准拦截。
+ *  工具名不含字面 '*'，尾部通配与精确匹配无歧义。 */
 export const matches = (matcher: HookMatcher, toolName: string): boolean => {
-    if (typeof matcher === 'string') return matcher === '*' || matcher === toolName;
+    if (typeof matcher === 'string') {
+        if (matcher === '*') return true;
+        if (matcher.endsWith('*')) return toolName.startsWith(matcher.slice(0, -1));
+        return matcher === toolName;
+    }
     if (matcher instanceof RegExp) return matcher.test(toolName);
     try { return matcher(toolName); } catch { return false; }
 };
@@ -44,6 +51,24 @@ export const registerHooks = (rs: HookRule[]): void => {
 /** 清空全部规则（测试 / 热重载用） */
 export const clearHooks = (): void => {
     rules.length = 0;
+};
+
+/** 声明式规则标记（loader 热重载用）：loadHooks 重载只替换带此标记的规则，程序化注册的规则原样保留。 */
+export const DECLARATIVE_RULE = Symbol('dsc.hook.declarative');
+
+/**
+ * 声明式规则整体替换（热重载幂等）：先摘除上一轮带 DECLARATIVE_RULE 标记的规则，再挂入新一批。
+ *  ★ 修复叠加 bug：原 loadHooks 直接 registerHooks 追加，重复调用（进程内 serve 重启 / /hooks reload）
+ *    规则翻倍、同一事件跑两遍。程序化注册（registerHook/registerHooks 直调）不带标记，重载不受影响。
+ */
+export const replaceDeclarativeHooks = (rs: HookRule[]): void => {
+    for (let i = rules.length - 1; i >= 0; i--) {
+        if ((rules[i] as any)[DECLARATIVE_RULE]) rules.splice(i, 1);
+    }
+    for (const r of rs) {
+        (r as any)[DECLARATIVE_RULE] = true;
+        rules.push(r);
+    }
 };
 
 /**

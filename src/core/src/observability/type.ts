@@ -49,6 +49,8 @@ export interface TraceBase {
     metadata: {
         messageId?: string; // 选填：关联的落盘消息 ID
         tools_id?: string;  // 选填：关联的工具调用唯一 ID
+        runId?: string;     // 选填：所属 run（一次用户输入的回合）ID——runAgent 事件包装层自动注入，
+                            //  trace 据此按 run 聚合切片（单 run token/耗时/工具序列），与 transcript 事件行同源
         depth: number;      // 强力穿透主子宇宙，标记当前的嵌套深度层级（主Agent为0，子Agent为1）
         decisionSource?: TraceDecisionSource; // 路由/编排决策来源
         toolName?: string;  // 调用工具的名称

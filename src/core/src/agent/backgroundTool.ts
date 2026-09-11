@@ -55,7 +55,7 @@ export async function runBackgroundTool(
     };
     onAbort = () => { aborted = true; void finalize(); };
 
-    // 1. 抢锁（极小概率：early-check 后被并发抢占，则不启动后台）
+    // 1. 抢锁（失败则不启动后台，generator 主动关闭防资源泄漏）
     if (lockKey && !acquireLock(lockKey)) {
         // generator 未被消费，主动关闭避免资源泄漏（未启动的 generator 关闭不应抛错，抛错属异常信号）
         try { await gen.return(undefined as any); } catch (e) { console.warn('⚠️ 关闭未消费的后台 generator 失败:', e instanceof Error ? e.message : e); }

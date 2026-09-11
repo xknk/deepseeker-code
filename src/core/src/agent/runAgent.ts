@@ -52,12 +52,16 @@ import { createNudgeScheduler } from "./agentNudges.ts";
  */
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
     const sessionId = options.sessionId; // 本次会话id
+    const runId = createUUID(); // 本次 run（一次用户输入的回合）唯一 ID：事件行 + 埋点 metadata.runId 同源
     // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
     //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
     //   全部埋点点位自动获得该保护，无需逐个 await/.catch。
+    // ★ runId 自动注入（P2）：主/子/压缩/工具各埋点统一带 metadata.runId——trace 可按 run 聚合切片
+    //   （单 run token/耗时/工具序列），与 transcript 的 run.start/run.end 事件行同 ID 互查。
+    //   子 agent 传入的 ctx.events 已含父级包装，此处再包一层以本 run runId 覆盖（spread 序：内层胜出）。
     const rawEvents = options.events; // 原始回调方法
     const events: typeof rawEvents = async (base) => {
-        try { await rawEvents(base); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
+        try { await rawEvents({ ...base, metadata: { ...base.metadata, runId } }); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
     };
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
@@ -112,8 +116,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 事件日志化：run 边界事件行直接落盘（不经 AgentEvent 通道——subagent abort 时 break 出 for-await，
     //   generator return 的 finally 不能 yield，AgentEvent 送不出去；直接落盘同时自动覆盖主/子会话，
     //   且不污染 SSE/UI 事件流）。appendEvent 内部查开关，关闭时 no-op。
-    const runId = createUUID();
     // 本 run 用量累计（run.end 永久计量；trace 侧 3 天自动清理，transcript 永久留存互补）
+    // （runId 已上移至函数头部：埋点包装层注入 metadata.runId 与事件行同源）
     let usageSum: UsageSnapshot | undefined;
     const addUsage = (u?: UsageSnapshot) => {
         if (!u) return;

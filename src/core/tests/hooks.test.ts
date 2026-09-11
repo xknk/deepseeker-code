@@ -6,7 +6,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { matches, registerHook, clearHooks, dispatch } from "@/hooks/registry.ts";
+import { matches, registerHook, clearHooks, dispatch, listHooks, replaceDeclarativeHooks } from "@/hooks/registry.ts";
 import { compileRule, validateRule, parseAgentDecision } from "@/hooks/loader.ts";
 import { executeHttpHook } from "@/hooks/httpExecutor.ts";
 import { requestApproval } from "@/tool/guard.ts";
@@ -378,5 +378,46 @@ describe("compileRule agent 分支（深度门控防递归 · P1-8）", () => {
         const rule = compileRule('PreToolUse', { type: 'agent', task: '审查', matcher: 'edit_file' });
         const res: any = await rule.run({ toolName: 'edit_file' });
         assert.equal(res.deny, false);
+    });
+});
+
+describe("matches 尾部通配（P1-MCP dispatcher 对称性）", () => {
+    it("尾部 '*' 前缀通配：按 server 维度拦截 MCP 合成名", () => {
+        assert.equal(matches("mcp__github__*", "mcp__github__create_issue"), true);
+        assert.equal(matches("mcp__github__*", "mcp__gitlab__create_issue"), false);
+        assert.equal(matches("mcp__github__create_*", "mcp__github__create_issue"), true);
+    });
+
+    it("精确名与 '*' 全匹配语义不变（向后兼容）", () => {
+        assert.equal(matches("edit_file", "edit_file"), true);
+        assert.equal(matches("edit_file", "read_file"), false);
+        assert.equal(matches("*", "anything"), true);
+    });
+});
+
+describe("replaceDeclarativeHooks（热重载幂等 · 修复叠加 bug）", () => {
+    it("重载只替换声明式规则，程序化规则原样保留且不翻倍", () => {
+        clearHooks();
+        try {
+            // 程序化注册 1 条（不带标记）
+            registerHook({ event: 'Stop', run: () => ({ deny: false }), source: 'builtin' });
+            // 第一轮声明式加载：1 条 PreToolUse
+            replaceDeclarativeHooks([
+                { event: 'PreToolUse', matcher: 'edit_file', run: () => ({ deny: false }), source: 'config' },
+            ]);
+            assert.equal(listHooks().length, 2);
+            // 第二轮声明式加载（模拟重载）：换 2 条
+            replaceDeclarativeHooks([
+                { event: 'PreToolUse', matcher: 'write_file', run: () => ({ deny: false }), source: 'config' },
+                { event: 'PostToolUse', run: () => ({ deny: false }), source: 'config' },
+            ]);
+            const all = listHooks();
+            assert.equal(all.length, 3, "声明式整体替换 + 程序化保留 = 1 + 2（叠加 bug 下会是 5）");
+            assert.equal(all.filter(r => r.event === 'Stop').length, 1, "程序化规则恰好 1 条");
+            assert.equal(all.filter(r => r.event === 'PreToolUse').length, 1, "旧声明式 PreToolUse 已被替换");
+            assert.equal(all.find(r => r.event === 'PreToolUse')?.matcher, 'write_file');
+        } finally {
+            clearHooks();
+        }
     });
 });
