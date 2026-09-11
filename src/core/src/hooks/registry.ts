@@ -27,10 +27,14 @@ const rules: HookRule[] = [];
 /** 匹配判定（沿用旧 tool/hooks.ts 语义）：string 支持精确名、'*' 全匹配与尾部 '*' 前缀通配。
  *  尾部通配（如 mcp__server__*）与 permissions 规则的通配习惯对齐——dispatcher 模式下 MCP 工具
  *  经 resolveMcpPermissionName 合成名参与 Pre/PostToolUse 匹配，可按 server 维度精准拦截。
- *  工具名不含字面 '*'，尾部通配与精确匹配无歧义。 */
+ *  工具名不含字面 '*'，尾部通配与精确匹配无歧义。
+ *  ★ 兼容：matcher "mcp_call" 映射为 mcp__ 前缀全匹配——hook 合成名切换（Pre/PostToolUse 的 toolName
+ *  从 dispatcher 名 mcp_call 改为 mcp__server__tool）会让既有 "mcp_call" 审计/观察规则静默失效
+ *  （fail-open 方向），此处把旧写法映射回等价的「任意 MCP 工具调用」语义。 */
 export const matches = (matcher: HookMatcher, toolName: string): boolean => {
     if (typeof matcher === 'string') {
         if (matcher === '*') return true;
+        if (matcher === 'mcp_call') return toolName.startsWith('mcp__');
         if (matcher.endsWith('*')) return toolName.startsWith(matcher.slice(0, -1));
         return matcher === toolName;
     }

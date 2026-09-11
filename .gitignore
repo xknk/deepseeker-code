@@ -3,7 +3,11 @@ node_modules
 # 构建产物（esbuild 打包输出）
 dist/
 
+# vsix 打包产物（4MB 二进制不入库——历史曾误追踪 1.0.58 及更早版本，git rm --cached 已出库）
+*.vsix
+
 # AI 相关设计文档，不进 git（本地保留）
 .ai-docs/
 src/文章示例/*
 src/core/tests/evals/.results/*
+.claude/

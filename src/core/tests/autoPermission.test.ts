@@ -95,6 +95,35 @@ describe("isReadOnlyCommand / isScriptRunnerCommand（供应链面分轨治理 /
         assert.equal(isScriptRunnerCommand("npx vitest run"), true);
     });
 
+    it("整族收口（2026-09-11）：枚举清单曾漏掉的等价形态一律 true——漏拦代价是供应链面洞开", () => {
+        // npm 系变体（exec 是 npx 等价物；t 是 test 别名；run-script 是 run 长形；install 触发生命周期脚本）
+        assert.equal(isScriptRunnerCommand("npm exec vitest"), true);
+        assert.equal(isScriptRunnerCommand("npm t"), true);
+        assert.equal(isScriptRunnerCommand("npm run-script test"), true);
+        assert.equal(isScriptRunnerCommand("npm --prefix ./sub run test"), true);
+        assert.equal(isScriptRunnerCommand("npm install left-pad"), true);
+        // pnpm/yarn 变体（dlx 是 pnpm 的 npx；-r 递归跑各 workspace；yarn 1 隐式 run）
+        assert.equal(isScriptRunnerCommand("pnpm dlx create-vite"), true);
+        assert.equal(isScriptRunnerCommand("pnpm -r test"), true);
+        assert.equal(isScriptRunnerCommand("yarn build"), true);
+        assert.equal(isScriptRunnerCommand("yarn dlx chalk"), true);
+        assert.equal(isScriptRunnerCommand("corepack prepare pnpm@latest --activate"), true);
+        // 大小写 / Windows .CMD 后缀 / tab 分隔 / 路径前缀（Git Bash 下均解析到真 npm）
+        assert.equal(isScriptRunnerCommand("NPM test"), true);
+        assert.equal(isScriptRunnerCommand("npm.CMD test"), true);
+        assert.equal(isScriptRunnerCommand("npm\ttest"), true);
+        assert.equal(isScriptRunnerCommand("/usr/bin/npm test"), true);
+    });
+
+    it("整族内无副作用查询豁免：版本号查询保持免审（回归 READONLY_HEADS 已承诺语义）", () => {
+        assert.equal(isScriptRunnerCommand("npm -v"), false);
+        assert.equal(isScriptRunnerCommand("pnpm --version"), false);
+        assert.equal(isScriptRunnerCommand("NPX -V"), false);
+        assert.equal(isReadOnlyCommand("npm -v"), true);
+        // 同头但非查询参数不豁免（-g install 是写操作面）
+        assert.equal(isScriptRunnerCommand("npm -g install left-pad"), true);
+    });
+
     it("非跑脚本类：isScriptRunnerCommand false（固定二进制验证类仍走只读免审）", () => {
         assert.equal(isScriptRunnerCommand("git status"), false);
         assert.equal(isScriptRunnerCommand("ls -la"), false);

@@ -21,10 +21,11 @@ npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/task.eval.ts --ta
 npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/task.eval.ts --save-baseline  # 固化基线
 ```
 
-- 结果对比 `.results/baseline.json`：`回退!`（pass→fail）时退出码 1，可脚本化 gate。
+- 结果对比 `.results/baseline.json`：`回退!`（pass→fail）时退出码 1，可脚本化 gate。基线与本轮模型不一致时仅警告不拦截（数字不可比，勿当门禁结论）；`--save-baseline` 拒绝固化全败轮次（防环境故障伪装成真实水位）。
 - 每轮明细落 `.results/run-<时间戳>.json`（含 checker 判定依据、final 摘要）。
 - 隔离：会话/trace/工作区全在临时目录，审批自动放行（allow-once，不写持久规则）。
-- `--no-engine` 跳过 initEngine（不加载全局 MCP/hooks，纯内置工具面，调试跑不通时用）。
+  ★ 洁净室语义：`DEEPSEEKER_CODE_DATA_DIR` 指向一次性目录，故**全局级 hooks/MCP/skills/memory/settings 均不参与 eval**（仅 env 级配置生效）——跑的是纯内置工具面 + core 管线，非真实日常环境。
+- `--no-engine` 跳过 initEngine（连内置 loader 也不挂，调试跑不通时用）。
 
 ### 怎么加任务
 

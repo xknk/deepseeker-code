@@ -10,7 +10,16 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ensureSummarySlot } from "@/agent/truncate.ts";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+// 沙盒惯例：dataDir 指向临时目录，防模块初始化读真实 ~/.deepseeker-code。
+// env 必须在 import core 之前设置 → 动态 import（ESM 静态 import 提升会先执行模块初始化，同 checkpoint 测试惯例）。
+const SANDBOX = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-summary-slot-"));
+process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
+
+const { ensureSummarySlot } = await import("@/agent/truncate.ts");
 
 const msg = (role: string, content: string) => ({ role, content } as any);
 

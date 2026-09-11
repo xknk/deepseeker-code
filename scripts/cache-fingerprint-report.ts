@@ -50,6 +50,10 @@ const parseFile = (file: string): Row[] => {
 };
 
 walk(TRACE_ROOT);
+// 剔除 selftest 会话（selftest-traced 等受控实验，混入会污染 toolsHash 分布统计，同 cache-by-round 惯例）
+for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].session.startsWith("selftest-")) rows.splice(i, 1);
+}
 if (rows.length === 0) { console.log("暂无带指纹的 trace（埋点后产生的新会话才会有）。跑几个真实会话后再来。"); process.exit(0); }
 
 console.log("session（首轮 request）                       toolsHash   sysHash     首轮命中");

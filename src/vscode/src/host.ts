@@ -365,6 +365,13 @@ export class ChatHost {
     const text = content.trim();
     const hasAtt = Array.isArray(attachments) && attachments.length > 0;
     if (!text && !hasAtt) return;
+    // ★ `!` shell 直执行：不经模型/审批，本机 shell 跑完回显；输出以 user 消息落 transcript（下轮模型可见）。
+    //   必须先于 busy 检查：生成中敲 `!git status` 应本地直跑，而非落入 inbox 排队把字面文本送给模型
+    //   （原顺序 busy 在前，bang 会被当普通输入排队——与 CLI App.onSubmit 的「bang 先于 busy」顺序分叉）。
+    if (text.startsWith("!")) {
+      await this.runBangCommand(text);
+      return;
+    }
     // ★ inbox steering：busy 期间排队补充输入，runAgent 回合边界送达模型。替代旧「静默 return」
     //   ——webview 在调用前已清空输入框，静默等于丢字。排队失败（开关关/队满）至少提示用户未发送。
     if (this.busy) {
@@ -378,11 +385,6 @@ export class ChatHost {
       } else {
         this.sink({ type: "info", text: "⏳ 生成中，输入未发送。" });
       }
-      return;
-    }
-    // ★ `!` shell 直执行：不经模型/审批，本机 shell 跑完回显；输出以 user 消息落 transcript（下轮模型可见）。
-    if (text.startsWith("!")) {
-      await this.runBangCommand(text);
       return;
     }
     if (this.sessionId == null) {

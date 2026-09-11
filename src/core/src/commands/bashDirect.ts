@@ -9,6 +9,7 @@
  */
 import { exec } from "node:child_process";
 import { appendMessage } from "@/session/transcript.ts";
+import { scrubCommandEnv } from "@/tool/guard.ts";
 
 /** 回显/落盘共用的输出截断上限（超出省略中段；防超大日志灌爆上下文与终端）。 */
 const OUTPUT_MAX_CHARS = 4000;
@@ -34,20 +35,36 @@ export const truncateOutput = (s: string): string => {
     return `${s.slice(0, half)}\n…（中段省略 ${s.length - OUTPUT_MAX_CHARS} 字符）…\n${s.slice(-half)}`;
 };
 
+/** 一次性 Buffer 解码（修 Windows 中文乱码）：中文 Windows 子进程以 OEM 代码页（cp936/GBK）输出，
+ *  exec 默认 utf-8 解码会产生 U+FFFD 菱形。与 run_command 的 decodeChunk 同思路（command.ts）：
+ *  utf-8 解出 U+FFFD 即回退 GBK（精简 ICU 无 gbk 时 try/catch 退回 utf-8）。exec 非流式、Buffer 完整，
+ *  无跨块多字节截断问题，无需 stream 模式。 */
+const decodeBuffer = (buf: Buffer): string => {
+    const utf8 = buf.toString("utf8");
+    if (!utf8.includes("�")) return utf8;
+    try { return new TextDecoder("gbk").decode(buf); } catch { return utf8; }
+};
+
 /**
- * 本机 shell 直执行（child_process.exec：Windows 走 cmd.exe，POSIX 走 /bin/sh，与用户手工敲命令同语义）。
- * cwd 由调用方传工作区根；signal 可选（Esc 中止 → kill 子进程，回调以 timedOut 收尾）。
+ * 本机 shell 直执行（child_process.exec：Windows 走 cmd.exe，POSIX 走 /bin/sh）。
+ * ★ 安全对齐 run_command：env 用 scrubCommandEnv() 剔除 agent 自身凭证——输出会以 user 消息回灌
+ *   上下文并送云端模型，若继承完整 process.env，`!printenv` / `!type .env` 会把 API key 等直送云端
+ *   （绕过 run_command 的两道防线，属旁路漏洞）。cwd 由调用方传工作区根；
+ *   signal 可选（Esc 中止 → kill 子进程，回调以 timedOut 收尾）。
  */
 export const runBashDirect = (cmd: string, cwd: string, signal?: AbortSignal): Promise<BashDirectResult> =>
     new Promise((resolve) => {
         let settled = false;
         const finish = (r: BashDirectResult): void => { if (!settled) { settled = true; resolve(r); } };
         const start = Date.now();
-        const child = exec(cmd, { cwd, timeout: timeoutMs(), maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        // encoding:"buffer"：拿原始字节自行解码（默认 utf-8 字符串解码会丢 GBK，见 decodeBuffer）
+        const child = exec(cmd, { cwd, timeout: timeoutMs(), maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: scrubCommandEnv(), encoding: "buffer" }, (err, stdout, stderr) => {
             const durationMs = Date.now() - start;
-            // exec 超时/abort 杀进程 → err.killed=true 且 code 为 null（信号终止）
-            const timedOut = err != null && err.killed === true;
-            const combined = stderr ? (stdout ? `${stdout}\n` : "") + stderr : stdout;
+            const out = stdout as unknown as Buffer;
+            const errBuf = stderr as unknown as Buffer;
+            // exec 超时/abort 杀进程 → err.killed=true 且 code 为 null（信号终止）；用户主动中止不计入超时
+            const timedOut = err != null && err.killed === true && signal?.aborted !== true;
+            const combined = errBuf.length ? (out.length ? `${decodeBuffer(out)}\n` : "") + decodeBuffer(errBuf) : decodeBuffer(out);
             const exitCode = err == null ? 0 : typeof err.code === "number" ? err.code : null;
             finish({ ok: err == null, output: truncateOutput(combined ?? ""), exitCode, timedOut, durationMs });
         });

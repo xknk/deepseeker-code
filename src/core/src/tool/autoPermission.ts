@@ -147,29 +147,40 @@ const READONLY_HEADS: RegExp[] = [
 ];
 
 /**
- * 供应链面：包管理器「跑脚本」命令（npm test / pnpm run lint / npx vitest 等）。
- *  ★ 与只读免审分轨治理：这类命令免审的本质是执行仓库作者的任意代码（scripts.test 可写任何东西；
- *    npx 未装包时还会从 registry 拉取执行），hasShellMetachars 只能验证命令串本身、拦不到脚本内容。
- *    故不再直接免审，也不再交给分类器放行（分类器只见命令串、同样看不见脚本内容），改走：
+ * 供应链面：包管理器命令（npm / pnpm / yarn / npx / corepack 全族）。
+ *  ★ 与只读免审分轨治理：这类命令的本质风险是执行仓库作者 / registry 作者的任意代码
+ *    （scripts.test 可写任何东西；npx/pnpm dlx 未装包时从 registry 拉取执行；install 的生命周期脚本同源），
+ *    hasShellMetachars 只能验证命令串本身、拦不到脚本内容。故不再直接免审，也不再交给分类器放行
+ *    （分类器只见命令串、同样看不见脚本内容），改走：
  *    - toolExecution 对 scriptRunnerBlocked 命令同时关闭只读免审与 auto 分类器，强制转人工审批一次；
  *    - 用户选 allow-always 后由 buildScopedAllowRule 落【精确命令串】allow 规则（permissions.ts），
  *      之后 perm==='allow' 自然跳过审批与分类器——即「首次确认，记住」语义；
  *    - 同命令的变体（不同 flag/子命令）重新确认（shell 类工具的正确安全姿态）。
+ *
+ *  ★ 整族拦截（2026-09-11 收口）：原枚举式清单（npm test/run、pnpm test/lint/run、yarn test/run、npx X）
+ *    实证漏掉大量等价形态——npm exec / npm t / npm run-script / npm --prefix ./sub run X / pnpm dlx /
+ *    pnpm -r test / yarn 隐式 run（yarn build）/ corepack / 大小写（NPM）/ Windows .CMD 后缀 / tab 分隔——
+ *    漏网者 perm===null 落回分类器自动放行，与分轨理由自相矛盾。故改【整族正则 + 查询类豁免】：
+ *    误拦代价只是首次多确认一次（allow-always 记忆后不再问），漏拦代价是供应链面洞开——宁可窄。
+ *    正则容忍路径前缀（/usr/bin/npm、D:\..\npm.CMD）与任意空白分隔（\s 含 tab）。
  */
+const PKG_MGR = String.raw`\s*([^\s"'\`]*[\\/])?(npx|npm|pnpm|yarn|corepack)(\.cmd|\.exe|\.ps1|\.bat)?\b`;
 const SCRIPT_RUNNER_HEADS: RegExp[] = [
-    /^npm (test|run\s+\S+)\b/,
-    /^pnpm (test|lint|typecheck|type-check|run\s+\S+)\b/,
-    /^yarn (test|run\s+\S+)\b/,
-    /^npx\s+\S+\b/,                       // npx 未装包时从 registry 拉取执行——按供应链面治理
+    new RegExp(`^${PKG_MGR}`, 'i'),
+];
+// 整族内的无副作用查询形态：不执行任何包代码，豁免首验（保持 READONLY_HEADS 已承诺的版本号免审语义）。
+const SCRIPT_RUNNER_READONLY: RegExp[] = [
+    new RegExp(`^${PKG_MGR}\\s+(-v|-V|--version)\\b`, 'i'),
 ];
 
 /**
- * 判定命令是否为包管理器「跑脚本」类（npm test / pnpm run lint / npx vitest 等）。
+ * 判定命令是否为包管理器「跑脚本」类（npm test / pnpm run lint / npx vitest / yarn build / npm install 等）。
  * 此类命令不参与只读免审与分类器放行，首次执行强制人工确认（见 SCRIPT_RUNNER_HEADS 上方说明）。
  */
 export const isScriptRunnerCommand = (cmd: string): boolean => {
     const c = (cmd || "").trim();
     if (!c || hasShellMetachars(c)) return false;
+    if (SCRIPT_RUNNER_READONLY.some(re => re.test(c))) return false;
     return SCRIPT_RUNNER_HEADS.some(re => re.test(c));
 };
 

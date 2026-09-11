@@ -224,8 +224,20 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         //   hasShellMetachars 只验证命令串本身、拦不到脚本内容，分类器同样看不见脚本内容。
         //   perm 为 null（无用户显式规则）时强制转人工审批一次；用户选 allow-always 后由 buildScopedAllowRule
         //   落【精确命令串】allow 规则，之后 perm==='allow' 自然免审——即「首次确认，记住」语义。
-        const scriptRunnerBlocked = perm === null && (calledName === 'run_command' || calledName === 'run_in_background')
+        //   ★ cwd 漂移重审（收口）：allow 规则只记命令串、不含 cwd——若模型事后带 cwd 指到 monorepo 子包，
+        //     同串命令会免审执行【另一个】package.json 的脚本（npm/pnpm 脚本解析以 cwd 下的 package.json 为准，
+        //     投毒面与首次审批时看到的不是同一份）。故 script-runner 类命令显式 cwd ≠ 工作区根时视同未确认，
+        //     重新审批一次（fail-closed；审批 detail 会带目录，用户知情）。非包管理器命令不受影响。
+        const cmdIsScriptRunner = (calledName === 'run_command' || calledName === 'run_in_background')
             && isScriptRunnerCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '');
+        const argCwd = typeof calledArgs?.cwd === 'string' ? calledArgs.cwd.trim() : '';
+        const samePath = (a: string, b: string): boolean => {
+            try { const ra = path.resolve(a), rb = path.resolve(b); return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb; }
+            catch { return false; }
+        };
+        const scriptRunnerCwdDrift = cmdIsScriptRunner && argCwd !== '' && !samePath(argCwd, toolCtx.cwd);
+        const scriptRunnerBlocked = cmdIsScriptRunner && (perm === null || scriptRunnerCwdDrift);
+        if (scriptRunnerCwdDrift) needApproval = true; // perm='allow' 已置 false → 漂移时强制拉回审批
         if (perm === null && needApproval && !denied && !scriptRunnerBlocked && calledName === 'run_command'
             && isReadOnlyCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
             needApproval = false;

@@ -231,7 +231,10 @@ let baseline: Baseline | null = null;
 try { baseline = JSON.parse(await fs.readFile(BASELINE_PATH, 'utf-8')) as Baseline; }
 catch { baseline = null; }
 
-// 引擎初始化（全局配置原样生效：MCP/hooks/skills/agents——「基线 = 我的真实日常环境」；
+// 引擎初始化（★ 洁净室语义：DEEPSEEKER_CODE_DATA_DIR 已在 import 前指向一次性临时目录，而
+// hooks/skills/agents/mcp/memory/settings 全部从 appConfig.dataDir 解析——即全局级 hooks/MCP/skills
+// 并【不】参与 eval，仅 env 级配置（DEEP_SEEK_* 等）生效。这正合「只测模型决策区、工具表恒定」准则、
+// 与真机环境解耦；勿再表述为「基线 = 真实日常环境」。
 // includeProject=false：工作区是一次性临时目录，项目级配置不该也不可能从那里加载）
 let dispose: (() => void) | undefined;
 if (!skipEngine) {
@@ -265,10 +268,23 @@ await fs.writeFile(path.join(RESULTS_DIR, `run-${stamp}.json`), JSON.stringify({
 
 printReport(rows, baseline);
 
+// ★ 可比性护栏：基线与本轮的模型不一致时数字不可比（不同模型水位不同，「回退/修复」失真）——显式警告。
+if (baseline && baseline.model && baseline.model !== modelName) {
+    console.warn(`\n⚠️ 模型不一致：基线由 [${baseline.model}] 固化，本轮为 [${modelName}]——回退/修复对比仅供参考，不可当门禁结论。`);
+}
+
 if (saveBaseline) {
-    const tasks: Record<string, BaselineEntry> = {};
-    for (const r of rows) tasks[r.id] = { pass: r.pass, rounds: r.rounds, totalTokens: r.totalTokens, durationMs: r.durationMs };
-    const next: Baseline = { createdAt: new Date().toISOString(), model: modelName, tasks };
-    await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
-    console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${rows.length} 个任务，模型 ${modelName}）`);
+    // ★ 防失真：全败（或全部回退）的轮次不允许固化基线——网络抖动 / 环境故障固化后，真实回退会
+    //   永久伪装成「仍败」而非「回退!」，门禁（退出码 1）失明。先修环境再重跑。
+    const passed = rows.filter(r => r.pass).length;
+    if (passed === 0) {
+        console.error('\n❌ 拒绝固化基线：本轮 0 个任务通过（疑似环境/网络故障而非真实水位）。请修复后重跑。');
+        process.exitCode = 1;
+    } else {
+        const tasks: Record<string, BaselineEntry> = {};
+        for (const r of rows) tasks[r.id] = { pass: r.pass, rounds: r.rounds, totalTokens: r.totalTokens, durationMs: r.durationMs };
+        const next: Baseline = { createdAt: new Date().toISOString(), model: modelName, tasks };
+        await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
+        console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${rows.length} 个任务，模型 ${modelName}）`);
+    }
 }

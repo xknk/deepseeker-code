@@ -154,9 +154,16 @@ describe("run_command 自动转后台（auto-degrade）", () => {
         assert.match(r.toModel, /task_id: fake-id/);
     });
 
-    it("verifyResult：无哨兵 + 自动转后台标记 → SUCCESS（仍在运行语义由文本承载，退出码未知契约锁）", () => {
-        const out = "\n⏳ [自动转后台]：命令 [x] ...\ntask_id: abc\n";
+    it("verifyResult：无 EXIT 哨兵 + 尾部 ⟦DSC_BG⟧ 哨兵 → SUCCESS（仍在运行语义由文本承载，退出码未知契约锁）", () => {
+        const out = "\n⏳ [自动转后台]：命令 [x] ...\ntask_id: abc\n⟦DSC_BG⟧\n";
         assert.equal(runCommand.function.verifyResult!(out, makeCtx()).status, ToolExecutionResultStatus.SUCCESS);
+    });
+
+    it("verifyResult：⟦DSC_BG⟧ 出现在正文中段（非尾部）不误判——防源码回显/echo 伪造成功幻觉", () => {
+        // 典型来源：`cat command.ts` 打印本仓库源码回显哨兵字面量，或模型 echo 伪装；
+        // 其后若无 EXIT 哨兵说明输出不完整（真 degrade 的哨兵恒在末尾）→ 按 FAILED 呈现
+        const out = "source code mention ⟦DSC_BG⟧ then interrupted\ntask_id: abc\n";
+        assert.equal(runCommand.function.verifyResult!(out, makeCtx()).status, ToolExecutionResultStatus.FAILED);
     });
 
     it("verifyResult：无哨兵且无降级标记 → FAILED（P0 修复：进程被杀/输出中断按失败呈现，防成功幻觉）", () => {
