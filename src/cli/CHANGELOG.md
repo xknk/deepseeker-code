@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+供应链审批整族收紧 + `!` shell 直执行 + 历史思考剥离省 ~25% 请求体积 + 微压缩保真 + 任务级 eval 基线；及上批未发布：多模态、看门狗自动转后台、红绿 diff、计划模式对齐 CC。
+
+### 供应链审批与 `!` 直执行（2026-09-11）
+
+- **npm/pnpm/yarn/npx/corepack 整族命令首次执行强制人工确认**（allow-always 按精确命令串记住；版本号查询如 `npm -v` 豁免）：scripts 是仓库作者的任意代码、npx/dlx 会从 registry 拉取执行——分类器看不见脚本内容，一律不放行。枚举式清单漏掉的 `npm exec` / `pnpm dlx` / `yarn build`（隐式 run）/ 大小写 / `.CMD` / tab 等变体已收口为整族正则。
+- **cwd 漂移重审**：script-runner 类命令带显式 cwd 且 ≠ 工作区根时，即使命中 allow 规则也重新弹审批（防批 A 包跑 B 包的投毒 package.json）。
+- **`!<命令>` shell 直执行**（对齐 Claude Code bang）：不经模型/审批本机直跑，输出以 user 消息落 transcript 下轮模型可见；env 经脱敏防密钥上云、中文 Windows GBK 解码；`DEEP_SEEK_BANG_TIMEOUT_MS` 可调（默认 60s）。
+- **成功幻觉治理**：run_command 输出缺退出码哨兵改判 FAILED；自动转后台标记升级为 `⟦DSC_BG⟧` 尾部锚定哨兵（正文中段出现字面量不再误判）。
+
+### 压缩与上下文经济
+
+- **历史思考剥离**：DeepSeek 请求出口剥离历史轮 reasoning_content（落盘保留，UI/recall 不受影响），省 ~25% 请求体积、压缩更晚触发；`DEEP_SEEK_REASONING_PASSTHROUGH=1` 还原。
+- **微压缩保真**：不再折叠行首缩进、不再剥 HTML 注释——read_file 行号格式下缩进被压曾是 edit_file「顶格」问题根因。
+- **【环境】块注入**：系统提示词声明工作区根/OS/shell/今天日期（按天粒度，同日内字节稳定不击穿前缀缓存）。
+
+### 其他
+
+- 新工具 `find_references`（TS/JS 符号反向引用，类型感知）；hooks 热重载幂等 + 尾部 `*` 通配 + 旧 `mcp_call` matcher 兼容映射；agents/skills 目录按名排序防缓存击穿；流式重试单层化（修 429 最坏 15 次请求放大）；任务级 eval 基线（6 种子任务确定性 checker，回退退出码 1 可当门禁）。
+
+---
+
 图片附件多模态支持 + 命令运行时看门狗（自动转后台）；代码变更红绿 diff 预览 + 计划模式交互对齐 Claude Code；斜杠菜单滚动 + 启动顿挫治理。
 
 ### 多模态与后台任务

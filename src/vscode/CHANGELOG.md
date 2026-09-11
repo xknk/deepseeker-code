@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.59
+
+供应链审批整族收紧 + `!` shell 直执行（双端）+ 历史思考剥离省 ~25% 请求体积 + 双端模型选择器 + 微压缩保真 + 任务级 eval 基线。
+
+### 供应链跑脚本审批收紧（P0）
+
+- npm/pnpm/yarn/npx/corepack **整族命令**首次执行强制人工确认（allow-always 按精确命令串记住）：package.json scripts 是仓库作者的任意代码、npx/pnpm dlx 未装包时从 registry 拉取执行、install 的生命周期脚本同源——分类器只见命令串、看不见脚本内容，一律不放行。此前枚举式清单漏 `npm exec` / `npm t` / `pnpm dlx` / `yarn build`（隐式 run）/ 大小写 / `.CMD` 后缀 / tab 分隔等十余种等价拼写，已收口为整族正则 + 版本号查询豁免（`npm -v` 等保持免审）。
+- **cwd 漂移重审**：allow 规则只记命令串、不含目录——script-runner 类命令带显式 cwd 且 ≠ 工作区根时（monorepo 子包是另一份 package.json），即使命中 allow 规则也重新弹审批（审批面板显示目录，防批 A 包跑 B 包）。
+- **成功幻觉治理**：run_command 输出缺退出码哨兵（进程被杀树/输出中断）改判 FAILED，逼模型正视「未验证成功」；自动转后台标记升级为 `⟦DSC_BG⟧` 尾部锚定哨兵——正文出现同名字面量（如 `cat` 回显源码）不再被误判为「仍在运行」。
+
+### `!` 前缀 shell 直执行（CLI + VSCode 双端）
+
+- 输入 `!<命令>` 不经模型/审批、本机 shell 直跑（对齐 Claude Code bang）：输出截断 4000 字符保头尾，以 user 消息落 transcript（下轮模型可见，带 `!bash $` 来源前缀，模型可归因非自身动作）。
+- 安全对齐 run_command：env 经 `scrubCommandEnv` 剔除 agent 自身凭证（`!printenv` / `!type .env` 不再外泄密钥上云）；中文 Windows 输出 GBK 解码（不再菱形乱码进上下文）；超时 `DEEP_SEEK_BANG_TIMEOUT_MS` 可调（默认 60s）。
+- VSCode 端生成期间同样本地直跑（不落入 inbox 排队把字面文本送给模型）。
+
+### 历史思考剥离 + 流式重试单层化（省 ~25% 请求体积）
+
+- DeepSeek 请求出口统一剥离历史轮 `reasoning_content`（transcript 落盘保留，UI 思考展示 / recall 召回不受影响）：历史思考记录占请求 ~25%，剥离后窗口瘦身、压缩更晚触发；草稿续写/守护轮形状自动回退全量回传（15 条协议探针实证分档）。`DEEP_SEEK_REASONING_PASSTHROUGH=1` 还原全量回传。
+- 流式对话关闭 SDK 层内建重试（maxRetries:0），瞬态重试单层归应用层——修复双层重试叠加（429 最坏放大 5×3=15 次请求）。
+
+### 模型选择器（双端）
+
+- VSCode：命令面板「DeepSeeker-Code: 切换模型」候选选择器 + `/model <id>` 直输 + `/switch`；设置项 `deepseekerCode.models` 可追加候选；选择存 workspaceState 跨重启恢复。CLI：`/model` / `/switch` 存 prefs.json（全局生效）。
+
+### 微压缩保真（缩进与注释）
+
+- 微压缩不再折叠行首缩进连多空格、不再剥 HTML 注释——read_file 输出 `行号: 代码` 格式下缩进连多空格被压，曾导致 edit_file 基于压缩视图写错缩进（「顶格」问题根因）。
+
+### 其他
+
+- hooks：声明式规则热重载幂等（先摘后挂，防重复注册翻倍）；matcher 支持尾部 `*` 前缀通配（`mcp__server__*`）；hook 合成名切换后旧 `mcp_call` matcher 自动映射为 `mcp__` 前缀全匹配（既有审计规则不静默失效）。
+- 新工具 `find_references`：TS/JS 符号反向引用（类型感知，注释/字符串同名词免疫；与 goto_definition 一查来源一查去向）。
+- 系统提示词新增【环境】块（工作区根 / OS / shell / 今天日期）——相对日期推理与路径构造不再靠蒙；agents/skills 目录按名称排序（消除 readdir 顺序对 fresh-session 前缀缓存的隐式击穿）。
+- 视觉门控按当前模型即时生效（换模型即切，无需重启）；token 估算纳入工具 schema 常数项（与压缩阈值、llm.request 校准三处口径一致）；新增 tools/sys/sum 前缀分段指纹埋点（缓存 miss 分歧定位）。
+- 任务级 eval 基线：`src/core/tests/evals/task.eval.ts` 端到端真跑 6 个种子任务，确定性 checker 对比 `.results/baseline.json` 报回退/修复（回退时退出码 1 可当门禁；全败轮拒绝固化基线防环境故障伪装水位）。
+
 ## 1.0.58
 
 TS/JS 代码工具源文件扩展名闸门 + hooks stdout 决议解析健壮性 + 系统提示词注入缓存语义澄清。

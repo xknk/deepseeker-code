@@ -9,7 +9,7 @@ cd 你的项目
 deepseeker-code
 ```
 
-DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、可折叠思考过程、工具调用卡（编辑类附红绿 diff 预览）、行内 Markdown 渲染（标题加粗、列表对齐）、审批模态、两阶段计划模式（计划 / 自动模式下输入框带边框与模式徽标）、会话恢复、长任务自动压缩且归档细节可经 recall 检索召回。**in-process 直驱引擎**——不走 HTTP/端口，工具审批走 Ink 原生模态。
+DeepSeeker-Code 在你的终端里跑一个自主 agent：流式逐字输出、可折叠思考过程、工具调用卡（编辑类附红绿 diff 预览）、行内 Markdown 渲染（标题加粗、列表对齐）、审批模态、两阶段计划模式（计划 / 自动模式下输入框带边框与模式徽标）、会话恢复、长任务自动压缩且归档细节可经 recall 检索召回。支持 `!<命令>` shell 直执行（不经模型、本机直跑，输出进下轮上下文）。**in-process 直驱引擎**——不走 HTTP/端口，工具审批走 Ink 原生模态。
 
 > 另有 **VS Code 插件**版本（同名 `deepseeker-code`），与终端版同源共享 core 引擎和 `~/.deepseeker-code/` 数据目录，同一项目下会话可互续。
 
@@ -151,6 +151,7 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | `DEEP_SEEK_WORKFLOW_CONCURRENCY` | run_workflow 子 agent 并发上限 | `4` |
 | `DEEP_SEEK_WORKFLOW_MAX_STEPS` | run_workflow 单次步数上限 | `8` |
 | `RUN_COMMAND_AUTO_BG_MS` | run_command 前台超时自动转后台阈值（ms）；到期进程收编进后台注册表返回 task_id，不杀进程 | `120000` |
+| `DEEP_SEEK_BANG_TIMEOUT_MS` | `!` 直执行命令超时（ms），超时杀进程并标注；输出截断 4000 字符保头尾 | `60000` |
 | `SEARCH_PROVIDER` | 搜索后端 `tavily` / `bing` / `ddg` | 自动（有 Tavily key 用 Tavily，否则 Bing） |
 | `TAVILY_API_KEY` | Tavily 搜索密钥 | — |
 | `WEB_FETCH_ALLOW_PRIVATE` | 设 `1` 放行 web_fetch 访问内网/回环（云元数据端点仍硬拦） | 关（SSRF 安全） |
@@ -186,7 +187,7 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | 配置 | 位置 | 作用 |
 | --- | --- | --- |
 | **Hooks** | `settings.json` 的 `hooks` 段 | 生命周期事件（PreToolUse/PostToolUse/UserPromptSubmit/Stop 等）触发命令/http/注入/子 agent |
-| **权限规则** | `settings.json` 的 `permissions` 段 | `allow`/`deny`/`ask` 细粒度工具放行（如 `run_command(npm:*)`） |
+| **权限规则** | `settings.json` 的 `permissions` 段 | `allow`/`deny`/`ask` 细粒度工具放行（命令类建议精确串，如 `run_command(npm test)`；前缀通配 `npm:*` 会把 `npm install`/`npm exec` 全族免审，勿作常规姿势） |
 | **状态栏** | `settings.json` 的 `statusLine` 段 | 自定义底部状态栏命令（stdin 收 JSON 上下文，stdout 首行作状态栏） |
 | **MCP** | `mcp.json`（独立文件，**非** settings.json） | 接入外部 MCP server 工具 |
 | **Skills** | `skills/<name>/SKILL.md` | 可被 agent 按需加载的技能包 |
@@ -208,7 +209,7 @@ settings.json 完整示例（代码真正消费的字段）：
     ]
   },
   "permissions": {
-    "allow": ["run_command(npm:*)", "read_file(src/*)"],
+    "allow": ["run_command(npm test)", "read_file(src/*)"],
     "deny":  ["read_file(.env)", "run_command(rm:*)"],
     "ask":   ["web_fetch(*)"]
   },
