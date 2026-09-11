@@ -1,10 +1,12 @@
 /**
  * @file vscode/src/extension.ts
- * @description VS Code 插件激活入口 ——【主编辑器区 Tab 架构】（对齐 Claude Code 工作区形态）：
+ * @description VS Code 插件激活入口 ——【主编辑器区多 Tab 架构】（对齐 Claude Code 工作区形态）：
  *  1) 读扩展配置（apiKey/model/locale）→ 注入环境变量 → chdir（必须在加载 core 之前）；
  *  2) 加载 core 模块 + 后台初始化引擎（initEngine）；
- *  3) 命令驱动：deepseekerCode.openChat 等 → vscode.window.createWebviewPanel
- *     在主代码编辑区创建/聚焦常驻面板（由侧边栏视图迁移而来）。
+ *  3) 命令驱动：deepseekerCode.openChat 等 → vscode.window.createWebviewPanel；
+ *  4) ★ 一个聊天 Tab = 一个 WebviewPanel + 一个独立 ChatHost（会话宿主）：
+ *     「新会话」在已有对话的 Tab 里触发时**开新页签**，旧对话原样保留、仍可切回续聊
+ *     （与 Claude Code 的多会话页签形态一致）；空白 Tab 原地复用，不堆积空页。
  */
 import * as vscode from "vscode";
 import * as fs from "fs";
@@ -17,7 +19,6 @@ import type { ChatHost, ChatHostCallbacks } from "./host";
 import { isVisionEnabled } from "@/session/contentParts.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 
-let host: ChatHost | null = null;
 let engineDispose: (() => void) | null = null;
 
 // —— core 观测/命令目录访问器（activate 第 4 步动态 import 后赋值；webview 的 /usage 等本地命令用） ——
@@ -41,8 +42,26 @@ let workspaceState: vscode.Memento | null = null;
 let waitEngine: () => Promise<void> = async () => {};
 let engineSettled = false;
 
-/** 主编辑区面板（单例：已存在则 reveal 聚焦）。 */
-let panel: vscode.WebviewPanel | null = null;
+/** ChatHost 构造器（activate 第 5 步动态 import 后赋值：host 及其 core 依赖必须在 chdir 之后加载）。 */
+let newChatHost: ((callbacks: ChatHostCallbacks) => ChatHost) | null = null;
+
+/**
+ * 聊天页签（多开）：一个 Tab = 一个面板 + 一个会话宿主，各自独立会话/模式/模型。
+ * 事件投递按 Tab 定向（host sink 只发自己的 panel），互不串扰。
+ */
+interface ChatTab {
+  panel: vscode.WebviewPanel;
+  host: ChatHost;
+  /** panel 已销毁（关 Tab）：之后的 in-flight 事件直接丢弃（host 已 abort，防投递报错）。 */
+  disposed: boolean;
+}
+
+/** 全部存活的聊天页签（尾部 = 最近创建）。 */
+let tabs: ChatTab[] = [];
+/** 最近活动的页签（openChat reveal 目标 + 会话 id 持久化收口）。 */
+let activeTab: ChatTab | null = null;
+/** workspaceState 里的活动会话 id 只给 activate 后首个页签恢复一次（后续新页签一律空白会话）。 */
+let persistedRestored = false;
 
 // —— 「打开左右对比」：修改前快照的虚拟文档（vscode.diff 左侧） ——
 //  URI 形如 deepseeker-diff:/<safeKey>/<文件名>；safeKey 为本类自生成 UUID（URL 安全，
@@ -52,6 +71,9 @@ const diffDocs = new Map<string, string>();
 
 /** 初始化错误（如缺 API Key）；随 state 快照发给 webview 显示提示横幅。 */
 let initError: string | null = null;
+
+/** activate 上下文（webview newSession 分支要开新页签；activate 里赋值，命令只能晚于 activate 触发）。 */
+let context0: vscode.ExtensionContext | null = null;
 
 /** 主根（相对路径/命令基准 + 图片上传落盘根）。多根工作区下 agent 仍可经绝对路径访问所有 folder
  *  （沙箱 setAllowedWorkspaceRoots 放行），主根仅作默认锚——「无切换·全可见」模型。
@@ -130,26 +152,34 @@ const cleanImageTmp = (): void => {
     .catch(() => { /* 目录尚不存在 = 无残留 */ });
 };
 
-/** 通知前端一次状态快照（busy/模式/模型…）。 */
-function postState(): void {
-  if (!host || !panel) return;
-  void panel.webview.postMessage({
+/** 最近活动的页签（无则 null）。 */
+const latestTab = (): ChatTab | null => activeTab ?? tabs[tabs.length - 1] ?? null;
+
+/** 定向投递：事件只发给所属页签的 webview（多 Tab 各聊各的，互不串扰）；Tab 已销毁则丢弃。 */
+const deliverTo = (tab: ChatTab, msg: Record<string, unknown>): void => {
+  if (tab.disposed) return;
+  void tab.panel.webview.postMessage(msg);
+};
+
+/** 通知某页签前端一次状态快照（busy/模式/模型…），数据取自该 Tab 自己的 host。 */
+const postState = (tab: ChatTab): void => {
+  deliverTo(tab, {
     type: "state",
     state: {
-      busy: host.isBusy,
-      planMode: host.currentPlanMode,
-      autoMode: host.currentAutoMode,
-      model: host.currentModel,
+      busy: tab.host.isBusy,
+      planMode: tab.host.currentPlanMode,
+      autoMode: tab.host.currentAutoMode,
+      model: tab.host.currentModel,
       // ★ 候选清单随快照下发：webview /switch 面板内选择器无需往返即可渲染
       models: modelCandidates(),
       initError: initError ?? "",
       projectRoot: workspaceRoot ?? "",
       // ★ 多模态：视觉开关下发 webview——决定贴图走原生附件（true）还是 MCP 中转兜底（false）。
       //   按当前生效模型自动判定（env DEEP_SEEK_VISION 仍可显式强开/强关）：切 vision 模型即原生贴图，无感。
-      vision: isVisionEnabled(host.currentModel || undefined),
+      vision: isVisionEnabled(tab.host.currentModel || undefined),
     },
   });
-}
+};
 
 /**
  * 模型候选清单（内置 SELECTABLE_MODELS + 设置项 deepseekerCode.models 追加去重，现读即生效）。
@@ -171,36 +201,8 @@ function modelCandidates(): string[] {
  * （与 / 命令菜单、提问条同一套 ↑↓/Enter/Esc 交互）。选中后 webview 走 setModel 消息回环
  * （setModel 分支统一做 host.setModel + workspaceState 持久化）。`/model <id>` 是另一条路：直输切换。
  */
-async function pickModel(context?: vscode.ExtensionContext): Promise<void> {
-  if (!host) return;
-  if (context) revealPanel(context); // 命令面板入口：先把聊天面板调到前台再弹选择器
-  deliver({ type: "openModelPicker", models: modelCandidates() });
-}
-
-// —— panel 销毁期间的事件缓冲（断链修复）——
-//  retainContextWhenHidden=true 时单纯隐藏不断；但 panel 被销毁（关 tab / Reload Window / 内存驱逐 retained webview）
-//  后 host 任务仍在跑，事件无处投递。缓冲流式增量，待 panel 重建（webview ready）时 flush；
-//  挂起交互类（approval/question/plan）不缓冲——由 host.collectPendingUI 在 ready 时重广播，避免重复投递。
-//  sessionReset 是清屏语义，绝不缓冲（否则会在重放历史后再清屏，擦掉刚回放的对话）。
-const MAX_PENDING_EVENTS = 2000;
-let pendingEvents: Record<string, unknown>[] = [];
-
-/** 是否「挂起交互类」消息（靠 host.collectPendingUI 重广播，故 panel 销毁期间不缓冲）。 */
-const isPendingInteraction = (msg: Record<string, unknown>): boolean => {
-  if (msg.type === "question" || msg.type === "plan" || msg.type === "sessionReset") return true;
-  const inner = msg.evt as Record<string, unknown> | undefined;
-  return inner?.type === "approval_request";
-};
-
-/** 统一投递：panel 有效直发；panel===null 时流式事件入缓冲队列，挂起交互类丢弃。 */
-const deliver = (msg: Record<string, unknown>): void => {
-  if (panel) {
-    void panel.webview.postMessage(msg);
-    return;
-  }
-  if (isPendingInteraction(msg)) return;
-  pendingEvents.push(msg);
-  if (pendingEvents.length > MAX_PENDING_EVENTS) pendingEvents.shift();
+const pickModel = (tab: ChatTab): void => {
+  deliverTo(tab, { type: "openModelPicker", models: modelCandidates() });
 };
 
 // —— 面板 HTML ——
@@ -249,36 +251,75 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </html>`;
 }
 
-// —— 面板创建（主编辑器区 Tab） ——
+// —— 面板创建（主编辑器区多 Tab） ——
 
-function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
-  if (panel) {
-    panel.reveal(panel.viewColumn ?? vscode.ViewColumn.One, true);
-    return panel;
-  }
-  // ★ 新建：默认落到活动编辑器右侧列（Beside），与代码并排。无活动编辑器时 Beside 自动退化为 One。
-  //   chat tab 本就是普通编辑器 tab，落到右侧后可自由拖拽/拆分（VSCode 原生）；此处只决定首次落点。
+/** ChatHost 事件回调（per-Tab 定向投递 + 会话 id 持久化按活动页签收口）。 */
+const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
+  sink: (evt) => deliverTo(tab, { type: "evt", evt }),
+  onBusy: () => postState(tab),
+  onQuestion: (req) => deliverTo(tab, { type: "question", req }),
+  onPlan: (plan) => deliverTo(tab, { type: "plan", plan }),
+  onSessionReset: () => deliverTo(tab, { type: "sessionReset" }),
+  // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：仅活动页签写——多 Tab 各自续接
+  //   自己的会话；重载后只恢复最近活动的那个（其余会话经 /sessions 续接）。
+  getPersistedSessionId: () =>
+    !persistedRestored ? workspaceState?.get<string | undefined>("deepseekerCode.activeSessionId") : undefined,
+  setPersistedSessionId: (id) => {
+    if (activeTab === tab) void workspaceState?.update("deepseekerCode.activeSessionId", id ?? undefined);
+  },
+  // ★ 引擎就绪闸门：后台 initEngine 未完成时提示一句再等（MCP 工具/自定义命令注入后才跑 agent）。
+  waitEngineReady: async () => {
+    if (engineSettled) return;
+    deliverTo(tab, { type: "info", text: "⏳ 引擎加载中（MCP/skills/commands）…完成后自动继续。" });
+    await waitEngine();
+  },
+});
+
+/**
+ * 新建聊天页签（独立 ChatHost，空白会话）。
+ * 落点：显式 col > 首个聊天页签所在列（同组新页签，聊天堆在一起）> openBeside 配置。
+ */
+const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): ChatTab => {
   const openBeside = vscode.workspace
     .getConfiguration("deepseekerCode")
     .get<boolean>("openBeside", true);
-  const col = openBeside ? vscode.ViewColumn.Beside : vscode.ViewColumn.One;
-  panel = vscode.window.createWebviewPanel(
+  const target =
+    col ??
+    tabs[0]?.panel.viewColumn ??
+    (openBeside ? vscode.ViewColumn.Beside : vscode.ViewColumn.One);
+  const panel = vscode.window.createWebviewPanel(
     "deepseekerCode.chat",
     "DeepSeeker-Code",
-    col,
+    target,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist")],
     },
   );
+  const tab: ChatTab = { panel, host: null as unknown as ChatHost, disposed: false };
+  if (!newChatHost) throw new Error("DeepSeeker-Code：会话宿主尚未加载（activate 未完成，不应到达）");
+  tab.host = newChatHost(makeCallbacks(tab));
   // ★ 顶部页卡图标（dist/icon.svg）：与工具栏品牌一致的 sparkle
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "dist", "icon.svg");
   panel.webview.html = renderHtml(panel.webview, context.extensionUri);
-  panel.webview.onDidReceiveMessage((msg) => handleMessage(msg as Record<string, unknown>));
-  panel.onDidDispose(() => {
-    panel = null;
+  panel.webview.onDidReceiveMessage((msg) => handleMessage(tab, msg as Record<string, unknown>));
+  panel.onDidChangeViewState(() => {
+    if (panel.active) activeTab = tab; // 用户点页签切换：openChat/持久化收口跟着走
   });
+  panel.onDidDispose(() => {
+    // ★ 关 Tab = 结束该 Tab 的运行（防后台静默烧 token）；transcript 已落盘，可经 /sessions 续接。
+    tab.disposed = true;
+    if (tab.host.isBusy) tab.host.abort();
+    tabs = tabs.filter((t) => t !== tab);
+    if (activeTab === tab) activeTab = latestTab();
+  });
+  tabs.push(tab);
+  activeTab = tab;
+  // 多开时页签标题带序号，便于分辨（首个保持纯品牌名）
+  if (tabs.length > 1) panel.title = `DeepSeeker-Code ${tabs.length}`;
+  // ★ 仅首个页签消费 workspaceState 里的活动会话 id（后续页签一律空白会话，避免多 host 写同一会话）
+  persistedRestored = true;
   // ★ 锁定聊天所在编辑器组：避免「再打开一个文件」时文件落到对话侧遮挡会话。
   //   组一旦上锁，新文件改投到未锁的编辑器组（文件侧），聊天 tab 始终留在原位不被覆盖。
   //   仅在 openBeside（聊天独占侧栏列）时锁定——若聊天与文件同列（openBeside=false），
@@ -291,27 +332,64 @@ function revealPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
         /* 命令不可用时静默（极旧版本/被禁用） */
       });
   }
-  return panel;
-}
+  // 页签默认值：语言/模型（每个 Tab 的 host 各自应用同一份持久化偏好）
+  const localeCfg = vscode.workspace.getConfiguration("deepseekerCode").get<string>("locale");
+  if (localeCfg === "en" || localeCfg === "zh") tab.host.setLocale(localeCfg);
+  const savedModel = workspaceState?.get<string>("deepseekerCode.model");
+  if (savedModel) tab.host.setModel(savedModel);
+  return tab;
+};
+
+/** 打开/聚焦聊天：有页签则 reveal 最近活动的（preserveFocus 不抢焦点），没有才新建。 */
+const revealTab = (context: vscode.ExtensionContext): ChatTab => {
+  const t = latestTab();
+  if (t) {
+    t.panel.reveal(t.panel.viewColumn ?? vscode.ViewColumn.One, true);
+    activeTab = t;
+    return t;
+  }
+  return createTab(context);
+};
+
+/** 页签脏判定：已有会话（transcript 存在）或正在生成 → 新会话应开新页签而非原地清屏。 */
+const isTabDirty = (tab: ChatTab): boolean => tab.host.activeSessionId != null || tab.host.isBusy;
+
+/**
+ * 新会话（统一入口，webview「新会话」按钮 //new 与命令面板共用）：
+ * ★ 对齐 Claude Code——已有对话的 Tab 开**新页签**跑新会话，旧对话原样保留、可切回续聊；
+ *   空白 Tab（无会话且空闲）原地复用清屏，避免点几次就堆几个空页签。
+ */
+const startNewSession = async (context: vscode.ExtensionContext, tab: ChatTab): Promise<void> => {
+  cleanImageTmp(); // 清理上一会话的图片上传临时文件
+  if (isTabDirty(tab)) {
+    createTab(context, tab.panel.viewColumn ?? undefined); // 新页签（聚焦），旧 Tab 现场不动
+    deliverTo(tab, { type: "info", text: "🆕 新会话已在新的编辑器页签打开；当前对话保留在本页，可切回继续。" });
+    return;
+  }
+  await tab.host.newSession();
+  postState(tab);
+};
 
 // —— webview → host ——
 
-async function sendSessions(): Promise<void> {
-  try {
-    const sessions = (await host?.listSessions()) ?? [];
-    if (panel) void panel.webview.postMessage({ type: "sessions", sessions });
-  } catch {
-    if (panel) void panel.webview.postMessage({ type: "sessions", sessions: [] });
-  }
-}
+const sendSessions = (tab: ChatTab): void => {
+  void (async () => {
+    try {
+      const sessions = (await tab.host.listSessions()) ?? [];
+      deliverTo(tab, { type: "sessions", sessions });
+    } catch {
+      deliverTo(tab, { type: "sessions", sessions: [] });
+    }
+  })();
+};
 
 /**
  * 图片上传（MCP 中转）：webview 把 base64 发来 → 存到用户目录 <dataDir>/tmp/paste/<uuid>.<ext> → 回传绝对路径。
  * 非 vision 模型无法直接"看"图；图片落到用户临时目录后，由 agent 调用用户配置的图像理解
  * MCP 工具读取该路径、把图转成文字描述（走现有 mcp__* 工具链路，core 不感知二进制）。
  */
-async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
-  if (!panel) return;
+const handleUploadImage = async (tab: ChatTab, msg: Record<string, unknown>): Promise<void> => {
+  if (tab.disposed) return;
   const base64 = String(msg.base64 ?? "");
   if (!base64) return;
   const mime = String(msg.mime ?? "image/png");
@@ -323,30 +401,26 @@ async function handleUploadImage(msg: Record<string, unknown>): Promise<void> {
     await fs.promises.mkdir(dir, { recursive: true });
     const filePath = path.join(dir, `${randomUUID()}.${ext}`);
     await fs.promises.writeFile(filePath, Buffer.from(base64, "base64"));
-    panel.webview.postMessage({ type: "imageSaved", path: filePath, name });
+    tab.panel.webview.postMessage({ type: "imageSaved", path: filePath, name });
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
-    panel.webview.postMessage({ type: "imageSaved", path: "", name, error: m });
+    tab.panel.webview.postMessage({ type: "imageSaved", path: "", name, error: m });
   }
-}
+};
 
-function handleMessage(msg: Record<string, unknown>): void {
+const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
   const type = msg?.type as string;
-  const h = host;
-  if (!h) return;
+  const h = tab.host;
   switch (type) {
     case "ready":
-      // 前端就绪（panel 首次加载/重建）：状态快照 → 重放活动会话历史 → flush 销毁期间缓冲的增量 → 重广播挂起交互。
-      //  串行顺序：先重放（含清屏）后 flush，避免增量被 replayCurrentSession 的清屏擦掉。
+      // 前端就绪（panel 首次加载/webview 重载）：状态快照 → 重放活动会话历史 → 重广播挂起交互。
+      //  串行顺序：先重放（含清屏）后重广播，避免增量/交互被 replayCurrentSession 的清屏擦掉。
       void (async () => {
-        postState();
+        postState(tab);
         await h.replayCurrentSession();
-        const buffered = pendingEvents;
-        pendingEvents = [];
-        for (const m of buffered) deliver(m);
-        for (const m of h.collectPendingUI()) deliver(m);
+        for (const m of h.collectPendingUI()) deliverTo(tab, m);
         // 自定义斜杠命令目录（引擎后台加载晚于面板打开时由此补推；engineSettled 后 listCommands 已就绪）
-        if (panel) void panel.webview.postMessage({ type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
+        deliverTo(tab, { type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
       })();
       break;
     case "localObs": {
@@ -394,7 +468,7 @@ function handleMessage(msg: Record<string, unknown>): void {
         } catch (e) {
           text = `读取失败：${e instanceof Error ? e.message : String(e)}`;
         }
-        deliver({ type: "info", text });
+        deliverTo(tab, { type: "info", text });
       })();
       break;
     }
@@ -440,16 +514,15 @@ function handleMessage(msg: Record<string, unknown>): void {
       h.resolveQuestion((msg.answer ?? {}) as never);
       break;
     case "newSession":
-      cleanImageTmp(); // 清理上一会话的图片上传临时文件
-      void h.newSession();
+      if (context0) void startNewSession(context0, tab);
       break;
     case "listSessions":
-      void sendSessions();
+      sendSessions(tab);
       break;
     case "listForkAnchors":
       void (async () => {
         const anchors = (await h.listForkAnchors()) ?? [];
-        if (panel) void panel.webview.postMessage({ type: "forkAnchors", anchors });
+        deliverTo(tab, { type: "forkAnchors", anchors });
       })();
       break;
     case "fork":
@@ -468,14 +541,14 @@ function handleMessage(msg: Record<string, unknown>): void {
       void (async () => {
         try { await h.renameSession(String(msg.id ?? ""), String(msg.title ?? "")); }
         catch (e) { void vscode.window.showErrorMessage(`重命名失败：${e instanceof Error ? e.message : String(e)}`); }
-        finally { await sendSessions(); }
+        finally { sendSessions(tab); }
       })();
       break;
     case "deleteSession":
       void (async () => {
         try { await h.deleteSession(String(msg.id ?? "")); }
         catch (e) { void vscode.window.showErrorMessage(`删除失败：${e instanceof Error ? e.message : String(e)}`); }
-        finally { await sendSessions(); }
+        finally { sendSessions(tab); }
       })();
       break;
     case "clear":
@@ -483,19 +556,19 @@ function handleMessage(msg: Record<string, unknown>): void {
       break;
     case "setModel":
       h.setModel(String(msg.model ?? ""));
-      void workspaceState?.update("deepseekerCode.model", String(msg.model ?? "")); // 持久化收口：/model <id> 直输与选择器两条路都落盘
-      postState();
+      void workspaceState?.update("deepseekerCode.model", String(msg.model ?? "")); // 持久化收口：/model 直输与选择器两条路都落盘
+      postState(tab);
       break;
     case "pickModel":
-      void pickModel(); // /switch → 面板内模型选择器（openModelPicker 消息，webview 渲染）
+      pickModel(tab); // /switch → 面板内模型选择器（openModelPicker 消息，webview 渲染）
       break;
     case "setPlanMode":
       h.setPlanMode(!!msg.on);
-      postState();
+      postState(tab);
       break;
     case "setAutoMode":
       h.setAutoMode(!!msg.on);
-      postState();
+      postState(tab);
       break;
     case "setThinking":
       h.setThinkingLevel(msg.level as never);
@@ -504,7 +577,7 @@ function handleMessage(msg: Record<string, unknown>): void {
       h.setLocale(msg.locale === "en" ? "en" : "zh");
       break;
     case "uploadImage":
-      void handleUploadImage(msg);
+      void handleUploadImage(tab, msg);
       break;
     case "openDiff": {
       // ★ 聊天面板「打开左右对比」：host 快照的修改前内容 vs 盘上现状 → 原生 vscode.diff 编辑器。
@@ -538,11 +611,12 @@ function handleMessage(msg: Record<string, unknown>): void {
     default:
       break;
   }
-}
+};
 
 // —— 激活 ——
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  context0 = context;
   // —— 1. 工作区校验 + 主根解析（持久化优先，否则按活动编辑器/folder[0] 解析）——
   //  ★ chdir 在此完成（先于 core import）：applyProjectRoot 失败即中止激活。
   //  ★ 主根持久化（workspaceState）：Reload Window 后 activeTextEditor 常为空、会回退 folder[0]，
@@ -616,33 +690,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidChangeWorkspaceFolders(() => setAllowedWorkspaceRoots(getAllWorkspaceRoots())),
   );
 
-  // —— 5. 会话宿主（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace） ——
+  // —— 5. 会话宿主构造器 + workspaceState 句柄（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace；
+  //        createTab 的会话 id/模型恢复用它；命令只能晚于 activate 触发，先赋值安全） ——
   const { ChatHost } = await import("./host.js");
-  const callbacks: ChatHostCallbacks = {
-    sink: (evt) => deliver({ type: "evt", evt }),
-    onBusy: () => postState(),
-    onQuestion: (req) => deliver({ type: "question", req }),
-    onPlan: (plan) => deliver({ type: "plan", plan }),
-    onSessionReset: () => {
-      if (panel) void panel.webview.postMessage({ type: "sessionReset" });
-    },
-    // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：重载后恢复，杜绝碎片化新会话。
-    getPersistedSessionId: () => context.workspaceState.get<string | undefined>("deepseekerCode.activeSessionId"),
-    setPersistedSessionId: (id) => { void context.workspaceState.update("deepseekerCode.activeSessionId", id ?? undefined); },
-    // ★ 引擎就绪闸门：后台 initEngine 未完成时提示一句再等（MCP 工具/自定义命令注入后才跑 agent）。
-    waitEngineReady: async () => {
-      if (engineSettled) return;
-      deliver({ type: "info", text: "⏳ 引擎加载中（MCP/skills/commands）…完成后自动继续。" });
-      await waitEngine();
-    },
-  };
-  host = new ChatHost(callbacks);
+  newChatHost = (cb) => new ChatHost(cb);
   workspaceState = context.workspaceState;
-  const localeCfg = cfg.get<string>("locale");
-  if (localeCfg === "en" || localeCfg === "zh") host?.setLocale(localeCfg);
-  // ★ 模型选择恢复（workspaceState，per-workspace 跨重载）：显式选择 > 设置项/env 的默认模型。
-  const savedModel = context.workspaceState.get<string>("deepseekerCode.model");
-  if (savedModel) host.setModel(savedModel);
 
   // ★ 「打开左右对比」虚拟文档供给：deepseeker-diff:/<safeKey>/<文件名> → 修改前快照内容
   //  （文件名带真实扩展名，左侧虚拟文档的语言高亮与右侧一致）。
@@ -652,24 +704,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // —— 6. 命令（主编辑器区 Tab：openChat 创建/聚焦面板） ——
+  // —— 6. 命令（主编辑器区多 Tab：openChat 聚焦最近页签/新建，newSession 开新页签） ——
   //  ★ 无切换·全可见：openChat/newSession/submit 不再切根——主根 activate 时定并持久化，运行期稳定；
   //    agent 经绝对路径访问所有 folder（沙箱放行）。selectProjectRoot 为唯一显式换主根入口。
   context.subscriptions.push(
     vscode.commands.registerCommand("deepseekerCode.openChat", () => {
-      if (!host) return;
-      revealPanel(context);
-      postState();
+      const t = revealTab(context);
+      postState(t);
     }),
-    vscode.commands.registerCommand("deepseekerCode.newSession", async () => {
-      if (!host) return;
-      cleanImageTmp();
-      revealPanel(context);
-      await host.newSession();
-      postState();
+    vscode.commands.registerCommand("deepseekerCode.newSession", () => {
+      // 与 webview「新会话」按钮同路：已有对话开新页签，空白页签原地复用；先把最近页签调到前台
+      const t = revealTab(context);
+      void startNewSession(context, t);
     }),
     vscode.commands.registerCommand("deepseekerCode.selectProjectRoot", async () => {
-      if (!host) return;
       const folders = vscode.workspace.workspaceFolders ?? [];
       if (folders.length === 0) {
         void vscode.window.showErrorMessage("DeepSeeker-Code：当前没有打开的工作区文件夹。");
@@ -683,33 +731,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!picked) return;
       if (applyProjectRoot(picked.description!)) {
         void context.workspaceState.update("deepseekerCode.activeProjectRoot", picked.description);
-        revealPanel(context);
-        postState();
+        const t = revealTab(context);
+        postState(t);
         void vscode.window.showInformationMessage(`DeepSeeker-Code：主根已切换为 ${picked.label}`);
       }
     }),
-    vscode.commands.registerCommand("deepseekerCode.listSessions", async () => {
-      if (!host) return;
-      revealPanel(context);
-      await sendSessions();
+    vscode.commands.registerCommand("deepseekerCode.listSessions", () => {
+      const t = revealTab(context);
+      sendSessions(t);
     }),
-    vscode.commands.registerCommand("deepseekerCode.selectModel", async () => {
-      if (!host) return;
-      await pickModel(context); // 先 reveal 面板，再投递面板内选择器
+    vscode.commands.registerCommand("deepseekerCode.selectModel", () => {
+      const t = revealTab(context); // 先 reveal 面板，再投递面板内选择器
+      pickModel(t);
     }),
     vscode.commands.registerCommand("deepseekerCode.abort", () => {
-      host?.abort();
-      postState();
+      latestTab()?.host.abort();
     }),
     vscode.commands.registerCommand("deepseekerCode.togglePlanMode", () => {
-      if (!host) return;
-      host.setPlanMode(!host.currentPlanMode);
-      postState();
+      const t = latestTab();
+      if (!t) return;
+      t.host.setPlanMode(!t.host.currentPlanMode);
+      postState(t);
     }),
     vscode.commands.registerCommand("deepseekerCode.toggleAutoMode", () => {
-      if (!host) return;
-      host.setAutoMode(!host.currentAutoMode);
-      postState();
+      const t = latestTab();
+      if (!t) return;
+      t.host.setAutoMode(!t.host.currentAutoMode);
+      postState(t);
     }),
     vscode.commands.registerCommand("deepseekerCode.manageTrust", async () => {
       const trusted = await readTrustedDirs();
@@ -745,7 +793,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   //   原 await initEngine（MCP spawn+握手常达秒级）期间 activate 未完成 → contributes.commands 的
   //   隐式 onCommand 激活要等 activate promise resolve 才派发 → 点 sparkle 图标后面板迟迟不弹（顿挫主因）。
   //   改 UI 先行：activate 立即返回、面板秒开；引擎后台加载，首轮提交经 host.waitEngineReady 闸门等待；
-  //   加载完成后把自定义斜杠命令目录推给 webview 合并进 / 菜单。
+  //   加载完成后把自定义斜杠命令目录推给各存活页签的 webview 合并进 / 菜单。
   console.log("DeepSeeker-Code：引擎后台初始化中…（MCP/skills/agents/commands 加载）");
   let resolveEngine: () => void = () => {};
   const engineReadyPromise = new Promise<void>((r) => { resolveEngine = r; });
@@ -761,8 +809,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } finally {
       engineSettled = true;
       resolveEngine();
-      // 命令目录就绪后推给 webview（panel 未开则跳过——ready 流程会重推）
-      if (panel) void panel.webview.postMessage({ type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
+      // 命令目录就绪后推给各存活页签（panel 未开则跳过——ready 流程会重推）
+      for (const t of tabs) {
+        deliverTo(t, { type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
+      }
     }
   })();
 
@@ -777,6 +827,6 @@ export function deactivate(): void {
     /* 忽略退出期清理异常 */
   }
   engineDispose = null;
-  host = null;
-  panel = null;
+  tabs = [];
+  activeTab = null;
 }

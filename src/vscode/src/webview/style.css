@@ -196,6 +196,10 @@ body {
 #messages {
   flex: 1;
   overflow-y: auto;
+  /* ★ 显式禁横向平移：overflow-y:auto 会把 overflow-x 计算成 auto，任何子行被撑破（长代码行等）
+     都会产生一条「滑过去是空白」的横向滚动条。消息流永不整体左右滚——长内容由内部
+     pre / 表格自滚动（各自 overflow-x:auto），行内长 token 靠折行兜底。 */
+  overflow-x: hidden;
   padding: 12px 14px 14px;
   scroll-behavior: smooth;
   position: relative;
@@ -280,6 +284,8 @@ body {
   color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
+  /* ★ flex item 可收缩：break-word 不影响 min-content 计算，无此限制时超长 token 会撑破消息流 */
+  min-width: 0;
   background: none;
   border: none;
   padding: 0;
@@ -303,6 +309,9 @@ body {
   color: var(--fg);
   white-space: normal;
   word-break: break-word;
+  /* ★ flex item 可收缩（min-width:auto 默认取 min-content，长代码行的 <pre> 会把整行撑破，
+     造成 #messages 横向溢出）：收缩后长行交给内部 pre 滚动 / 正文折行 */
+  min-width: 0;
 }
 
 .assistant-body strong {
@@ -745,6 +754,8 @@ body {
   color: var(--fg-dim);
   font-size: 11.5px;
   font-style: italic;
+  /* info 常含长路径/URL 等无空格长 token：anywhere 让 min-content 收缩可折行，不撑破消息流 */
+  overflow-wrap: anywhere;
 }
 
 /* 轮次分割线：─ 第 N 轮 ───── */
@@ -814,6 +825,7 @@ body {
 .row-system .system-line {
   color: var(--warn);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 /* 初始化错误横幅 */

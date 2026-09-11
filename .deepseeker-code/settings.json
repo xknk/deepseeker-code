@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "web_fetch(https://api-docs.deepseek.com/guides/thinking)"
+      "web_fetch(https://api-docs.deepseek.com/guides/thinking)",
+      "run_command(echo \"=== ~/.deepseeker-code 目录 ===\"; ls -la ~/.deepseeker-code/ 2>&1; echo \"=== prefs ===\"; cat ~/.deepseeker-code/prefs.json 2>&1; echo \"\"; echo \"=== settings ===\"; cat ~/.deepseeker-code/settings.json 2>&1 | head -40)",
+      "run_command(cd /tmp && timeout 12 deepseeker-code < /dev/null 2>&1 | head -30; echo \"---EXIT=$?---\")",
+      "run_command(npm i -g deepseeker-code@latest 2>&1 | tail -15)",
+      "run_command(cd /d/npm/node_global/node_modules/deepseeker-code/node_modules/vscode-ripgrep && timeout 90 node ./lib/postinstall.js 2>&1 | tail -20; echo \"---EXIT=$?---\"; ls -la bin/ 2>&1)"
     ]
   }
 }

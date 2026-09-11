@@ -235,7 +235,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             try { const ra = path.resolve(a), rb = path.resolve(b); return process.platform === 'win32' ? ra.toLowerCase() === rb.toLowerCase() : ra === rb; }
             catch { return false; }
         };
-        const scriptRunnerCwdDrift = cmdIsScriptRunner && argCwd !== '' && !samePath(argCwd, toolCtx.cwd);
+        const scriptRunnerCwdDrift = cmdIsScriptRunner && argCwd !== '' && !samePath(argCwd, toolCtx.cwd ?? process.cwd());
         const scriptRunnerBlocked = cmdIsScriptRunner && (perm === null || scriptRunnerCwdDrift);
         if (scriptRunnerCwdDrift) needApproval = true; // perm='allow' 已置 false → 漂移时强制拉回审批
         if (perm === null && needApproval && !denied && !scriptRunnerBlocked && calledName === 'run_command'

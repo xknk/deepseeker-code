@@ -1862,7 +1862,7 @@ const SLASH = [
 { cmd: "/hooks", hint: "查看已注册的 hook 规则", arg: false, obs: true },
 { cmd: "/trust", hint: "管理已信任目录（列出 / 撤销）", arg: true, obs: true },
 { cmd: "/debug", hint: "排障快照（session/cwd/模型/配置/环境）", arg: false, obs: true },
-{ cmd: "/new", hint: "新会话", arg: false },
+{ cmd: "/new", hint: "新会话（新页签，当前对话保留）", arg: false },
 { cmd: "/clear", hint: "清空当前屏幕", arg: false },
 ];
 
@@ -2094,7 +2094,7 @@ tb.innerHTML = `
 <div class="brand"><span class="logo codicon codicon-sparkle"></span> <span class="brand-name">DeepSeeker-Code</span> <span id="busy-dot" class="dot"></span></div>
 <button id="btn-project-root" title="agent 当前工作的项目根（点击切换）" class="project-root"><span class="codicon codicon-root-folder"></span><span id="project-root-name">…</span></button>
 <div class="actions">
-<button id="btn-new" title="新会话" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
+<button id="btn-new" title="新会话（在新页签打开，当前对话保留）" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
 <button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
 <button id="btn-fork" title="分叉当前会话" class="icon-btn"><span class="codicon codicon-gist-fork"></span></button>
 </div>`;
