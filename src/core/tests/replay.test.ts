@@ -323,14 +323,14 @@ describe("runAgent harness 回归（PHANTOM / EARLY_FINAL / TOOL_DIGEST / repeat
         assert.equal(runEndOf(ret.lines).stopReason, 'normal');
     });
 
-    it("EARLY_FINAL：首轮无完成声明的草率收尾被拦一次，第二次带完成声明放行", async () => {
+    it("EARLY_FINAL：实现型任务首轮无完成声明的草率收尾被拦一次，第二次带完成声明放行", async () => {
         const sid = `hr-early-final-${Date.now()}`;
         const { handle, ret } = await withReplay({
             turns: [
-                { kind: 'reply', content: '我觉得大概是这样吧' },                          // round=1、无完成词 → 拦
+                { kind: 'reply', content: '我觉得大概是这样吧' },                          // round=1、无完成词、looksComplex 武装 → 拦
                 { kind: 'reply', content: '已完成：自检后确认全部落地，这是最终回答。' },
             ],
-        }, async (p) => driveAgent('做个小任务', sid).then((r) => ({ ...r, calls: p.calls })));
+        }, async (p) => driveAgent('请帮我实现用户登录功能，涉及多个文件的改动', sid).then((r) => ({ ...r, calls: p.calls })));
         assert.match(finalTextOf(ret.events), /已完成：自检后/);
         assert.equal(handle.calls.length, 2);
         const secondTail: any = handle.calls[1].messages[handle.calls[1].messages.length - 1];

@@ -112,13 +112,30 @@ describe("子 Agent 续跑端到端（ReplayProvider）", () => {
 
 describe("createNudgeScheduler noEarlyFinal 开关（守护分层对照）", () => {
     const shortNoDeclare = "任务做了一部分，先这样。"; // 无完成声明词、非空
+    const complexTask = "请帮我实现用户登录功能，涉及多个文件的改动"; // 命中 looksComplex（多个文件、≥20 字）
 
-    it("缺省（主 agent）：EARLY_FINAL 拦截无声明早收尾", () => {
-        assert.equal(createNudgeScheduler({}).interceptFinal(shortNoDeclare, 1), true);
+    it("缺省（主 agent）+ 明确实现型任务：EARLY_FINAL 拦截无声明早收尾", () => {
+        assert.equal(createNudgeScheduler({ firstPrompt: complexTask }).interceptFinal(shortNoDeclare, 1), true);
     });
 
-    it("noEarlyFinal（子 agent）：同文本放行真实收尾", () => {
-        assert.equal(createNudgeScheduler({ noEarlyFinal: true }).interceptFinal(shortNoDeclare, 1), false);
+    it("非任务型输入（寒暄/闲聊提问/含糊短句）：零工具轮不武装、放行收尾", () => {
+        // 2026-09-11「你好」被逼写结题报告事故：非任务型输入枚举不完，按信号武装（开过工/实现型任务）而非白名单
+        assert.equal(createNudgeScheduler({ firstPrompt: "你好" }).interceptFinal("你好！我是 DeepSeeker-Code。", 1), false);
+        assert.equal(createNudgeScheduler({ firstPrompt: "hi!" }).interceptFinal(shortNoDeclare, 1), false);
+        assert.equal(createNudgeScheduler({ firstPrompt: "你觉得 AI 会取代程序员吗" }).interceptFinal(shortNoDeclare, 1), false);
+        // 有意收窄：模糊短任务零工具轮不再拦（救回责任交还用户追问），复杂任务仍拦（见上一条）
+        assert.equal(createNudgeScheduler({ firstPrompt: "做个小任务" }).interceptFinal(shortNoDeclare, 1), false);
+    });
+
+    it("开过工（本 run 有工具调用）：长文本零声明收尾仍武装（长文本不触发 TOOL_DIGEST，此处靠 EARLY_FINAL）", () => {
+        const longNoDeclare = "让我梳理一下目前的进展和思路，整体情况比较复杂，涉及多个层面的问题还需要进一步分析。";
+        const s = createNudgeScheduler({});
+        s.noteToolCall(1, [{ function: { name: "read_file", arguments: "{\"path\":\"a.ts\"}" } }]);
+        assert.equal(s.interceptFinal(longNoDeclare, 2), true);
+    });
+
+    it("noEarlyFinal（子 agent）：守护武装时同文本放行真实收尾", () => {
+        assert.equal(createNudgeScheduler({ noEarlyFinal: true, firstPrompt: complexTask }).interceptFinal(shortNoDeclare, 1), false);
     });
 
     it("PHANTOM 不受开关影响：空 content 仍拦截（正确性兜底保留）", () => {

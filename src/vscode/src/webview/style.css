@@ -364,6 +364,29 @@ body {
   font-style: italic;
 }
 
+/* GFM 表格：窄面板内横向滚动，不撑破布局 */
+.assistant-body table {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+.assistant-body th,
+.assistant-body td {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+  padding: 3px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.assistant-body th {
+  background: rgba(128, 128, 128, 0.12);
+  font-weight: 700;
+}
+
 .cursor {
   color: var(--fg);
   animation: blink 1s step-end infinite;

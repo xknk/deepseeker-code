@@ -10,6 +10,8 @@
  *   - PLAN_FIRST：首轮规划引导——顶层非计划模式下，用户首条 prompt 疑似非平凡实现任务时，引导先调 enter_plan_mode 规划（仅首轮一次）。
  *   - PHANTOM：空 content 守护（空包/纯崩溃）——既无实质文本又无 tool_calls 时注入重试（上限 PHANTOM_RETRY_MAX）。
  *   - EARLY_FINAL：早收尾守护——有实质文本、但轮次极少且无明确完成声明时推一轮让其自检（上限 EARLY_FINAL_MAX）。
+ *     ★ 按信号武装：仅当本 run 已发生过工具调用、或首条 prompt 疑似非平凡实现任务（looksComplex）时才拦；
+ *     纯寒暄/闲聊/问答不拦（2026-09-11「你好」被逼写结题报告事故）。
  *   - NUDGE：长任务周期自评——每 NUDGE_EVERY 轮提醒模型自决收尾（对标 CC：靠模型自收敛 + 用户中止，不硬停）。
  *
  *   死循环保险：EARLY_FINAL 预算全局计次、不随工具调用重置，推满上限后无论如何收尾都放行；PHANTOM 只计连续空包，
@@ -25,7 +27,7 @@ const NUDGE_FENCE = "⟦DSC:NUDGE⟧";
 const PHANTOM_FENCE = "⟦DSC:PHANTOM⟧";
 const PHANTOM_RETRY_MAX = 2;             // 空响应最多重试次数
 const EARLY_FINAL_FENCE = "⟦DSC:EARLY_FINAL⟧";
-const EARLY_FINAL_TURN_THRESHOLD = 2;    // round ≤ 此值且无完成声明 → 视为过早收尾
+const EARLY_FINAL_TURN_THRESHOLD = 2;    // round ≤ 此值且无完成声明、且守护已武装（开过工/实现型任务）→ 视为过早收尾
 const EARLY_FINAL_MAX = 1;               // 整个 run 最多推 1 次（硬死循环保险）
 const TOOL_DIGEST_FENCE = "⟦DSC:TOOL_DIGEST⟧";
 const TOOL_DIGEST_MAX = 2;               // 「工具消化收尾」守护：刚执行完工具就草草收尾时最多推 2 次
@@ -44,7 +46,7 @@ const REPEAT_NUDGE_MAX = 3;          // 整个 run 最多推 3 次重复检索 n
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
 const EARLY_FINAL_TEXT = (round: number): string =>
-    `你仅进行了 ${round} 轮工具调用就准备收尾，且回答中没有明确的完成声明。请严格自检：用户的每一个子目标是否都已真正落地（所需信息已获取 / 该改的文件已改完 / 已验证通过）？若确实全部完成，请明确回复"已完成"并简述成果；若还有任何未落地的子目标，立即继续调用工具推进，不要用自然语言草率总结收尾。`;
+    `你仅 ${round} 轮就准备收尾，且回答中没有明确的完成声明。请自检：若用户输入本就无需工具（寒暄/闲聊/纯问答）、或你在等用户澄清决策，直接正常回应即可，忽略本自检、不要输出任何自检说明；若确有任务未落地（所需信息未获取齐 / 该改的文件未改完 / 未验证），立即继续调用工具推进，不要草率总结收尾；若确已全部完成，请明确回复「已完成」并简述成果。`;
 const TOOL_DIGEST_TEXT = "你刚执行完工具拿到结果，却未基于该结果给出实质回应就准备收尾。请结合工具返回结果继续推进；若结果表明任务尚未完成（如仍在编译/运行、需继续轮询），立即采取下一步行动，不要空手收尾。若确已全部完成，请明确回复「已完成」并简述成果。";
 const NUDGE_TEXT = (round: number): string =>
     `你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
@@ -172,7 +174,12 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
                 return true;
             }
             // EARLY_FINAL：有 content 但轮次极少且无完成声明（疑似拿部分结果草率收尾）
-            if (!noEarlyFinal && text !== "" && round <= EARLY_FINAL_TURN_THRESHOLD
+            //   ★ 按信号武装（2026-09-11 重构，替代寒暄白名单——非任务型输入枚举不完，白名单是打地鼠）：
+            //   仅当 ①本 run 已开过工（发生过工具调用，此时草率收尾才可疑）或 ②首条 prompt 疑似非平凡
+            //   实现任务（复用 looksComplex，文本-only = 逃避干活）时拦。纯寒暄/闲聊/问答/含糊短句
+            //   没有「子目标」可言，硬推自检只会逼出对空话的结题报告（「你好」被写检讨事故），一律放行。
+            if (!noEarlyFinal && (lastToolCallRound > 0 || looksComplex(firstPrompt)) && text !== ""
+                && round <= EARLY_FINAL_TURN_THRESHOLD
                 && earlyFinalNudges < EARLY_FINAL_MAX && !looksComplete(finalText)) {
                 earlyFinalNudges++;
                 earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n${EARLY_FINAL_TEXT(round)}` };
