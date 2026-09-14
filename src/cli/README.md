@@ -96,8 +96,8 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 // ~/.deepseeker-code/config.json
 {
   "apiKey": "sk-你的key",            // 不必再 export DEEP_SEEK_API_KEY
-  "model": "deepseek-v4-flash",
-  "auxModel": "deepseek-v4-flash",
+  "model": "deepseek-flash",
+  "auxModel": "deepseek-flash",
   "apiUrl": "https://api.deepseek.com",
   "reasoningEffort": "high",          // high | max
   "thinking": true,                   // 默认开；false 关闭深度思考
@@ -112,8 +112,8 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | --- | --- | --- | --- |
 | `apiKey` | string | — | `DEEP_SEEK_API_KEY` |
 | `apiUrl` | string | `https://api.deepseek.com` | `DEEP_SEEK_API_URL` |
-| `model` | string | `deepseek-v4-flash` | `DEEP_SEEK_MODEL` |
-| `auxModel` | string | `deepseek-v4-flash` | `DEEP_SEEK_AUX_MODEL` |
+| `model` | string | `deepseek-flash` | `DEEP_SEEK_MODEL` |
+| `auxModel` | string | `deepseek-flash` | `DEEP_SEEK_AUX_MODEL` |
 | `reasoningEffort` | `high`\|`max` | `high` | `DEEP_SEEK_REASONING_EFFORT` |
 | `thinking` | boolean | `true` | `DEEP_SEEK_THINKING`（false→`0`） |
 | `parallelSafeTools` | boolean | `true` | `DEEP_SEEK_PARALLEL_SAFE_TOOLS`（false→`0`） |
@@ -134,8 +134,8 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | --- | --- | --- |
 | `DEEP_SEEK_API_KEY` | DeepSeek API Key（**必填**） | — |
 | `DEEP_SEEK_API_URL` | API 基址（兼容 OpenAI 协议的代理可改此项） | `https://api.deepseek.com` |
-| `DEEP_SEEK_MODEL` | 主模型 | `deepseek-v4-flash` |
-| `DEEP_SEEK_AUX_MODEL` | 辅助模型（摘要 / 风险分类） | `deepseek-v4-flash` |
+| `DEEP_SEEK_MODEL` | 主模型 | `deepseek-flash` |
+| `DEEP_SEEK_AUX_MODEL` | 辅助模型（摘要 / 风险分类） | `deepseek-flash` |
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max` | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |

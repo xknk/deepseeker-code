@@ -67,6 +67,11 @@ const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "tool" && r.status === "running") ||
     (r.kind === "todos" && !!r.active);
 
+/** 底部「生成中」行的 braille 帧表（与 Ink Spinner dots 同源）。
+ *  ★ 动画只允许出现在这一行——工具卡内严禁逐帧动画（Ink 擦除失准会把上一帧叠在下面，
+ *    历史上表现为同一工具出现两行不同的 ⠋/⠸，见 components/ToolCard.tsx 头注）。 */
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initialIncludeProject, engineReady }: { resumeSessionId?: string; initialPlanMode?: boolean; initialAutoMode?: boolean; initialIncludeProject?: boolean; engineReady: Promise<unknown> }): React.ReactElement => {
     const state = useChatState(resumeSessionId, initialPlanMode, initialAutoMode);
     const { exit } = useApp();
@@ -220,6 +225,28 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     }, [input, menuEntries]);
 
     const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null || state.pendingModel != null;
+    /** 底部「生成中」行动画时钟：120ms 一帧 braille + 1s 粒度秒表。
+     *  仅 busy 且无模态时走 setInterval 逐帧重绘——模态打开时动态区必须零额外重绘（治闪屏，
+     *  见 cli-render-flicker 记忆）。起点存 ref：模态开合停/启帧但秒表连续；帧取自 Date.now()
+     *  整除区间，interval 抖动不跳帧。 */
+    const [busyClock, setBusyClock] = useState({ frame: 0, sec: 0 });
+    const busyStartRef = useRef(0);
+    useEffect(() => {
+        if (!state.busy) {
+            busyStartRef.current = 0;
+            setBusyClock((c) => (c.frame === 0 && c.sec === 0 ? c : { frame: 0, sec: 0 }));
+            return;
+        }
+        if (busyStartRef.current === 0) busyStartRef.current = Date.now();
+        if (menuActive) return; // 模态独占动态区，停帧
+        const drive = () => setBusyClock({
+            frame: Math.floor(Date.now() / 120) % SPINNER_FRAMES.length,
+            sec: Math.floor((Date.now() - busyStartRef.current) / 1000),
+        });
+        drive();
+        const t = setInterval(drive, 120);
+        return () => clearInterval(t);
+    }, [state.busy, menuActive]);
     const slashVisible = !menuActive && input.startsWith("/") && filteredCommands.length > 0;
     // ★ 斜杠菜单时输入仍活跃（suppressSubmit 仅把 Enter 交 App 执行选中命令）：可继续打字过滤命令、
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
@@ -315,7 +342,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 state.pushInfo(S.modelSwitched(arg));
                 return true;
             case "/switch":
-                void state.openModelPicker(); // 候选模型选择器（内置清单；VSCode 端可经设置项 deepseekerCode.models 扩充）
+                // 候选模型选择器（内置清单；VSCode 端可经设置项 deepseekerCode.models 扩充）。
+                // 选中后同步 modelDisplay：/model 直输路径两态同更（上方 case），picker 路径此前漏了展示态
+                void state.openModelPicker().then((picked) => { if (picked) setModelDisplay(picked); });
                 return true;
             case "/thinking": {
                 const lvl = arg.toLowerCase();
@@ -550,7 +579,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                     <Box flexDirection="column" paddingX={1}>
                         {dynamicRows.map((row) => <RowView key={row.id} row={row} wrapW={wrapW} streamTail={streamTail} showThinking={state.showThinkingText} />)}
                         {state.busy ? (
-                            <Box marginTop={0.5}><Text color={THEME.coralBright}>● {S.generating}</Text></Box>
+                            <Box marginTop={0.5}>
+                                <Text color={THEME.coralBright}>
+                                    {`${SPINNER_FRAMES[busyClock.frame]} ${S.generating} (${busyClock.sec}s · ${S.escInterrupt})`}
+                                </Text>
+                            </Box>
                         ) : null}
                     </Box>
                 )}

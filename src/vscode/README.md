@@ -61,9 +61,9 @@ code --install-extension deepseeker-code-<version>.vsix
 | 设置项 | 说明 |
 |---|---|
 | `deepseekerCode.apiKey` | DeepSeek API Key。**留空**则回退读取环境变量 `DEEP_SEEK_API_KEY`。 |
-| `deepseekerCode.model` | 默认模型（如 `deepseek-v4-flash` / `deepseek-v4-pro`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.model` | 默认模型（如 `deepseek-flash` / `deepseek-v4-pro`）。**留空**回退 `DEEP_SEEK_MODEL`，再缺省 `deepseek-flash`。 |
 | `deepseekerCode.apiUrl` | API 基址（兼容 OpenAI 协议的代理可改）。留空回退 `DEEP_SEEK_API_URL`，再缺省 `https://api.deepseek.com`。 |
-| `deepseekerCode.auxModel` | 辅助模型（摘要等轻量任务）。留空回退 `DEEP_SEEK_AUX_MODEL`，再缺省 `deepseek-v4-flash`。 |
+| `deepseekerCode.auxModel` | 辅助模型（摘要等轻量任务）。留空回退 `DEEP_SEEK_AUX_MODEL`，再缺省 `deepseek-flash`。 |
 | `deepseekerCode.reasoningEffort` | 推理力度：`high` / `max`（low/medium 已废弃）。留空回退环境变量，缺省 `high`。 |
 | `deepseekerCode.thinking` | 深度思考：`on` / `off`，留空默认开。选 `off` 等价 `DEEP_SEEK_THINKING=0`。 |
 | `deepseekerCode.parallelSafeTools` | 同轮 SAFE 只读工具并发（写/审批/后台仍串行）。**默认开**；关掉回退完全串行。 |
@@ -84,8 +84,8 @@ code --install-extension deepseeker-code-<version>.vsix
 |---|---|---|
 | `DEEP_SEEK_API_KEY` | DeepSeek API Key（与 `deepseekerCode.apiKey` 二选一，必填） | — |
 | `DEEP_SEEK_API_URL` | API 基址（兼容 OpenAI 协议的代理可用此项改） | `https://api.deepseek.com` |
-| `DEEP_SEEK_MODEL` | 主模型 | `deepseek-v4-flash` |
-| `DEEP_SEEK_AUX_MODEL` | 辅助模型（摘要 / 风险分类） | `deepseek-v4-flash` |
+| `DEEP_SEEK_MODEL` | 主模型 | `deepseek-flash` |
+| `DEEP_SEEK_AUX_MODEL` | 辅助模型（摘要 / 风险分类） | `deepseek-flash` |
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max`（`low`/`medium` 已废弃） | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |

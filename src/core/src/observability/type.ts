@@ -59,6 +59,7 @@ export interface TraceBase {
         durationMs?: number; // 该步骤消耗的时长（毫秒）
         attempt?: number;   // 重试次数
         round?: number; // 运行次数
+        model?: string; // 生效模型 id（llm.request/llm.response 埋点）：跨模型对账/按模型折算费用用
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {

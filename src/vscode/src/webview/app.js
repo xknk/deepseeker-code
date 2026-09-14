@@ -22,6 +22,7 @@ toolRowByCallId: new Map(), // toolCallId -> key
 currentAssistant: null, // 流式 assistant 行 key
 currentThinking: null, // 流式 thinking 行 key
 busy: false,
+busySince: 0, // busy 翻 true 的时刻（生成中条/工具行已耗时计秒的公共钟）
 planMode: false,
 autoMode: false,
 thinkingLevel: "high",
@@ -466,9 +467,13 @@ case "tool": {
         const level = toolLevel(row.toolName);
         const statusIcon = row.status === "running" ? "" : row.ok ? "✓" : "✗";
         const statusCls = row.status === "running" ? "run" : row.ok ? "ok" : "fail";
+        // 运行中徽标：codicon 自转 spinner + 已耗时（秒数由全局 1s ticker 只改 textContent，零整行重渲染）
+        const runningBadge = row.status === "running"
+          ? `<span class="tool-status run"><span class="codicon codicon-loading codicon-modifier-spin"></span><span class="t-elapsed" data-s="${row.startedAt || ""}"></span></span>`
+          : "";
         const head = `<span class="tool-icon lvl-${level}">⏺</span><span class="tool-name lvl-${level}">${escapeHtml(row.toolName)}</span>` +
           (row.args && argHint(row.args) ? `<span class="tool-hint">${escapeHtml(argHint(row.args))}</span>` : "") +
-          (statusIcon ? `<span class="tool-status ${statusCls}">${statusIcon}</span>` : "");
+          (statusIcon ? `<span class="tool-status ${statusCls}">${statusIcon}</span>` : runningBadge);
         let body = "";
         if (row.status === "running" && row.progress) {
           const last = String(row.progress).replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean).pop() || "";
@@ -736,6 +741,7 @@ if (evt.kind === "tool") {
 row.toolName = String(evt.toolName ?? "");
 row.args = evt.args;
 row.status = evt.status || "running";
+if (row.status === "running") row.startedAt = row.startedAt || Date.now();
 }
 if (evt.kind === "thinking") row.expanded = false;
 // ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
@@ -781,7 +787,7 @@ switch (evt.type) {
         closeStreaming();
         const key = nextKey();
         state.toolRowByCallId.set(String(evt.toolCallId ?? ""), key);
-        appendRow({ key, kind: "tool", toolName: String(evt.toolName ?? ""), args: evt.args, status: "running", toolCallId: String(evt.toolCallId ?? "") });
+        appendRow({ key, kind: "tool", toolName: String(evt.toolName ?? ""), args: evt.args, status: "running", startedAt: Date.now(), toolCallId: String(evt.toolCallId ?? "") });
         break;
       }
       case "tool.end": {
@@ -882,6 +888,7 @@ switch (evt.type) {
           row.toolName = String(msg.toolName ?? "");
           row.args = msg.args;
           row.status = msg.status || "running";
+          if (row.status === "running") row.startedAt = row.startedAt || Date.now();
         }
         if (msg.kind === "thinking") row.expanded = false;
         // ★ 多模态：用户行的贴图缩略图字段透传
@@ -894,7 +901,11 @@ switch (evt.type) {
         break;
       }
       case "state": {
+        const wasBusy = state.busy;
         state.busy = !!msg.state?.busy;
+        // busy 计秒：true 翻转瞬间记起点；回 false 清零（秒表随轮次，不跨轮累计）
+        if (state.busy && !wasBusy) state.busySince = Date.now();
+        if (!state.busy) state.busySince = 0;
         state.planMode = !!msg.state?.planMode;
         state.autoMode = !!msg.state?.autoMode;
         // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题
@@ -1151,7 +1162,7 @@ el.textContent = "⚠️ " + msg;
   // ———————— 模型选择器（面板内：与提问条同一套 modal + ↑↓/Enter/Esc + 点击交互） ————————
   function openModelPicker() {
     if (!state.models.length) {
-      addInfo("候选清单为空：/model <模型id> 直输切换，或在设置 deepseekerCode.models 里追加模型 id");
+      addInfo("候选清单为空：/model <模型id> 直输切换，或在设置 deepseekerCode.models 里配置候选模型");
       return;
     }
     state.modelPicker = true;
@@ -1690,10 +1701,11 @@ addInfo(`当前模型：${state.model || "默认（DEEP_SEEK_MODEL）"}\n用法�
 }
 return true;
 case "switch":
-// ★ 延迟一拍再开：执行命令的这次 Enter 还会冒泡到 document 级选择器键盘监听，
-//   同步打开会被同一事件立刻当「确认选中」（选择器闪现即切到第 0 项）。快照缺失时走 host 回环。
-if (state.models.length) setTimeout(openModelPicker, 0);
-else vscode.postMessage({ type: "pickModel" });
+// ★ 一律走 host 回环（pickModel → openModelPicker 带最新候选）：设置项 deepseekerCode.models
+//   改动即时生效。此前快照命中时本地直开，但 state.models 只在 state 消息时刷新——
+//   改了设置没有新快照落地就会吃到旧清单（删掉的模型还出现在选择器里）。
+//   消息回环天然跨事件，Enter 冒泡误确认（原「延迟一拍」防的坑）不会发生。
+vscode.postMessage({ type: "pickModel" });
 return true;
 case "thinking":
 if (["off", "high", "max"].includes(arg)) {
@@ -1779,6 +1791,7 @@ function buildComposer() {
 const c = $("#composer");
 c.innerHTML = `
 <div class="composer-shell">
+<div class="busy-strip" id="busy-strip" hidden><span class="codicon codicon-loading codicon-modifier-spin"></span><span id="busy-label">生成中…</span></div>
 <div class="composer-line">
 <span class="composer-prompt">❯</span>
 <textarea id="input" rows="1" placeholder="输入消息，/ 查看命令" spellcheck="false"></textarea>
@@ -2118,6 +2131,15 @@ if (btnSend) {
 btnSend.textContent = state.busy ? "■" : "↑";
 btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
 }
+// 生成中指示条：显示在输入框上方（spinner 由 codicon 自转，秒表由 1s ticker 驱动）
+const strip = $("#busy-strip");
+if (strip) {
+strip.hidden = !state.busy;
+if (state.busy) {
+const lbl = $("#busy-label");
+if (lbl) lbl.textContent = `生成中… ${state.busySince ? Math.round((Date.now() - state.busySince) / 1000) : 0}s`;
+}
+}
 // 项目根：末段文件夹名 + 完整路径 title（让用户一眼看到 agent 工作在哪个项目）
 const rootName = $("#project-root-name");
 if (rootName) {
@@ -2128,6 +2150,18 @@ rootName.parentElement.title = p ? `项目根：${p}（点击切换）` : "未�
 }
 updateModeToggle();
 }
+// 1s 心跳：只改文本节点——工具行已耗时（.t-elapsed）与生成中条秒表；无行在跑时零 DOM 写。
+//   刻意不做整行重建（rebuildRow 会闪 + 丢展开态）；spinner 的连续动画由 codicon CSS 无限旋转承担。
+setInterval(() => {
+document.querySelectorAll(".t-elapsed[data-s]").forEach((el) => {
+const s = Number(el.dataset.s);
+if (s) el.textContent = `${Math.max(1, Math.round((Date.now() - s) / 1000))}s`;
+});
+if (state.busy && state.busySince) {
+const lbl = $("#busy-label");
+if (lbl) lbl.textContent = `生成中… ${Math.round((Date.now() - state.busySince) / 1000)}s`;
+}
+}, 1000);
 
 // —— 模式配置面板：胶囊按钮 toggle 显示/隐藏 ——
 function toggleModePopover() {

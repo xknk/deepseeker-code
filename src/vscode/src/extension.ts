@@ -33,9 +33,30 @@ let listOutputStylesForWebview: () => Array<{ name: string; description: string 
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
 let untrustDirFn: (dir: string) => Promise<boolean> = async () => false;
 /** /model 选择器的内置候选清单（activate 第 4 步动态 import 后赋值）。 */
-let selectableModels: string[] = ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"];
+let selectableModels: string[] = ["deepseek-flash", "deepseek-v4-pro", "deepseek-flash-vision-exp"];
+/** 全局默认模型名（core MODEL_NAME 的回退快照：env 未配时为 deepseek-flash）。状态快照下发「生效模型」用。 */
+let modelName = "deepseek-flash";
 /** per-workspace 持久化（模型选择等）；activate 赋值。 */
 let workspaceState: vscode.Memento | null = null;
+/** 全局状态栏 busy 指示（懒建）：任一页签执行中即显示旋转图标，面板被编辑器盖住时仍可见。 */
+let busyStatusBar: vscode.StatusBarItem | null = null;
+
+/** 依当前存活页签的 busy 情况同步状态栏（busy 翻转必经 onBusy→postState；Tab 销毁时补调一次）。 */
+const syncBusyStatusBar = (): void => {
+  if (!busyStatusBar) {
+    busyStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+    busyStatusBar.name = "DeepSeeker-Code";
+    busyStatusBar.command = "deepseekerCode.openChat";
+  }
+  const anyBusy = tabs.some((t) => !t.disposed && t.host.isBusy);
+  if (anyBusy) {
+    busyStatusBar.text = "$(sync~spin) DeepSeeker-Code";
+    busyStatusBar.tooltip = "DeepSeeker-Code 正在执行…（点击打开聊天面板）";
+    busyStatusBar.show();
+  } else {
+    busyStatusBar.hide();
+  }
+};
 
 // —— 引擎后台加载状态（治启动顿挫：activate 不再 await initEngine，见 activate 第 8 步） ——
 /** 引擎就绪闸门：activate 启动后台 initEngine，host 首轮 runAgent 前等待（失败也放行，仅缺 MCP/skills）。 */
@@ -152,8 +173,16 @@ const cleanImageTmp = (): void => {
     .catch(() => { /* 目录尚不存在 = 无残留 */ });
 };
 
-/** 最近活动的页签（无则 null）。 */
-const latestTab = (): ChatTab | null => activeTab ?? tabs[tabs.length - 1] ?? null;
+/**
+ * 最近活动的页签（无则 null）。
+ * ★ 只认活页签：activeTab 可能短暂指向已销毁面板（onDidDispose 清理前/清理竞态），
+ *   一旦放行，revealTab 会对死面板 reveal 抛「Webview is disposed」且永不自愈（重载窗口才恢复）。
+ */
+const latestTab = (): ChatTab | null => {
+  if (activeTab && !activeTab.disposed) return activeTab;
+  const alive = tabs.filter((t) => !t.disposed);
+  return alive.length ? alive[alive.length - 1] : null;
+};
 
 /** 定向投递：事件只发给所属页签的 webview（多 Tab 各聊各的，互不串扰）；Tab 已销毁则丢弃。 */
 const deliverTo = (tab: ChatTab, msg: Record<string, unknown>): void => {
@@ -169,7 +198,9 @@ const postState = (tab: ChatTab): void => {
       busy: tab.host.isBusy,
       planMode: tab.host.currentPlanMode,
       autoMode: tab.host.currentAutoMode,
-      model: tab.host.currentModel,
+      // ★ 下发「生效模型」而非裸覆盖值：currentModel 为 ""（未覆盖、走 core 默认）时兜底全局默认，
+      //   webview 才能显示「当前：…」与 ● 标记、预选光标落在真实生效模型上（否则空串匹配不到任何候选）。
+      model: tab.host.currentModel || modelName,
       // ★ 候选清单随快照下发：webview /switch 面板内选择器无需往返即可渲染
       models: modelCandidates(),
       initError: initError ?? "",
@@ -179,20 +210,22 @@ const postState = (tab: ChatTab): void => {
       vision: isVisionEnabled(tab.host.currentModel || undefined),
     },
   });
+  syncBusyStatusBar();
 };
 
 /**
- * 模型候选清单（内置 SELECTABLE_MODELS + 设置项 deepseekerCode.models 追加去重，现读即生效）。
+ * 模型候选清单（现读设置即生效）：设置项 deepseekerCode.models **非空 = 全量自定义候选**
+ * （替换内置——配了什么选择器就只有什么）；留空/未配 = 内置 SELECTABLE_MODELS。
  * 脏条目防护：设置 UI 里容易把整个 JSON 数组文本当成一个条目粘进来（含 [ ] " , 等字符），
- * 这类字符串不可能是合法模型 id，直接跳过，避免选择器出现垃圾候选。
+ * 这类字符串不可能是合法模型 id，直接跳过；剔完为空回退内置，防选择器开天窗。
  */
 function modelCandidates(): string[] {
   const extra = vscode.workspace.getConfiguration("deepseekerCode").get<unknown[]>("models") ?? [];
-  const list = [...selectableModels];
+  const list: string[] = [];
   for (const m of extra) {
     if (typeof m === "string" && m.trim() && !/[[\]",]/.test(m) && !list.includes(m)) list.push(m.trim());
   }
-  return list;
+  return list.length ? list : [...selectableModels];
 }
 
 /**
@@ -312,7 +345,10 @@ const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): C
     tab.disposed = true;
     if (tab.host.isBusy) tab.host.abort();
     tabs = tabs.filter((t) => t !== tab);
-    if (activeTab === tab) activeTab = latestTab();
+    // ★ 修复死引用：此刻 activeTab 仍 === tab，latestTab() 会原样返回它（等于没清），
+    //   之后 openChat/reveal 对死面板 reveal 必抛「Webview is disposed」。直接从过滤后的 tabs 取尾。
+    if (activeTab === tab) activeTab = tabs.length ? tabs[tabs.length - 1] : null;
+    syncBusyStatusBar(); // 销毁的页签可能正 busy：状态栏立即熄灭，不留假指示
   });
   tabs.push(tab);
   activeTab = tab;
@@ -401,9 +437,12 @@ const handleUploadImage = async (tab: ChatTab, msg: Record<string, unknown>): Pr
     await fs.promises.mkdir(dir, { recursive: true });
     const filePath = path.join(dir, `${randomUUID()}.${ext}`);
     await fs.promises.writeFile(filePath, Buffer.from(base64, "base64"));
+    // 落盘 await 期间面板可能已销毁（关 Tab/重载）：死面板 postMessage 会抛「Webview is disposed」
+    if (tab.disposed) return;
     tab.panel.webview.postMessage({ type: "imageSaved", path: filePath, name });
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
+    if (tab.disposed) return;
     tab.panel.webview.postMessage({ type: "imageSaved", path: "", name, error: m });
   }
 };
@@ -660,7 +699,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
@@ -682,6 +721,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   readTrustedDirsFn = readTrustedDirs;
   untrustDirFn = untrustDir;
   selectableModels = SELECTABLE_MODELS;
+  modelName = MODEL_NAME;
 
   // ★ 多根沙箱：注册工作区所有文件夹 → core 的 resolveSafePath 放行「落在任一文件夹内」的绝对路径，
   //   仅拦截逃出整个工作区的路径。多根工作区下 agent 可直接读写任意项目，不再被锁死在 folder[0]。

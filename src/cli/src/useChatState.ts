@@ -648,13 +648,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setPendingModel((prev) => { prev?.resolve(model); return null; });
     }, []);
     /** 唤出 /model 选择器：内置候选清单（对标 Claude Code /model 的固定选项，任意模型 id 仍可直输）
-     *  → 模态选择 → 选定即 setModelOverride（切换 + 持久化）。 */
-    const openModelPicker = useCallback(async () => {
+     *  → 模态选择 → 选定即 setModelOverride（切换 + 持久化）。返回所选 id（null=取消），
+     *  调用方据此同步展示态（modelDisplay），否则状态栏与下次打开的高亮/「当前」标记停留在旧模型。 */
+    const openModelPicker = useCallback(async (): Promise<string | null> => {
         const picked = await new Promise<string | null>((resolve) => setPendingModel({ models: SELECTABLE_MODELS, resolve }));
         if (picked) {
             setModelOverride(picked);
             pushInfo(S.modelSwitched(picked));
         }
+        return picked;
     }, [pushInfo, setModelOverride]);
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
     const setPlanMode = useCallback((on: boolean) => { planModeRef.current = on; }, []);

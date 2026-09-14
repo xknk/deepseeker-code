@@ -21,7 +21,7 @@ if (!apiKey) {
     console.error("❌ 未设置 DEEP_SEEK_API_KEY，无法打真实 API");
     process.exit(1);
 }
-const modelName = process.env.DEEP_SEEK_MODEL || "deepseek-v4-flash";
+const modelName = process.env.DEEP_SEEK_MODEL || "deepseek-flash";
 console.log(`模型: ${modelName}\n`);
 
 const THINK = "用户问的是对当前 agent 的评价。我需要从架构、成本、可维护性三个维度组织回答，" +

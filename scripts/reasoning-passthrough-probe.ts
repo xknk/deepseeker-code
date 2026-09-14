@@ -20,7 +20,7 @@ if (!apiKey) {
     console.error("❌ 未设置 DEEP_SEEK_API_KEY，无法打真实 API");
     process.exit(1);
 }
-const modelName = process.env.DEEP_SEEK_MODEL || "deepseek-v4-flash";
+const modelName = process.env.DEEP_SEEK_MODEL || "deepseek-flash";
 const baseURL = process.env.DEEP_SEEK_API_URL || "https://api.deepseek.com";
 // 复用产品同款 client（同 env、同超时）；SDK 的自动重试只针对瞬态错误，400 类校验错误不会重试，
 // 不影响探针判读。client = model.ts 供 deepseek provider 用的同一个单例。

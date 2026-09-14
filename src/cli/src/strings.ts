@@ -48,6 +48,8 @@ interface StringDict {
     approvalDeny: string;
     errAborted: string;
     busyBlockSend: string;
+    /** 底部「生成中」行动画的 esc 提示尾巴。 */
+    escInterrupt: string;
     /** inbox steering：排队成功提示。 */
     inboxQueued: string;
     /** inbox steering：回合边界送达模型提示（n=条数）。 */
@@ -163,6 +165,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "拒绝",
         errAborted: "已中止当前轮。",
         busyBlockSend: "⏳ 正在生成，请等待或按 Esc 中止后再发送。",
+        escInterrupt: "Esc 中止",
         inboxQueued: "📮 已排队，将在回合边界送达模型（Esc 仍可中止）。",
         inboxClaimed: (n: number) => `📬 已送达模型（${n} 条补充输入）`,
         inboxCarryover: (n: number) => `📬 本轮结束时 ${n} 条补充输入未在回合边界送达，已写入会话历史，下轮对话自动带入。`,
@@ -307,6 +310,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalDeny: "Deny",
         errAborted: "Aborted current turn.",
         busyBlockSend: "⏳ Still generating—wait or press Esc to abort before sending.",
+        escInterrupt: "esc to interrupt",
         inboxQueued: "📮 Queued—will reach the model at the next round boundary (Esc still aborts).",
         inboxClaimed: (n: number) => `📬 Delivered to the model (${n} supplemental input${n > 1 ? "s" : ""})`,
         inboxCarryover: (n: number) => `📬 ${n} supplemental input${n > 1 ? "s" : ""} not claimed at a round boundary before this run ended; saved to session history and carried into the next turn.`,

@@ -125,7 +125,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         events({
             sessionId,
             eventType: 'llm.request',
-            metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round, ...prefixFingerprint },
+            metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model, ...prefixFingerprint },
             // ★ P2 口径：估算加上工具 schema 常数项（与 API 真实 prompt_tokens 同口径，trace 里 est/real 才可比）
             usage: { prompt_tokens: estimateTokens(inferenceMessages) + toolsTokens },
             payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
@@ -279,7 +279,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         events({
             sessionId,
             eventType: 'llm.response',
-            metadata: { depth, decisionSource: llmDecisionSource, ok: true, durationMs: performance.now() - startTime, round },
+            metadata: { depth, decisionSource: llmDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model },
             usage: {
                 prompt_tokens: lastUsage?.prompt_tokens,
                 completion_tokens: lastUsage?.completion_tokens,

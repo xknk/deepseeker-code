@@ -2,7 +2,7 @@
     "name": "deepseeker-code",
     "displayName": "DeepSeeker-Code",
     "description": "DeepSeek 驱动的终端级 AI 编程助手（VS Code 插件入口）。复用 core agent 引擎，与 CLI 功能一致。",
-    "version": "1.0.60",
+    "version": "1.0.65",
     "publisher": "deepseeker-code",
     "license": "MIT",
     "icon": "media/icon.png",
@@ -104,7 +104,7 @@
                 "deepseekerCode.model": {
                     "type": "string",
                     "default": "",
-                    "description": "默认模型（如 deepseek-v4-flash / deepseek-v4-pro）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-v4-flash。"
+                    "description": "默认模型（如 deepseek-flash / deepseek-v4-pro）。留空时用环境变量 DEEP_SEEK_MODEL，再缺省为 deepseek-flash。"
                 },
                 "deepseekerCode.models": {
                     "type": "array",
@@ -112,7 +112,7 @@
                         "type": "string"
                     },
                     "default": [],
-                    "description": "「切换模型」选择器的候选模型清单：在此添加模型 id（追加在内置候选 deepseek-v4-flash / deepseek-v4-pro / deepseek-v4-flash-vision-exp 之后并去重）。改完即生效，无需重启。"
+                    "description": "「切换模型」选择器的候选模型清单：非空时作为全量候选（替换内置 deepseek-flash / deepseek-v4-pro / deepseek-flash-vision-exp——配了什么选择器就只有什么），留空用内置。改完即生效，无需重启。"
                 },
                 "deepseekerCode.locale": {
                     "type": "string",
@@ -132,7 +132,7 @@
                 "deepseekerCode.auxModel": {
                     "type": "string",
                     "default": "",
-                    "description": "辅助模型（摘要等轻量任务）。留空回退 DEEP_SEEK_AUX_MODEL，再缺省 deepseek-v4-flash。"
+                    "description": "辅助模型（摘要等轻量任务）。留空回退 DEEP_SEEK_AUX_MODEL，再缺省 deepseek-flash。"
                 },
                 "deepseekerCode.reasoningEffort": {
                     "type": "string",

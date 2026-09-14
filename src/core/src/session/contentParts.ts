@@ -60,7 +60,7 @@ export const hasImagePart = (content: unknown): boolean => imageUrlsOf(content).
 
 /**
  * 模型名视觉能力启发式：id 带 vision / vlm / qwen 式 -vl 段视为支持图片输入。
- * 覆盖 DeepSeek 在售（deepseek-v4-flash-vision-exp）与常见开源命名（qwen-vl-*、internvl 等）；
+ * 覆盖 DeepSeek 在售（deepseek-flash-vision-exp）与常见开源命名（qwen-vl-*、internvl 等）；
  * 误判兜底：DEEP_SEEK_VISION env 可显式强开/强关（见 isVisionEnabled）。
  */
 export const modelSupportsVision = (modelId: string): boolean =>

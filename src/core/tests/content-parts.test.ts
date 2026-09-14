@@ -155,11 +155,11 @@ describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
     });
 
     it("modelSupportsVision 命名启发式：vision/vlm/-vl 命中，普通模型与 vllm 不命中", () => {
-        assert.ok(modelSupportsVision("deepseek-v4-flash-vision-exp"));
+        assert.ok(modelSupportsVision("deepseek-flash-vision-exp"));
         assert.ok(modelSupportsVision("qwen-vl-max"));
         assert.ok(modelSupportsVision("Qwen2-VL-7B"));
         assert.ok(modelSupportsVision("some-vlm-model"));
-        assert.ok(!modelSupportsVision("deepseek-v4-flash"));
+        assert.ok(!modelSupportsVision("deepseek-flash"));
         assert.ok(!modelSupportsVision("deepseek-v4-pro"));
         assert.ok(!modelSupportsVision("vllm"), "vllm 是推理运行时不是 vision 模型");
         assert.ok(!modelSupportsVision(""));
@@ -167,18 +167,18 @@ describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
 
     it("isVisionEnabled 无感判定：env 未设按生效模型名推断；env 显式设置优先级最高", () => {
         delete process.env.DEEP_SEEK_VISION;
-        assert.ok(isVisionEnabled("deepseek-v4-flash-vision-exp"), "vision 模型自动开");
-        assert.ok(!isVisionEnabled("deepseek-v4-flash"), "普通模型自动关");
+        assert.ok(isVisionEnabled("deepseek-flash-vision-exp"), "vision 模型自动开");
+        assert.ok(!isVisionEnabled("deepseek-flash"), "普通模型自动关");
         process.env.DEEP_SEEK_VISION = "0";
-        assert.ok(!isVisionEnabled("deepseek-v4-flash-vision-exp"), "env 显式关压过模型名命中");
+        assert.ok(!isVisionEnabled("deepseek-flash-vision-exp"), "env 显式关压过模型名命中");
         process.env.DEEP_SEEK_VISION = "1";
-        assert.ok(isVisionEnabled("deepseek-v4-flash"), "env 显式开压过模型名不命中");
+        assert.ok(isVisionEnabled("deepseek-flash"), "env 显式开压过模型名不命中");
         delete process.env.DEEP_SEEK_VISION;
     });
 
     it("toIngestContents：vision 模型（env 未设）wire 与 archive 同引用——贴图直达零尾注", () => {
         delete process.env.DEEP_SEEK_VISION;
-        const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }], "deepseek-v4-flash-vision-exp");
+        const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }], "deepseek-flash-vision-exp");
         assert.ok(r.wire === r.archive, "vision 模型应复用 archive 引用（parts 直达）");
         assert.equal(imageUrlsOf(r.archive).length, 1);
     });

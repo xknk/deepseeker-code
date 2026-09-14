@@ -116,6 +116,25 @@ body {
   }
 }
 
+/* 输入框上方「生成中」指示条：codicon 自转 + 秒表；busy 结束经 hidden 隐藏。
+   ★ display:flex 会盖过 UA 的 [hidden]{display:none}，必须显式补回，否则常显。 */
+.busy-strip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 2px 0;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.busy-strip[hidden] {
+  display: none;
+}
+
+.busy-strip .codicon-loading {
+  font-size: 12px;
+}
+
 .actions {
   display: flex;
   gap: 1px;
@@ -530,6 +549,17 @@ body {
 
 .tool-status.fail {
   color: var(--error);
+}
+
+/* 运行中工具行徽标：codicon spinner + 已耗时（tabular-nums 防秒数跳动抖宽） */
+.tool-status .codicon-loading {
+  font-size: 12px;
+  margin-right: 2px;
+  color: var(--fg-dim);
+}
+
+.tool-status .t-elapsed {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ⎿ 结果/进度前缀（CLI 连接线） */
