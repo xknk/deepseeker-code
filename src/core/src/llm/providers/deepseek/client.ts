@@ -1,21 +1,28 @@
 /**
  * @file llm/providers/deepseek/client.ts
- * @description DeepSeek OpenAI SDK 客户端单例 + 模型参数（DEEP_SEEK_* env 接入）。
+ * @description DeepSeek OpenAI SDK 客户端懒加载单例 + 模型参数（DEEP_SEEK_* env 接入）。
  *  从 llm/createModel.ts 搬迁（单一数据源迁入 provider）。所有 DeepSeek 对话（流式 / 摘要 / 分类）复用此 client。
  */
 import OpenAI from "openai";
 
-/** 全局共享的 OpenAI 客户端单例（DeepSeek 兼容 OpenAI 协议）。 */
-export const model = new OpenAI({
-    baseURL: process.env.DEEP_SEEK_API_URL || 'https://api.deepseek.com',
-    apiKey: process.env.DEEP_SEEK_API_KEY,
-    // ★ 瞬态错误自动指数退避重试（SDK 内置：408/409/429/500/502/503/504 + 连接错误），
-    //   覆盖非流式 helper（summarize / classifyRisk）。★ 流式对话不在此列：stream.ts 按
-    //   maxRetries: 0 关掉 SDK 层，瞬态重试单层归 streamInference 应用层（Retry-After 感知 +
-    //   text.reset/abort/超长降级语义，SDK 层不具备）——两层同开会把 429 放大成 5×3=15 次请求。
-    maxRetries: 4,
-    timeout: 120_000, // 单次请求 120s 兜底（长上下文 / 长生成场景）
-});
+let _model: OpenAI | undefined;
+/**
+ * 全局共享的 OpenAI 客户端懒加载单例（DeepSeek 兼容 OpenAI 协议），首次 getModel() 时构造。
+ * ★ 懒加载是硬要求而非风格：OpenAI 构造在缺 DEEP_SEEK_API_KEY 时即 throw，顶层构造会炸掉整条
+ *   import 链——曾致 27/40 个测试文件在无凭证环境「加载期整文件失败」，表象像测试坏了、实为缺
+ *   环境变量。按需构造后，缺 key 报错延迟到真正发起 API 调用时，模块加载零副作用（2026-09-14 修）。
+ */
+export const getModel = (): OpenAI =>
+    (_model ??= new OpenAI({
+        baseURL: process.env.DEEP_SEEK_API_URL || 'https://api.deepseek.com',
+        apiKey: process.env.DEEP_SEEK_API_KEY,
+        // ★ 瞬态错误自动指数退避重试（SDK 内置：408/409/429/500/502/503/504 + 连接错误），
+        //   覆盖非流式 helper（summarize / classifyRisk）。★ 流式对话不在此列：stream.ts 按
+        //   maxRetries: 0 关掉 SDK 层，瞬态重试单层归 streamInference 应用层（Retry-After 感知 +
+        //   text.reset/abort/超长降级语义，SDK 层不具备）——两层同开会把 429 放大成 5×3=15 次请求。
+        maxRetries: 4,
+        timeout: 120_000, // 单次请求 120s 兜底（长上下文 / 长生成场景）
+    }));
 
 // Q-4：模型参数外置到环境变量（换模型 / 关 reasoning 不必改源码）。
 export const MODEL_NAME = process.env.DEEP_SEEK_MODEL || "deepseek-flash";

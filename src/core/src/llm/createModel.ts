@@ -9,7 +9,7 @@
  *  思考开关用于展示与初始化）保留旧路径即可，无需感知 provider 重构。
  */
 export {
-    model,
+    getModel,
     MODEL_NAME,
     AUX_MODEL_NAME,
     MODEL_REASONING_EFFORT,

@@ -4,7 +4,8 @@
  *  回填到 process.env.DEEP_SEEK_*（仅当 env 未设时——环境变量优先级最高，作为逃生通道）。
  *
  *  ★ 必须是 main.tsx 的第一个 import（在任何 core 模块求值之前执行）。core 模块（config/index.ts、
- *    createModel.ts 等）在加载期就把 env 拍成定值（如 parallelSafeTools、OpenAI client 的 apiKey），
+ *    createModel.ts 等）在加载期就把 env 拍成定值（如 parallelSafeTools、模型名等常量；OpenAI client
+ *    已改 getModel() 懒构造，apiKey 在首次 API 调用时才读取），
  *    而它们经 prefs.ts / @/trust 被 main.tsx 静态 import——ESM 按声明序 depth-first post-order 求值，
  *    本文件作为「纯叶子 + 首条 import」必先于它们求值，从而保证 env 在 core 定值前已回填。
  *  ★ 严禁 import core 或 @/common（会拖入 config/index.ts 求值图，反而把回填时机推后）。仅用 node 内置。

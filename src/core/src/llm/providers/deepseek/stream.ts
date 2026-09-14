@@ -10,7 +10,7 @@
 import { Msg } from "@/session/contextCore.ts";
 import { toolMsg, MsgParams } from "../../type.ts";
 import { ProviderStreamChunk, ProviderStreamOpts } from "../../provider.ts";
-import { model, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./client.ts";
+import { getModel, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./client.ts";
 
 /** 流式 idle 超时阈值（ms）：两 chunk 间隔超过此值即判定为 stall（连接保持但不吐 chunk），
  *  中止底层 fetch 并上抛带标记错误（stream_idle_timeout），供 streamInference 重试或优雅收尾。
@@ -96,7 +96,7 @@ export const streamChat = async function* (
     //   "不再叠加第二层" 注释即此意，但此前实际叠加了）。非流式 helper（summarize/classifyRisk）不受此
     //   影响，保留 client 默认 maxRetries=4。
     // stream:true 时 SDK 返回 Stream<ChatCompletionChunk>（AsyncIterable），手动驱动 reader 消费
-    const stream = await model.chat.completions.create(requestBody, {
+    const stream = await getModel().chat.completions.create(requestBody, {
         signal: combinedSignal,
         maxRetries: 0,
     }) as unknown as AsyncIterable<any>;

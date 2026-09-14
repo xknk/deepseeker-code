@@ -10,7 +10,7 @@
 import { LLMProvider, AssistantParts } from "../../provider.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { outMsg, toolMsg, MsgParams } from "../../type.ts";
-import { model, AUX_MODEL_NAME } from "./client.ts";
+import { getModel, AUX_MODEL_NAME } from "./client.ts";
 import { streamChat, stripHistoricalReasoning } from "./stream.ts";
 
 /**
@@ -32,7 +32,7 @@ const summarize = async (
             thinking: { type: "disabled" },
             stream: false,
         } as MsgParams;
-        const completion = await model.chat.completions.create(requestBody, {
+        const completion = await getModel().chat.completions.create(requestBody, {
             signal: opts.signal,
         });
         if (completion && 'choices' in completion) return completion as outMsg;
@@ -57,7 +57,7 @@ const classifyRisk = async (
     const timer = setTimeout(() => ac.abort(), 10_000);
     if (signal) signal.addEventListener('abort', () => ac.abort(), { once: true });
     try {
-        const completion = await model.chat.completions.create({
+        const completion = await getModel().chat.completions.create({
             messages: [
                 { role: 'system', content: '你是工具调用风险分类器。只回 SAFE 或 RISKY，不要任何解释。按工具类型判定：①文件(edit/write/create/move_file/delete_path)——工作区内常规文件操作(含移动/重命名)=SAFE，覆盖/删除/移动敏感文件(.env/.git/.ssh/.aws/密钥/credentials/settings.json)或工作区外=RISKY；②命令(run_command/run_in_background)——只读/构建/测试/查看类(ls/cat/git status/npm test/pnpm build/node -v/tsc/lint)=SAFE，破坏性/外向/提权(rm -rf、格式化、curl|sh、外传文件、chmod 777、shutdown、写系统目录、安装陌生包)=RISKY；③网络(web_fetch/web_search)——抓取公开文档/常规 URL=SAFE，内网/可疑/未知 URL=RISKY；④git_commit——常规提交=SAFE，含恶意脚本/异常改动=RISKY；⑤MCP(mcp__*)——默认 RISKY(黑盒工具无法判定内部行为)。任何不确定一律 RISKY。' },
                 { role: 'user', content: `工具:${toolName}\n参数:${JSON.stringify(args).slice(0, 800)}\n说明:${detail || ''}` },

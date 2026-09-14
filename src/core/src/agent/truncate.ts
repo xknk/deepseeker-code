@@ -468,6 +468,28 @@ export const ensureSummarySlot = (messageArr: Msg[]): void => {
 const SUMMARY_SELF_COMPACT_THRESHOLD = 2000;
 
 /**
+ * 压缩落盘单点：先 setRollingState 成功、再 appendEvent——「顺序铁律」由本函数结构化保证（P1-3 去重：
+ * 原先归档分支与摘要自收敛分支两份近乎逐字复制的实现，改一处忘一处即静默劣化）。
+ * 铁律依据：崩溃夹缝只会出现「state 有计数、transcript 无事件」的单向 desync，recovery 的交叉校验
+ * 按此方向判定自愈；反过来写会留下双向矛盾，恢复层无法裁决。
+ * 失败分支（catch）只回写 state、刻意不走此函数——失败无压缩事实，不写 compaction 事件。
+ */
+const persistCompaction = async (sessionId: string, archivedMessageCount: number, summary: string): Promise<void> => {
+    await setRollingState(sessionId, {
+        archivedMessageCount,
+        rollingSummary: summary,
+        consecutiveFailures: 0,
+        updatedAt: new Date().toISOString()
+    });
+    // 携带归档计数 + 摘要全文 → transcript 自包含，fork/审计不再押 state.json 单点。
+    await appendEvent(sessionId, {
+        dscEvent: 'compaction',
+        archivedMessageCount,
+        summary,
+    });
+};
+
+/**
  * @description: 压缩全量上下文
  *  当 token 超过 modelWindow * compactRatio 时，循环把”可压缩区”分批压成摘要，
  *  写入 messageArr[1] 的滚动摘要槽，仅保留最近 keepRecentUnits 条活动消息。
@@ -556,20 +578,8 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 // 注意：此时我们要捕获这批被压缩的废料中，最后一条消息的真实持久化唯一 ID (如 uuid)
                 const store = await getRollingState(event.sessionId);
                 store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                await setRollingState(event.sessionId, {
-                    archivedMessageCount: store.archivedMessageCount,
-                    rollingSummary: summaryMsg.content,
-                    consecutiveFailures: 0,
-                    updatedAt: new Date().toISOString()
-                })
-                // ★ 事件日志化：压缩边界事件行。顺序铁律：先 setRollingState 成功、再 appendEvent——
-                //   崩溃夹缝只会出现「state 有计数、transcript 无事件」单向 desync（recovery 交叉校验按此方向判定）。
-                //   携带归档计数 + 摘要全文 → transcript 自包含，fork/审计不再押 state.json 单点。
-                await appendEvent(event.sessionId, {
-                    dscEvent: 'compaction',
-                    archivedMessageCount: store.archivedMessageCount,
-                    summary: summaryMsg.content,
-                })
+                // ★ 压缩边界事件行经 persistCompaction 单点落盘（先 state 后 event 的顺序铁律在其内保证）。
+                await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
             } else if (keep > 1) { // 如果保留的条数还是大于最大token，则继续减少保留数据
                 keep--;
                 continue;
@@ -581,19 +591,8 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 const store = await getRollingState(event.sessionId);
                 // 注：本分支 toCompact 为空（无新归档消息），仅对既有摘要做再压缩——归档计数不变，
                 //   仅需把新的 summary 内容落盘。原先 `+ toCompact.length`(=0) 是误导死代码，已移除。
-                await setRollingState(event.sessionId, {
-                    archivedMessageCount: store.archivedMessageCount,
-                    rollingSummary: summaryMsg.content,
-                    consecutiveFailures: 0,
-                    updatedAt: new Date().toISOString()
-                })
-                // ★ 事件日志化：摘要自收敛分支（toCompact 为空、归档计数不变，仅摘要被再压缩）——
-                //   fork 派生"该时点的摘要文本"依赖此事件，与归档分支同样先 state 后事件。
-                await appendEvent(event.sessionId, {
-                    dscEvent: 'compaction',
-                    archivedMessageCount: store.archivedMessageCount,
-                    summary: summaryMsg.content,
-                })
+                //   fork 派生"该时点的摘要文本"依赖此处的 compaction 事件，与归档分支同经 persistCompaction 单点。
+                await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
             } else {
                 break
             }
@@ -607,7 +606,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             const store = await getRollingState(event.sessionId);
             // 2. 失败计数默默加 1
             const nextFailures = (store.consecutiveFailures || 0) + 1;
-            // 3. 一脚强行回写落盘，锁死连续失败的物理记忆
+            // 3. 一脚强行回写落盘，锁死连续失败的物理记忆（刻意不走 persistCompaction：失败无压缩事实，不写事件）
             await setRollingState(event.sessionId, {
                 archivedMessageCount: store.archivedMessageCount || 0,
                 rollingSummary: summaryMsg?.content || "",

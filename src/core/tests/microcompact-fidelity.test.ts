@@ -10,9 +10,9 @@
  *  （路径相对化依赖 appConfig.userWorkspaceDir，沙盒指向 tmp 与样例路径不匹配，不在本文件钉范围。）
  */
 import os from "node:os";
+import assert from "node:assert/strict";
 process.env.DEEPSEEKER_CODE_DATA_DIR = process.env.DEEPSEEKER_CODE_DATA_DIR ?? os.tmpdir();
 const { microcompactTextContent } = await import("@/agent/truncate.ts");
-const assert = (await import("node:assert/strict")).default;
 
 const code = [
     "   42:     const submit = async () => {",
