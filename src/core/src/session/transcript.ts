@@ -99,17 +99,29 @@ type MessageWithId = OpenAI.Chat.ChatCompletionMessageParam & {
  * ★ 短重试：磁盘瞬时忙/锁（尤其 Windows）下 appendFile 偶发失败，重试 3 次降低「内存已 push、磁盘未落」
  *   导致重启后转录不一致的概率。部分写入防御：appendFile 可能写入部分字节后抛错（磁盘满/中断），
  *   若直接重试会再追加完整行 → JSONL 出现「半行 + 全行」。失败时先截断回写入前大小，再重试。
+ * ★ 成功路径免 stat（2026-09-15）：原实现每次 append 前都 fs.stat 拿写入前大小——但该值只在
+ *   失败截断分支才用得上。改用进程内字节水位（path → 已知长度，本进程成功 append 后累加），
+ *   首次（缓存 miss）仍 stat 校准；失败截断目标 = 水位值 = 精确的写入前大小，语义与原实现逐位一致。
+ *   单人本地单进程写同一会话文件；deleteSession 删文件后条目过期无害（下次失败路径截断目标略偏，
+ *   极端场景，且原实现同样无法防御外部改写）。
  */
+const appendSizeCache = new Map<string, number>(); // path → 已知字节长度（写入前大小）
 const appendLineWithRetry = async (p: string, payload: string): Promise<void> => {
     const MAX_ATTEMPTS = 3;
+    const payloadBytes = Buffer.byteLength(payload, "utf-8");
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        let beforeSize = 0;
-        try { beforeSize = (await fs.stat(p)).size; } catch { /* 文件不存在 → beforeSize=0 */ }
+        let beforeSize = appendSizeCache.get(p);
+        if (beforeSize === undefined) {
+            beforeSize = 0;
+            try { beforeSize = (await fs.stat(p)).size; } catch { /* 文件不存在 → beforeSize=0 */ }
+        }
         try {
             await fs.appendFile(p, payload, "utf-8");
+            appendSizeCache.set(p, beforeSize + payloadBytes); // ★ 水位推进：下次 append 免 stat
             return;
         } catch (e) {
             try { await fs.truncate(p, beforeSize); } catch { /* 截断失败则放弃重试避免重复追加 */ }
+            appendSizeCache.set(p, beforeSize); // 截断成功与否，写入前大小不变，保持精确
             if (attempt === MAX_ATTEMPTS) throw e; // 交由外层统一告警
             await new Promise(r => setTimeout(r, 50 * attempt)); // 50ms / 100ms 退避
         }

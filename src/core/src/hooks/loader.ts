@@ -43,6 +43,28 @@ import { executeHookCommand } from "./shellExecutor.ts";
 import { executeHttpHook } from "./httpExecutor.ts";
 import { runSubagent } from "@/agent/subagent.ts";
 import { agentTools } from "@/tool/index.ts";
+
+/**
+ * ★ 声明式 hook 载荷瘦身（2026-09-15）：shell stdin / http body 序列化前把 toolContext 投影成
+ *   小白名单视图——完整 ToolContext 携带 parentSystemPrompt（整段系统提示词；http hook 会原样
+ *   POST 到远端 url，属信息外泄面）与 requestApproval/events 等宿主回调（函数被 stringify 丢弃，
+ *   但字段名/嵌套结构暴露内部契约）。顶层字段（sessionId/cwd/toolName/args/result/prompt 等各
+ *   事件自带的小字段）原样保留。程序化 hook（registerHook 直调 dispatch，含 agent 型 hook）不走
+ *   本投影、仍拿完整 ctx，契约不变。无 toolContext 的事件（UserPromptSubmit/SessionStart 等）零改动。
+ */
+const slimHookContext = (ctx: any): any => {
+    if (!ctx || typeof ctx !== "object" || !ctx.toolContext) return ctx;
+    const { toolContext, ...rest } = ctx;
+    return {
+        ...rest,
+        toolContext: {
+            sessionId: toolContext.sessionId,
+            cwd: toolContext.cwd,
+            depth: toolContext.depth,
+            permissionMode: toolContext.permissionMode,
+        },
+    };
+};
 import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT, HookResult } from "./types.ts";
 
 /** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
@@ -334,7 +356,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                     url,
                     method: raw.method,
                     headers: raw.headers,
-                    body: ctx, // 整个 hook 上下文 JSON 化发出（含 sessionId/toolName/args/prompt 等）
+                    body: slimHookContext(ctx), // hook 上下文 JSON 化发出（含 sessionId/toolName/args/prompt 等；toolContext 走瘦投影）
                     timeoutMs,
                 });
                 if (!res.ok) {
@@ -378,7 +400,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                 cwd: ctx?.cwd,
                 env: ctx?.env,
                 timeoutMs,
-                stdinPayload: ctx,
+                stdinPayload: slimHookContext(ctx),
             });
             if (res.timedOut) {
                 return denyOnNonZero

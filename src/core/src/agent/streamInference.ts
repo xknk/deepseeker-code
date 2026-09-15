@@ -28,6 +28,12 @@ import { MODEL_NAME } from "@/llm/createModel.ts";
 /** sha1 前 10 位短哈希：前缀分段指纹用（只入 trace 供跨会话对比，不上模型）。 */
 const sha1short = (s: string): string => createHash('sha1').update(s).digest('hex').slice(0, 10);
 
+/** tools 段指纹缓存（数组引用 → sha1）：cleanedToolSchemas 整 run 恒定（systemInjections 每 run 构造一次），
+ *  原实现每轮 JSON.stringify(~40KB)+sha1。缓存命中跳过 stringify；schema 内容变化必然伴随新数组
+ *  （systemInjections 按工具名单 memo，名单变→新数组→新指纹），引用键不会撞陈旧值。
+ *  指纹值不变 → trace 字段与原实现逐字节一致，不影响任何缓存判定。 */
+const toolsFingerprintCache = new WeakMap<object, string>();
+
 /** 退避上限（ms）：服务器给天价 Retry-After 时封顶，防止 agent 被单次限流冻结半小时+。 */
 const RETRY_BACKOFF_CAP_MS = 30_000;
 
@@ -120,7 +126,14 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         //   toolsHash 变 → 工具表分歧（env 门控漂移 / 版本迭代）；sysHash 变 → message[0] 注入漂移（locale/
         //   skills/memory）；全同仍 miss → DS 服务端缓存 TTL/LRU 驱逐，非本地前缀问题。
         const prefixFingerprint = {
-            toolsHash: sha1short(JSON.stringify(cleanedToolSchemas)),
+            toolsHash: (() => {
+                let h = toolsFingerprintCache.get(cleanedToolSchemas as object);
+                if (h === undefined) {
+                    h = sha1short(JSON.stringify(cleanedToolSchemas));
+                    toolsFingerprintCache.set(cleanedToolSchemas as object, h);
+                }
+                return h;
+            })(),
             sysHash: sha1short(String((message[0] as any)?.content ?? '')),
             sumHash: sha1short(String((message[1] as any)?.content ?? '')),
             msgCount: message.length,
@@ -223,8 +236,9 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                     const raHint = retryAfterMs != null ? `，遵 Retry-After=${retryAfterMs}ms` : '';
                     console.warn(`⚠️ API 瞬时错误（${statusHint}${streamErr instanceof Error ? streamErr.message : String(streamErr)}），${backoffMs}ms 后第 ${apiRetries}/${MAX_API_RETRIES} 次重试${raHint}...`);
                     await new Promise<void>((resolve, reject) => {
-                        const t = setTimeout(resolve, backoffMs);
-                        signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+                        const onAbort = () => { clearTimeout(t); reject(new Error('aborted')); };
+                        const t = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, backoffMs);
+                        signal?.addEventListener('abort', onAbort, { once: true });
                     });
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;

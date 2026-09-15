@@ -156,7 +156,8 @@ export const globTools: CustomTool[] = [
                     }
                     return `${prefix}[Glob: ${cleanPattern} | ${hits.length} 个匹配]\n` + hits.join("\n");
                 } catch (error: any) {
-                    return `glob 检索失败: ${error.message}`;
+                    // ★ ❌ 前缀：toolExecution 的 FAILED_PREFIXES 靠前缀嗅探判成败，裸"glob 检索失败:"会被误判 ok=true
+                    return `❌ glob 检索失败: ${error.message}`;
                 }
             },
         },

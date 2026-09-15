@@ -315,6 +315,19 @@ export const isProtectedWrite = (relOrAbs: string, cwd?: string): boolean => {
 };
 
 /**
+ * 构建期下降剪枝目录：这些目录名已被 BUILTIN_IGNORE_RULES 整体忽略——其内部不存在「引擎可见路径」，
+ * 里面的 .gitignore/.agentignore 对判定无贡献（被忽略目录内的规则只作用于同样被忽略的子路径）。
+ * 递归扫描时不再下降，免去在大型构建产物树（build/out/target/vendor…）里逐层找 ignore 文件的纯浪费。
+ * 仅收录字面量目录名（*.log/.env/*.tmp 是文件模式，不在此列）；"dist"/".next" 不在 BUILTIN 清单
+ * （rg 层另有 --glob 排除），引擎不忽略它们 → 不剪枝，保持规则收集完整。
+ */
+const SCAN_PRUNE_DIRS = new Set([
+    "node_modules", ".git", "vendor", "__pycache__", ".venv", ".pytest_cache",
+    ".gradle", "build", "target", ".settings", ".vs", "Debug", "Release",
+    "out", ".DerivedData", "Pods", ".idea", ".vscode",
+]);
+
+/**
  * 递归扫描全盘内部私有闭包函数，支持 Monorepo 级多层子目录 ignore 动态联动。
  * ★ base 相对化：relDir 以传入 base（非全局 WORKSPACE_ROOT）为锚，使每个 worktree 各持正确前缀的规则集。
  * @param engine 本 base 的 ignore 引擎实例（规则加入此 engine，不碰全局）
@@ -340,7 +353,7 @@ const scanIgnoreFilesRecursive = async (dirPath: string, base: string, engine: R
         }
 
         for (const entry of entries) {
-            if (entry.isDirectory() && entry.name !== "node_modules" && entry.name !== ".git") {
+            if (entry.isDirectory() && !SCAN_PRUNE_DIRS.has(entry.name)) {
                 await scanIgnoreFilesRecursive(path.join(dirPath, entry.name), base, engine);
             }
         }

@@ -126,9 +126,16 @@ export const reconcileCompaction = (
  * 读 transcript → 判定中断 → crashed 则补写 run.abandoned（detect 刚确认未闭合，写一行即闭合，
  * 下次 detect 返回 clean——天然幂等；多进程并发极端情况多写一行同义闭墓也不破坏数据）→ 压缩交叉校验。
  * 返回报告供调用方决定孤儿修复档位（interruption.kind === 'crashed' → confirmedCrash=true）。
+ * @param precomputed 调用方已读好的 transcript 行与 rolling state（buildContextMessages 在本函数前
+ *   已各自读过一遍，传入免二次碰盘）。可选、向后兼容——缺省时本函数自读（测试/独立调用方不受影响）。
+ *   ★ 快照语义：crashed 补写 run.abandoned 只 append 新行，不改写传入的 lines 快照内容，
+ *     与自读路径（appendEvent 后不再重读 lines）行为一致。
  */
-export const recoverSession = async (sessionId: string): Promise<RecoveryReport> => {
-    const lines = await readTranscriptLines(sessionId);
+export const recoverSession = async (
+    sessionId: string,
+    precomputed?: { lines?: TranscriptLine[]; state?: { archivedMessageCount: number; rollingSummary: string } },
+): Promise<RecoveryReport> => {
+    const lines = precomputed?.lines ?? await readTranscriptLines(sessionId);
     const interruption = detectInterruption(lines);
     if (interruption.kind === 'crashed') {
         await appendEvent(sessionId, {
@@ -138,7 +145,7 @@ export const recoverSession = async (sessionId: string): Promise<RecoveryReport>
         });
         console.warn(`⟦recovery⟧ 检测到未闭合 run（${interruption.runId.slice(0, 8)}…）→ 已补 run.abandoned 闭墓标记；孤儿修复按「崩溃确认」档执行。`);
     }
-    const state = await getRollingState(sessionId);
+    const state = precomputed?.state ?? await getRollingState(sessionId);
     const compaction = reconcileCompaction(
         { archivedMessageCount: state.archivedMessageCount, rollingSummary: state.rollingSummary },
         lines,

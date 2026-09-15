@@ -32,9 +32,9 @@ import { recoverSession, repairOrphanToolCalls, RecoveryReport } from "./recover
  *  content 截断到 BOUNDARY_TOOL_KEEP_CHARS + 折叠提示。旧 tool 的结论早已被后续 assistant 消化进文本/方案，
  *  原文无需跨 run 完整保留——砍掉跨 run 重复背负的只读检索体积（grep/read 输出），零 LLM 开销、不破坏配对。
  *  按对话单元边界切分，永不切断 tool_calls↔tool 配对；仅衰减 tool content 长度，assistant 文本/方案不动。
- *  只作用于重建的内存视图，不改写 transcript。
+ *  只作用于内存视图，不改写 transcript。导出供 truncate.ensureFitsWindow 复用（压缩前免费衰减，2026-09-15）。
  */
-const decayOldToolResults = (msgs: Msg[]): Msg[] => {
+export const decayOldToolResults = (msgs: Msg[]): Msg[] => {
     const units = groupUnits(msgs); // assistant(tool_calls)+紧跟 tool = 不可分割单元
     const cutoffUnitIdx = Math.max(0, units.length - appConfig.KEEP_RECENT_UNITS);
     if (cutoffUnitIdx === 0) return msgs; // 全部落在保留区，无需衰减
@@ -96,7 +96,12 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     //   开关关且无事件行 → 纯内存启发式（= 改造前行为，零碰盘副作用）。
     const eventAware = appConfig.transcriptEvents || lines.some(isEventLine);
     const recovery: Pick<RecoveryReport, 'interruption' | 'compaction'> = eventAware
-        ? await recoverSession(sessionId)
+        // ★ 传入已读好的 lines/store：recoverSession 不再二次 readTranscriptLines + getRollingState
+        //   （同一 turn 内重复碰盘是纯浪费；crashed 补写只 append 新行，快照语义一致，见 recovery.ts 注释）
+        ? await recoverSession(sessionId, {
+            lines,
+            state: { archivedMessageCount: store.archivedMessageCount, rollingSummary: store.rollingSummary },
+        })
         : {
             interruption: { kind: 'legacy' },
             compaction: { archivedMessageCount: store.archivedMessageCount, rollingSummary: store.rollingSummary, desync: 'legacy' },

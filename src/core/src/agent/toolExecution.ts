@@ -27,6 +27,11 @@ import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 
+// ★ sidecar 目录 ensure 缓存：原实现每次写侧车（超预算工具结果）都 fs.mkdir(recursive)——目录首次
+//   建立后进程内不会再消失（deleteSession 删的是整个会话目录，该会话此后不再写侧车），重复 mkdir
+//   是纯浪费系统调用。与 store.ts ensuredSessionDirs / observability ensuredTraceDirs 同款模式。
+const ensuredSidecarDirs = new Set<string>();
+
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
  *  - RegExp[]：逐条全局替换为 [MASKED_SECRET]；
@@ -354,7 +359,10 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     if (result.length > truncBudget) {
         try {
             const sidecarDir = path.join(getSessionsDirPath(sessionId), 'tool-outputs');
-            await fs.mkdir(sidecarDir, { recursive: true });
+            if (!ensuredSidecarDirs.has(sidecarDir)) {
+                await fs.mkdir(sidecarDir, { recursive: true });
+                ensuredSidecarDirs.add(sidecarDir);
+            }
             // tool_call.id 来自模型（通常形如 call_0_xxx），白名单清洗防路径注入
             const safeId = String(toolCall.id).replace(/[^A-Za-z0-9_-]/g, '');
             await fs.writeFile(path.join(sidecarDir, `${safeId}.txt`), result, 'utf-8');
@@ -364,7 +372,9 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         }
     }
     result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters, sidecarNote);
-    const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:"];
+    // ★ "[⏳" 收 collectToolResult 两类熔断文案（工具执行超时/流式 idle 超时）——原先不在清单，
+    //   超时熔断的结果被 ok 前缀嗅探误判为成功。search/glob 的失败文案已统一加 ❌ 前缀（registry 侧）。
+    const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:", "[⏳"];
     const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
     // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
     let resultForModel = result;

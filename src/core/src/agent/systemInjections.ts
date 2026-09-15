@@ -23,6 +23,29 @@ import { injectOutputStyle } from "@/outputStyles/inject.ts";
 import { injectMemory } from "@/memory/inject.ts";
 import { injectMarkedBlock, detectTextLocale, type Locale } from "@/common/index.ts";
 
+// ★ 工具 schema 清洗 + token 粗估的逐工具 memo（2026-09-15）：原实现每次 runAgent setup 都对全部
+//   工具 map 重建 cleaned 对象 + JSON.stringify(~40KB) 算 toolsTokens；spawn_agent / run_workflow 扇出
+//   时按子 agent 数线性放大。缓存键 = raw 工具对象引用——注册表工具是模块级单例、MCP 工具发现后
+//   稳定，重复 run 直接复用；工具对象换新（MCP 重新发现）自动 miss 重算，永不陈旧。
+//   ★ 逐字节一致（硬约束：toolsTokens 进压缩阈值与校准分母，漂移即改压缩时机→击穿前缀缓存节奏）：
+//     cleaned 对象字段固定（type/function{name,description,parameters}）且逐次构造相同；
+//     toolsTokens 用恒等式 JSON.stringify(arr).length = Σlen(JSON.stringify(元素)) + (n-1) 个逗号 + 2 个
+//     方括号（n≥1 时 = Σ+ n + 1；空数组 "[]" = 2）——逐元素与整体走同一序列化器，求和恒等。
+//     前提（与原实现相同）：schema 对象注册后视为不可变（registry/MCP 均整体换新、无原地改写）。
+const cleanedSchemaCache = new WeakMap<object, { cleaned: any; fragment: string }>();
+const cleanToolSchema = (t: any): { cleaned: any; fragment: string } => {
+    let entry = cleanedSchemaCache.get(t);
+    if (!entry) {
+        const cleaned = {
+            type: t.type,
+            function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters }
+        };
+        entry = { cleaned, fragment: JSON.stringify(cleaned) };
+        cleanedSchemaCache.set(t, entry);
+    }
+    return entry;
+};
+
 /**
  * setup 期：工具表裁剪 + schema 清洗 + 摘要槽 + fence 注入。
  * @param message  会话消息数组（原地修改：ensureSummarySlot 预留 message[1]、各 inject 追加到 message[0]）
@@ -61,14 +84,17 @@ export const prepareToolsAndInjections = async (
         requestQuestion: options.requestQuestion,
     };
     const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
-    // 格式化工具消息（剔除 safetyLevel/审批/锁等内部字段，只留 OpenAI 协议所需：type/function{name,description,parameters}）
-    const cleanedToolSchemas = rawTools.map((t: any) => ({
-        type: t.type,
-        function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters }
-    }));
+    // 格式化工具消息（剔除 safetyLevel/审批/锁等内部字段，只留 OpenAI 协议所需：type/function{name,description,parameters}）。
+    //   逐工具 memo（cleanToolSchema，见文件头缓存说明）：命中返回同一 cleaned 引用（调用方只读），miss 才重建。
+    const cleanedEntries = rawTools.map((t: any) => cleanToolSchema(t));
+    const cleanedToolSchemas = cleanedEntries.map(e => e.cleaned);
     // ★ P2 口径：工具 schema 常数项（token 粗估，ASCII JSON ≈ 4 字节/token）。真实 prompt_tokens 含这段
     //   而 estimateTokens(messages) 不含——供 runAgent 校准分母与 ensureFitsWindow 压缩阈值显式计入。
-    const toolsTokens = Math.round(JSON.stringify(cleanedToolSchemas).length / 4);
+    //   fragment 求和替代整体 stringify（恒等式见 cleanToolSchema 缓存说明），数值与原实现逐位一致。
+    const schemaJsonLen = cleanedEntries.length === 0
+        ? 2 // JSON.stringify([]) === "[]"
+        : cleanedEntries.reduce((sum, e) => sum + e.fragment.length, 0) + cleanedEntries.length + 1;
+    const toolsTokens = Math.round(schemaJsonLen / 4);
     // 预留系统提示词和摘要存放区域（message[1] 槽，被 ensureFitsWindow/ensureSummarySlot 强依赖——勿改前两个下标）
     ensureSummarySlot(message);
     // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]

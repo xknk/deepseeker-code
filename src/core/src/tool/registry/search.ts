@@ -129,8 +129,9 @@ export const searchTools: CustomTool[] = [
                     // 💡 优化 3：优雅降级，ripgrep 找不到内容时正常退出码是 1，不属于常规报错
                     if (error.code === 1) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
                     // ★ 超时（30s 兜底触发）：给友好提示而非裸"检索失败"，建议缩小范围
-                    if (error.killed || error.signal) return `⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`;
-                    return `检索失败: ${error.message}`;
+                    if (error.killed || error.signal) return `❌ ⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`;
+                    // ★ ❌ 前缀：toolExecution 的 FAILED_PREFIXES 靠前缀嗅探判成败，裸"检索失败:"会被误判 ok=true
+                    return `❌ 检索失败: ${error.message}`;
                 }
             },
         },

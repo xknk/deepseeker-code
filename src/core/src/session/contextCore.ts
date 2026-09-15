@@ -53,50 +53,81 @@ const estimateTextTokens = (text: string, divisor = 4.8): number => {
 }
 
 /**
+ * 单消息 token 计（纯函数）：原 estimateTokens 的 reduce 体逐行抽出，计算逻辑零改动。
+ * 返回 { tokens, imageCount, imagePrice }：后两者供 messageTokens 缓存校验（图片单价是 env 可变输入）。
+ */
+const computeMessageTokens = (m: Msg): { tokens: number; imageCount: number; imagePrice: number } => {
+    let pureText = '';
+    let imageCount = 0;
+    // 1. 核心防御：显式捕获并还原最重的两个代码吞吐大户
+    // A. 捕获基础文本内容
+    if (m.content) {
+        if (typeof m.content === 'string') {
+            pureText += m.content;
+        } else if (Array.isArray(m.content)) {
+            // ★ 多模态：数组 content 只折算 text part，image part 固定计价——
+            //   绝不能 JSON.stringify 整个数组（dataURL base64 会把估算撑成天文数字 → 压缩风暴）
+            pureText += msgText(m.content);
+            imageCount += imageUrlsOf(m.content).length;
+        }
+    }
+    // B. 捕获大模型发出的工具调用参数（Search/Replace 块等巨型 JSON 字符串）
+    if ((m as any).tool_calls && Array.isArray((m as any).tool_calls)) {
+        for (const call of (m as any).tool_calls) {
+            if (call.function) {
+                pureText += ` ${call.function.name} ${call.function.arguments || ''}`;
+            }
+        }
+    }
+    // 2. 边缘防御：动态扫描那些被遗漏的隐藏字符串（如 role, name, tool_call_id 甚至未来新增的字段）
+    // 通过 Object.keys 遍历，只要值是字符串，且刚才没算过，统统薅进来算一遍
+    const knownKeys = ['content', 'tool_calls'];
+    for (const key of Object.keys(m)) {
+        if (!knownKeys.includes(key) && typeof (m as any)[key] === 'string') {
+            pureText += ` ${(m as any)[key]}`;
+        }
+    }
+    // ★ 按消息性质选折算系数：tool 返回（文件/命令输出/JSON）与 assistant 的工具调用参数
+    //   （Search/Replace 等巨型 JSON）都是代码/结构化内容，BPE token 密度远高于散文（≈÷4）。
+    //   原统一 ÷4.8 对这类内容系统性低估，导致压缩阈值被估算偏差吃掉、靠 API 400 兜底。
+    const isStructured = m.role === 'tool' || (Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0);
+    // ★ image part 固定计价（估算口径见 contentParts.estimateImageTokens），与文本折算分列相加
+    const imagePrice = imageCount > 0 ? estimateImageTokens() : 0;
+    const tokens = estimateTextTokens(pureText, isStructured ? 4 : 4.8) + imageCount * imagePrice + 4; // 4 为消息结构开销
+    return { tokens: isNaN(tokens) ? 0 : tokens, imageCount, imagePrice };
+};
+
+// ★ 每消息 token 缓存（WeakMap，2026-09-15）：estimateTokens 每轮被多处全量调用（ensureFitsWindow
+//   入口判定 / llm.request 埋点估算 / 校准分母 / 压缩循环内部），原实现每次对全部消息逐码点重扫，
+//   代价随上下文线性放大。按消息对象 memo 后重复扫描退化为 O(消息数) 求和。
+//   ★ 数值逐位一致（硬约束：压缩判定与校准 EMA 依赖该值，1 token 漂移即可能改变压缩时机、
+//     击穿前缀缓存的节奏）：计算逻辑原样抽出；失效校验比对 content（字符串按值等/数组按引用等，
+//     恰与两类 content 的恒等条件对齐）+ tool_calls 引用 + role + 图片单价（DEEP_SEEK_IMAGE_TOKENS
+//     是 env 可变输入——含图消息单价变即重算；无图消息跳过 env 读取，不受单价影响）——覆盖全部
+//     输入面（role/tool_call_id/name 等字符串字段构造后从不改写；content 改写（摘要槽重赋值 /
+//     injectMarkedBlock 追加）必然产生新值/新引用，值比较天然命中失效）。命中缓存的数组求和
+//     与全量重算逐位相同。
+type MsgTokenCacheEntry = { content: unknown; toolCalls: unknown; role: unknown; imageCount: number; imagePrice: number; tokens: number };
+const msgTokenCache = new WeakMap<object, MsgTokenCacheEntry>();
+const messageTokens = (m: Msg): number => {
+    const toolCalls = (m as any).tool_calls;
+    const cached = msgTokenCache.get(m as object);
+    if (cached && cached.role === m.role && cached.toolCalls === toolCalls && cached.content === m.content
+        && (cached.imageCount === 0 || cached.imagePrice === estimateImageTokens())) {
+        return cached.tokens;
+    }
+    const { tokens, imageCount, imagePrice } = computeMessageTokens(m);
+    msgTokenCache.set(m as object, { content: m.content, toolCalls, role: m.role, imageCount, imagePrice, tokens });
+    return tokens;
+};
+
+/**
  * @description: 获取当前token数量
  * @param {Msg} messagesArr // 上下文
  * @return {*}
  */
 export const estimateTokens = (messagesArr: Msg[]): number => {
-    return messagesArr.reduce((total, m) => {
-        let pureText = '';
-        let imageCount = 0;
-        // 1. 核心防御：显式捕获并还原最重的两个代码吞吐大户
-        // A. 捕获基础文本内容
-        if (m.content) {
-            if (typeof m.content === 'string') {
-                pureText += m.content;
-            } else if (Array.isArray(m.content)) {
-                // ★ 多模态：数组 content 只折算 text part，image part 固定计价——
-                //   绝不能 JSON.stringify 整个数组（dataURL base64 会把估算撑成天文数字 → 压缩风暴）
-                pureText += msgText(m.content);
-                imageCount += imageUrlsOf(m.content).length;
-            }
-        }
-        // B. 捕获大模型发出的工具调用参数（Search/Replace 块等巨型 JSON 字符串）
-        if ((m as any).tool_calls && Array.isArray((m as any).tool_calls)) {
-            for (const call of (m as any).tool_calls) {
-                if (call.function) {
-                    pureText += ` ${call.function.name} ${call.function.arguments || ''}`;
-                }
-            }
-        }
-        // 2. 边缘防御：动态扫描那些被遗漏的隐藏字符串（如 role, name, tool_call_id 甚至未来新增的字段）
-        // 通过 Object.keys 遍历，只要值是字符串，且刚才没算过，统统薅进来算一遍
-        const knownKeys = ['content', 'tool_calls'];
-        for (const key of Object.keys(m)) {
-            if (!knownKeys.includes(key) && typeof (m as any)[key] === 'string') {
-                pureText += ` ${(m as any)[key]}`;
-            }
-        }
-        // ★ 按消息性质选折算系数：tool 返回（文件/命令输出/JSON）与 assistant 的工具调用参数
-        //   （Search/Replace 等巨型 JSON）都是代码/结构化内容，BPE token 密度远高于散文（≈÷4）。
-        //   原统一 ÷4.8 对这类内容系统性低估，导致压缩阈值被估算偏差吃掉、靠 API 400 兜底。
-        const isStructured = m.role === 'tool' || (Array.isArray((m as any).tool_calls) && (m as any).tool_calls.length > 0);
-        // ★ image part 固定计价（估算口径见 contentParts.estimateImageTokens），与文本折算分列相加
-        const tokens = estimateTextTokens(pureText, isStructured ? 4 : 4.8) + imageCount * estimateImageTokens() + 4; // 4 为消息结构开销
-        return total + (isNaN(tokens) ? 0 : tokens);
-    }, 0);
+    return messagesArr.reduce((total, m) => total + messageTokens(m), 0);
 }
 
 /**

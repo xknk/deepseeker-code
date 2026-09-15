@@ -54,13 +54,22 @@ export const getTranscriptPath = (sessionId: string): string => {
     return path.join(getSessionsDirPath(sessionId), `${sessionId}.jsonl`);
 }
 
+// ★ 热路径 IO 缓存：ensureSessionsDir 在每次 appendMessage/appendEvent/readStore/writeStore 上都被调，
+//   原实现每次 mkdir + 旧版迁移 readFile（ENOENT）= 每条落盘/读盘 2 次纯浪费系统调用（Windows+Defender 更疼）。
+//   进程内记住"已 ensure"的目录即归零——与 observability/store.ts 的 ensuredTraceDirs 同款修复。
+//   deleteSession 删目录时同步失效，防复用陈旧条目。
+const ensuredSessionDirs = new Set<string>();
+
 /** 确保 sessions 文件夹存在（在数据目录下创建），并顺带做一次性历史文件迁移 */
 export const ensureSessionsDir = async (sessionId: string): Promise<void> => {
+    const dir = getSessionsDirPath(sessionId);
+    if (ensuredSessionDirs.has(dir)) return; // ★ 命中缓存：目录本进程内已确认存在且迁移已尝试过
     // 💡 修复：确保是在 appConfig.dataDir 下创建 sessions 文件夹
-    await fs.mkdir(getSessionsDirPath(sessionId), { recursive: true });
+    await fs.mkdir(dir, { recursive: true });
     // 一次性迁移：旧版 store/transcript 共用 `${sessionId}.json`（格式互斥会互相破坏），
     // 按“逐行可解析=JSONL 转录 / 整体单对象=状态”判定后分流到 .jsonl / .state.json。失败静默，绝不阻塞会话。
     await migrateLegacyFiles(sessionId).catch(() => { });
+    ensuredSessionDirs.add(dir); // 迁移失败亦标记（原实现本就静默吞掉，不重试）
 }
 
 /**
@@ -367,11 +376,37 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
 
 /**
  * 取本工作区最近一次会话的 sessionId（--continue 用）。
- * 即 listSessions 的首条（已按 updatedAt 降序）；无历史则 null。
+ * ★ 快路径（2026-09-15）：只读各会话的 state.json（小文件）+ 目录 mtime 兜底排序，不读任何
+ *   transcript——原实现经 listSessions 把【每个】会话的完整 jsonl 读进内存数行数取预览，
+ *   长会话历史越多启动越慢，而 --continue 只需要一个 id。排序语义与 listSessions 首条一致：
+ *   updatedAt 降序（字符串比较同口径）；全部拿不到时间戳时取目录枚举序首个（对齐稳定排序沉底语义）。
  */
 export const getMostRecentSessionId = async (): Promise<string | null> => {
-    const list = await listSessions();
-    return list.length > 0 ? list[0].sessionId : null;
+    const root = getWorkspaceSessionsDir();
+    let entries: any[];
+    try {
+        entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+        return null; // 目录不存在（从未建过会话）
+    }
+    let best: { sessionId: string; updatedAt: string } | undefined;
+    let noTimestampFirst: string | undefined; // 全体无时间戳时的兜底（枚举序首个）
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const sessionId = entry.name;
+        if (!isSafeSessionId(sessionId)) continue; // 纵深防御：跳过非法文件夹名
+        const state: any = await readJSONFile<any>(getStatePath(sessionId));
+        let updatedAt: string | undefined = state?.updatedAt;
+        if (!updatedAt) {
+            try { updatedAt = (await fs.stat(path.join(root, sessionId))).mtime.toISOString(); } catch { /* 目录也不可 stat */ }
+        }
+        if (!updatedAt) {
+            noTimestampFirst ??= sessionId;
+            continue;
+        }
+        if (!best || updatedAt > best.updatedAt) best = { sessionId, updatedAt };
+    }
+    return best?.sessionId ?? noTimestampFirst ?? null;
 };
 
 /**
@@ -397,4 +432,5 @@ export const deleteSession = async (sessionId: string): Promise<void> => {
     assertSafeSessionId(sessionId); // 路径穿越硬守——拒绝 '..'/'/' 等非法 id 误删其他目录
     const dir = getSessionsDirPath(sessionId);
     await fs.rm(dir, { recursive: true, force: true });
+    ensuredSessionDirs.delete(dir); // ★ 目录已删，失效 ensure 缓存（防同 id 重建后跳过 mkdir）
 };

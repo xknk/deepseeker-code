@@ -24,6 +24,7 @@ import { appConfig } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import { msgText, degradeImagesForAux } from "@/session/contentParts.ts";
+import { decayOldToolResults } from "@/session/content.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
@@ -55,6 +56,11 @@ export const getFileAccessRoots = (): string[] => {
  * @param text 原始文本
  * @return 路径相对化后的文本；若 workspace 根解析失败则仅做 ANSI 剥离
  */
+// ★ 根路径正则编译缓存（norm → RegExp）：工作区根进程内基本不变，原实现每次调用（每个工具结果
+//   都要过 microcompact）都 new RegExp 重新编译。String.replace 对 /g 正则会自动重置 lastIndex，
+//   缓存实例跨调用复用安全。正则 source/flags 逐字不变 → 替换结果与原实现逐字节一致。
+const rootPathRegexCache = new Map<string, RegExp>();
+
 export const relativizeWorkspacePathsInText = (text: string): string => {
     if (!text) return text;
     const roots = new Set<string>();
@@ -68,23 +74,33 @@ export const relativizeWorkspacePathsInText = (text: string): string => {
             }
         }
     } catch {
-        return text.replace(ANSI_ESCAPE, "");
+        return stripAnsi(text);
     }
     let out = text;
     for (const root of roots) {
         const norm = root.replace(/\\/g, "/");
         if (norm.length < 3) continue;
-        const re = new RegExp(
-            norm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(\\/|\\\\|$)",
-            "gi",
-        );
+        let re = rootPathRegexCache.get(norm);
+        if (!re) {
+            re = new RegExp(
+                norm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(\\/|\\\\|$)",
+                "gi",
+            );
+            rootPathRegexCache.set(norm, re);
+        }
         out = out.replace(re, "./$1");
     }
     return out;
 }
 
+/** ANSI 转义起始符 ESC(0x1B)：fromCharCode 常量，避免源码嵌不可见控制符。 */
+const ANSI_ESC_CHAR = String.fromCharCode(27);
+
 /** 剥离文本中的 ANSI / OSC 转义序列。 */
 export function stripAnsi(text: string): string {
+    // ★ 快速跳过：ANSI 转义必以 ESC(0x1B) 起头，串中无 ESC 则正则不可能命中——纯代码/日志文本
+    //   此短路，省掉全串正则扫描。输出与原实现逐字节一致（replace 无匹配即原串）。
+    if (!text || !text.includes(ANSI_ESC_CHAR)) return text;
     return text.replace(ANSI_ESCAPE, "");
 }
 /**
@@ -519,6 +535,23 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     const cacheFactor = hitRate == null ? 1.0 : Math.min(1.1, Math.max(0.9, 0.9 + hitRate * 0.2));
     const effectiveRatio = Math.min(event.compactRatio * cacheFactor, 0.82);
     if (estReal(event.messageArr) <= event.modelWindow * effectiveRatio) return;
+    // ★ 压缩前免费衰减（2026-09-15）：超阈值先试零 LLM 成本的旧工具结果折叠（与跨 run 重建同款
+    //   decayOldToolResults：保留最近 KEEP_RECENT_UNITS 个对话单元全文，更早单元的超长 tool content
+    //   截头+折叠提示、老图占位）。旧 tool 结论早已被后续 assistant 消化，折叠信息损失有界；降回
+    //   阈值内即免整轮 LLM 摘要调用。仍在阈值上 → 照走下方 LLM 压缩（衰减不白做：待压缩批体积更小）。
+    //   ★ 缓存口径：仅在本就超阈值（= 原本必触发压缩、message[1] 必被改写）时才动历史字节，首个
+    //     分歧点深于 message[1]，击穿范围严格小于压缩路径；estReal 数值口径不变（衰减是内容操作）。
+    //   幂等：已折叠内容（头 keep 字符+固定尾注）重衰减收敛到同一固定点，不逐次加深。
+    const preDecaySize = estReal(event.messageArr);
+    const decayedArr = decayOldToolResults(event.messageArr);
+    if (decayedArr !== event.messageArr) {
+        event.messageArr.length = 0;
+        event.messageArr.push(...decayedArr);
+    }
+    if (estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
+        console.log(`📉 [窗口治理] 免费衰减（旧工具结果折叠）后回到阈值内（${Math.round(preDecaySize)} → ${Math.round(estReal(event.messageArr))} token），跳过 LLM 压缩`);
+        return;
+    }
     // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
     const tokensThreshold = Math.round(event.modelWindow * effectiveRatio);
     await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(estReal(event.messageArr)), tokensThreshold });
@@ -716,6 +749,7 @@ export const collectToolResult = async (
     //   此处仅作「兜底熔断」，非 per-tool 业务超时。
     const timeoutMs = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
     let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
     const raced = await Promise.race<{
         kind: 'ok'; value: string;
     } | {
@@ -726,10 +760,15 @@ export const collectToolResult = async (
         Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: typeof v === 'string' ? v : JSON.stringify(v) })),
         new Promise<{ kind: 'timeout' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs); }),
         ...(signal ? [new Promise<{ kind: 'abort' }>((resolve) => {
-            signal.addEventListener('abort', () => resolve({ kind: 'abort' }), { once: true });
+            onAbort = () => resolve({ kind: 'abort' });
+            signal.addEventListener('abort', onAbort, { once: true });
         })] : []),
     ]);
     if (timer) clearTimeout(timer);
+    // ★ 监听器清理：race 以 ok/timeout 收尾时监听器仍挂在 signal 上——每次工具调用漏挂一个，
+    //   长会话缓慢累积（AbortSignal 是 EventTarget，超过阈值 Node 不告警）。对照 backgroundTool.ts
+    //   finalize 的解绑写法；{once:true} 只保证 abort 时触发后移除，不触发就永久滞留。
+    if (onAbort && signal) signal.removeEventListener('abort', onAbort);
     if (raced.kind === 'timeout') {
         return `[⏳ 工具执行超时（${Math.round(timeoutMs / 1000)}s 未返回），已熔断跳过。该工具可能 hang 或不响应中止信号。]`;
     }

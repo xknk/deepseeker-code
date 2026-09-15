@@ -75,18 +75,49 @@ const findTsConfigBounded = (ts: TsModule, absPath: string): string | undefined 
 };
 
 /** 解析最近 tsconfig：读 + parse（含 extends 展开），取 options/fileNames/projectRoot；无则回退默认。 */
-const resolveTsConfig = (ts: TsModule, absPath: string): {
-    options: ts.CompilerOptions; fileNames: string[]; projectRoot: string;
-} => {
-    const tsConfigPath = findTsConfigBounded(ts, absPath);
+type TsConfigResolved = { options: ts.CompilerOptions; fileNames: string[]; projectRoot: string };
+// ★ tsconfig 解析两级缓存（2026-09-15）：getLanguageService 每次调用都先 resolveTsConfig——原实现
+//   向上逐目录探测 + readConfigFile + parseJsonConfigFileContent（后者枚举 include 全目录树），而模型在
+//   编码会话中高频调 get_diagnostics/goto_definition，重复解析是纯浪费（lsCache 命中时解析结果除
+//   projectRoot 外根本没被用，却照付全额解析代价）。两级：
+//   1) walk 缓存：起点目录 → 最近 tsconfig 路径。只缓存正向命中——「无 tsconfig」不缓存，用户
+//      会话中新建 tsconfig 后下一次调用即生效（walk 本身仅每目录一次 existsSync，代价低）。
+//   2) 解析缓存：tsconfig 路径 → { mtimeMs, 结果 }。命中后 statSync 一次过 mtime 网关（与下方
+//      createProjectHost.fresh 的 mtime 网关同思路）：内容变更 → 重读重解析；文件删除 → 清两级缓存重走。
+//      边界：extends 链上父 tsconfig 的编辑不在网关内（罕见，重启生效）；读取失败（raw.error）不缓存。
+//   结果对象跨调用复用安全：options 在 getLanguageService 侧经 finalOptions 浅拷贝后才进 LS，
+//   fileNames 仅被 createProjectHost forEach 进 Set，均无原地改写。
+const tsconfigWalkCache = new Map<string, string>();
+const tsconfigParseCache = new Map<string, { mtimeMs: number; resolved: TsConfigResolved }>();
+
+const resolveTsConfig = (ts: TsModule, absPath: string): TsConfigResolved => {
+    const startDir = path.dirname(absPath);
+    let tsConfigPath = tsconfigWalkCache.get(startDir);
+    if (!tsConfigPath) {
+        tsConfigPath = findTsConfigBounded(ts, absPath) ?? "";
+        if (tsConfigPath) tsconfigWalkCache.set(startDir, tsConfigPath);
+    }
     if (!tsConfigPath) {
         return { options: buildDefaultOptions(ts), fileNames: [], projectRoot: getContainingRoot(absPath) };
+    }
+    // mtime 网关（单次 statSync）：命中直接复用解析结果；删除则清缓存重走
+    let st: fsSync.Stats | undefined;
+    try { st = fsSync.statSync(tsConfigPath, { throwIfNoEntry: false }); } catch { st = undefined; }
+    const cached = tsconfigParseCache.get(tsConfigPath);
+    if (cached && st && st.mtimeMs === cached.mtimeMs) return cached.resolved;
+    if (!st) {
+        // tsconfig 已被删除：清掉指向它的 walk 条目与解析缓存，本轮重走（可能落到更外层 tsconfig 或默认档）
+        tsconfigParseCache.delete(tsConfigPath);
+        for (const [dir, p] of tsconfigWalkCache) if (p === tsConfigPath) tsconfigWalkCache.delete(dir);
+        return resolveTsConfig(ts, absPath);
     }
     const basePath = path.dirname(tsConfigPath);
     const raw = ts.readConfigFile(tsConfigPath, ts.sys.readFile);
     if (raw.error) return { options: buildDefaultOptions(ts), fileNames: [], projectRoot: basePath };
     const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, basePath);
-    return { options: parsed.options, fileNames: parsed.fileNames, projectRoot: basePath };
+    const resolved: TsConfigResolved = { options: parsed.options, fileNames: parsed.fileNames, projectRoot: basePath };
+    tsconfigParseCache.set(tsConfigPath, { mtimeMs: st.mtimeMs, resolved });
+    return resolved;
 };
 
 /**
