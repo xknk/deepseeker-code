@@ -8,15 +8,23 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import type { CheckResult } from "./types.ts";
 
-/** 在工作区跑一个 node 子进程（判定用，独立于 agent 的 run_command 通道） */
-export const runNode = (ws: string, args: string[], timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string }> =>
-    new Promise((resolve) => {
-        execFile(process.execPath, args, { cwd: ws, timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+/**
+ * 在工作区跑一个 node 子进程（判定用，独立于 agent 的 run_command 通道）。
+ * ★ 必须摘掉 NODE_TEST_CONTEXT：当本进程自身跑在 `node --test` 里时（如 initial-red 守护测试），
+ *   外层 runner 会注入该变量；子进程原样继承会让子 `node --test` 进 child 模式空转、
+ *   不发现任何测试文件却退出 0——判定器集体假绿（2026-09-15 守护测试首跑抓到）。
+ */
+export const runNode = (ws: string, args: string[], timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string }> => {
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    return new Promise((resolve) => {
+        execFile(process.execPath, args, { cwd: ws, timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env },
             (err, stdout, stderr) => {
                 const code = err && typeof (err as any).code === 'number' ? (err as any).code as number : (err ? 1 : 0);
                 resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
             });
     });
+};
 
 /** node --test 全绿判定（fixture 约定：测试放 test/ 目录，纯 Node 无依赖） */
 export const nodeTestsPass = async (ws: string): Promise<CheckResult> => {
