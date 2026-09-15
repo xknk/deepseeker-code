@@ -22,7 +22,7 @@ export const searchTools: CustomTool[] = [
         type: "function",
         function: {
             name: "search_grep",
-            description: "在工作区文件中检索匹配的代码行，每个命中默认带前后各 2 行上下文（可直接判断用法；构造 edit_file 的 old_str 前可用 context 调大一次拿足）。默认字面量匹配，正则传 is_regex=true。★ 多关键词用 is_regex=true 以 | 合并（如 'uploadVisible|uploadTip'）一次查完，勿逐词多次调用。path 可限定目录或文件（单大文件多处定位传文件路径最高效）。多根工作区：path 可传项目目录名（如 'frontend'）、绝对路径或 ../兄弟目录。★ 用户指明了项目时务必把该项目作为 path 传入——缺省只搜活动根，常与意图不符。",
+            description: "在工作区文件中检索匹配的代码行，每个命中默认带前后各 2 行上下文（可直接判断用法；构造 edit_file 的 old_str 前可用 context 调大一次拿足）。默认字面量匹配，正则传 is_regex=true。★ 多关键词用 is_regex=true 以 | 合并（如 'uploadVisible|uploadTip'）一次查完，勿逐词多次调用。path 可限定目录或文件（单大文件多处定位传文件路径最高效）。多根工作区：path 可传项目目录名（如 'frontend'）、绝对路径或 ../兄弟目录。★ 用户指明了项目时务必把该项目作为 path 传入——缺省只搜活动根，常与意图不符。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {

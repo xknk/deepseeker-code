@@ -121,7 +121,7 @@ export const typescriptTools: CustomTool[] = [
             description:
                 "对一个或多个 TS/JS 文件取类型+语义诊断（类型错误/未用变量/不可达代码），输出行:列/严重度/TS 错误码，格式对齐 tsc。" +
                 "★ 改完多个文件后验证：传 paths 数组一次诊断全部（最多 20 个），勿逐文件多次调用。" +
-                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名（.java/.py 等）直接拒绝、勿传入。项目级全量诊断用 run_command 跑 `tsc --noEmit`。",
+                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名（.java/.py 等）直接拒绝、勿传入。项目级全量诊断用 run_command 跑 `tsc --noEmit`。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {
@@ -176,7 +176,7 @@ export const typescriptTools: CustomTool[] = [
             description:
                 "跳转到 TS/JS 文件某行某列符号的定义位置，返回 rel/path:line:col（可多处）。跨文件追踪函数/类型/变量的来源，替代 grep 猜测。" +
                 "落点在 node_modules/.d.ts 时标注 (declaration/library)。行列 1-based。" +
-                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名直接拒绝、勿传入。",
+                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名直接拒绝、勿传入。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {
@@ -239,7 +239,7 @@ export const typescriptTools: CustomTool[] = [
                 "查找 TS/JS 文件某行某列符号的全项目引用（调用/导入/读写），输出 rel/path:line:col + 读写标注 + 行摘录。" +
                 "类型感知：只返回真实绑定，不含注释/字符串里的同名词（grep 核心误报源）。用于改签名/重命名前的影响面排查、追踪调用方；与 goto_definition 互为反向。" +
                 "覆盖以 program 内文件为界（tsconfig include + import 链）；单符号超 200 处引用截断。行列 1-based。" +
-                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名直接拒绝、勿传入。",
+                "支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；.vue SFC 与其他语言扩展名直接拒绝、勿传入。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {

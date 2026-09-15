@@ -391,7 +391,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "read_file",
-            description: "读取指定【文本】文件的文本内容，并自动带上用于对齐定位的物理行号。支持大文件分片读取，防止 Token 爆炸。★ 仅处理文本文件——二进制文件会读出乱码：.xlsx 改用 read_xlsx，.docx 改用 read_docx，.pdf 改用 read_pdf。",
+            description: "读取指定【文本】文件的文本内容，并自动带上用于对齐定位的物理行号。支持大文件分片读取，防止 Token 爆炸。★ 仅处理文本文件——二进制文件会读出乱码：.xlsx 改用 read_xlsx，.docx 改用 read_docx，.pdf 改用 read_pdf。★ 需读多个文件时，把多个 read_file 调用放进同一条消息并行发出（自动并发执行），勿读完一个再发下一个。",
             parameters: {
                 type: "object",
                 properties: {
@@ -474,7 +474,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "list_dir",
-            description: "扫描并精简列出当前项目的工作区目录树。本工具自动合并通用忽略规则与多层子目录级 .gitignore 规范。",
+            description: "扫描并精简列出当前项目的工作区目录树。本工具自动合并通用忽略规则与多层子目录级 .gitignore 规范。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {
@@ -816,7 +816,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "view_symbol_outline",
-            description: "通过抽象语法树(AST)快速提取指定 TS/JS 源文件中的符号大纲（类、接口、函数名、导出项、入参签名等）。适合在不读取几千行具体代码的前提下，宏观了解文件架构。仅支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；其他类型文件（.java/.vue/.py 等）直接拒绝，请改用 read_file。",
+            description: "通过抽象语法树(AST)快速提取指定 TS/JS 源文件中的符号大纲（类、接口、函数名、导出项、入参签名等）。适合在不读取几千行具体代码的前提下，宏观了解文件架构。仅支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；其他类型文件（.java/.vue/.py 等）直接拒绝，请改用 read_file。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {

@@ -75,6 +75,8 @@ interface TaskResult {
     pass: boolean;
     rounds: number;
     toolCalls: number;
+    /** 归因埋点：每轮工具名序列（同一轮多个 = 并行批次）。不进基线，仅供 run 记录归因 */
+    roundTools: string[][];
     durationMs: number;
     promptTokens: number;
     completionTokens: number;
@@ -101,6 +103,17 @@ const materialize = async (ws: string, fixture: Record<string, string>): Promise
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, content, 'utf-8');
     }
+};
+
+/** 归因埋点：按 round.start 分段收集每轮工具名序列（同轮多个 = 并行批次），写入 run 记录供事后归因 */
+const collectRoundTools = (events: any[]): string[][] => {
+    const rounds: string[][] = [];
+    let cur: string[] | undefined;
+    for (const e of events) {
+        if (e?.type === 'round.start') { cur = []; rounds.push(cur); }
+        else if (e?.type === 'tool.start' && cur) cur.push(String(e?.toolName ?? '?'));
+    }
+    return rounds;
 };
 
 /** 恢复 env（WORKSPACE_ROOT 缺省态要删而非置空——实时读语义下空串是「空根」） */
@@ -171,6 +184,7 @@ const runOneTask = async (task: EvalTask): Promise<TaskResult> => {
         pass: check.ok,
         rounds: agentEvents.filter((e) => e?.type === 'round.start').length,
         toolCalls: agentEvents.filter((e) => e?.type === 'tool.start').length,
+        roundTools: collectRoundTools(agentEvents),
         durationMs: Date.now() - t0,
         promptTokens, completionTokens, totalTokens, cacheHitTokens,
         costCents: estimateCostCents({ promptTokens, completionTokens, cacheHitTokens }),
