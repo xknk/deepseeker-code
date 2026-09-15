@@ -21,6 +21,7 @@ import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
 import { registerMemory, getMemory, unregisterMemory, listMemories, MemoryType } from "@/memory/registry.ts";
 
 const MAX_BODY_BYTES = 64 * 1024; // 64KB：单条记忆上限，防误灌巨量日志撑爆索引/缓存
+const MAX_DESCRIPTION_CHARS = 200; // description 是唯一逐轮注入提示词的字段（索引行），限长防静默膨胀
 const NAME_RE = /^[a-z0-9-]+$/;
 const VALID_TYPES: MemoryType[] = ['user', 'feedback', 'project', 'reference'];
 
@@ -69,7 +70,7 @@ export const memoryTools: CustomTool[] = [
                     },
                     description: {
                         type: "string",
-                        description: "一句话概括（注入索引供日后判断是否召回）。勿换行",
+                        description: "一句话概括（注入索引供日后判断是否召回）。勿换行，上限 200 字符",
                     },
                     body: {
                         type: "string",
@@ -97,6 +98,7 @@ export const memoryTools: CustomTool[] = [
                 const project = args?.project === true;
                 if (!NAME_RE.test(name)) return toolFailure(`[memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`);
                 if (!description) return toolFailure("[memory_save] description 不能为空。");
+                if (description.length > MAX_DESCRIPTION_CHARS) return toolFailure(`[memory_save] description 超过 ${MAX_DESCRIPTION_CHARS} 字符上限（当前 ${description.length}）。请压缩为一句话。`);
                 if (!body.trim()) return toolFailure("[memory_save] body 不能为空。");
                 if (!VALID_TYPES.includes(type)) return toolFailure(`[memory_save] type 非法：须 user/feedback/project/reference，收到 "${type}"。`);
                 const bodyBytes = Buffer.byteLength(body, "utf-8");
