@@ -196,6 +196,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "thinking": return S.cmdThinking;
                 case "lang": return S.cmdLang;
                 case "output-style": return S.cmdOutputStyle;
+                case "new": return S.cmdNew;
                 case "sessions": return S.cmdSessions;
                 case "fork": return S.cmdFork;
                 case "usage": return S.cmdUsage;
@@ -275,6 +276,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 return true;
             case "/clear":
                 state.clearRows();
+                return true;
+            case "/new":
+                // 生成中拒绝换会话：清屏会冲掉进行中的输出行，且旧轮 finally 还会写回旧会话
+                if (state.busy) { state.pushInfo(S.sessionNewBusy); return true; }
+                void state.newSession();
                 return true;
             case "/sessions":
                 void state.openSessionPicker();

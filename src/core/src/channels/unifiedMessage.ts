@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-11 15:42:50
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-15 09:46:49
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\channels\unifiedMessage.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * 入站图片附件（多模态）：随 content 一起提交，由服务端按 vision 开关物化为 image_url part 或降级文本。
  */

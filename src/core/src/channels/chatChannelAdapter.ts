@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-11 16:36:09
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-11 17:08:46
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\channels\chatChannelAdapter.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AEs
- */
 /**
  * @file channels/chatChannelAdapter.ts
  * @description WebChat 渠道适配器：sendOutbound 把统一出站消息转成 HTTP JSON 响应回给前端。

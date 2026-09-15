@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-17 15:38:50
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 17:20:26
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\observability\trace.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * @file observability/trace.ts
  * @description Trace 落盘与自适应运维：emitTrace 统一分发埋点事件 → appendTraceEvent 高效追加 JSONL，

@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-07-10 16:15:31
- * @LastEditors: fanqianliang
- * @LastEditTime: 2026-07-29 10:00:00
- * @FilePath: \deepSeekCode\src\core\src\tool\registry\agent.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
 import { runSubagent } from "@/agent/subagent.ts";
 

@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-11 08:37:48
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-12 09:13:49
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\serve\index.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * @file serve/index.ts
  * @description 服务启动入口：创建 express 应用并在端口 3000 监听。

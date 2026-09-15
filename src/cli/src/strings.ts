@@ -92,6 +92,10 @@ interface StringDict {
     sessionsPrompt: string;
     noHistory: string;
     sessionLoaded: (id: string) => string;
+    /** /new 开新会话 */
+    cmdNew: string;
+    sessionNew: (id: string) => string;
+    sessionNewBusy: string;
     /** /fork 选择器（会话分叉） */
     cmdFork: string;
     forkTitle: string;
@@ -216,6 +220,9 @@ const STRINGS: Record<Locale, StringDict> = {
         sessionsPrompt: "↑↓ 选择 · Enter 载入 · Esc 取消",
         noHistory: "（暂无历史会话）",
         sessionLoaded: (id) => `已载入会话 ${id}（继续对话将续接此会话）`,
+        cmdNew: "开启新会话（清屏；旧会话保留，/sessions 可找回）",
+        sessionNew: (id) => `🆕 已开启新会话 ${id}（旧会话完整保留，/sessions 可找回）`,
+        sessionNewBusy: "生成中——先 Esc/Ctrl+G 中止当前回复，再开新会话",
         cmdFork: "从当前会话的某轮回复处分叉出新会话",
         forkTitle: "🌿 分叉当前会话（↑↓ 选检查点 · Enter 分叉）",
         forkPrompt: "↑↓ 选择 · Enter 分叉 · Esc 取消",
@@ -260,6 +267,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
+            "/new       — 开启新会话（旧会话保留，/sessions 可找回）",
             "/fork      — 从当前会话的某轮回复处分叉出新会话",
             "/trust  — 管理已信任目录（项目级 hooks/skills 等仅在信任目录加载；CI 用 --trust 显式信任）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
@@ -360,6 +368,9 @@ const STRINGS: Record<Locale, StringDict> = {
         sessionsPrompt: "↑↓ pick · Enter resume · Esc cancel",
         noHistory: "(no past sessions)",
         sessionLoaded: (id) => `Resumed session ${id} (new messages continue it)`,
+        cmdNew: "Start a new session (clears screen; old ones remain via /sessions)",
+        sessionNew: (id) => `🆕 New session ${id} started (old sessions kept, resume via /sessions)`,
+        sessionNewBusy: "Busy — abort the current reply first (Esc/Ctrl+G), then start a new session",
         cmdFork: "Fork the current session from a past round",
         forkTitle: "🌿 Fork current session (↑↓ to pick · Enter to fork)",
         forkPrompt: "↑↓ pick · Enter fork · Esc cancel",
@@ -404,6 +415,7 @@ const STRINGS: Record<Locale, StringDict> = {
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",
+            "/new       — Start a new session (old ones remain via /sessions)",
             "/fork      — Fork the current session from a past round",
             "/trust  — Manage trusted dirs (project hooks/skills load only when trusted; CI uses --trust)",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
@@ -431,4 +443,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;

@@ -618,6 +618,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         if (picked) await loadSession(picked);
     }, [pushInfo, loadSession]);
 
+    // —— 开新会话（/new，会话历史 UX 补齐：CLI 端此前只能退出重启） ——
+    /** /new：显式新建 sessionId（不能只置 null——`--continue` 启动时 initialSessionId 有值，
+     *  下轮 getOrCreateSessionId(initialSessionId) 会粘回旧会话）+ 清屏；旧会话文件不动，/sessions 可找回。 */
+    const newSession = useCallback(async () => {
+        sessionIdRef.current = await getOrCreateSessionId(undefined);
+        clearRows();
+        pushInfo(S.sessionNew(truncateMiddle(sessionIdRef.current, 12)));
+    }, [clearRows, pushInfo]);
+
     // —— 会话分叉（/fork 选择器，会话历史 UX ③） ——
     /** 关闭分叉选择器并回传结果（null=取消）。 */
     const resolveFork = useCallback((anchor: ForkAnchor | null) => {
@@ -684,7 +693,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
-        openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork,
+        openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };
 };

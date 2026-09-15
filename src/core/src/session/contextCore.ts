@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-16 14:07:39
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-16 15:35:45
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\session\contextCore.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * @file session/contextCore.ts
  * @description 上下文（消息）核心工具：

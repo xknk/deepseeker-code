@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-11 15:41:07
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-07-15 17:12:20
- * @FilePath: \deepSeekCode\src\core\src\serve\chatPorcessing.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * @file serve/chatProcessing.ts
  * @description 对话处理主入口：把入站统一消息（UnifiedInboundMessage）装配成 runAgent 所需的

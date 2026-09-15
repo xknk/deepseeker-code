@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-12 15:47:18
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-18 14:20:28
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\session\transcript.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koroFileHeader/wiki/%E9%85%8D%E7%BD%AE
- */
 /**
  * @file session/transcript.ts
  * @description 会话转录（JSONL 追加日志）：readTranscriptLines 读取全部行（消息 + 事件混合序列），

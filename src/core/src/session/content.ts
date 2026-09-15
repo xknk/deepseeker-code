@@ -1,11 +1,3 @@
-/*
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-06-16 14:32:11
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-06-17 14:15:57
- * @FilePath: d:\code\自研\deepSeekCode\src\core\src\session\content.ts
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koroFileHeader/wiki/%E9%85%8D%E7%BD%AE%E8%AE%BE%E7%BD%AE
- */
 /**
  * @file session/content.ts
  * @description ★ 唯一跨 run LLM 上下文派生函数 buildContextMessages（正式化契约，事件日志化改造）：
