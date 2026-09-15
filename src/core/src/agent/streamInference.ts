@@ -2,8 +2,9 @@
  * @file agent/streamInference.ts
  * @description 流式推理消费（async generator）。
  *  驱动 activeProvider.streamChat 流式拉取标准化 ProviderStreamChunk：边收边 yield text.delta / thinking.delta；
- *  按 index 拼接 tool_calls 分片；末包收 usage。含三道有限重试——流式 stall（idle 超时）/ API 瞬时错误
- *  （429/5xx/网络复位）/ 上下文超长降级（context_length_exceeded → 强制压缩后重试）。重试前若已推过文本则先 yield text.reset。
+ *  按 index 拼接 tool_calls 分片；末包收 usage。含四道有限重试——流式 stall（idle 超时）/ API 瞬时错误
+ *  （429/5xx/网络复位）/ 上下文超长降级（context_length_exceeded → 强制压缩后重试）/ 视觉自学习降级
+ *  （端点 400 不支持图片 → 记能力 + 折叠为文本占位重试）。重试前若已推过文本则先 yield text.reset。
  *
  *  从 runAgent 流式推理段抽出。yield text.delta|thinking.delta|text.reset，return InferenceResult——
  *  final 永远由主循环 yield，本模块绝不 yield final。消费方用 `yield* streamInference(ctx)` 委托。
@@ -20,7 +21,9 @@ import type { ProviderUsage } from "@/llm/provider.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { appendMessage } from "@/session/transcript.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
-import { msgText } from "@/session/contentParts.ts";
+import { msgText, collapseToText, VISION_DEGRADE_NOTE } from "@/session/contentParts.ts";
+import { learnVisionCapability } from "@/llm/visionCapability.ts";
+import { MODEL_NAME } from "@/llm/createModel.ts";
 
 /** sha1 前 10 位短哈希：前缀分段指纹用（只入 trace 供跨会话对比，不上模型）。 */
 const sha1short = (s: string): string => createHash('sha1').update(s).digest('hex').slice(0, 10);
@@ -149,6 +152,8 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         let apiRetries = 0;
         // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
         let compactedThisRound = false;
+        // ★ 本轮是否已做过「视觉自学习降级」：乐观直发图片被端点拒绝时折叠为文本占位重试，同样最多一次
+        let visionDegradedThisRound = false;
         for (let streamAttempt = 0; ; streamAttempt++) {
             try {
                 // ★ 消费标准化 ProviderStreamChunk（provider 已把 DeepSeek/OpenAI delta+usage 映射好）。
@@ -244,6 +249,30 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                     });
                     inferenceMessages = withNudgeTail(message, nudgeMsg);
                     compactedThisRound = true;
+                    contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
+                    continue;
+                }
+                // ★ 视觉自学习降级（零配置多模态）：乐观直发图片 → 端点 400 不支持图片输入 →
+                //   按生效模型记住能力（visionCapability）+ 全部 image part 折叠为文本占位 + 立即重试一次。
+                //   前提安全：该 400 从 provider 的 create() 抛出（流开始前），此刻必然 noOutputYet、
+                //   零 chunk 已 yield → 重试对用户完全不可见。最多一次（visionDegradedThisRound）；
+                //   折叠的是 message 数组槽位（ctx 契约：引用共享原地修改主循环可见）→ 本 run 后续工具轮
+                //   不再二次 400；transcript 归档原件（含图）不受影响；下一轮 buildContextMessages 经
+                //   enforceVisionGate 按缓存 false 折叠历史——跨 run 行为自动一致。
+                if (activeProvider.isImageUnsupportedError(streamErr) && noOutputYet && !visionDegradedThisRound) {
+                    const effModel = (typeof model === "string" && model.trim()) ? model.trim() : MODEL_NAME;
+                    learnVisionCapability(effModel, false);   // 内存同步生效（重试前即见），落盘异步
+                    for (let i = 0; i < message.length; i++) message[i] = collapseToText(message[i], VISION_DEGRADE_NOTE) as Msg;
+                    inferenceMessages = withNudgeTail(message, nudgeMsg);   // 重算请求视图（nudge ephemeral 副本）
+                    visionDegradedThisRound = true;
+                    events({
+                        sessionId,
+                        eventType: 'llm.visionDowngraded',
+                        metadata: { depth, decisionSource: llmDecisionSource, ok: true, round, model: effModel },
+                        payload: { output: streamErr instanceof Error ? streamErr.message : String(streamErr) },
+                    });
+                    yield { type: 'vision.downgraded', model: effModel };
+                    console.warn(`⚠️ 模型 ${effModel} 不支持图片输入（API ${(streamErr as any)?.status ?? '?'}），已自动降级为文本占位并重试（能力已记住，后续消息直接按文本发送）`);
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;
                 }

@@ -23,6 +23,7 @@ import { appendMessage } from "@/session/transcript.ts";
 import { buildContextMessages } from "@/session/content.ts";
 import { Msg } from "@/session/contextCore.ts";
 import { toIngestContents, WirePart } from "@/session/contentParts.ts";
+import { ensureVisionCacheLoaded } from "@/llm/visionCapability.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { RunAgentOptions, ThinkingLevel, PermissionMode } from "@/agent/type.ts";
@@ -153,6 +154,8 @@ export const handleUnifiedChat = async (
     //   wire 喂 buildContextMessages（vision 关时降级为文本注，绝不给非 vision 端点发 parts——宿主门控
     //   失效如 HTTP 直调绕过前端也在此兜底）；archive 喂 appendMessage（transcript 存入站原件含图，
     //   供回放还原缩略图 / 日后开启 vision 复见）。context 视图的 vision 门控兜底仍是 content.ts enforceVisionGate。
+    // ★ 零配置多模态：vision 判定（toIngestContents 入站降级）前先关掉能力缓存启动竞态窗口。
+    await ensureVisionCacheLoaded();
     const { wire: userContent, archive: archiveContent } = toIngestContents(inbound.content, inbound.attachments, opts?.model);
     try {
         // ★ R-1：setup（buildContextMessages / appendMessage 等）原在 runWithSessionContext 的 try 之外，

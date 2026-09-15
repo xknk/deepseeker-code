@@ -354,6 +354,10 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }
                 break;
             }
+            case "vision.downgraded":
+                // ★ 零配置多模态自学习：当前模型不支持图片，本轮已自动折叠为文本重试（能力已记住）
+                pushInfo(`🖼 模型 ${String(obj.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
+                break;
             default:
                 break;
         }

@@ -37,7 +37,7 @@ code --install-extension deepseeker-code-<version>.vsix
 ## 功能特性
 
 - **流式输出**：逐字打字效果 + 可折叠的思考过程块。
-- **图片贴图提问**：输入框支持 Ctrl+V 直接粘贴截图（微信/QQ 等截图工具）或点击按钮上传（单张 ≤8MB），chip 悬停显 × 可移除，发送后用户消息气泡内联缩略图回显，历史会话回放同样还原。视觉能力按当前模型自动判定（模型 id 含 vision/vlm/-vl 即视为多模态，`/switch` 切模型即时生效、用户无感）：vision 模型图片随消息直达模型上下文；非 vision 模型图片自动存用户临时目录 `~/.deepseeker-code/tmp/paste/`（不进项目目录、不污染 git，>24h 自动清扫），落盘路径随消息尾注带给模型，由已配置的图像识别 MCP 工具中转读图（用户输入框保持零文本）。env `DEEP_SEEK_VISION` 可显式强开（=1）/强关（=0）覆盖自动判定。不贴图时请求体逐字节不变。
+- **图片贴图提问（零配置）**：输入框支持 Ctrl+V 直接粘贴截图（微信/QQ 等截图工具）或点击按钮上传（单张 ≤8MB），chip 悬停显 × 可移除，发送后用户消息气泡内联缩略图回显，历史会话回放同样还原。无需任何配置：图片默认随消息乐观直发模型上下文，多模态模型（含名字无 vision/vlm 标记的，如 deepseek-v4.1-flash）直接看图；若端点报「不支持图片」（400），本轮自动降级为文本占位并重试（用户无感、UI 提示一条），按模型 id 记入 `~/.deepseeker-code/model-capabilities.json` 永久记住，此后图片自动存 `~/.deepseeker-code/tmp/paste/`（不进项目目录、不污染 git，>24h 自动清扫），落盘路径随消息带给模型，由已配置的图像识别 MCP 工具中转读图（用户输入框保持零文本）。env `DEEP_SEEK_VISION` 为逃生门：`=1`/`true` 强开、`=0`/`false` 强关，未设走自学习。不贴图时请求体逐字节不变。已知局限：个别 OpenAI 兼容代理对不支持图片的模型不报错、静默丢图——此类端点无法自学习，请用 `DEEP_SEEK_VISION=0` 显式关闭。
 - **长任务细节不丢**：上下文自动压缩，被压缩归档的原始消息与工具结果经 `recall` 工具按需检索取回（文件类结果带实时 mtime 校验，防过期盲改），超长工具结果脱敏侧车存档、分页取回。
 - **工具调用**：读/写/编辑文件 + 符号大纲、运行命令（前台/后台）、ripgrep 搜索 + glob、Git 操作集、网页抓取与搜索、HTTP 客户端（联调）、TypeScript 诊断与跳转、Word/PDF/Excel 阅读，每步以工具卡展示。
 - **审批网关**：写操作 / 危险命令弹内联审批（允许本次 / 总是允许 / 拒绝）；「总是允许」会智能落成 glob 规则持久化。
@@ -89,7 +89,7 @@ code --install-extension deepseeker-code-<version>.vsix
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max`（`low`/`medium` 已废弃） | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |
-| `DEEP_SEEK_VISION` | 视觉多模态开关，设 `1`/`true` 开启（开启后聊天支持贴图附件） | 关 |
+| `DEEP_SEEK_VISION` | 视觉多模态逃生门：贴图默认乐观直发（端点报不支持时自动降级为文本并按模型记住）；`=1`/`true` 强开、`=0`/`false` 强关 | 自动 |
 | `DEEP_SEEK_IMAGE_TOKENS` | 单张图片折算 token 数（下限 100） | `1500` |
 
 #### 产品行为（`DEEPSEEKER_CODE_*` / `DEEP_SEEK_*`）

@@ -139,7 +139,7 @@ DeepSeeker-Code 支持三种配置来源，优先级 **环境变量 > config.jso
 | `DEEP_SEEK_REASONING_EFFORT` | 推理强度，仅 `high` / `max` | `high` |
 | `DEEP_SEEK_THINKING` | 深度思考开关，设 `0` 关闭 | 开 |
 | `DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS` | 流式 idle 超时（ms） | `120000` |
-| `DEEP_SEEK_VISION` | 视觉多模态开关，设 `1`/`true` 开启（开启后聊天支持贴图附件） | 关 |
+| `DEEP_SEEK_VISION` | 视觉多模态逃生门：贴图默认乐观直发（端点报不支持时自动降级为文本并按模型记住）；`=1`/`true` 强开、`=0`/`false` 强关 | 自动 |
 | `DEEP_SEEK_IMAGE_TOKENS` | 单张图片折算 token 数（下限 100） | `1500` |
 
 #### 产品行为

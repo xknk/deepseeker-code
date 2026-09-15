@@ -21,10 +21,11 @@
  *     （transcript 永远 append-only）。
  */
 import { cleanMsg, groupUnits, Msg } from "./contextCore.ts";
-import { hasImagePart, replaceImageParts, isVisionEnabled, collapseToText } from "./contentParts.ts";
+import { hasImagePart, replaceImageParts, isVisionEnabled, collapseToText, VISION_DEGRADE_NOTE } from "./contentParts.ts";
 import { readTranscriptLines, isEventLine } from "./transcript.ts";
 import { getRollingState } from "./store.ts";
 import { appConfig } from "@/config/index.ts";
+import { ensureVisionCacheLoaded } from "@/llm/visionCapability.ts";
 import { recoverSession, repairOrphanToolCalls, RecoveryReport } from "./recovery.ts";
 /**
  * ★ 跨 run 历史工具结果衰减：保留最近 KEEP_RECENT_UNITS 个对话单元的 tool 结果全文，更早的（跨 run 旧 tool）
@@ -64,8 +65,7 @@ const decayOldToolResults = (msgs: Msg[]): Msg[] => {
         return replaceImageParts(mm, '[历史图片已折叠：原图仍在会话归档中，如需再次查看请重新提供该图片]') as Msg;
     });
 };
-/** vision 关闭时重建视图的图片占位文案（告知模型图存在但本轮不可见）。 */
-const NO_VISION_IMAGE_NOTE = "[图片未送达：当前模型无视觉能力，看不到该图；原图保留在会话归档中，如需分析请让用户重新提供或切换 vision 模型]";
+/** vision 关闭时重建视图的图片占位文案：与入站降级/400 自学习降级共用全局常量（contentParts.ts）。 */
 
 /**
  * ★ 多模态重建闸门：vision 关闭时，transcript 里已落盘的 parts 数组（含 decay 未覆盖的
@@ -78,7 +78,7 @@ const NO_VISION_IMAGE_NOTE = "[图片未送达：当前模型无视觉能力，�
  */
 const enforceVisionGate = (msgs: Msg[], modelId?: string): Msg[] => isVisionEnabled(modelId)
     ? msgs
-    : msgs.map((m) => collapseToText(m, NO_VISION_IMAGE_NOTE) as Msg);
+    : msgs.map((m) => collapseToText(m, VISION_DEGRADE_NOTE) as Msg);
 
 /**
  * 跨会话构建发给模型的上下文视图：
@@ -88,6 +88,7 @@ const enforceVisionGate = (msgs: Msg[], modelId?: string): Msg[] => isVisionEnab
  * 必须在 appendMessage(本次user) 之前调用，否则本次 user 被重复读入。
  */
 export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string, modelId?: string) => {
+    await ensureVisionCacheLoaded();   // vision 判定（enforceVisionGate）前关掉能力缓存启动竞态窗口
     const lines = await readTranscriptLines(sessionId);
     const store = await getRollingState(sessionId);
     // ★ 恢复层接线（事件日志化）：开关开（或既存文件已含事件行——中途关开关的会话仍按事件恢复）→

@@ -11,11 +11,12 @@
  *  - 剧本按序消费：streamChat 每被调一次进入下一 turn；**只有完整流完（无故障）才推进游标**——
  *    streamInference 的三道重试会重入同一 turn，故障按 per-turn 次数预算（fault.times，默认 1）
  *    消耗，耗尽后同一 turn 干净流出（重试成功场景）。
- *  - 故障类型对准 streamInference 的三条重试通道 + 致命档：
- *      idle            → message 恰为 'stream_idle_timeout'（streamInference 按串匹配判 idle）；
- *      transient       → 携带 replayFault 标记 + status 429（isTransientError 自识别）；
- *      context_length  → replayFault 标记（isContextLengthError 自识别；配 afterChars=0 满足 noOutputYet 前提）；
- *      fatal           → 每次进入该 turn 都抛（重试耗尽 → InferenceResult error → runAgent final 收尾）。
+ *  - 故障类型对准 streamInference 的重试通道 + 致命档：
+ *      idle              → message 恰为 'stream_idle_timeout'（streamInference 按串匹配判 idle）；
+ *      transient         → 携带 replayFault 标记 + status 429（isTransientError 自识别）；
+ *      context_length    → replayFault 标记（isContextLengthError 自识别；配 afterChars=0 满足 noOutputYet 前提）；
+ *      image_unsupported → replayFault 标记（isImageUnsupportedError 自识别；视觉自学习降级通道）；
+ *      fatal             → 每次进入该 turn 都抛（重试耗尽 → InferenceResult error → runAgent final 收尾）。
  *    afterChars>0 → 先吐该长度正文再抛（复现「已推文本 → text.reset → 重试」的 mid-stream 场景）。
  *  - 录制器：每次 streamChat 记录入参（messages 快照 + tools + opts），测试据此断言「模型实际看到了什么」
  *    （如 ephemeral nudge 是否注入、inbox steering 是否送达）——这是纯黑盒断言做不到的。
@@ -32,8 +33,8 @@ import { AssistantParts, LLMProvider, ProviderStreamChunk, ProviderStreamOpts, P
 
 // ============ 剧本类型 ============
 
-/** 故障类型：对准 streamInference 三条重试通道 + 致命档（见文件头注释）。 */
-export type ReplayFaultType = 'idle' | 'transient' | 'context_length' | 'fatal';
+/** 故障类型：对准 streamInference 重试通道 + 致命档（见文件头注释）。 */
+export type ReplayFaultType = 'idle' | 'transient' | 'context_length' | 'image_unsupported' | 'fatal';
 
 /** 单 turn 内的故障注入。times=消耗预算（默认 1，即首次重入干净）；afterChars=先吐多少正文字符再抛。 */
 export interface ReplayFault {
@@ -105,10 +106,12 @@ export const createReplayProvider = (script: ReplayScript): ReplayProviderHandle
             ?? (fault.type === 'idle' ? 'stream_idle_timeout'
                 : fault.type === 'context_length' ? 'context_length_exceeded（回放注入）'
                 : fault.type === 'transient' ? 'HTTP 429 rate limit（回放注入）'
+                : fault.type === 'image_unsupported' ? 'This model does not support image（回放注入）'
                 : '回放致命错误（fatal）');
         const e: any = new Error(msg);
         e.replayFault = fault.type;
         if (fault.type === 'transient') e.status = 429;
+        if (fault.type === 'image_unsupported') e.status = 400;
         return e;
     };
 
@@ -170,9 +173,10 @@ export const createReplayProvider = (script: ReplayScript): ReplayProviderHandle
             if (parts.toolCalls?.length) m.tool_calls = parts.toolCalls;
             return m;
         },
-        // 自识别回放注入的故障（streamInference 经 activeProvider 调用这两个分类器驱动重试通道）
+        // 自识别回放注入的故障（streamInference 经 activeProvider 调用这些分类器驱动重试通道）
         isContextLengthError: (e: any) => e?.replayFault === 'context_length',
         isTransientError: (e: any) => e?.replayFault === 'transient',
+        isImageUnsupportedError: (e: any) => e?.replayFault === 'image_unsupported',
         get calls() { return calls; },
         get cursor() { return cursor; },
         reset: () => { cursor = 0; attemptCounts = []; calls.length = 0; },

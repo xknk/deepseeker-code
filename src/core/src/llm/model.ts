@@ -76,3 +76,5 @@ export const isContextLengthError: typeof deepseekProvider.isContextLengthError 
     activeProvider.isContextLengthError(e);
 export const isTransientApiError: typeof deepseekProvider.isTransientError = (e) =>
     activeProvider.isTransientError(e);
+export const isImageUnsupportedError: typeof deepseekProvider.isImageUnsupportedError = (e) =>
+    activeProvider.isImageUnsupportedError(e);

@@ -10,6 +10,7 @@
 
 import OpenAI from "openai";
 import { MODEL_NAME } from "@/llm/createModel.ts";
+import { peekVisionCapability } from "@/llm/visionCapability.ts";
 
 /** 入站图片附件（webview/HTTP 随 UnifiedInboundMessage.attachments 携带）。 */
 export interface InboundAttachment {
@@ -59,25 +60,29 @@ export const imageUrlsOf = (content: unknown): string[] => {
 export const hasImagePart = (content: unknown): boolean => imageUrlsOf(content).length > 0;
 
 /**
- * 模型名视觉能力启发式：id 带 vision / vlm / qwen 式 -vl 段视为支持图片输入。
- * 覆盖 DeepSeek 在售（deepseek-flash-vision-exp）与常见开源命名（qwen-vl-*、internvl 等）；
- * 误判兜底：DEEP_SEEK_VISION env 可显式强开/强关（见 isVisionEnabled）。
+ * 视觉降级占位文案（全局唯一，两处共用）：
+ * - toIngestContents 的入站降级尾注（vision 关闭时 wire 带此说明）；
+ * - streamInference 的「400 自学习降级」重试分支（乐观直发被端点拒绝后折叠 image part）。
+ * 「图片未送达」前缀为测试断言锚点，勿改。
  */
-export const modelSupportsVision = (modelId: string): boolean =>
-    /vision|vlm|(^|[-_.])vl([-_.0-9]|$)/i.test(modelId || "");
+export const VISION_DEGRADE_NOTE =
+    "[图片未送达：当前模型不支持图片输入，系统已自动改用文本方式；原图仍在会话归档中，如需分析图片内容可配置图像识别工具读取存档路径，或由用户重新提供]";
 
 /**
- * 视觉能力开关（判定优先级）：
- * 1. env DEEP_SEEK_VISION 显式设置强开/强关（'1'/'true' 开，'0'/'false' 关）——用户覆盖权最高；
- * 2. 未设 → 按「生效模型名」自动判定（无感）：modelId（调用方传入的 per-agent/会话覆盖）|| 全局 MODEL_NAME。
- * ★ 调用时读取（非模块加载期缓存）：运行期 /model 切换、改 env 均立即生效。
+ * 视觉能力开关（判定优先级）——零配置多模态：默认乐观直发，能力靠端点实测自学习：
+ * 1. env DEEP_SEEK_VISION 显式设置强开/强关（'1'/'true' 开，'0'/'false' 关）——用户覆盖权最高（逃生门）；
+ * 2. 能力缓存有该模型记录（历史 400 自学习的产物，visionCapability.ts）→ 用缓存值；
+ * 3. 缺省 → true（乐观直发）。名字启发式已退役：对"原生多模态但 id 无 vision/vlm 标记"的模型
+ *    （deepseek-v4.1-flash 类）必然误判，而乐观误判的代价（不支持图的模型首次贴图吃一次 400）
+ *    已由 streamInference 的自动降级重试兜住且之后永久记住。
+ * ★ 调用时读取（非模块加载期缓存）：运行期 /model 切换、改 env、learn 写缓存均立即生效。
  */
 export const isVisionEnabled = (modelId?: string): boolean => {
     const v = process.env.DEEP_SEEK_VISION;
     if (v === "1" || v === "true") return true;
     if (v === "0" || v === "false") return false;
     const effective = typeof modelId === "string" && modelId.trim() ? modelId.trim() : MODEL_NAME;
-    return modelSupportsVision(effective);
+    return peekVisionCapability(effective) ?? true;
 };
 
 /** 单张图片折算 token 数（压缩判定 / EMA 校准口径）；env DEEP_SEEK_IMAGE_TOKENS 可覆盖，默认 1500。 */
@@ -99,7 +104,7 @@ export const estimateImageTokens = (): number => {
  */
 export const toWireUserContent = (text: string, attachments?: InboundAttachment[]): string | WirePart[] => {
     if (!Array.isArray(attachments) || attachments.length === 0) return text;
-    const accepted: { name: string; url: string }[] = [];
+    const accepted: { name: string; url: string; path?: string }[] = [];
     const skipped: string[] = [];
     for (const a of attachments as InboundAttachment[]) {
         const name = typeof a?.name === "string" && a.name.trim() ? a.name : "image";
@@ -110,10 +115,11 @@ export const toWireUserContent = (text: string, attachments?: InboundAttachment[
             skipped.push(`🖼 图片 ${name} 已忽略：超过 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB 上限`);
             continue;
         }
-        accepted.push({ name, url: `data:${a.mime};base64,${b64}` });
+        accepted.push({ name, url: `data:${a.mime};base64,${b64}`, path: a.path });
     }
-    // 被接受的图片统一在文本尾部留标签行（纯文本视图可读）
-    const labels = accepted.map((p) => `🖼 [图片: ${p.name}]`);
+    // 被接受的图片统一在文本尾部留标签行（纯文本视图可读）；带落盘 path 时一并留档——
+    // 乐观直发成功时模型可经工具复读原图，降级重试折叠后路径线索仍存活于 text part（MCP 中转不丢）
+    const labels = accepted.map((p) => `🖼 [图片: ${p.name}${p.path ? ` | 存档: ${p.path}` : ""}]`);
     const footer = [...skipped, ...labels];
     const finalText = footer.length ? `${text}\n\n${footer.join("\n")}` : text;
     if (accepted.length === 0) return finalText;   // 全部无效：降级为含原因的 string
@@ -151,7 +157,7 @@ export const toIngestContents = (
         ? `图片已存工作区：\n${paths.join("\n")}\n若已配置图像识别 MCP 工具，可读取上述路径理解图片内容。`
         : "若消息中包含图片文件路径且已配置图像识别 MCP 工具，可读取该路径理解图片。";
     return {
-        wire: `${text}\n\n🖼 收到图片附件（${names}）：当前模型无视觉能力，无法直接查看图片内容（可切换 vision 模型或设 DEEP_SEEK_VISION=1 强开）；${relay}`,
+        wire: `${text}\n\n🖼 收到图片附件（${names}）：当前模型不支持图片输入（视觉能力已按端点实测自动判定；可切换 vision 模型或设 DEEP_SEEK_VISION=1 强开）；${relay}`,
         archive,
     };
 };

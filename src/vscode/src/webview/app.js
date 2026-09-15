@@ -870,6 +870,12 @@ switch (evt.type) {
         renderApproval();
         break;
       }
+      case "vision.downgraded": {
+        // ★ 零配置多模态自学习：当前模型不支持图片，本轮已自动折叠为文本重试（能力已记住）
+        flush();
+        addInfo(`🖼 模型 ${String(evt.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
+        break;
+      }
       default:
         break;
     }
@@ -1721,7 +1727,7 @@ case "lang":
 if (arg === "zh" || arg === "en") {
 state.locale = arg;
 vscode.postMessage({ type: "setLocale", locale: arg });
-addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}`);
+addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}（AI 回复语言默认跟随每轮提问自动判断；纯代码/无文字轮次以此语言为准）`);
 syncToolbar();
 } else if (!arg) {
 addInfo(`当前界面语言：${state.locale === "zh" ? "中文" : "English"}\n用法：/lang zh|en`);
@@ -1963,7 +1969,15 @@ return;
 if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
 e.preventDefault();
 if (menu.style.display !== "none" && slashItems.length) {
-runSlash(slashItems[selIdx >= 0 ? selIdx : 0]);
+const sel = slashItems[selIdx >= 0 ? selIdx : 0];
+// ★ 仅「输入仍是选中命令名的前缀」（如 /lan → /lang）才补全回填；已打到参数阶段
+//   （/lang zh）或恰好敲完命令名（/lang，无参=查看当前值）时直接发送。
+//   修：带参命令（/lang /model /thinking 等）菜单常驻时 Enter 回填抹掉已输参数。
+if (sel.cmd !== input.value && sel.cmd.toLowerCase().startsWith(input.value.toLowerCase())) {
+runSlash(sel);
+} else {
+doSend();
+}
 return;
 }
 doSend();
@@ -1991,11 +2005,7 @@ const fileInput = $("#file-input");
 const imageInput = $("#image-input");
 btnFile.addEventListener("click", () => fileInput.click());
 btnImage.addEventListener("click", () => {
-if (state.vision) {
-addInfo("🖼 已选择视觉模式：图片将随消息直达模型（chip 上的 × 可移除待发送的图）。");
-} else {
-addInfo("🖼 图片识别需配置图像理解 MCP（settings.json 的 mcpServers，如能读图返回文字描述的 server）；未配置则助手无法“看到”图片。");
-}
+addInfo("🖼 图片将随消息直达模型（chip 上的 × 可移除待发送的图）；若模型不支持图片会自动降级为文本处理。");
 imageInput.click();
 });
 fileInput.addEventListener("change", () => {
@@ -2014,10 +2024,11 @@ addInfo(`📎 已入库文件：${f.name}`);
 reader.onerror = () => addInfo(`📎 读取文件失败：${f.name}`);
 reader.readAsText(f);
 });
-// ★ 贴图统一入口（file picker 与 Ctrl+V 粘贴共用 ingestImageFile）：
-//   两模式一致：图片进 pendingImages 待发（chip 带 × 可移除），随 submit 上送——用户气泡缩略图回显 +
-//   transcript 落 parts 供历史回放（vision 关闭时 core 侧降级文本注、原件照存归档）。
-//   vision 关闭额外 uploadImage 落工作区 tmp：回包路径只回填到待发附件，随 submit 走 wire 尾注给模型（MCP 中转读图）。
+// ★ 贴图统一入口（file picker 与 Ctrl+V 粘贴共用 ingestImageFile）——零配置多模态：
+//   不再按 state.vision 分叉：图片进 pendingImages 待发（chip 带 × 可移除）随 submit 上送（base64 直达，
+//   乐观发送，core 侧按端点实测自学习判定能力）；同时无条件 uploadImage 落工作区 tmp 拿存档路径——
+//   回包路径只回填到待发附件（随 submit 上送）：乐观成功时模型可经工具复读原图，端点拒绝降级时
+//   路径线索随 wire 尾注给模型（图像识别 MCP 中转读图）。
 const ingestImageFile = (f) => {
 if (!f) return;
 if (f.size > 8 * 1024 * 1024) { addInfo(`🖼 图片 ${f.name} 过大（>8MB），已忽略`); return; }
@@ -2029,12 +2040,8 @@ const base64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : "";
 const mime = f.type || "image/png";
 state.pendingImages.push({ name: f.name, mime, base64, dataUrl });
 appendImagePreview(dataUrl, f.name, true);
-if (state.vision) {
-addInfo(`🖼 已添加待发送图片：${f.name}（当前模型支持视觉，随消息直达）`);
-} else {
 vscode.postMessage({ type: "uploadImage", name: f.name, mime, base64 });
-addInfo(`🖼 已添加图片：${f.name}（当前模型无视觉，已存本地临时目录供图像识别 MCP 读取）`);
-}
+addInfo(`🖼 已添加待发送图片：${f.name}`);
 };
 reader.onerror = () => addInfo(`🖼 读取图片失败：${f.name}`);
 reader.readAsDataURL(f);

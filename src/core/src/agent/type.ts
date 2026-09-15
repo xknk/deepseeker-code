@@ -141,4 +141,6 @@ export type AgentEvent =
     /** 整个 agent 运行结束的最终文本（正常结束 / 中止 / 出错）。 */
     | { type: 'final'; text: string }
     /** inbox steering：回合边界认领了运行中排队的补充输入（已注入上下文并落盘；texts 仅供前端提示，勿重复渲染）。 */
-    | { type: 'inbox.claimed'; texts: string[] };
+    | { type: 'inbox.claimed'; texts: string[] }
+    /** 视觉自学习降级：当前模型不支持图片输入，本轮已自动折叠为文本占位重试（能力已记住，后续直接按文本发送）。 */
+    | { type: 'vision.downgraded'; model: string };

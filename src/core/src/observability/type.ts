@@ -27,6 +27,7 @@ export type TraceEventType =
     | "llm.request"             // LLM 请求：准备向大模型发送 Prompt
     | "llm.response"            // LLM 响应：收到大模型的回复（含 Token 消耗等）
     | "llm.error"               // LLM 调用失败：网络/模型/配置等导致本轮推理未返回
+    | "llm.visionDowngraded"    // 视觉自学习降级：端点拒绝图片输入（400）→ 记能力 + 折叠为文本重试
     | "tool.resolve"            // 工具解析：系统识别出需要调用哪个插件/工具
     | "tool.execute.start"      // 工具执行开始：具体的函数或 API 开始运行
     | "tool.execute.end"        // 工具执行结束：拿到工具返回的结果

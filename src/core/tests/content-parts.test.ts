@@ -23,10 +23,11 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 const {
     msgText, imageUrlsOf, hasImagePart,
     toWireUserContent, replaceImageParts, degradeImagesForAux, toIngestContents,
-    isVisionEnabled, modelSupportsVision, estimateImageTokens, MAX_IMAGE_BYTES,
+    isVisionEnabled, estimateImageTokens, MAX_IMAGE_BYTES,
 } = await import("@/session/contentParts.ts");
 const { estimateTokens, groupUnits } = await import("@/session/contextCore.ts");
 const { extractArchiveEntities } = await import("@/agent/truncate.ts");
+const { learnVisionCapability, _resetVisionCacheForTest } = await import("@/llm/visionCapability.ts");
 
 /** 构造一个约 n KB 的伪 base64（含路径状片段，用于验证正则扫描面不被污染）。 */
 const fakeB64 = (nKB: number): string => {
@@ -99,40 +100,49 @@ describe("toIngestContents（ingest 双视图：wire=模型所见 / archive=入�
         }
     });
 
-    it("vision 关闭：archive 保留 image parts（transcript 原件 → 回放缩略图/日后复见），wire 降级纯 string 带 MCP 指引尾注", () => {
-        delete process.env.DEEP_SEEK_VISION;
-        const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }]);
-        // archive：原件含图——落 transcript 供 UI 回放还原缩略图；context 视图由 enforceVisionGate 兜底折叠
-        assert.ok(Array.isArray(r.archive));
-        assert.equal(imageUrlsOf(r.archive).length, 1);
-        assert.match(msgText(r.archive), /\[图片: shot\.png\]/);
-        // wire：纯 string（绝不给非 vision 端点发 parts），原文开头 + 指引尾注
-        assert.equal(typeof r.wire, "string");
-        assert.match(r.wire as string, /^看图/);
-        assert.match(r.wire as string, /DEEP_SEEK_VISION/);
-        assert.match(r.wire as string, /图像识别 MCP/);
-        assert.doesNotMatch(r.wire as string, /data:/);
+    it("vision 关闭（env 强关）：archive 保留 image parts（transcript 原件 → 回放缩略图/日后复见），wire 降级纯 string 带 MCP 指引尾注", () => {
+        // ★ 零配置多模态后，env 未设 = 乐观直发；显式关必须走 env="0"（或能力缓存 vision:false）
+        process.env.DEEP_SEEK_VISION = "0";
+        try {
+            const r = toIngestContents("看图", [{ name: "shot.png", mime: "image/png", base64: "QUJD" }]);
+            // archive：原件含图——落 transcript 供 UI 回放还原缩略图；context 视图由 enforceVisionGate 兜底折叠
+            assert.ok(Array.isArray(r.archive));
+            assert.equal(imageUrlsOf(r.archive).length, 1);
+            assert.match(msgText(r.archive), /\[图片: shot\.png\]/);
+            // wire：纯 string（绝不给非 vision 端点发 parts），原文开头 + 指引尾注
+            assert.equal(typeof r.wire, "string");
+            assert.match(r.wire as string, /^看图/);
+            assert.match(r.wire as string, /DEEP_SEEK_VISION/);
+            assert.match(r.wire as string, /图像识别/);
+            assert.doesNotMatch(r.wire as string, /data:/);
+        } finally {
+            delete process.env.DEEP_SEEK_VISION;
+        }
     });
 
-    it("vision 关闭 + 附件带已存路径：wire 尾注携带落盘路径（MCP 读图线索只给模型，不回灌用户输入）", () => {
-        delete process.env.DEEP_SEEK_VISION;
-        const r = toIngestContents("看图", [
-            { name: "shot.png", mime: "image/png", base64: "QUJD", path: "d:\\w\\.deepseeker-code\\tmp\\a.png" },
-            { name: "bare.png", mime: "image/png", base64: "QUJD" },
-        ]);
-        assert.equal(typeof r.wire, "string");
-        assert.match(r.wire as string, /shot\.png → d:\\w\\\.deepseeker-code\\tmp\\a\.png/);
-        assert.doesNotMatch(r.wire as string, /bare\.png →/);
-        assert.match(r.wire as string, /图像识别 MCP/);
-        // archive 原件不受路径影响（仍含两张图的 parts）
-        assert.equal(imageUrlsOf(r.archive).length, 2);
+    it("vision 关闭（env 强关）+ 附件带已存路径：wire 尾注携带落盘路径（MCP 读图线索只给模型，不回灌用户输入）", () => {
+        process.env.DEEP_SEEK_VISION = "0";
+        try {
+            const r = toIngestContents("看图", [
+                { name: "shot.png", mime: "image/png", base64: "QUJD", path: "d:\\w\\.deepseeker-code\\tmp\\a.png" },
+                { name: "bare.png", mime: "image/png", base64: "QUJD" },
+            ]);
+            assert.equal(typeof r.wire, "string");
+            assert.match(r.wire as string, /shot\.png → d:\\w\\\.deepseeker-code\\tmp\\a\.png/);
+            assert.doesNotMatch(r.wire as string, /bare\.png →/);
+            assert.match(r.wire as string, /图像识别/);
+            // archive 原件不受路径影响（仍含两张图的 parts）
+            assert.equal(imageUrlsOf(r.archive).length, 2);
+        } finally {
+            delete process.env.DEEP_SEEK_VISION;
+        }
     });
 });
 
 describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
-    it("DEEP_SEEK_VISION 开关矩阵：'1'/'true' 开，未设/'0'/'false' 关", async () => {
+    it("DEEP_SEEK_VISION 开关矩阵：'1'/'true' 开，'0'/'false' 关；未设/非法值 → 乐观默认开", async () => {
         const cases: Array<[string | undefined, boolean]> = [
-            ["1", true], ["true", true], [undefined, false], ["0", false], ["false", false], ["yes", false],
+            ["1", true], ["true", true], [undefined, true], ["0", false], ["false", false], ["yes", true],
         ];
         for (const [v, want] of cases) {
             if (v === undefined) delete process.env.DEEP_SEEK_VISION;
@@ -154,26 +164,19 @@ describe("isVisionEnabled / estimateImageTokens（env 口径）", () => {
         delete process.env.DEEP_SEEK_IMAGE_TOKENS;
     });
 
-    it("modelSupportsVision 命名启发式：vision/vlm/-vl 命中，普通模型与 vllm 不命中", () => {
-        assert.ok(modelSupportsVision("deepseek-flash-vision-exp"));
-        assert.ok(modelSupportsVision("qwen-vl-max"));
-        assert.ok(modelSupportsVision("Qwen2-VL-7B"));
-        assert.ok(modelSupportsVision("some-vlm-model"));
-        assert.ok(!modelSupportsVision("deepseek-flash"));
-        assert.ok(!modelSupportsVision("deepseek-v4-pro"));
-        assert.ok(!modelSupportsVision("vllm"), "vllm 是推理运行时不是 vision 模型");
-        assert.ok(!modelSupportsVision(""));
-    });
-
-    it("isVisionEnabled 无感判定：env 未设按生效模型名推断；env 显式设置优先级最高", () => {
+    it("isVisionEnabled 零配置判定链：env 未设乐观直发；能力缓存命中用缓存；env 显式优先级最高", () => {
         delete process.env.DEEP_SEEK_VISION;
-        assert.ok(isVisionEnabled("deepseek-flash-vision-exp"), "vision 模型自动开");
-        assert.ok(!isVisionEnabled("deepseek-flash"), "普通模型自动关");
-        process.env.DEEP_SEEK_VISION = "0";
-        assert.ok(!isVisionEnabled("deepseek-flash-vision-exp"), "env 显式关压过模型名命中");
+        _resetVisionCacheForTest();
+        assert.ok(isVisionEnabled("deepseek-v4.1-flash"), "原生多模态但名字无 vision/vlm 标记 → 乐观直发（本改造的出发点）");
+        assert.ok(isVisionEnabled("deepseek-flash"), "未知模型同样乐观开（能力由端点实测自学习）");
+        learnVisionCapability("deepseek-flash", false);
+        assert.ok(!isVisionEnabled("deepseek-flash"), "自学习缓存 vision:false 命中 → 降级");
+        assert.ok(isVisionEnabled("deepseek-v4.1-flash"), "缓存按模型 id 隔离，其它模型不受牵连");
         process.env.DEEP_SEEK_VISION = "1";
-        assert.ok(isVisionEnabled("deepseek-flash"), "env 显式开压过模型名不命中");
+        assert.ok(isVisionEnabled("deepseek-flash"), "env 强开压过缓存 false（逃生门）");
         delete process.env.DEEP_SEEK_VISION;
+        assert.ok(!isVisionEnabled("deepseek-flash"), "env 撤销后缓存值恢复生效");
+        _resetVisionCacheForTest();
     });
 
     it("toIngestContents：vision 模型（env 未设）wire 与 archive 同引用——贴图直达零尾注", () => {
@@ -314,18 +317,22 @@ describe("decay 旧单元图片折叠 + vision 重建闸门（buildContextMessag
         }
     });
 
-    it("vision 关闭：重建视图整体折叠为纯 string（含保留区贴图）——非 vision 端点零数组面", async () => {
-        // ★ P1 回归：贴过图的会话在 DEEP_SEEK_VISION 关闭后续跑，保留区近图不走 decay 折叠，
+    it("vision 关闭（env 强关）：重建视图整体折叠为纯 string（含保留区贴图）——非 vision 端点零数组面", async () => {
+        // ★ P1 回归：贴过图的会话在 vision 关闭后续跑，保留区近图不走 decay 折叠，
         //   若无重建闸门会以 image_url parts 直发非 vision 端点 → API 400 → 每轮必死。
-        delete process.env.DEEP_SEEK_VISION;
-        const ctx: any[] = await buildContextMessages(await seedImageSession(), { role: "user", content: "当前提问" }, "SYS");
-        for (const m of ctx) {
-            assert.equal(Array.isArray(m.content), false, `vision 关闭时不应有数组 content（role=${(m as any).role}）`);
+        process.env.DEEP_SEEK_VISION = "0";
+        try {
+            const ctx: any[] = await buildContextMessages(await seedImageSession(), { role: "user", content: "当前提问" }, "SYS");
+            for (const m of ctx) {
+                assert.equal(Array.isArray(m.content), false, `vision 关闭时不应有数组 content（role=${(m as any).role}）`);
+            }
+            const joined = JSON.stringify(ctx);
+            assert.ok(!joined.includes("image_url"), "不应残留 image_url part");
+            assert.match(joined, /图片未送达/, "保留区贴图轮应带 vision 关闭占位说明");
+            assert.match(joined, /历史图片已折叠/, "衰减区贴图仍走 decay 折叠文案");
+            assert.match(joined, /带图消息 NEW/, "贴图轮文本视图保留");
+        } finally {
+            delete process.env.DEEP_SEEK_VISION;
         }
-        const joined = JSON.stringify(ctx);
-        assert.ok(!joined.includes("image_url"), "不应残留 image_url part");
-        assert.match(joined, /图片未送达/, "保留区贴图轮应带 vision 关闭占位说明");
-        assert.match(joined, /历史图片已折叠/, "衰减区贴图仍走 decay 折叠文案");
-        assert.match(joined, /带图消息 NEW/, "贴图轮文本视图保留");
     });
 });

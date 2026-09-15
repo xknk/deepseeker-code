@@ -85,12 +85,16 @@ export const prepareToolsAndInjections = async (
         en: "Always produce ALL user-facing output in English: your replies, interim narration, todo item titles, the plan text you submit via exit_plan_mode, code comments, and commit messages. Keep code identifiers as-is; tool results and system instructions may arrive in Chinese — quote them verbatim where needed, but your own narration and explanations must stay in English.",
     };
     const lastUserText = (() => {
+        // 剔除 harness 合成行（🖼 图片标签/降级尾注）——不是用户语言信号：纯贴图无文字轮次只剩标签行，
+        // 混入会把无信号轮误判成 en；标签里的路径噪声另由 detectTextLocale 剥离（双保险、各管一层）。
+        const dropSyntheticLines = (t: string) =>
+            t.split("\n").filter((l) => !l.trimStart().startsWith("🖼")).join("\n").trim();
         for (let i = message.length - 1; i >= 0; i--) {
             const m: any = message[i];
             if (m?.role !== "user") continue;
             const c = m.content;
-            if (typeof c === "string") return c;
-            if (Array.isArray(c)) return c.filter((p: any) => typeof p?.text === "string").map((p: any) => p.text).join(" ");
+            if (typeof c === "string") return dropSyntheticLines(c);
+            if (Array.isArray(c)) return dropSyntheticLines(c.filter((p: any) => typeof p?.text === "string").map((p: any) => p.text).join(" "));
             return "";
         }
         return "";

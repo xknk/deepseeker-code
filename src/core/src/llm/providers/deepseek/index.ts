@@ -93,6 +93,23 @@ const isContextLengthError = (e: any): boolean => {
 };
 
 /**
+ * 识别「模型不支持图片输入」错误（零配置多模态的降级信号）。
+ * DeepSeek 官方对无视觉模型收图返回 400 + "This model does not support image"；OpenAI 兼容端点
+ * 常见 400/422 + image 关键词（message 或 error.code）。容错优先：漏判代价 = 用户整轮失败（高），
+ * 误判代价 = 一次多余重试 + 一条可被 env=1 翻案的缓存（低），故取宽匹配。与 isContextLengthError
+ * 关键词面不相交（超长错误不含 image 词），防御性再排除一次防误吞。
+ */
+const isImageUnsupportedError = (e: any): boolean => {
+    if (!e || isContextLengthError(e)) return false;
+    const status = e.status ?? e.response?.status;
+    if (status !== 400 && status !== 422) return false;
+    const code = e.error?.code ?? e.code;
+    const msg = typeof e.message === 'string' ? e.message : '';
+    const codeStr = typeof code === 'string' ? code : '';
+    return /image|multimodal|vision|image_url/i.test(msg) || /image/i.test(codeStr);
+};
+
+/**
  * 识别 API「瞬时」错误（可安全原样重试）：429 限流、5xx 服务端错误、连接级网络复位/超时。
  * 漏判代价 = 用户被一次偶发限流/抖动中断长任务（高），误判代价 = 多一次廉价重试（低），故取宽匹配。
  * 从 llm/model.ts isTransientApiError 搬迁，逻辑等价。
@@ -131,4 +148,5 @@ export const deepseekProvider: LLMProvider = {
     buildAssistantMessage,
     isContextLengthError,
     isTransientError,
+    isImageUnsupportedError,
 };

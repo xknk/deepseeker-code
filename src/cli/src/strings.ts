@@ -241,7 +241,7 @@ const STRINGS: Record<Locale, StringDict> = {
             return new Date(t).toLocaleDateString("zh-CN");
         },
         langCurrent: () => `当前界面语言：中文（/lang en 切换英文）`,
-        langSet: (l) => `界面语言已切换：${l === "zh" ? "中文" : "English"}`,
+        langSet: (l) => `界面语言已切换：${l === "zh" ? "中文" : "English"}（AI 回复语言默认跟随每轮提问自动判断；纯代码/无文字轮次以此语言为准）`,
         langInvalid: (arg) => `无效语言：${arg}（可选：zh 中文 / en English）`,
         outputStyleNone: () => `未加载任何输出风格（在 ~/.deepseeker-code/output-styles/ 放 <name>.md）。`,
         outputStyleCurrent: (cur) => `当前输出风格：${cur ?? "默认（中性）"}。可用：`,
@@ -385,7 +385,7 @@ const STRINGS: Record<Locale, StringDict> = {
             return new Date(t).toLocaleDateString("en-US");
         },
         langCurrent: () => `Interface language: English (/lang zh for 中文)`,
-        langSet: (l) => `Interface language: ${l === "zh" ? "中文" : "English"}`,
+        langSet: (l) => `Interface language: ${l === "zh" ? "中文" : "English"} (AI reply language follows each question's language automatically; this is the fallback for code-only / text-less turns)`,
         langInvalid: (arg) => `Invalid language: ${arg} (choose zh / en)`,
         outputStyleNone: () => `No output styles loaded (drop a <name>.md in ~/.deepseeker-code/output-styles/).`,
         outputStyleCurrent: (cur) => `Current output style: ${cur ?? "default (neutral)"}. Available:`,

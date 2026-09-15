@@ -68,6 +68,9 @@ export type Locale = "zh" | "en";
 /**
  * 从文本推断语言（zh/en；无信号返回 null）：CJK 与拉丁字母计数 + 混排比例启发式。
  *  - 剥离围栏代码块/行内代码后再统计（大段代码不参与语言判定）；
+ *  - 剥离路径与 URL（盘符路径 / 常见 Unix 绝对路径 / http 链接）——它们是拉丁字母重度噪声，
+ *    会把 CJK 占比稀释到阈值之下误判语言（真实事故 2026-09-14：贴图标签行携带 Windows 存档
+ *    路径，12/(12+51)≈0.19<0.2，中文提问被误判 en 注入英文引导）；
  *  - 纯符号/数字/空白 → null（无信号，调用方回退显式 locale）；
  *  - 中英混排：中文字符占比 ≥ 20% 即视为中文——中文用户夹英文术语是常态、且中文单字符
  *    信息密度高（「帮我把 getUserInfo 提取到 utils」这类应判中文，反之英文句夹单个中文词判英文）。
@@ -76,6 +79,10 @@ export const detectTextLocale = (text: string): Locale | null => {
     const stripped = (text || "")
         .replace(/```[\s\S]*?```/g, " ") // 围栏代码块
         .replace(/`[^`]*`/g, " ")       // 行内代码
+        // 路径/URL：停在引号/括号/CJK 标点，防止吞掉紧随其后的中文（URL 用 \S+ 会连中文一起吃掉）
+        .replace(/[A-Za-z]:[\\/][^\s"'`）)\]}，。；]*/g, " ")                               // C:\Users\x\y.png
+        .replace(/(?:^|[\s(（【"'])\/(?:home|Users|root|var|tmp|mnt|opt|data|app)[^\s"'`）)\]}，。；]*/g, " ") // /home/… /Users/…
+        .replace(/https?:\/\/[^\s"'`）)\]}，。；]*/g, " ")                                  // http(s) 链接
         .replace(/\s+/g, " ");
     const cjk = (stripped.match(/[㐀-䶿一-鿿]/g) || []).length;
     const latin = (stripped.match(/[A-Za-z]/g) || []).length;

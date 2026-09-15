@@ -76,4 +76,6 @@ export interface LLMProvider {
     isContextLengthError: (e: any) => boolean;
     /** 识别「瞬时」错误（429/5xx/网络复位）→ 原请求重试。 */
     isTransientError: (e: any) => boolean;
+    /** 识别「模型不支持图片输入」错误（乐观直发的降级信号）→ 记能力 + 折叠为文本占位重试一次。 */
+    isImageUnsupportedError: (e: any) => boolean;
 }
