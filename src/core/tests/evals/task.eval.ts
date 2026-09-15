@@ -49,6 +49,26 @@ const BASELINE_PATH = path.join(RESULTS_DIR, 'baseline.json');
 
 // ==================== 结果与基线类型 ====================
 
+/**
+ * ★ 单价表（路线 #3「折算成本」）：USD / 1M tokens。
+ *   用途是**跨 run 可比性**（本轮 vs 基线贵了还是便宜了），不是账单——官网数字≠实际花的钱
+ *   （trace 折算权重、阶梯折扣、夜间半价等都会造成偏差），结论只看相对变化。
+ *   ★ 校准：换价先改这里（改完跑一次记录新口径，勿与旧口径数字直接对比）。
+ *   最后校准日期：2026-09-15（近似值，用前自查官网当期价）。
+ */
+const PRICE_TABLE: Record<string, { miss: number; hit: number; output: number }> = {
+    'deepseek-chat': { miss: 0.28, hit: 0.028, output: 0.42 },
+    'deepseek-flash': { miss: 0.28, hit: 0.028, output: 0.42 }, // 占位：暂按 chat 档，官网出价后校准
+};
+const DEFAULT_PRICE = PRICE_TABLE['deepseek-chat']!;
+/** 折算成本（美分）：(prompt−cacheHit)×miss + cacheHit×hit + completion×output */
+const estimateCostCents = (r: Pick<TaskResult, 'promptTokens' | 'completionTokens' | 'cacheHitTokens'>): number => {
+    const p = PRICE_TABLE[process.env.DEEP_SEEK_MODEL ?? ''] ?? DEFAULT_PRICE;
+    const missTokens = Math.max(0, r.promptTokens - r.cacheHitTokens);
+    const usd = (missTokens * p.miss + r.cacheHitTokens * p.hit + r.completionTokens * p.output) / 1e6;
+    return Math.round(usd * 10000) / 100; // 美分，两位小数
+};
+
 interface TaskResult {
     id: string;
     name: string;
@@ -60,6 +80,7 @@ interface TaskResult {
     completionTokens: number;
     totalTokens: number;
     cacheHitTokens: number;
+    costCents: number;
     checkerDetail: string;
     finalPreview: string;
     error?: string;
@@ -152,6 +173,7 @@ const runOneTask = async (task: EvalTask): Promise<TaskResult> => {
         toolCalls: agentEvents.filter((e) => e?.type === 'tool.start').length,
         durationMs: Date.now() - t0,
         promptTokens, completionTokens, totalTokens, cacheHitTokens,
+        costCents: estimateCostCents({ promptTokens, completionTokens, cacheHitTokens }),
         checkerDetail: check.detail ?? '',
         finalPreview: String(final?.text ?? '').slice(0, 200),
         error,
@@ -183,7 +205,7 @@ const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
     console.log(
         'id'.padEnd(18) + '结果'.padEnd(6)
         + 'vs基线'.padEnd(8) + '轮次'.padEnd(10) + '工具'.padEnd(6)
-        + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8),
+        + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8) + '成本¢'.padEnd(8),
     );
     let regressions = 0;
     let passes = 0;
@@ -197,12 +219,14 @@ const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
             r.id.padEnd(18) + (r.pass ? 'PASS' : 'FAIL').padEnd(6)
             + vs.padEnd(8) + `${r.rounds}${roundDelta}`.padEnd(10) + String(r.toolCalls).padEnd(6)
             + fmtK(r.totalTokens).padEnd(10) + fmtK(r.cacheHitTokens).padEnd(10)
-            + `${Math.round(r.durationMs / 1000)}s`.padEnd(8),
+            + `${Math.round(r.durationMs / 1000)}s`.padEnd(8) + String(r.costCents).padEnd(8),
         );
         if (!r.pass) console.log(`  ↳ ${r.checkerDetail.split('\n').slice(0, 3).join(' ⏎ ')}`);
     }
     console.log(line);
     console.log(`通过 ${passes}/${rows.length}` + (baseline ? `，对比基线：回退 ${regressions} 个` : '（无基线，本轮可用 --save-baseline 固化）'));
+    const totalCost = rows.reduce((s, r) => s + r.costCents, 0);
+    console.log(`折算成本合计 ≈ ${totalCost.toFixed(2)}¢（近似口径，看相对变化勿当账单；单价表见文件头 PRICE_TABLE）`);
     console.log(line);
     if (regressions > 0) process.exitCode = 1;
 };
