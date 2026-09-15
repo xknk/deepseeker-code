@@ -136,15 +136,26 @@ export const getAllowedWorkspaceRoots = (): string[] => [...allowedRootsReal];
  *   ② 即便不抛，也是用活动根的 gitignore 引擎去判兄弟根文件——引擎用错。
  * 取最长（最具体）匹配根，处理一个根嵌套在另一个根内的边界情况。
  */
+/** native realpath（解析 8.3 短名与磁盘精确大小写）；失败退原值。Windows 下 env 形式路径（如 TEMP 里的
+ *  C:\Users\RUNNER~1）与 native 形式（...\runneradmin）字符串不等——包含判定/相对路径计算前必须统一形式。 */
+const realpathNativeSync = (p: string): string => {
+    try { return fsSync.realpathSync.native(p); } catch { return p; }
+};
+
 export const getContainingRoot = (absPath: string): string => {
+    // 根与目标统一 native realpath 后再比：CI runner 的 TEMP 环境变量是 8.3 短名形式，而查询目标经
+    // realpathSync.native 已是长名——不统一则 path.relative 误判"根外"，引用输出的显示路径退化为末三段截断
+    // （2026-09-15 CI find_references 用例实证）。返回值同样取 native 形式，消费方（toDisplayPath 等）才能算对相对路径。
+    const target = realpathNativeSync(absPath);
     let best: string | undefined;
     for (const r of allowedBoundaryRoots()) {
-        const rel = path.relative(r, absPath);
+        const rReal = realpathNativeSync(r);
+        const rel = path.relative(rReal, target);
         if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
-            if (!best || r.length > best.length) best = r;
+            if (!best || rReal.length > best.length) best = rReal;
         }
     }
-    return best ?? getActiveWorkspaceRoot();
+    return best ?? realpathNativeSync(getActiveWorkspaceRoot());
 };
 /** 围栏判定用的根集合：有注册用注册集，否则回退单活动根（realpath，失败用原值）。 */
 const allowedBoundaryRoots = (): string[] => {

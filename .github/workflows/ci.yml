@@ -12,10 +12,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# 诊断回推分支需要写权限（默认 GITHUB_TOKEN 是只读）
-permissions:
-  contents: write
-
 jobs:
   guard:
     runs-on: windows-latest
@@ -47,7 +43,7 @@ jobs:
         shell: bash
         run: npm test > test-output.txt 2>&1
 
-      # 日志接口需鉴权，完整测试输出作为 artifact 上传（公开仓库可匿名下载）
+      # Actions 日志接口需鉴权才能拉：失败时把完整 TAP 输出传为 artifact（登录态页面可直接下载，7 天留存）
       - name: Upload test output
         if: failure()
         uses: actions/upload-artifact@v4
@@ -55,39 +51,3 @@ jobs:
           name: test-output
           path: test-output.txt
           retention-days: 7
-
-      # 失败细节同时写进 run summary（登录态页面可见）
-      - name: Summarize test failures
-        if: failure()
-        shell: bash
-        run: |
-          {
-            echo "### Tests 失败诊断"
-            if [ -f test-output.txt ] && grep -q "^not ok" test-output.txt; then
-              echo '```'
-              grep -B 2 -A 25 "^not ok" test-output.txt | head -400
-              echo '```'
-            elif [ -f test-output.txt ]; then
-              echo '```'
-              tail -80 test-output.txt
-              echo '```'
-            else
-              echo "test-output.txt 未生成（进程早期崩溃）"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # 日志/artifact 均需鉴权才能读：失败时把完整测试输出直接 commit 回分支（[skip ci] 防循环），本地即可拉取诊断
-      - name: Push diagnosis back to branch
-        if: failure()
-        shell: bash
-        run: |
-          git config user.name "ci-diagnosis-bot"
-          git config user.email "actions@users.noreply.github.com"
-          if [ -f test-output.txt ]; then cp test-output.txt ci-diagnosis.txt; else echo "(test-output.txt 缺失，进程早期崩溃)" > ci-diagnosis.txt; fi
-          git add ci-diagnosis.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: CI 测试失败诊断输出 [skip ci]"
-            git push origin HEAD:feat/tool-system-rebuild-and-fixes || echo "(push 失败，忽略——下一轮再取)"
-          else
-            echo "(诊断内容无变化，跳过提交)"
-          fi
