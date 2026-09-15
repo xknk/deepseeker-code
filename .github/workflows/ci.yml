@@ -1,0 +1,43 @@
+# 守门链 CI：每次 push / main 收 PR 时在干净环境跑 typecheck + 全量单测。
+# 判据与本地一致：无任何 API 凭证也必须全绿（2026-09-14 P0-1 修复后的承诺）。
+# runner 选 windows-latest：开发在 Windows，路径分隔符 / CRLF / 编码类问题只在 Windows 暴露。
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        env:
+          # 空串凭证 = 保险丝：任何用例若真的尝试构造 API client 会立即抛错，
+          # 而不是静默打出真实调用。全部测试都应只依赖 fixture / ReplayProvider。
+          DEEPSEEK_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: npm test
