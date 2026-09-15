@@ -6,6 +6,9 @@
 import type { EvalTask } from "./types.ts";
 import { nodeRunOutput, sourceAssert } from "./checkers.ts";
 
+// 引用 fmtMoney 的四个文件（report.js 只用 cartLine/totalLine，从不引用该函数——mustHave 不该查它，
+// 首轮基线实跑误伤过：改名正确却因 report.js 无新名判负，2026-09-15 修）
+const REFS = ['src/money.js', 'src/cart.js', 'src/summary.js', 'src/index.js'];
 const FILES = ['src/money.js', 'src/cart.js', 'src/summary.js', 'src/report.js', 'src/index.js'];
 
 export const task: EvalTask = {
@@ -55,7 +58,9 @@ module.exports = { render, fmtMoney };
     checker: async (ws) => {
         const run = await nodeRunOutput(ws, 'src/index.js', { include: ['TOTAL 12.00', 'CHECK 9.00'] });
         if (!run.ok) return run;
-        // 五个文件全部改干净：新名必须出现、旧名（词边界）必须绝迹
-        return sourceAssert(ws, FILES, { mustHave: [/\bformatMoney\b/], mustNotHave: [/\bfmtMoney\b/] });
+        // 引用处新名必须出现；全仓旧名（词边界）必须绝迹
+        const refs = await sourceAssert(ws, REFS, { mustHave: [/\bformatMoney\b/] });
+        if (!refs.ok) return refs;
+        return sourceAssert(ws, FILES, { mustNotHave: [/\bfmtMoney\b/] });
     },
 };

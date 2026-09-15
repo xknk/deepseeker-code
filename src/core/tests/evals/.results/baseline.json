@@ -1,42 +1,102 @@
 {
-  "createdAt": "2026-09-11T01:34:59.288Z",
+  "createdAt": "2026-09-15T07:10:48.946Z",
   "model": "deepseek/DeepSeek",
   "tasks": {
     "discount-bugfix": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 63287,
-      "durationMs": 9404
+      "totalTokens": 64994,
+      "durationMs": 13113
     },
     "median-implement": {
       "pass": true,
-      "rounds": 6,
-      "totalTokens": 74437,
-      "durationMs": 11163
+      "rounds": 5,
+      "totalTokens": 60779,
+      "durationMs": 8005
     },
     "rename-api": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 63482,
-      "durationMs": 10862
+      "totalTokens": 63312,
+      "durationMs": 10362
     },
     "mask-privacy": {
       "pass": true,
-      "rounds": 5,
-      "totalTokens": 62269,
-      "durationMs": 9818
+      "rounds": 4,
+      "totalTokens": 48579,
+      "durationMs": 7641
     },
     "async-race-fix": {
       "pass": true,
       "rounds": 4,
-      "totalTokens": 47685,
-      "durationMs": 6103
+      "totalTokens": 47805,
+      "durationMs": 6612
     },
     "config-extract": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 62598,
-      "durationMs": 11967
+      "totalTokens": 61627,
+      "durationMs": 10974
+    },
+    "decoy-bugfix": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 63001,
+      "durationMs": 10032
+    },
+    "state-leak-fix": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 60492,
+      "durationMs": 7917
+    },
+    "error-swap-fix": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 62037,
+      "durationMs": 7806
+    },
+    "currency-rename": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 67537,
+      "durationMs": 13049
+    },
+    "extract-module": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 61881,
+      "durationMs": 9592
+    },
+    "promise-to-async": {
+      "pass": true,
+      "rounds": 7,
+      "totalTokens": 91791,
+      "durationMs": 19423
+    },
+    "constant-enum": {
+      "pass": true,
+      "rounds": 7,
+      "totalTokens": 91768,
+      "durationMs": 18536
+    },
+    "pagination-implement": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 62275,
+      "durationMs": 10001
+    },
+    "csv-report": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 60239,
+      "durationMs": 8496
+    },
+    "retry-wrapper": {
+      "pass": true,
+      "rounds": 5,
+      "totalTokens": 62662,
+      "durationMs": 10261
     }
   }
 }
