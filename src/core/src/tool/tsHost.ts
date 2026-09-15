@@ -16,6 +16,7 @@ import type * as ts from "typescript";   // type-only——esbuild 编译期剥�
 import fsSync from "fs";
 import path from "path";
 import { getContainingRoot } from "./guard.ts";
+import { toolFailure } from "./type.ts";
 
 /** 已加载的 typescript 模块类型别名（getTs 成功后即此类型）。 */
 export type TsModule = typeof import("typescript");
@@ -247,7 +248,7 @@ const SUPPORTED_SOURCE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".c
 export const checkSupportedSourceExt = (displayPath: string): string | null => {
     const ext = path.extname(displayPath).toLowerCase();
     if (SUPPORTED_SOURCE_EXTS.has(ext)) return null;
-    return `❌ [文件类型不支持]：[${displayPath}] 的扩展名 ${ext || "(无)"} 不在 TS 引擎支持范围（仅 .ts/.tsx/.js/.jsx/.mjs/.cjs）。` +
+    return toolFailure(`[文件类型不支持]：[${displayPath}] 的扩展名 ${ext || "(无)"} 不在 TS 引擎支持范围（仅 .ts/.tsx/.js/.jsx/.mjs/.cjs）。`) +
         `请改用 read_file/grep 查看内容；编译/类型类验证用 run_command 跑对应语言工具链（如 mvn compile / tsc --noEmit）。`;
 };
 

@@ -6,7 +6,7 @@
  *  SAFE 级 + resolveReadablePath 跨界读 + 读保护闸门（敏感凭证拒读）+ 内容脱敏。
  */
 import fs from "fs/promises";
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveReadablePath } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
@@ -47,7 +47,7 @@ export const documentTools: CustomTool[] = [
                     if (readBlock) return readBlock;
 
                     if (!absPath.toLowerCase().endsWith(".docx")) {
-                        return `❌ [格式不支持]：[${args.path}] 不是 .docx。read_docx 仅解析 Word 文档（.doc 老格式请先另存为 .docx）；其它文件用 read_file。`;
+                        return toolFailure(`[格式不支持]：[${args.path}] 不是 .docx。read_docx 仅解析 Word 文档（.doc 老格式请先另存为 .docx）；其它文件用 read_file。`);
                     }
 
                     const start = args.start_char ? Math.max(0, Math.floor(args.start_char)) : 0;
@@ -67,7 +67,7 @@ export const documentTools: CustomTool[] = [
                     if (start + slice.length < total) lines.push(`\n[... 后面还有 ${total - (start + slice.length)} 字符，可把 start_char 设为 ${start + slice.length} 继续翻页。]`);
                     return lines.join("\n");
                 } catch (error: any) {
-                    return `读取 Word 文档失败 [${args.path}]: ${error.message}`;
+                    return toolFailure(`读取 Word 文档失败 [${args.path}]: ${error.message}`);
                 }
             },
         },
@@ -97,7 +97,7 @@ export const documentTools: CustomTool[] = [
                     if (readBlock) return readBlock;
 
                     if (!absPath.toLowerCase().endsWith(".pdf")) {
-                        return `❌ [格式不支持]：[${args.path}] 不是 .pdf。read_pdf 仅解析 PDF 文档；其它文件用 read_file。`;
+                        return toolFailure(`[格式不支持]：[${args.path}] 不是 .pdf。read_pdf 仅解析 PDF 文档；其它文件用 read_file。`);
                     }
 
                     const start = args.start_char ? Math.max(0, Math.floor(args.start_char)) : 0;
@@ -120,7 +120,7 @@ export const documentTools: CustomTool[] = [
                     if (start + slice.length < total) lines.push(`\n[... 后面还有 ${total - (start + slice.length)} 字符，可把 start_char 设为 ${start + slice.length} 继续翻页。]`);
                     return lines.join("\n");
                 } catch (error: any) {
-                    return `读取 PDF 失败 [${args.path}]: ${error.message}`;
+                    return toolFailure(`读取 PDF 失败 [${args.path}]: ${error.message}`);
                 }
             },
         },

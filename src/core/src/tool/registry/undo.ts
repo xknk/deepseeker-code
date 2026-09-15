@@ -5,7 +5,7 @@
  *  - undo_restore (MUTATION)：按 undoId 或最近一项回退文件/目录变更，需用户审批。
  *  拆成两个工具，避免 list 误触发审批（MUTATION/DANGER 统一审批会在调度层拦截）。
  */
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { listUndoable, restoreByUndoId, restoreLast, findByUndoIdPrefix } from "../undo/restore.ts";
 
 export const undoTools: CustomTool[] = [
@@ -21,7 +21,7 @@ export const undoTools: CustomTool[] = [
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
             async execute(_args: any, ctx: ToolContext): Promise<string> {
-                if (!ctx?.sessionId) return `❌ [undo_list 失败]：缺少会话上下文。`;
+                if (!ctx?.sessionId) return toolFailure(`[undo_list 失败]：缺少会话上下文。`);
                 const list = await listUndoable(ctx.sessionId);
                 if (!list.length) return `（当前会话没有可回退的变更。）`;
                 const lines = list.map((r, i) =>
@@ -50,16 +50,16 @@ export const undoTools: CustomTool[] = [
                     ? `申请回退最近一次文件变更（restore_last）。该操作会改写磁盘文件。`
                     : `申请回退文件变更（undoId=${String(args?.undoId ?? "").slice(0, 8)}）。该操作会改写磁盘文件。`,
             async execute(args: any, ctx: ToolContext): Promise<string> {
-                if (!ctx?.sessionId) return `❌ [undo_restore 失败]：缺少会话上下文。`;
+                if (!ctx?.sessionId) return toolFailure(`[undo_restore 失败]：缺少会话上下文。`);
                 try {
                     if (args?.restore_last) return await restoreLast(ctx.sessionId);
-                    if (!args?.undoId) return `❌ [undo_restore 失败]：需提供 undoId，或设 restore_last=true。`;
+                    if (!args?.undoId) return toolFailure(`[undo_restore 失败]：需提供 undoId，或设 restore_last=true。`);
                     // 支持前缀匹配（用户/模型可能只填前 8 位）
                     const target = await findByUndoIdPrefix(ctx.sessionId, String(args.undoId));
-                    if (!target) return `❌ [undo_restore 失败]：找不到 undoId 前缀 "${args.undoId}" 对应的记录，请用 undo_list 核对。`;
+                    if (!target) return toolFailure(`[undo_restore 失败]：找不到 undoId 前缀 "${args.undoId}" 对应的记录，请用 undo_list 核对。`);
                     return await restoreByUndoId(target.undoId, ctx.sessionId);
                 } catch (e: any) {
-                    return `❌ [undo_restore 失败]：${e?.message ?? e}`;
+                    return toolFailure(`[undo_restore 失败]：${e?.message ?? e}`);
                 }
             },
         },

@@ -5,7 +5,7 @@
  *  （配置表 / 数据表 / 导出报表）。安全与 read_file 对齐：SAFE 级 + resolveReadablePath 跨界读 + 读保护闸门
  *  （敏感凭证拒读）+ 单元格内容脱敏。
  */
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveReadablePath } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
 
@@ -71,7 +71,7 @@ export const spreadsheetTools: CustomTool[] = [
 
                     // ★ exceljs 只解 .xlsx（ZIP+XML）；.xls 老二进制 / 其它格式直接拒，免白跑解析。
                     if (!absPath.toLowerCase().endsWith(".xlsx")) {
-                        return `❌ [格式不支持]：[${args.path}] 不是 .xlsx。read_xlsx 仅解析 Excel 工作簿（.xls 请先另存为 .xlsx）；其它文件请用 read_file。`;
+                        return toolFailure(`[格式不支持]：[${args.path}] 不是 .xlsx。read_xlsx 仅解析 Excel 工作簿（.xls 请先另存为 .xlsx）；其它文件请用 read_file。`);
                     }
 
                     const startRow = args.start_row ? Math.max(1, Math.floor(args.start_row)) : 1;
@@ -127,7 +127,7 @@ export const spreadsheetTools: CustomTool[] = [
                     return lines.join("\n");
                 } catch (error: any) {
                     // 加密工作簿 / 损坏文件：exceljs 抛错信息较明确，原样透出便于模型判断
-                    return `读取 Excel 失败 [${args.path}]: ${error.message}`;
+                    return toolFailure(`读取 Excel 失败 [${args.path}]: ${error.message}`);
                 }
             },
         },

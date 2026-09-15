@@ -8,7 +8,7 @@
  */
 import * as fs from "fs/promises";
 import * as path from "path";
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { getActiveWorkspaceRoot } from "../guard.ts";
 
 export const dependencyTools: CustomTool[] = [
@@ -36,7 +36,7 @@ export const dependencyTools: CustomTool[] = [
                     
                     return JSON.stringify(result, null, 2);
                 } catch (error: any) {
-                    return `❌ 读取依赖清单失败，未找到 package.json 或文件格式损坏: ${error.message}`;
+                    return toolFailure(`读取依赖清单失败，未找到 package.json 或文件格式损坏: ${error.message}`);
                 }
             }
         }

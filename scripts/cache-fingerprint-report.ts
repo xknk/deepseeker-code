@@ -66,3 +66,19 @@ const byTools = new Map<string, number>();
 for (const r of rows) byTools.set(r.toolsHash!, (byTools.get(r.toolsHash!) ?? 0) + 1);
 console.log(`\n共 ${rows.length} 个带指纹会话；toolsHash 分布:`, [...byTools.entries()].map(([h, n]) => `${h}×${n}`).join(", "));
 console.log("判读：toolsHash 多值=工具表分歧（嫌疑①）；sysHash 多值=system 注入漂移（嫌疑②）；全同仍低命中=DS 端驱逐（嫌疑③）。");
+
+// —— 时间序视角（2026-09-15 取证后常设）：同指纹组内「首现 vs 后续」的命中规律 ——
+//   经验规律（2026-09-08~09-14 实测）：组内 #1 命中 0-15%（付全价+写缓存），#2 起 96-99%；
+//   间隔 ~39h+ 出现驱逐（#N=0% 后紧邻 #N+1 又恢复高命中）。首行即低命中且时间紧邻上一行 → 查指纹分歧，不是 TTL。
+rows.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+const seen = new Map<string, number>();
+console.log(`\n时间序（fresh-session 取证主视角）`);
+console.log("时间序                 指纹组(tools/sys)       组内序  首轮命中");
+console.log("-".repeat(90));
+for (const r of rows) {
+    const key = `${r.toolsHash}/${r.sysHash}`;
+    const n = (seen.get(key) ?? 0) + 1;
+    seen.set(key, n);
+    const pct = r.r1Real ? `${Math.round((r.r1Hit! / r.r1Real) * 100)}%` : "?";
+    console.log(`${String(r.ts).slice(0, 19).padEnd(23)} ${key.padEnd(24)} ${`#${n}`.padEnd(8)} ${pct}  (${r.r1Hit ?? "?"}/${r.r1Real ?? "?"})`);
+}

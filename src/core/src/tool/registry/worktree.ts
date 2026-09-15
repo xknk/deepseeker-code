@@ -10,7 +10,7 @@
  *  清理：模型显式 exit_worktree；启动期 sweepOrphanedWorktrees 回收崩溃孤儿；进程退出 dispose 清全部。
  *  worktree 落仓外 tmpdir（见 manager.ts），不污染项目目录；改动在临时分支上，需 commit/merge 才能回主仓。
  */
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { createWorktree, removeWorktree, harvestDiff, isNotARepoError } from "../worktree/manager.ts";
 import {
     setSessionWorktree,
@@ -37,7 +37,7 @@ export const worktreeTools: CustomTool[] = [
                 `⚠️【进入 worktree 审批】\n原因：${args?.reason ?? "(未提供)"}\n（将创建临时分支的 git worktree 并把会话工作区切换过去；改动隔离，需 commit/merge 才能并回主仓）`,
             async execute(args: any, ctx?: ToolContext): Promise<string> {
                 const sessionId = ctx?.sessionId;
-                if (!sessionId) return "❌ [enter_worktree] 缺少会话上下文（sessionId）。";
+                if (!sessionId) return toolFailure("[enter_worktree] 缺少会话上下文（sessionId）。");
                 if (getSessionWorktree(sessionId)) {
                     return `⚠️ 当前会话已在 worktree 内（${getSessionWorktree(sessionId)?.path}）。请先 exit_worktree 再重新进入，避免泄漏。`;
                 }
@@ -46,8 +46,8 @@ export const worktreeTools: CustomTool[] = [
                     // stepId 用 "session" 稳定命名（区别于 run_workflow 的数字 stepId），一个 session 同一时刻只一个
                     wt = await createWorktree(sessionId, "session");
                 } catch (e: any) {
-                    if (isNotARepoError(e)) return "❌ [enter_worktree] 主工作区不是 git 仓库，无法创建 worktree。";
-                    return `❌ [enter_worktree] 创建 worktree 失败：${e?.message ?? e}`;
+                    if (isNotARepoError(e)) return toolFailure("[enter_worktree] 主工作区不是 git 仓库，无法创建 worktree。");
+                    return toolFailure(`[enter_worktree] 创建 worktree 失败：${e?.message ?? e}`);
                 }
                 setSessionWorktree(sessionId, wt);
                 return [
@@ -76,7 +76,7 @@ export const worktreeTools: CustomTool[] = [
                 `⚠️【退出 worktree 审批】\n（将删除当前 worktree 及其临时分支；未提交改动会丢失。如需保留请先 commit。）`,
             async execute(_args: any, ctx?: ToolContext): Promise<string> {
                 const sessionId = ctx?.sessionId;
-                if (!sessionId) return "❌ [exit_worktree] 缺少会话上下文（sessionId）。";
+                if (!sessionId) return toolFailure("[exit_worktree] 缺少会话上下文（sessionId）。");
                 const wt = clearSessionWorktree(sessionId);
                 if (!wt) return "ℹ️ 当前会话不在任何 worktree 内（无需退出）。";
                 // 删除前收割 diff 快照（让模型/用户知道丢弃了什么；best-effort，失败不阻断清理）

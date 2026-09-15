@@ -11,7 +11,7 @@
  *   默认 allowPrivate=true——本地联调必需放行 loopback 与内网段（含 docker 172.x、k8s 服务 IP），
  *   但云元数据端点 169.254.169.254 仍由 pinnedMetadataGuardDispatcher 硬拦（防凭证窃取）。
  */
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { safeFetchFollow, readBodyCapped } from "./web.ts";
 
 const HTTP_TIMEOUT_MS = 30000;
@@ -56,7 +56,7 @@ export const httpTools: CustomTool[] = [
             async execute(args: any, ctx?: ToolContext): Promise<string> {
                 const method = ((args.method as string) || "GET").toUpperCase();
                 if (!(ALLOWED_METHODS as readonly string[]).includes(method)) {
-                    return `❌ [http_request] 不支持的方法：${args.method}（允许 ${ALLOWED_METHODS.join("/")})`;
+                    return toolFailure(`[http_request] 不支持的方法：${args.method}（允许 ${ALLOWED_METHODS.join("/")})`);
                 }
                 const maxChars = args.max_length && args.max_length > 0 ? args.max_length : DEFAULT_MAX_CHARS;
 
@@ -65,10 +65,10 @@ export const httpTools: CustomTool[] = [
                 try {
                     parsed = new URL(args.url);
                 } catch {
-                    return `❌ [http_request] URL 不合法：${args.url}`;
+                    return toolFailure(`[http_request] URL 不合法：${args.url}`);
                 }
                 if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-                    return `❌ [http_request] 仅允许 http/https，拒绝 ${parsed.protocol}`;
+                    return toolFailure(`[http_request] 仅允许 http/https，拒绝 ${parsed.protocol}`);
                 }
 
                 // 2. 请求头：默认 UA + 用户自定义；带 body 但缺 Content-Type 时默认 JSON（联调常见）
@@ -117,12 +117,12 @@ export const httpTools: CustomTool[] = [
                     ].join("\n");
                 } catch (error: any) {
                     if (error?.name === "TimeoutError") {
-                        return `❌ [http_request 超时]：${HTTP_TIMEOUT_MS / 1000}s 内未响应：${parsed.href}`;
+                        return toolFailure(`[http_request 超时]：${HTTP_TIMEOUT_MS / 1000}s 内未响应：${parsed.href}`);
                     }
                     if (error?.name === "AbortError") {
                         return `⏹️ [http_request 已中止]：用户中断：${parsed.href}`;
                     }
-                    return `❌ [http_request 失败 | ${method}]：${error.message}`;
+                    return toolFailure(`[http_request 失败 | ${method}]：${error.message}`);
                 }
             }
         }

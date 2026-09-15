@@ -13,6 +13,7 @@
  */
 import { acquireLock, releaseLock } from "@/tool/lockManager.ts";
 import { appConfig } from "@/config/index.ts";
+import { toolFailure } from "@/tool/type.ts";
 
 /** 把单个 yield 值归一化为字符串（兼容 string 与 {content} 载荷） */
 function normalizeYield(v: any): string {
@@ -65,7 +66,7 @@ export async function runBackgroundTool(
     // ★ abort 已发生：直接收尾，不启动后台（避免脱离中止控制的任务继续占用资源/锁）
     if (signal?.aborted) {
         await finalize();
-        return `❌ [已中止]：[${toolName}] 后台任务未启动（用户已中断）。`;
+        return toolFailure(`[已中止]：[${toolName}] 后台任务未启动（用户已中断）。`);
     }
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
@@ -75,7 +76,7 @@ export async function runBackgroundTool(
         first = await gen.next();
     } catch (e: any) {
         await finalize();
-        return `❌ [后台启动失败]：${e?.message ?? e}`;
+        return toolFailure(`[后台启动失败]：${e?.message ?? e}`);
     }
 
     const immediate = first.done

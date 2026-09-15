@@ -20,7 +20,7 @@
  *  - 单步结果截断 + 整体 maxOutputCharacters：防单个巨型结果挤占聚合输出 / 撑爆上下文；
  *  - abort 响应：每步派生前检测 abortSignal；中止时已派生步骤各自经 runSubagent 内部中止通道收尾。
  */
-import { CustomTool, MAX_AGENT_DEPTH, ToolContext, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, MAX_AGENT_DEPTH, ToolContext, ToolSafetyLevel } from "../type.ts";
 import { runSubagent, SubagentResult } from "@/agent/subagent.ts";
 import { createSemaphore } from "@/common/index.ts";
 import { truncateToolResult } from "@/agent/truncate.ts";
@@ -96,7 +96,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
             // 聚合输出整体兜底截断（各子 agent 结果已按 workflowPerStepChars 单独截断）。
             maxOutputCharacters: 18000,
             async execute(args: any, ctx?: ToolContext): Promise<string> {
-                if (!ctx) return "❌ [工作流]：run_workflow 缺少必须的智能体运行上下文。";
+                if (!ctx) return toolFailure("[工作流]：run_workflow 缺少必须的智能体运行上下文。");
 
                 const maxSteps = appConfig.workflowMaxSteps;
                 const validationError = validateWorkflowArgs(args, maxSteps);
@@ -108,7 +108,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                 const isolation: "none" | "worktree" = args.isolation === "worktree" ? "worktree" : "none";
                 // worktree 隔离仅支持 parallel（pipeline 串行隔离收益小，v1 不开）
                 if (isolation === "worktree" && mode === "pipeline") {
-                    return "❌ [工作流]：isolation=\"worktree\" 暂仅支持 parallel 模式（pipeline 串行无需隔离）。请改 mode=parallel 或 isolation=none。";
+                    return toolFailure("[工作流]：isolation=\"worktree\" 暂仅支持 parallel 模式（pipeline 串行无需隔离）。请改 mode=parallel 或 isolation=none。");
                 }
                 const steps = (args.steps as WorkflowStep[]).map(s => ({
                     task: String(s.task),
@@ -119,7 +119,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
 
                 // ★ 深度预检：当前 agent 已达 MAX_AGENT_DEPTH → 任何子 agent 都派不出去，一次性清晰报错
                 if (ctx.depth >= MAX_AGENT_DEPTH) {
-                    return `❌ [安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层），无法派生工作流子 agent。请在本层级自行消化任务。`;
+                    return toolFailure(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层），无法派生工作流子 agent。请在本层级自行消化任务。`);
                 }
 
                 // ★ 并发子 agent 共享审批互斥锁：包裹 requestApproval，确保并行高危请求排队审批（CLI 单弹窗），
@@ -164,7 +164,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     try {
                         wt = await createWorktree(ctx.sessionId, String(index));
                     } catch (e: any) {
-                        const msg = `❌ [worktree 创建失败]：${e?.message ?? e}（worktree 隔离需要主工作区是 git 仓库）。该步骤未执行。`;
+                        const msg = toolFailure(`[worktree 创建失败]：${e?.message ?? e}（worktree 隔离需要主工作区是 git 仓库）。该步骤未执行。`);
                         done++;
                         ctx.emitProgress?.(`并行编排：${done}/${total} worktree 创建失败（${stepLabel(step, index)}）`);
                         return { ok: false, output: msg, label: stepLabel(step, index) };
@@ -222,7 +222,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                         outcomes = await Promise.all(running);
                     }
                 } catch (err: any) {
-                    return `❌ [工作流编排异常]：${err?.message ?? err}`;
+                    return toolFailure(`[工作流编排异常]：${err?.message ?? err}`);
                 }
 
                 return formatWorkflowResult(mode, outcomes);

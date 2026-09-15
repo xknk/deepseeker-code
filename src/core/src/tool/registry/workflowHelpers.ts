@@ -1,4 +1,5 @@
-/**
+
+import { toolFailure } from "@/tool/type.ts";/**
  * @file tool/registry/workflowHelpers.ts
  * @description run_workflow 的纯逻辑层：参数校验 / 标签 / 流水线上下文拼接 / 结果聚合格式化。
  *
@@ -30,15 +31,15 @@ export type StepOutcome = {
 export const validateWorkflowArgs = (args: any, maxSteps: number): string | null => {
     const steps = args?.steps;
     if (!Array.isArray(steps) || steps.length === 0) {
-        return "❌ [工作流] steps 必须是非空数组（至少 1 个步骤）。";
+        return toolFailure("[工作流] steps 必须是非空数组（至少 1 个步骤）。");
     }
     if (steps.length > maxSteps) {
-        return `❌ [工作流] 步骤数 ${steps.length} 超过上限 ${maxSteps}（防失控派生烧 token）。请拆分为多次 run_workflow 调用，或精简步骤。`;
+        return toolFailure(`[工作流] 步骤数 ${steps.length} 超过上限 ${maxSteps}（防失控派生烧 token）。请拆分为多次 run_workflow 调用，或精简步骤。`);
     }
     for (let i = 0; i < steps.length; i++) {
         const s = steps[i];
         if (!s || typeof s.task !== "string" || !s.task.trim()) {
-            return `❌ [工作流] steps[${i}].task 必须是非空字符串。`;
+            return toolFailure(`[工作流] steps[${i}].task 必须是非空字符串。`);
         }
     }
     return null;

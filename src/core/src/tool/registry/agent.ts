@@ -6,7 +6,7 @@
  * @FilePath: \deepSeekCode\src\core\src\tool\registry\agent.ts
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
-import { CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
 import { runSubagent } from "@/agent/subagent.ts";
 
 /**
@@ -43,7 +43,7 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
             async execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：强制约束返回值类型
-                if (!ctx) return "❌ [派生失败]：spawn_agent 缺少必须的智能体运行上下文。";
+                if (!ctx) return toolFailure("[派生失败]：spawn_agent 缺少必须的智能体运行上下文。");
 
                 // ★ 派生内核：深度 / manifest / 子系统词 / 工具收权 / runAgent 驱动 / 异常熔断 / 续跑校验均在内
                 //   （协议层 snake_case → spec 层 camelCase 映射）

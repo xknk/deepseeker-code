@@ -10,6 +10,9 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { createNudgeScheduler } from "@/agent/agentNudges.ts";
 
 const FENCE = {
@@ -251,4 +254,31 @@ describe("REPEAT_RETRIEVAL（重复检索检测）", () => {
         const m = s.pickNudge(4)!;
         assert.ok(m.content.includes("D:/src/Foo.ts"));
     });
+});
+
+/**
+ * 判定词表钉（2026-09-15，后续路线 #2 顺手项）：looksComplete / looksComplex 的词表是
+ * 「文案即协议」软契约——注释自己承认关键词覆盖不可靠（TOOL_DIGEST 已因漏判改长度阈值）。
+ * 改词表 = 改守护触发行为，必须 conscious 更新本镜像；此处逐字钉源码声明行，任何增删词都红。
+ */
+describe("判定词表钉（防静默漂移）", () => {
+    // 行尾归一化（源文件 CRLF / 镜像 LF）：比较只关心词表内容，不关心行尾
+    const source = fs.readFileSync(
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/agent/agentNudges.ts"),
+        "utf8",
+    ).replace(/\r\n/g, "\n");
+
+    const PINNED_DECLARATIONS: Array<[string, string]> = [
+        ["COMPLEX_VERBS（looksComplex 动词表）", "const COMPLEX_VERBS = /实现|新增|添加|重构|改造|迁移|重写|拆分|升级|开发|编写|构建|集成|支持|完善|implement|refactor|migrate|rewrite|rebuild|restructure|split|upgrade|integrate|develop/i;"],
+        ["COMPLEX_OBJECTS（looksComplex 对象表）", "const COMPLEX_OBJECTS = /功能|模块|系统|架构|流程|机制|组件|服务|页面|接口|能力|特性|面板|feature|module|system|architecture|pipeline|component|service|page|api\\b|interface|panel|workflow|endpoint/i;"],
+        ["COMPLEX_MARKERS（looksComplex 显式标记表）", "const COMPLEX_MARKERS = /多个文件|多文件|整体|全套|端到端|从零|重新设计|一整套|跨[^，。\\s]{1,6}|multiple files|multi-file|end-to-end|from scratch|across\\s+\\S+/i;"],
+        ["QUERY_LEAD（问答开头豁免表）", "const QUERY_LEAD = /^(请)?\\s*(解释|说明|查(一下|询)?|搜索|搜一下|怎么看|如何(用|使用|配置|启动)|怎么用|为什么|是什么|帮我看看|分析一下|检查|review|对比|评价)/i;"],
+        ["looksComplete（完成声明词表）", "const looksComplete = (text: string): boolean =>\n    /已完成|已修改|已创建|已删除|已重构|已实现|已修复|已替换|已更新|已配置|已验证|已提交|已全部|全部完成|改造完成|修改完成|实现完成|测试通过|总结(一下)?|以上就是|done|finished|completed/i.test(text || \"\");"],
+    ];
+
+    for (const [name, pinned] of PINNED_DECLARATIONS) {
+        it(`${name} 逐字一致（改动须 conscious 更新此镜像）`, () => {
+            assert.ok(source.includes(pinned), `词表已漂移：${name}\n期望逐字包含：\n${pinned}`);
+        });
+    }
 });

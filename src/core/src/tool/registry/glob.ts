@@ -6,7 +6,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveReadablePath, initializeWorkspaceIgnore, checkIsPathIgnored } from "../guard.ts";
 
 /**
@@ -90,7 +90,7 @@ export const globTools: CustomTool[] = [
             async execute(args: { pattern: string; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：约束明确的返回值类型
                 try {
                     const cleanPattern = (args.pattern || "").trim();
-                    if (!cleanPattern) return "❌ [Glob失败]：传入的检索 pattern 不能为空。";
+                    if (!cleanPattern) return toolFailure("[Glob失败]：传入的检索 pattern 不能为空。");
 
                     // ★ 显式根（与 run_command/fs 工具签名统一）：优先 ctx.cwd（已与 ALS 同源），否则回退 ALS 活动根。
                     //   消除对全局 ALS 的隐式依赖，使工具更可测、可覆盖（ctx.cwd 与 getActiveWorkspaceRoot() 等价）。
@@ -156,8 +156,9 @@ export const globTools: CustomTool[] = [
                     }
                     return `${prefix}[Glob: ${cleanPattern} | ${hits.length} 个匹配]\n` + hits.join("\n");
                 } catch (error: any) {
-                    // ★ ❌ 前缀：toolExecution 的 FAILED_PREFIXES 靠前缀嗅探判成败，裸"glob 检索失败:"会被误判 ok=true
-                    return `❌ glob 检索失败: ${error.message}`;
+                    // ★ 失败文案必须经 toolFailure() 出厂（❌ 前缀供 FAILED_PREFIXES 嗅探判成败），
+                    //   tests/tool-failure-consistency.test.ts 扫裸失败文案守门（2026-09-15 起不再靠自觉）
+                    return toolFailure(`glob 检索失败: ${error.message}`);
                 }
             },
         },

@@ -15,7 +15,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
 import { makeTmpPath } from "./fs.ts";
 import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
 import { registerMemory, getMemory, unregisterMemory, listMemories, MemoryType } from "@/memory/registry.ts";
@@ -95,12 +95,12 @@ export const memoryTools: CustomTool[] = [
                 const body = typeof args?.body === "string" ? args.body : "";
                 const type = (sanitizeLine(args?.type) as MemoryType) || "reference";
                 const project = args?.project === true;
-                if (!NAME_RE.test(name)) return `❌ [memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`;
-                if (!description) return "❌ [memory_save] description 不能为空。";
-                if (!body.trim()) return "❌ [memory_save] body 不能为空。";
-                if (!VALID_TYPES.includes(type)) return `❌ [memory_save] type 非法：须 user/feedback/project/reference，收到 "${type}"。`;
+                if (!NAME_RE.test(name)) return toolFailure(`[memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`);
+                if (!description) return toolFailure("[memory_save] description 不能为空。");
+                if (!body.trim()) return toolFailure("[memory_save] body 不能为空。");
+                if (!VALID_TYPES.includes(type)) return toolFailure(`[memory_save] type 非法：须 user/feedback/project/reference，收到 "${type}"。`);
                 const bodyBytes = Buffer.byteLength(body, "utf-8");
-                if (bodyBytes > MAX_BODY_BYTES) return `❌ [memory_save] body 超过 ${MAX_BODY_BYTES} 字节上限（当前 ${bodyBytes}）。请精简或拆分。`;
+                if (bodyBytes > MAX_BODY_BYTES) return toolFailure(`[memory_save] body 超过 ${MAX_BODY_BYTES} 字节上限（当前 ${bodyBytes}）。请精简或拆分。`);
                 const file = await writeAndRegister(name, description, type, body, project);
                 return `✅ 已保存记忆 **${name}**（${type}${project ? "，项目源" : "，全局源"}）→ ${file}`;
             },
@@ -125,7 +125,7 @@ export const memoryTools: CustomTool[] = [
             async execute(args: any): Promise<string> {
                 const name = sanitizeLine(args?.name);
                 const m = getMemory(name);
-                if (!m) return `❌ 未找到记忆：${name}。可调用 memory_list 查看全部记忆名。`;
+                if (!m) return toolFailure(`未找到记忆：${name}。可调用 memory_list 查看全部记忆名。`);
                 return `## ${m.name}（${m.type}）\n\n${m.body}`;
             },
         },
@@ -164,7 +164,7 @@ export const memoryTools: CustomTool[] = [
             async execute(args: any): Promise<string> {
                 const name = sanitizeLine(args?.name);
                 const m = getMemory(name);
-                if (!m) return `❌ 未找到记忆：${name}（可能已被删除）。`;
+                if (!m) return toolFailure(`未找到记忆：${name}（可能已被删除）。`);
                 try { await fs.unlink(m.file); } catch { /* 文件已不在则忽略 */ }
                 unregisterMemory(name);
                 return `✅ 已删除记忆 **${name}**（${m.file}）。`;

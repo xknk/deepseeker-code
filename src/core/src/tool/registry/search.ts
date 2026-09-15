@@ -12,7 +12,7 @@
  *  返回带行列号的匹配行；支持字面量（默认自动转义）与正则两种模式。与 glob（按文件名）互补。
  */
 import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-ripgrep
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveReadablePath, getAllowedWorkspaceRoots } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 import { maskSecretsInContent } from "./fs.ts";
@@ -50,7 +50,7 @@ export const searchTools: CustomTool[] = [
             async execute(args: { query: string; is_regex?: boolean; path?: string; context?: number }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();
-                    if (!cleanQuery) return "❌ [检索失败]：传入的检索关键词不能为空。";
+                    if (!cleanQuery) return toolFailure("[检索失败]：传入的检索关键词不能为空。");
 
                     const pattern = args.is_regex ? cleanQuery : escapeRegExp(cleanQuery);
 
@@ -129,9 +129,10 @@ export const searchTools: CustomTool[] = [
                     // 💡 优化 3：优雅降级，ripgrep 找不到内容时正常退出码是 1，不属于常规报错
                     if (error.code === 1) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
                     // ★ 超时（30s 兜底触发）：给友好提示而非裸"检索失败"，建议缩小范围
-                    if (error.killed || error.signal) return `❌ ⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`;
-                    // ★ ❌ 前缀：toolExecution 的 FAILED_PREFIXES 靠前缀嗅探判成败，裸"检索失败:"会被误判 ok=true
-                    return `❌ 检索失败: ${error.message}`;
+                    if (error.killed || error.signal) return toolFailure(`⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`);
+                    // ★ 失败文案必须经 toolFailure() 出厂（❌ 前缀供 FAILED_PREFIXES 嗅探判成败），
+                    //   tests/tool-failure-consistency.test.ts 扫裸失败文案守门（2026-09-15 起不再靠自觉）
+                    return toolFailure(`检索失败: ${error.message}`);
                 }
             },
         },

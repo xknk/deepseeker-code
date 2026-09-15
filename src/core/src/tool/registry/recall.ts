@@ -13,7 +13,7 @@
  *    分页取回被截断工具结果的全文；
  *  · 范围刻意限定本会话（跨会话检索涉及注入复活与信息越界，默认不开放）。
  */
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot } from "../guard.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
 import { getSessionsDirPath } from "@/session/store.ts";
@@ -98,16 +98,16 @@ export const recallTools: CustomTool[] = [
             // ★ 检索结果预算与 web 等工具对齐 16000 口径；命中数 × 单片段双重限流防 context thrashing
             maxOutputCharacters: 16000,
             async execute(args: { query?: string; is_regex?: boolean; run_id?: string; limit?: number; with_full?: string; full_offset?: number }, ctx?: ToolContext): Promise<string> {
-                if (!ctx?.sessionId) return "❌ [recall] 缺少会话上下文（sessionId），无法检索。";
+                if (!ctx?.sessionId) return toolFailure("[recall] 缺少会话上下文（sessionId），无法检索。");
                 try {
                     // ———— 分支一：with_full 取回侧车存档全文（分页读，chunk 卡在 16K 预算内防二次截断） ————
                     if (args.with_full) {
                         const safeId = String(args.with_full).replace(/[^A-Za-z0-9_-]/g, '');
-                        if (!safeId) return "❌ [recall] with_full 含非法字符。";
+                        if (!safeId) return toolFailure("[recall] with_full 含非法字符。");
                         const sidecar = path.join(getSessionsDirPath(ctx.sessionId), 'tool-outputs', `${safeId}.txt`);
                         let full = '';
                         try { full = await fs.readFile(sidecar, 'utf-8'); }
-                        catch { return `❌ [recall] 未找到该 id 的存档原文（可能未曾触发截断存档、或会话已清理）：${args.with_full}`; }
+                        catch { return toolFailure(`[recall] 未找到该 id 的存档原文（可能未曾触发截断存档、或会话已清理）：${args.with_full}`); }
                         const CHUNK = 14000;
                         const off = Math.max(0, Math.floor(args.full_offset ?? 0));
                         const slice = full.slice(off, off + CHUNK);
@@ -119,7 +119,7 @@ export const recallTools: CustomTool[] = [
 
                     // ———— 分支二：关键词检索本会话全量转录 ————
                     const cleanQuery = (args.query || '').trim();
-                    if (!cleanQuery) return "❌ [recall] 检索关键词不能为空（或改用 with_full 取存档全文）。";
+                    if (!cleanQuery) return toolFailure("[recall] 检索关键词不能为空（或改用 with_full 取存档全文）。");
                     const re = new RegExp(args.is_regex ? cleanQuery : escapeRegExp(cleanQuery), 'i');
 
                     const lines = await readTranscriptLines(ctx.sessionId);
@@ -179,7 +179,7 @@ export const recallTools: CustomTool[] = [
                     return [`[recall] 本会话全量转录命中 ${blocks.length} 条（按时间旧→新，含已归档消息）：`, '', blocks.join('\n\n'), '',
                         '提示：⚠️ 标注的文件必须重新 read_file 验证后才能据以修改；本工具结果仅作历史线索，不替代当前文件状态。'].join('\n');
                 } catch (e) {
-                    return `❌ [recall] 检索失败: ${e instanceof Error ? e.message : String(e)}`;
+                    return toolFailure(`[recall] 检索失败: ${e instanceof Error ? e.message : String(e)}`);
                 }
             },
         },

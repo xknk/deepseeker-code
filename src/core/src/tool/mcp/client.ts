@@ -16,6 +16,7 @@ import { createInterface } from "readline";
 import { fetch as undiciFetch } from "undici";
 import { killTree } from "../registry/background.ts";
 import { appConfig } from "@/config/index.ts";
+import { toolFailure } from "@/tool/type.ts";
 
 /** MCP server 配置：type 决定 transport（缺省按 command/url 推断） */
 export interface McpServerConfig {
@@ -83,7 +84,7 @@ const joinContentText = (result: any): string => {
         .join("\n");
     const capped = capResultText(text);
     if (result?.isError) {
-        return `❌ [MCP 工具报错]\n${capped || JSON.stringify(result)}`;
+        return toolFailure(`[MCP 工具报错]\n${capped || JSON.stringify(result)}`);
     }
     return capped || JSON.stringify(result);
 };

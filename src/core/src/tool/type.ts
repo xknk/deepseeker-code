@@ -42,6 +42,15 @@ export enum ToolExecutionResultStatus {
     ABORTED = 'aborted'
 }
 
+/**
+ * 失败文案统一工厂（FAILED_PREFIXES 结构性退役，2026-09-15）：
+ * 执行层 FAILED_PREFIXES（toolExecution.ts）靠「❌」前缀嗅探判成败——裸失败文案会被误判 ok=true
+ * （历史两次补漏：glob / search）。一切面向模型的失败/拒绝/越界/超时提示**必须经本工厂出口**；
+ * tests/tool-failure-consistency.test.ts 扫描工具出口的裸失败文案——写不对就过不了测试。
+ * 只做前缀拼接，不触碰审批链 / explicitOk 语义。
+ */
+export const toolFailure = (msg: string) => `❌ ${msg}`;
+
 
 /**
  * ============================================================================

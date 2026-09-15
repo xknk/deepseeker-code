@@ -20,7 +20,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { homedir } from "os";
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
 import {
     McpClient,
@@ -193,10 +193,10 @@ const mcpResourceTools: CustomTool[] = [
                 `⚠️【MCP 资源读取审批】\n服务: ${args?.server} / uri: ${args?.uri}\n（将把 MCP server 提供的内容拉入模型上下文；请确认来源可信、不含敏感数据）`,
             async execute(args: any): Promise<string> {
                 const { server, uri } = args ?? {};
-                if (!server || !uri) return "❌ [read_mcp_resource] 缺少 server 或 uri。";
+                if (!server || !uri) return toolFailure("[read_mcp_resource] 缺少 server 或 uri。");
                 const c = findClient(server);
-                if (!c) return `❌ 未连接的 MCP server：${server}`;
-                if (!c.supportsResources) return `❌ server "${server}" 不支持 resources。`;
+                if (!c) return toolFailure(`未连接的 MCP server：${server}`);
+                if (!c.supportsResources) return toolFailure(`server "${server}" 不支持 resources。`);
                 const text = await c.readResource(uri);
                 return `[MCP resource ${server}${uri}]\n${text}`;
             },
@@ -264,10 +264,10 @@ const mcpPromptTools: CustomTool[] = [
                 `⚠️【MCP prompt 获取审批】\n服务: ${args?.server} / prompt: ${args?.name}\n（将把 MCP server 渲染的 prompt 文本拉入模型上下文；请确认来源可信）`,
             async execute(args: any): Promise<string> {
                 const { server, name, arguments: pargs } = args ?? {};
-                if (!server || !name) return "❌ [get_mcp_prompt] 缺少 server 或 name。";
+                if (!server || !name) return toolFailure("[get_mcp_prompt] 缺少 server 或 name。");
                 const c = findClient(server);
-                if (!c) return `❌ 未连接的 MCP server：${server}`;
-                if (!c.supportsPrompts) return `❌ server "${server}" 不支持 prompts。`;
+                if (!c) return toolFailure(`未连接的 MCP server：${server}`);
+                if (!c.supportsPrompts) return toolFailure(`server "${server}" 不支持 prompts。`);
                 const text = await c.getPrompt(name, pargs);
                 return `[MCP prompt ${server}/${name}]\n${text}`;
             },
@@ -352,16 +352,16 @@ const mcpDispatcherTools: CustomTool[] = [
                 `⚠️【MCP 工具审批】\n服务: ${args?.server} / 工具: ${args?.tool}\n参数: ${args?.args}`,
             async execute(args: any): Promise<string> {
                 const { server, tool } = args ?? {};
-                if (!server || !tool) return "❌ [mcp_call] 缺少 server 或 tool（先用 mcp_list_tools 查目录）。";
+                if (!server || !tool) return toolFailure("[mcp_call] 缺少 server 或 tool（先用 mcp_list_tools 查目录）。");
                 let parsed: any = {};
                 if (typeof args.args === "string" && args.args.trim() && args.args.trim() !== "{}") {
                     try { parsed = JSON.parse(args.args); }
                     catch {
-                        return `❌ [mcp_call] args 不是合法 JSON：${String(args.args).slice(0, 200)}。请传该工具参数的 JSON 字符串（无参数传 "{}"）。`;
+                        return toolFailure(`[mcp_call] args 不是合法 JSON：${String(args.args).slice(0, 200)}。请传该工具参数的 JSON 字符串（无参数传 "{}"）。`);
                     }
                 }
                 const c = findClient(server);
-                if (!c) return `❌ 未连接的 MCP server：${server}（用 mcp_list_tools 查看已连接列表）`;
+                if (!c) return toolFailure(`未连接的 MCP server：${server}（用 mcp_list_tools 查看已连接列表）`);
                 const result = await c.callTool(tool, parsed);
                 return `[MCP ${server}/${tool}]\n${result}`;
             },

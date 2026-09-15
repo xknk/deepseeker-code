@@ -5,7 +5,7 @@
  *  对齐 Claude Code 的 TodoWrite——这是维持长任务计划连贯性、防止跑偏/失忆的关键。
  *  设计：整表覆盖写（非增量），由模型每次传入完整最新清单；状态机 pending→in_progress→completed。
  */
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { setTodos } from "@/session/store.ts";
 import { Todo } from "@/observability/type.ts";
 
@@ -41,12 +41,12 @@ export const todoTools: CustomTool[] = [
             isSync: true,
             async execute(args: { todos: Todo[] }, ctx?: ToolContext): Promise<string> {
                 if (!ctx?.sessionId) {
-                    return `❌ [todo_write 失败]：缺少会话上下文（sessionId），无法持久化任务清单。`;
+                    return toolFailure(`[todo_write 失败]：缺少会话上下文（sessionId），无法持久化任务清单。`);
                 }
                 const todos = Array.isArray(args.todos) ? args.todos : [];
 
                 if (todos.length > MAX_TODOS) {
-                    return `❌ [todo_write 失败]：任务条数 ${todos.length} 超过上限 ${MAX_TODOS}，请合理拆分。`;
+                    return toolFailure(`[todo_write 失败]：任务条数 ${todos.length} 超过上限 ${MAX_TODOS}，请合理拆分。`);
                 }
 
                 // 轻量校验 + 规范化：content 去空、status 兜底
@@ -62,7 +62,7 @@ export const todoTools: CustomTool[] = [
 
                 const emptyContent = cleaned.filter(t => !t.content);
                 if (emptyContent.length) {
-                    return `❌ [todo_write 失败]：有 ${emptyContent.length} 条任务缺少 content，请补全后再提交。`;
+                    return toolFailure(`[todo_write 失败]：有 ${emptyContent.length} 条任务缺少 content，请补全后再提交。`);
                 }
 
                 const inProgressCount = cleaned.filter(t => t.status === "in_progress").length;

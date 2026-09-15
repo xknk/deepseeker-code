@@ -8,7 +8,7 @@
 import { promises as dns } from "dns";
 import { lookup as dnsLookupCb } from "dns";    // 回调风格，供 undici connect.lookup 钉 IP
 import { Agent, fetch as undiciFetch } from "undici"; // 显式用 undici fetch：钉 IP dispatcher 选项有类型保证、不被静默吞掉
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
 
 // ---- 抓取相关常量 ----
@@ -562,10 +562,10 @@ export const webTools: CustomTool[] = [
                 try {
                     parsed = new URL(args.url);
                 } catch {
-                    return `❌ [抓取失败]：URL 格式不合法：${args.url}`;
+                    return toolFailure(`[抓取失败]：URL 格式不合法：${args.url}`);
                 }
                 if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-                    return `❌ [安全熔断]：仅允许 http/https 协议，拒绝 ${parsed.protocol}`;
+                    return toolFailure(`[安全熔断]：仅允许 http/https 协议，拒绝 ${parsed.protocol}`);
                 }
 
                 // 2. SSRF 防护 + 手动跟随重定向：每跳复检 checkHost + 协议白名单 + 拒绝降级；
@@ -579,7 +579,7 @@ export const webTools: CustomTool[] = [
                     }, signals, allowPrivate);
 
                     if (!res.ok) {
-                        return `❌ [抓取失败]：HTTP ${res.status} ${res.statusText}（${parsed.href}）`;
+                        return toolFailure(`[抓取失败]：HTTP ${res.status} ${res.statusText}（${parsed.href}）`);
                     }
 
                     const contentType = res.headers.get("content-type") || "";
@@ -613,12 +613,12 @@ export const webTools: CustomTool[] = [
                     return `[web_fetch | ${parsed.href}]\n${body}${truncNote}`;
                 } catch (error: any) {
                     if (error?.name === "TimeoutError") {
-                        return `❌ [抓取超时]：${FETCH_TIMEOUT_MS / 1000}s 内未响应：${parsed.href}`;
+                        return toolFailure(`[抓取超时]：${FETCH_TIMEOUT_MS / 1000}s 内未响应：${parsed.href}`);
                     }
                     if (error?.name === "AbortError") {
                         return `⏹️ [已中止]：用户中断了抓取：${parsed.href}`;
                     }
-                    return `❌ [抓取失败]：${error.message}`;
+                    return toolFailure(`[抓取失败]：${error.message}`);
                 }
             }
         }
@@ -656,12 +656,12 @@ export const webTools: CustomTool[] = [
                     return formatSearchResults(args.query, provider, resp);
                 } catch (error: any) {
                     if (error?.name === "TimeoutError") {
-                        return `❌ [web_search 超时]：${SEARCH_TIMEOUT_MS / 1000}s 内未响应。`;
+                        return toolFailure(`[web_search 超时]：${SEARCH_TIMEOUT_MS / 1000}s 内未响应。`);
                     }
                     if (error?.name === "AbortError") {
                         return `⏹️ [已中止]：用户中断了搜索。`;
                     }
-                    return `❌ [web_search 失败 | ${provider}]：${error.message}`;
+                    return toolFailure(`[web_search 失败 | ${provider}]：${error.message}`);
                 }
             }
         }

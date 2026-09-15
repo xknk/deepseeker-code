@@ -5,7 +5,7 @@
  * @Description: 命令执行工具 (run_command) —— spawn shell 命令，流式吐 stdout/stderr + 退出码
  */
 import { spawn } from "child_process";
-import { CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
 import { adoptRunningProcess, killTree, resolveWinShell, StreamCodec } from "./background.ts";
 import { appConfig } from "@/config/index.ts";
@@ -114,7 +114,7 @@ export const commandTools: CustomTool[] = [
                 const isWin = process.platform === "win32";
                 // ★ 若进入工具时 signal 已 aborted，spawn 会同步抛 ERR_ABORTED；前置兜底避免击穿 generator
                 if (ctx?.abortSignal?.aborted) {
-                    yield `❌ [已中止]：命令 [${args.command}] 未执行（用户已中断）。`;
+                    yield toolFailure(`[已中止]：命令 [${args.command}] 未执行（用户已中断）。`);
                     yield EXIT_SENTINEL(-1); // ★ H-2：中止也追加失败哨兵，避免 verifyResult 无哨兵时默认判 SUCCESS
                     return;
                 }
@@ -128,7 +128,7 @@ export const commandTools: CustomTool[] = [
                         signal: ctx?.abortSignal,
                     });
                 } catch (e: any) {
-                    yield `❌ [启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`;
+                    yield toolFailure(`[启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`);
                     yield EXIT_SENTINEL(-1); // ★ H-2：启动失败追加失败哨兵，避免 verifyResult 默认判 SUCCESS
                     return;
                 }

@@ -10,7 +10,7 @@
  *  cell.source 形式保留：原数组写数组、原串写串（减小 git diff）；insert 新 cell 默认数组形式（Jupyter 惯例）。
  */
 import fs from "fs/promises";
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveSafePath, assertWithinWorkspace } from "../guard.ts";
 import { makeTmpPath } from "./fs.ts";
 
@@ -123,20 +123,20 @@ export const notebookTools: CustomTool[] = [
                 `⚠️【Notebook 编辑审批】\n文件：${args?.path}\n模式：${args?.edit_mode ?? "replace"}${args?.cell_id ? ` / cell_id=${args.cell_id}` : args?.cell_index !== undefined ? ` / cell_index=${args.cell_index}` : ""}${args?.cell_type ? ` / 类型=${args.cell_type}` : ""}${args?.new_source !== undefined ? `\n新内容：\n${String(args.new_source).slice(0, 500)}` : ""}`,
             async execute(args: any): Promise<string> {
                 const relPath = args?.path;
-                if (typeof relPath !== "string" || !relPath.trim()) return "❌ [notebook_edit] 缺少参数 path。";
-                if (!relPath.toLowerCase().endsWith(".ipynb")) return `❌ [notebook_edit] 仅支持 .ipynb 文件：${relPath}`;
+                if (typeof relPath !== "string" || !relPath.trim()) return toolFailure("[notebook_edit] 缺少参数 path。");
+                if (!relPath.toLowerCase().endsWith(".ipynb")) return toolFailure(`[notebook_edit] 仅支持 .ipynb 文件：${relPath}`);
                 const edit_mode = (args?.edit_mode === "insert" || args?.edit_mode === "delete") ? args.edit_mode : "replace";
                 let absPath;
                 try { absPath = resolveSafePath(relPath); }
-                catch (e: any) { return `❌ [notebook_edit] 路径解析失败：${e?.message ?? e}`; }
+                catch (e: any) { return toolFailure(`[notebook_edit] 路径解析失败：${e?.message ?? e}`); }
 
                 let raw: string;
                 try { raw = await fs.readFile(absPath, "utf-8"); }
-                catch (e: any) { return `❌ [notebook_edit] 读取失败：${e?.message ?? e}`; }
+                catch (e: any) { return toolFailure(`[notebook_edit] 读取失败：${e?.message ?? e}`); }
                 let nb: any;
                 try { nb = JSON.parse(raw); }
-                catch (e: any) { return `❌ [notebook_edit] JSON 解析失败（非合法 .ipynb）：${e?.message ?? e}`; }
-                if (!nb || !Array.isArray(nb.cells)) return "❌ [notebook_edit] 非合法 notebook（缺 cells 数组）。";
+                catch (e: any) { return toolFailure(`[notebook_edit] JSON 解析失败（非合法 .ipynb）：${e?.message ?? e}`); }
+                if (!nb || !Array.isArray(nb.cells)) return toolFailure("[notebook_edit] 非合法 notebook（缺 cells 数组）。");
 
                 let summary: string;
                 try {
@@ -147,10 +147,10 @@ export const notebookTools: CustomTool[] = [
                         cell_type: args?.cell_type,
                         edit_mode,
                     });
-                } catch (e: any) { return `❌ [notebook_edit] ${e?.message ?? e}`; }
+                } catch (e: any) { return toolFailure(`[notebook_edit] ${e?.message ?? e}`); }
 
                 try { assertWithinWorkspace(absPath); }
-                catch (e: any) { return `❌ [notebook_edit] 二次围栏复检失败：${e?.message ?? e}`; }
+                catch (e: any) { return toolFailure(`[notebook_edit] 二次围栏复检失败：${e?.message ?? e}`); }
 
                 // 原子写（tmp + rename，与 write_file 同款）
                 const tmpPath = makeTmpPath(absPath);
@@ -159,7 +159,7 @@ export const notebookTools: CustomTool[] = [
                     await fs.rename(tmpPath, absPath);
                 } catch (e: any) {
                     await fs.unlink(tmpPath).catch(() => { /* ignore */ });
-                    return `❌ [notebook_edit] 写入失败：${e?.message ?? e}`;
+                    return toolFailure(`[notebook_edit] 写入失败：${e?.message ?? e}`);
                 }
                 return `✅ [notebook_edit] ${summary}（${relPath}）`;
             },

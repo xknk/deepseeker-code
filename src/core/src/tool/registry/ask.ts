@@ -9,7 +9,7 @@
  *  不走审批网关（SAFE：提问本身无副作用）；isSync:true（阻塞至作答）。
  *  不参与 P0-1 并行调度（runAgent.canParallelize 已排除）——避免与审批模态并发弹窗。
  */
-import { CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
 
 /** ask_question 工具集（当前仅 ask_question）。 */
 export const askTools: CustomTool[] = [
@@ -52,11 +52,12 @@ export const askTools: CustomTool[] = [
                 const cleanOptions = options
                     .map(o => ({ label: String(o?.label ?? "").trim(), description: o?.description ? String(o.description).trim() : undefined }))
                     .filter(o => o.label);
-                if (!question) return "❌ [提问失败]：question 不能为空。";
-                if (cleanOptions.length < 2 || cleanOptions.length > 4) return "❌ [提问失败]：options 须为 2-4 个非空选项。";
+                if (!question) return toolFailure("[提问失败]：question 不能为空。");
+                if (cleanOptions.length < 2 || cleanOptions.length > 4) return toolFailure("[提问失败]：options 须为 2-4 个非空选项。");
 
                 if (!ctx?.requestQuestion) {
-                    return "⚠️ [提问不支持]：当前宿主不支持结构化提问（多为非交互环境）。请改用纯文本直接向用户列出选项并提问。";
+                    // 工具未能履职（宿主无结构化提问通道）→ 按失败处理（ok=false），文案引导模型回退纯文本
+                    return toolFailure("[提问不支持]：当前宿主不支持结构化提问（多为非交互环境）。请改用纯文本直接向用户列出选项并提问。");
                 }
 
                 let answer: { selected: string[] };
@@ -67,7 +68,7 @@ export const askTools: CustomTool[] = [
                         multiSelect: !!args?.multiSelect,
                     });
                 } catch (e: any) {
-                    return `❌ [提问异常]：${e?.message ?? e}。请改用纯文本向用户提问。`;
+                    return toolFailure(`[提问异常]：${e?.message ?? e}。请改用纯文本向用户提问。`);
                 }
 
                 if (!answer.selected || answer.selected.length === 0) {

@@ -9,7 +9,7 @@
 import fs from "fs/promises";
 import type * as ts from "typescript";   // P0-1：type-only——esbuild 编译期剥离，运行时不 resolve（CLI 不发布 typescript）
 import path from "path";
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 // typescript 模块惰性加载（view_symbol_outline 的 AST + 代码导航/诊断的 LanguageService 共用）已收敛到 tsHost，
 //   本文件不再持私有副本。CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩；
 //   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
@@ -357,19 +357,19 @@ export const applyOneEditToContent = (
                 };
             }
             if (lm.reason === "conflict") {
-                return { ok: false, error: `❌ [代码修补失败]：代码冲突！old_str（${tag}归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。` };
+                return { ok: false, error: toolFailure(`[代码修补失败]：代码冲突！old_str（${tag}归一后）在全文中不唯一（共 ${lm.count} 处）。请多包裹几行上下文，或显式设 replace_all=true 批量替换。`) };
             }
         }
         // ⑤ 全失败：逐行诊断，精确指出最先失配的行，让模型一次定位（避免盲目重读整文件反复试错）
         const diag = diagnoseOldStr(normalizedContent, normalizedOldRaw);
-        return { ok: false, error: `❌ [代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对该处片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进）后重试。⚠️ 严禁改用 run_command 调用 python/node/sed/awk 等脚本绕过本工具修改文件。` };
+        return { ok: false, error: toolFailure(`[代码修补失败]：未能在文件中找到指定的 old_str 旧代码块。${diag}常见原因：① 误带了 read_file 的「<行号>: 」前缀；② 缩进（Tab/空格）不一致；③ 行尾多余空格；④ 文件已被改动/old_str 非连续整段。请用 read_file 重新核对该处片段（去掉「<行号>: 」前缀、保留原始 Tab/空格缩进）后重试。⚠️ 严禁改用 run_command 调用 python/node/sed/awk 等脚本绕过本工具修改文件。`) };
     }
 
     // 精确口径：子串替换
     const matchCount = normalizedContent.split(normalizedOld).length - 1;
     // replace_all=true：放行多匹配，全量替换；默认：要求唯一，否则报冲突
     if (!replaceAll && matchCount > 1) {
-        return { ok: false, error: `❌ [代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改，或显式设 replace_all=true 批量替换。` };
+        return { ok: false, error: toolFailure(`[代码修补失败]：代码冲突！old_str 在全文中不唯一（共发现了 ${matchCount} 处）。请向上或向下多包裹几行上下文再提请修改，或显式设 replace_all=true 批量替换。`) };
     }
     // ★ 缩进基线对齐：以 old_str 在文件里的真实缩进为基线重排 new_str，修模型丢基础缩进（顶格）。
     //   baseIndent = old_str 第一非空行的真实前导；为空（old 本身顶格）则跳过、原样写入。
@@ -594,7 +594,7 @@ export const fsTools: CustomTool[] = [
                             ? args.edits
                             : [{ old_str: args.old_str ?? "", new_str: args.new_str ?? "", replace_all: args.replace_all }];
                     if (editList.length === 0 || editList.some(e => typeof e.old_str !== "string" || e.old_str.length === 0)) {
-                        return `❌ [参数缺失]：请传入 edits 数组（每条含 old_str/new_str）一次完成多处修改，或顶层 old_str + new_str 修改单处。old_str 不能为空。`;
+                        return toolFailure(`[参数缺失]：请传入 edits 数组（每条含 old_str/new_str）一次完成多处修改，或顶层 old_str + new_str 修改单处。old_str 不能为空。`);
                     }
 
                     const absPath = resolveSafePath(args.path);
@@ -609,7 +609,7 @@ export const fsTools: CustomTool[] = [
                             // 单条直返原文案（与历史行为一致）；批量时前缀定位到第几条（剥内层重复的 ❌ 前缀），并明确整体未写入（原子）
                             return editList.length === 1
                                 ? r.error
-                                : `❌ [代码修补失败]：edits 第 ${i + 1}/${editList.length} 条未命中，已整体放弃（文件未做任何改动，可修正该条后整组重试）。${r.error.replace(/^❌ \[代码修补失败\]：/, "")}`;
+                                : toolFailure(`[代码修补失败]：edits 第 ${i + 1}/${editList.length} 条未命中，已整体放弃（文件未做任何改动，可修正该条后整组重试）。${r.error.replace(/^❌ \[代码修补失败\]：/, "")}`);
                         }
                         content = r.content;
                         summaries.push(editList.length === 1 ? r.summary : `  ${i + 1}. ${r.summary}`);
@@ -653,7 +653,7 @@ export const fsTools: CustomTool[] = [
                     //   仅当 ENOENT（确实不存在）才继续；EACCES 等其它错误原样上抛，避免被误判为"不存在"
                     try {
                         await fs.access(absPath);
-                        return `❌ [创建失败]：文件 [${args.path}] 已存在。create_file 仅用于新建文件；如需修改请用 edit_file，如需覆盖请用 write_file。`;
+                        return toolFailure(`[创建失败]：文件 [${args.path}] 已存在。create_file 仅用于新建文件；如需修改请用 edit_file，如需覆盖请用 write_file。`);
                     } catch (e: any) {
                         if (e?.code !== "ENOENT") throw e;
                     }
@@ -723,7 +723,7 @@ export const fsTools: CustomTool[] = [
                     // 💡 优化 3：空路径直接拒；根目录 / src 源码根的判定放到 resolveSafePath 之后用规范化 rel，
                     //   以堵住 "./src"、"src/"、"src/sub/.." 等字面量变形绕过（resolveSafePath + path.relative 会规整它们）
                     if (!cleanPath || cleanPath === "." || cleanPath === "./" || cleanPath === "/") {
-                        return `❌ [安全熔断]：禁止通过本工具直接摧毁项目根目录或传入空路径！`;
+                        return toolFailure(`[安全熔断]：禁止通过本工具直接摧毁项目根目录或传入空路径！`);
                     }
 
                     const absPath = resolveSafePath(cleanPath);
@@ -732,14 +732,14 @@ export const fsTools: CustomTool[] = [
                     //   rel === "" → 工作区根；rel === "src" → 源码根；rel 以 ".." 开头或为绝对路径 → 越界
                     const rel = path.relative(getActiveWorkspaceRoot(), absPath);
                     if (!rel || rel === "" || rel === "src" || rel.startsWith("..") || path.isAbsolute(rel)) {
-                        return `❌ [安全熔断]：拒绝销毁工作区根目录 / src 源码根 / 越界路径 [${cleanPath}]！`;
+                        return toolFailure(`[安全熔断]：拒绝销毁工作区根目录 / src 源码根 / 越界路径 [${cleanPath}]！`);
                     }
 
                     let stat: Stats;
                     try {
                         stat = await fs.stat(absPath);
                     } catch {
-                        return `❌ [销毁失败]：在工作区内未找到指定的路径 [${cleanPath}]。`;
+                        return toolFailure(`[销毁失败]：在工作区内未找到指定的路径 [${cleanPath}]。`);
                     }
 
                     const isDirectory = stat.isDirectory();
@@ -946,9 +946,9 @@ export const fsTools: CustomTool[] = [
                     const srcAbs = resolveSafePath(args.source);
                     const dstAbs = resolveSafePath(args.destination);
                     // 源必须存在
-                    try { await fs.access(srcAbs); } catch { return `❌ [移动失败]：源路径 [${args.source}] 不存在。`; }
+                    try { await fs.access(srcAbs); } catch { return toolFailure(`[移动失败]：源路径 [${args.source}] 不存在。`); }
                     // 目标已存在则拒绝（防误覆盖）
-                    try { await fs.access(dstAbs); return `❌ [移动失败]：目标 [${args.destination}] 已存在。如需覆盖请先 delete_path 再 move_file。`; } catch { /* 不存在，继续 */ }
+                    try { await fs.access(dstAbs); return toolFailure(`[移动失败]：目标 [${args.destination}] 已存在。如需覆盖请先 delete_path 再 move_file。`); } catch { /* 不存在，继续 */ }
                     // TOCTOU 二次围栏复检（与 write/create 对称）+ 建父目录 + 原子 rename
                     assertWithinWorkspace(srcAbs);
                     assertWithinWorkspace(dstAbs);

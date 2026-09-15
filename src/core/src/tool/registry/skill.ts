@@ -7,7 +7,7 @@
  *   - 进 agentTools 后，子 agent 经 getGlobalTools() 自动继承，无需改 RunAgentOptions 透传链；
  *   - 仅在有 skill 时由 initSkills 注入（无 skill 不暴露，避免无效工具位）。
  */
-import { CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
 import { getSkillManifest } from "@/skills/registry.ts";
 
 /**
@@ -44,11 +44,11 @@ export const skillTools: CustomTool[] = [
             async execute(args: any): Promise<string> {
                 const name = args?.name;
                 if (typeof name !== "string" || !name.trim()) {
-                    return "❌ [load_skill] 缺少参数 name。请先查看【可用技能目录】中的技能名。";
+                    return toolFailure("[load_skill] 缺少参数 name。请先查看【可用技能目录】中的技能名。");
                 }
                 const manifest = getSkillManifest(name.trim());
                 if (!manifest) {
-                    return `❌ 未找到技能：${name}。请核对【可用技能目录】中的名称拼写。`;
+                    return toolFailure(`未找到技能：${name}。请核对【可用技能目录】中的名称拼写。`);
                 }
                 return assembleSkillContent(manifest);
             },

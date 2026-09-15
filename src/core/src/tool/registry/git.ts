@@ -7,7 +7,7 @@
  *  - git_commit（MUTATION，提交暂存区；可选 stage_all 一并 git add -A）
  *  设计：统一用 execFile（不走 shell，天然防注入）+ getActiveWorkspaceRoot() 锚定 + 非 git 仓库兜底。
  */
-import { CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
 
@@ -72,9 +72,9 @@ export const gitTools: CustomTool[] = [
                     return `[Current Code Changes (Git Diff)]\n${stdout}`;
                 } catch (error: any) {
                     if (isNotARepoError(error)) {
-                        return `❌ [Diff 失败]：当前工作区尚未初始化 Git 仓库，无法嗅探代码版本改动差异。`;
+                        return toolFailure(`[Diff 失败]：当前工作区尚未初始化 Git 仓库，无法嗅探代码版本改动差异。`);
                     }
-                    return `读取代码差异失败: ${error.message}`;
+                    return toolFailure(`读取代码差异失败: ${error.message}`);
                 }
             }
         }
@@ -100,9 +100,9 @@ export const gitTools: CustomTool[] = [
                     return `[Git Status | ${getActiveWorkspaceRoot()}]\n${stdout.trim()}`;
                 } catch (error: any) {
                     if (isNotARepoError(error)) {
-                        return `❌ [Git Status 失败]：当前工作区尚未初始化 Git 仓库。`;
+                        return toolFailure(`[Git Status 失败]：当前工作区尚未初始化 Git 仓库。`);
                     }
-                    return `读取 Git 状态失败: ${error.message}`;
+                    return toolFailure(`读取 Git 状态失败: ${error.message}`);
                 }
             }
         }
@@ -135,9 +135,9 @@ export const gitTools: CustomTool[] = [
                     return `[Git Log | 最近 ${limit} 条]\n${stdout.trim()}`;
                 } catch (error: any) {
                     if (isNotARepoError(error)) {
-                        return `❌ [Git Log 失败]：当前工作区尚未初始化 Git 仓库。`;
+                        return toolFailure(`[Git Log 失败]：当前工作区尚未初始化 Git 仓库。`);
                     }
-                    return `读取 Git 历史失败: ${error.message}`;
+                    return toolFailure(`读取 Git 历史失败: ${error.message}`);
                 }
             }
         }
@@ -173,14 +173,14 @@ export const gitTools: CustomTool[] = [
                     return `[git_commit 提交完成]\n${summary}`;
                 } catch (error: any) {
                     if (isNotARepoError(error)) {
-                        return `❌ [Git Commit 失败]：当前工作区尚未初始化 Git 仓库。`;
+                        return toolFailure(`[Git Commit 失败]：当前工作区尚未初始化 Git 仓库。`);
                     }
                     const text = `${error?.stderr || error?.message || ""}`;
                     // nothing to commit 时 git 以非零码退出，给出友好提示
                     if (text.toLowerCase().includes("nothing to commit")) {
                         return `ℹ️ [git_commit]：没有可提交的改动（nothing to commit）。如需提交请先暂存（stage_all=true 或 git add）。`;
                     }
-                    return `❌ [git_commit 失败]：${text.trim()}`;
+                    return toolFailure(`[git_commit 失败]：${text.trim()}`);
                 }
             }
         }

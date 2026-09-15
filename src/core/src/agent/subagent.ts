@@ -16,7 +16,7 @@ import { buildContextMessages } from "@/session/content.ts";
 import { appendMessage, readTranscriptLines } from "@/session/transcript.ts";
 import { createUUID } from "@/common/index.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
-import { CustomTool, MAX_AGENT_DEPTH, ToolContext } from "@/tool/type.ts";
+import { toolFailure, CustomTool, MAX_AGENT_DEPTH, ToolContext } from "@/tool/type.ts";
 import { getAgent } from "@/agents/registry.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { ownerCanApprove } from "@/session/lineage.ts";
@@ -90,7 +90,7 @@ export const runSubagent = async (
     if (ctx.depth >= MAX_AGENT_DEPTH) {
         return {
             ok: false,
-            output: `❌ [安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层）。禁止继续无限向下嵌套，请父层级 Agent 自行消化当前任务。`,
+            output: toolFailure(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层）。禁止继续无限向下嵌套，请父层级 Agent 自行消化当前任务。`),
             sessionId: "",
         };
     }
@@ -101,21 +101,21 @@ export const runSubagent = async (
         if (!target.includes("__sub__")) {
             return {
                 ok: false,
-                output: `❌ [续跑失败]：${target} 不是子 Agent 会话 ID（应形如 <会话>__sub__<uuid>，来自此前 spawn_agent 返回的 agent_id）。`,
+                output: toolFailure(`[续跑失败]：${target} 不是子 Agent 会话 ID（应形如 <会话>__sub__<uuid>，来自此前 spawn_agent 返回的 agent_id）。`),
                 sessionId: "",
             };
         }
         if (!ownerCanApprove(target, ctx.sessionId)) {
             return {
                 ok: false,
-                output: `❌ [续跑失败]：子会话 ${target} 不属于当前会话（及其 fork 血缘），禁止跨会话复活。请核对 agent_id 或改用新建派生。`,
+                output: toolFailure(`[续跑失败]：子会话 ${target} 不属于当前会话（及其 fork 血缘），禁止跨会话复活。请核对 agent_id 或改用新建派生。`),
                 sessionId: "",
             };
         }
         if (activeSubagents.has(target)) {
             return {
                 ok: false,
-                output: `❌ [续跑失败]：子 Agent ${target} 正在执行中，禁止并发续跑同一子会话（会交叉写坏转录）。请等待其完成后再试。`,
+                output: toolFailure(`[续跑失败]：子 Agent ${target} 正在执行中，禁止并发续跑同一子会话（会交叉写坏转录）。请等待其完成后再试。`),
                 sessionId: "",
             };
         }
@@ -123,7 +123,7 @@ export const runSubagent = async (
         if (existing.length === 0) {
             return {
                 ok: false,
-                output: `❌ [续跑失败]：子会话 ${target} 的转录不存在或为空，无法续跑。请改用新建派生。`,
+                output: toolFailure(`[续跑失败]：子会话 ${target} 的转录不存在或为空，无法续跑。请改用新建派生。`),
                 sessionId: "",
             };
         }
@@ -137,7 +137,7 @@ export const runSubagent = async (
     if (name && !manifest) {
         return {
             ok: false,
-            output: `❌ [派生失败]：未找到声明式子 Agent "${name}"。请核对系统提示词中【可用子 Agent 目录】的名称拼写。`,
+            output: toolFailure(`[派生失败]：未找到声明式子 Agent "${name}"。请核对系统提示词中【可用子 Agent 目录】的名称拼写。`),
             sessionId: "",
         };
     }
@@ -214,7 +214,7 @@ export const runSubagent = async (
         try {
             for await (const e of runAgent(subMessages, subOptions)) {
                 if (ctx.abortSignal?.aborted) {
-                    result = { ok: false, output: `❌ [子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`, sessionId: subSessionId, manifestName: manifest?.name };
+                    result = { ok: false, output: toolFailure(`[子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`), sessionId: subSessionId, manifestName: manifest?.name };
                     break;
                 }
                 if (e.type === 'final') {
@@ -230,16 +230,16 @@ export const runSubagent = async (
                 result = { ok: true, output: subResult, sessionId: subSessionId, manifestName: manifest?.name };
             }
         } catch (streamError: any) {
-            result = { ok: false, output: `❌ [子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`, sessionId: subSessionId, manifestName: manifest?.name };
+            result = { ok: false, output: toolFailure(`[子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`), sessionId: subSessionId, manifestName: manifest?.name };
         } finally {
             // ★ P1-8 SubagentStop：观察事件，best-effort（hook 异常不击垮子 agent）。output 截断防巨量回灌 hook
             if (result) {
                 await dispatch('SubagentStop', { ...startCtx, ok: result.ok, output: result.output.slice(0, 2000) }).catch((e: any) => console.warn(`⚠️ SubagentStop hook 异常（已忽略）: ${e?.message ?? e}`));
             }
         }
-        return result ?? { ok: false, output: `❌ [派生执行失败]: 未知错误`, sessionId: subSessionId, manifestName: manifest?.name };
+        return result ?? { ok: false, output: toolFailure(`[派生执行失败]: 未知错误`), sessionId: subSessionId, manifestName: manifest?.name };
     } catch (error: any) {
-        return { ok: false, output: `❌ [派生执行失败]: ${error.message}`, sessionId: subSessionId, manifestName: manifest?.name };
+        return { ok: false, output: toolFailure(`[派生执行失败]: ${error.message}`), sessionId: subSessionId, manifestName: manifest?.name };
     } finally {
         activeSubagents.delete(subSessionId); // 释放并发护栏（正常/中止/崩溃均走此）
     }

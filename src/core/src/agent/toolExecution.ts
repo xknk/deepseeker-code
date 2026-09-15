@@ -33,6 +33,16 @@ import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 const ensuredSidecarDirs = new Set<string>();
 
 /**
+ * ★ 成败前缀嗅探清单（ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p))）：
+ * "❌" 收 toolFailure() 工厂出品的全部工具失败文案；其余条目收无法/不宜走工厂的历史前缀
+ * （"工具执行失败"/"参数解析失败" 由本层 catch 生成，"【系统判定" 由 verifyResult 注入，
+ * "[⏳" 收 collectToolResult 两类熔断文案（工具执行超时/流式 idle 超时），"🔒"/"读取文件失败"等
+ * 为先于工厂存在的约定前缀）。**改本清单必须 conscious**——tests/tool-failure-consistency.test.ts
+ * 已把内容钉死，任何增删会在 CI 红（防静默漂移：漏加前缀 = 对应失败被误判 ok=true）。
+ */
+export const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:", "[⏳"];
+
+/**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
  *  - RegExp[]：逐条全局替换为 [MASKED_SECRET]；
  *  - 函数：交由工具自定义脱敏（可结合 args 动态决策）。
@@ -371,10 +381,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             console.warn(`⚠️ [sidecar] 工具原文存档失败（已降级为普通截断提示）:`, e instanceof Error ? e.message : e);
         }
     }
-    result = truncateToolResult(result, matchedTool?.function?.maxOutputCharacters, sidecarNote);
-    // ★ "[⏳" 收 collectToolResult 两类熔断文案（工具执行超时/流式 idle 超时）——原先不在清单，
-    //   超时熔断的结果被 ok 前缀嗅探误判为成功。search/glob 的失败文案已统一加 ❌ 前缀（registry 侧）。
-    const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:", "[⏳"];
+    result = truncateToolResult(result, matchedTool?.function.maxOutputCharacters, sidecarNote);
     const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
     // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
     let resultForModel = result;

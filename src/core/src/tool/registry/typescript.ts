@@ -14,7 +14,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative, checkSupportedSourceExt } from "../tsHost.ts";
 import { resolveReadablePath, getContainingRoot } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
@@ -109,7 +109,7 @@ const diagnoseOneFile = async (
         const tail = overflow ? `\n…(另有 ${overflow} 条诊断未显示，请缩小范围或用 run_command 跑 tsc 看全量)…` : "";
         return { ok: true, errors, warnings, text: `[Diagnostics: ${displayPath}] ${errors} error(s), ${warnings} warning(s)\n${body}${tail}` };
     } catch (e: any) {
-        return { ok: false, text: `❌ 类型诊断失败 [${displayPath}]: ${e?.message ?? e}` };
+        return { ok: false, text: toolFailure(`类型诊断失败 [${displayPath}]: ${e?.message ?? e}`) };
     }
 };
 
@@ -144,8 +144,8 @@ export const typescriptTools: CustomTool[] = [
                     // ★ 批量模式：paths 数组优先；单条老参数（path）向后兼容归一为长度 1 的列表。
                     //   单文件失败（不存在/超限/被拦）不中断整批，计入失败数单独展示。
                     const targets = args.paths && args.paths.length > 0 ? args.paths : (args.path ? [args.path] : []);
-                    if (targets.length === 0) return `❌ [参数缺失]：请传 path（单文件）或 paths（批量，改完多个文件后一次验证）。`;
-                    if (targets.length > MAX_DIAG_FILES) return `❌ [参数超限]：单次批量诊断最多 ${MAX_DIAG_FILES} 个文件（收到 ${targets.length} 个）。请分批调用，或用 run_command 跑 \`tsc --noEmit\` 做项目级全量诊断。`;
+                    if (targets.length === 0) return toolFailure(`[参数缺失]：请传 path（单文件）或 paths（批量，改完多个文件后一次验证）。`);
+                    if (targets.length > MAX_DIAG_FILES) return toolFailure(`[参数超限]：单次批量诊断最多 ${MAX_DIAG_FILES} 个文件（收到 ${targets.length} 个）。请分批调用，或用 run_command 跑 \`tsc --noEmit\` 做项目级全量诊断。`);
 
                     const results = [];
                     for (const p of targets) results.push(await diagnoseOneFile(TS, p, args.check_js));
@@ -164,7 +164,7 @@ export const typescriptTools: CustomTool[] = [
                     }
                     return `[批量诊断: ${targets.length} 个文件] 共 ${totalErr} error(s), ${totalWarn} warning(s)；${clean} 个文件干净${failed ? `，${failed} 个诊断失败` : ""}\n\n${sections.join("\n\n")}`;
                 } catch (e: any) {
-                    return `❌ 类型诊断失败: ${e?.message ?? e}`;
+                    return toolFailure(`类型诊断失败: ${e?.message ?? e}`);
                 }
             },
         },
@@ -201,9 +201,9 @@ export const typescriptTools: CustomTool[] = [
 
                     const { ls } = await getLanguageService(TS, absPath);
                     const program = ls.getProgram();
-                    if (!program) return `❌ 无法取得 TS program（内部错误）。`;
+                    if (!program) return toolFailure(`无法取得 TS program（内部错误）。`);
                     const sf = program.getSourceFile(absPath);
-                    if (!sf) return `❌ 文件未纳入 program：${displayPath}（可能无对应 tsconfig 或解析失败）。`;
+                    if (!sf) return toolFailure(`文件未纳入 program：${displayPath}（可能无对应 tsconfig 或解析失败）。`);
 
                     const pos = lineColToPos(TS, sf, line, column);
                     const defs = ls.getDefinitionAtPosition(absPath, pos);
@@ -226,7 +226,7 @@ export const typescriptTools: CustomTool[] = [
                     });
                     return `[Goto Definition: ${displayPath}:${line}:${column}]\n${out.join("\n")}`;
                 } catch (e: any) {
-                    return `❌ 跳转定义失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`;
+                    return toolFailure(`跳转定义失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`);
                 }
             },
         },
@@ -265,9 +265,9 @@ export const typescriptTools: CustomTool[] = [
 
                     const { ls } = await getLanguageService(TS, absPath);
                     const program = ls.getProgram();
-                    if (!program) return `❌ 无法取得 TS program（内部错误）。`;
+                    if (!program) return toolFailure(`无法取得 TS program（内部错误）。`);
                     const sf = program.getSourceFile(absPath);
-                    if (!sf) return `❌ 文件未纳入 program：${displayPath}（可能无对应 tsconfig 或解析失败）。`;
+                    if (!sf) return toolFailure(`文件未纳入 program：${displayPath}（可能无对应 tsconfig 或解析失败）。`);
 
                     const pos = lineColToPos(TS, sf, line, column);
                     const groups = ls.findReferences(absPath, pos);
@@ -320,7 +320,7 @@ export const typescriptTools: CustomTool[] = [
                     const tail = overflow > 0 ? `\n…(另有 ${overflow} 处引用未显示；符号过热可改用 grep 按调用名扫描，或分文件缩小范围)…` : "";
                     return `[References: ${displayPath}:${line}:${column}]\n${sections.join("\n")}${tail}`;
                 } catch (e: any) {
-                    return `❌ 查找引用失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`;
+                    return toolFailure(`查找引用失败 [${displayPath}:${line}:${column}]: ${e?.message ?? e}`);
                 }
             },
         },

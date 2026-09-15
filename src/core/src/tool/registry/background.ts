@@ -19,7 +19,7 @@
 import { spawn, execFileSync } from "child_process";
 import fsSync from "fs";
 import path from "path";
-import { CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
 import { createUUID, execFileSmart } from "@/common/index.ts";
 
@@ -262,7 +262,7 @@ export const backgroundTools: CustomTool[] = [
                     proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin, env: scrubCommandEnv() });
                     proc.unref?.(); // 父进程（agent）不必等待它退出
                 } catch (e: any) {
-                    yield `❌ [后台启动失败]：${e.message}`;
+                    yield toolFailure(`[后台启动失败]：${e.message}`);
                     return;
                 }
 
@@ -312,7 +312,7 @@ export const backgroundTools: CustomTool[] = [
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {
                     // 跨会话不可见：统一返回未找到，不泄露 task 是否存在
-                    return `❌ [查询失败]：未找到 task_id=${args.task_id}（可能已随服务重启丢失，或不属于当前会话）。`;
+                    return toolFailure(`[查询失败]：未找到 task_id=${args.task_id}（可能已随服务重启丢失，或不属于当前会话）。`);
                 }
                 // ★ 阻塞等待（长任务正解，替代忙轮询）：直至任务退出 / 超时 / 用户中止。
                 //   唤醒条件只看「退出」不看「有新输出」——chatty 构建/常驻 server 持续吐日志，按新输出
@@ -356,7 +356,7 @@ export const backgroundTools: CustomTool[] = [
             async execute(args: { task_id: string }, ctx?: ToolContext): Promise<string> {
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {
-                    return `❌ [终止失败]：未找到 task_id=${args.task_id}（或不属于当前会话）。`;
+                    return toolFailure(`[终止失败]：未找到 task_id=${args.task_id}（或不属于当前会话）。`);
                 }
                 if (task.status !== "running") {
                     return `ℹ️ [stop]：任务 ${args.task_id} 当前状态为 ${task.status}（已不在运行），无需终止。`;
