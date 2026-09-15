@@ -40,4 +40,25 @@ jobs:
           # 而不是静默打出真实调用。全部测试都应只依赖 fixture / ReplayProvider。
           DEEPSEEK_API_KEY: ""
           OPENAI_API_KEY: ""
-        run: npm test
+        shell: bash
+        run: npm test > test-output.txt 2>&1
+
+      # 日志接口需鉴权，失败细节写进 run summary（公开页面匿名可读），CI 值夜班自报告
+      - name: Summarize test failures
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### Tests 失败诊断"
+            if [ -f test-output.txt ] && grep -q "^not ok" test-output.txt; then
+              echo '```'
+              grep -B 2 -A 25 "^not ok" test-output.txt | head -400
+              echo '```'
+            elif [ -f test-output.txt ]; then
+              echo '```'
+              tail -80 test-output.txt
+              echo '```'
+            else
+              echo "test-output.txt 未生成（进程早期崩溃）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
