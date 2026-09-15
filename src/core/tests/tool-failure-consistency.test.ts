@@ -47,7 +47,7 @@ const ALLOWLIST = new Set([
     // recall 检索成功后的 staleness 标注（⚠️ 文件已变动提示，属信息性附注非工具失败）
     "recall.ts:63",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）
-    "search.ts:120", "search.ts:130",
+    "search.ts:112", "search.ts:122",
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）
     "web.ts:589",
     // 工作流聚合报告内的步骤级中止标注（该步未执行，非工具调用失败）
@@ -97,6 +97,7 @@ describe("失败文案一致性守门（toolFailure 工厂 + FAILED_PREFIXES）"
 
     it("B. 出口位置的裸失败文案必须经 toolFailure() / 历史前缀 / 白名单", () => {
         const offenders: string[] = [];
+        const barePositions: string[] = [];  // 全部裸失败现场（含已入白名单的）——供白名单防漂移核对
         for (const file of SCAN_FILES) {
             const rel = path.basename(file);
             const sf = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
@@ -105,6 +106,7 @@ describe("失败文案一致性守门（toolFailure 工厂 + FAILED_PREFIXES）"
                 if (prefix === null || !FAILURE_RE.test(prefix)) return;
                 if (prefix.startsWith("❌")) return;                          // 工厂出品
                 if (FAILED_PREFIXES.some(p => prefix.startsWith(p))) return; // 历史约定前缀（与嗅探清单同源）
+                barePositions.push(`${rel}:${line}`);
                 if (ALLOWLIST.has(`${rel}:${line}`)) return;                 // 白名单（带理由，见上）
                 offenders.push(`${rel}:${line} → ${prefix.slice(0, 60)}`);
             };
@@ -123,5 +125,9 @@ describe("失败文案一致性守门（toolFailure 工厂 + FAILED_PREFIXES）"
             sf.forEachChild(visit);
         }
         assert.deepEqual(offenders, [], `发现裸失败文案（会被 FAILED_PREFIXES 误判 ok=true）：\n${offenders.join("\n")}`);
+        // 白名单防漂移：条目精确到行号，代码移动/删除后条目必须 conscious 更新（否则静默积累失效条目，
+        // 真正的新裸文案反而可能被旧条目侥幸掩护）。koroFileHeader 清理曾因删注释移行让白名单整体错位。
+        const stale = [...ALLOWLIST].filter(e => !barePositions.includes(e));
+        assert.deepEqual(stale, [], `白名单条目已失效（对应裸失败现场已移动/删除，请按当前行号更新）：\n${stale.join("\n")}`);
     });
 });
