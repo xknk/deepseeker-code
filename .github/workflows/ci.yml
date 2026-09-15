@@ -43,7 +43,16 @@ jobs:
         shell: bash
         run: npm test > test-output.txt 2>&1
 
-      # 日志接口需鉴权，失败细节写进 run summary（公开页面匿名可读），CI 值夜班自报告
+      # 日志接口需鉴权，完整测试输出作为 artifact 上传（公开仓库可匿名下载）
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: test-output.txt
+          retention-days: 7
+
+      # 失败细节同时写进 run summary（登录态页面可见）
       - name: Summarize test failures
         if: failure()
         shell: bash
