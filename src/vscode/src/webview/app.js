@@ -1874,7 +1874,7 @@ const SLASH = [
 { cmd: "/output-style", hint: "切换输出风格：/output-style <name|off>", arg: true, obs: true },
 { cmd: "/sessions", hint: "选择并载入历史会话（续接对话）", arg: false },
 { cmd: "/fork", hint: "从当前会话的某轮回复处分叉出新会话", arg: false },
-{ cmd: "/usage", hint: "查看本会话 token 用量（主/子 agent、缓存命中）", arg: false, obs: true },
+{ cmd: "/usage", hint: "查看 token 用量（主/子 agent、缓存命中、近 7 天使用日志）", arg: false, obs: true },
 { cmd: "/context", hint: "查看上下文窗口治理（阈值、填充率、已归档）", arg: false, obs: true },
 { cmd: "/permissions", hint: "查看已加载的权限规则（allow/ask/deny）", arg: false, obs: true },
 { cmd: "/mcp", hint: "查看已连接的 MCP server 与工具数", arg: false, obs: true },

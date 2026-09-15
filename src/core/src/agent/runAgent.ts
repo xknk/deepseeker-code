@@ -29,6 +29,8 @@ import { prepareToolsAndInjections } from "./systemInjections.ts";
 import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
 import { createNudgeScheduler } from "./agentNudges.ts";
+import { recordUsageRun } from "@/observability/usageLog.ts";
+import { MODEL_NAME } from "@/llm/createModel.ts";
 
 // ============ 主流程 ============
 /**
@@ -120,6 +122,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             cached_tokens: (usageSum?.cached_tokens ?? 0) + (u.cached_tokens ?? 0),
         };
     };
+    // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
+    //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
+    const toolCounts: Record<string, number> = {};
     await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
     try {
         while (true) {
@@ -272,6 +277,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // 有 tool_calls = 实质推进 → 通知 nudge 调度器重置空响应预算（只计连续空包）
             //   + 透传 tool_calls 供重复检索检测（read_file 路径 / search_grep·glob 检索词计数，命中阈值 → 下一轮 nudge）
             nudges.noteToolCall(round, assistantMessage.tool_calls);
+            for (const tc of assistantMessage.tool_calls) {
+                const name = tc?.function?.name || "unknown";
+                toolCounts[name] = (toolCounts[name] ?? 0) + 1;
+            }
             // 2、重复工具调用熔断（完整签名连续 3 次 / 后台忙轮询同任务连续 4 轮，等待查询豁免）：委托 repeatBreaker。
             //    breaker 内部发 tool.repeat_break / tool.resolve 埋点；tripped 则 yield final + return。
             const repeatVerdict = breaker.check(assistantMessage.tool_calls, round, lastContent);
@@ -344,6 +353,25 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         try {
             await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: usageSum });
         } catch { /* appendEvent 已内部吞错，双保险 */ }
+        // ★ 使用日志落盘（路线 #6 真实使用数据回路）：每 run 一行（轮数/token/工具分布/停止原因），
+        //   按月分片纯本地留存、绝不上报；recordUsageRun 内部全容错，此处 fire-and-forget 再包一层——
+        //   旁路计量绝不击垮收尾链路（与 Stop hook / updateCalibration 同级）。
+        try {
+            void recordUsageRun({
+                v: 1,
+                ts: new Date().toISOString(),
+                sessionId, runId, depth,
+                model: options.model?.trim() || MODEL_NAME,
+                stopReason: signal?.aborted ? 'aborted' : stopReason,
+                rounds: round,
+                durationMs: Math.round(performance.now() - startTime),
+                promptTokens: usageSum?.prompt_tokens,
+                completionTokens: usageSum?.completion_tokens,
+                totalTokens: usageSum?.total_tokens,
+                cachedTokens: usageSum?.cached_tokens,
+                tools: toolCounts,
+            });
+        } catch { /* recordUsageRun 已内部吞错，双保险 */ }
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
         try {

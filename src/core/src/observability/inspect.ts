@@ -11,6 +11,7 @@ import { listPermissionRules } from "@/tool/permissions.ts";
 import { listHooks } from "@/hooks/registry.ts";
 import { listMcpClients } from "@/tool/mcp/loader.ts";
 import { getTraceStorePath } from "@/observability/store.ts";
+import { readUsageRecords, summarizeUsage, topTools } from "@/observability/usageLog.ts";
 import { getRollingState } from "@/session/store.ts";
 import { MODEL_NAME, AUX_MODEL_NAME } from "@/llm/createModel.ts";
 
@@ -32,11 +33,19 @@ const readTrace = async (sessionId: string): Promise<any[]> => {
     } catch { return []; }
 };
 
-/** /usage：从 trace 汇总 token 用量（按主 agent / 子 agent 拆分 + 缓存命中）。 */
+/** stopReason 人类可读短标签（/usage run 明细行用） */
+const STOP_LABEL: Record<string, string> = { normal: "完成", aborted: "中止", error: "错误", repeat: "熔断", limit: "超限" };
+/** token 数缩写：≥10k 显示 12.3k，其余原样千分位 */
+const fmtK = (n: number): string => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : fmt(n));
+
+/** /usage：从 trace 汇总 token 用量（按主 agent / 子 agent 拆分 + 缓存命中），并附使用日志（路线 #6）
+ *  的本会话 run 明细与近 7 天日常聚合——evals 测「能不能」，使用日志测「日常省不省」。 */
 export const inspectUsage = async (sessionId: string): Promise<string> => {
     const trace = await readTrace(sessionId);
     const responses = trace.filter(t => t?.eventType === "llm.response" && t?.usage);
-    if (responses.length === 0) return `📊 Token 用量：暂无数据（本会话尚无 LLM 响应落盘）。`;
+    // ★ 使用日志读侧（跨会话长期口径见 scripts/usage-report.ts）：本会话 run 明细 + 近 7 天全项目聚合
+    const sessionRuns = (await readUsageRecords()).filter(r => r.sessionId === sessionId);
+    if (responses.length === 0 && sessionRuns.length === 0) return `📊 Token 用量：暂无数据（本会话尚无 LLM 响应落盘）。`;
     let prompt = 0, completion = 0, total = 0, cacheHit = 0, cacheMiss = 0;
     let mainTotal = 0, subTotal = 0;
     for (const r of responses) {
@@ -51,13 +60,35 @@ export const inspectUsage = async (sessionId: string): Promise<string> => {
     }
     const cacheRate = prompt > 0 ? ((cacheHit / prompt) * 100).toFixed(1) : "0.0";
     const rounds = responses.length;
-    return [
+    const lines = [
         `📊 Token 用量（本会话，${rounds} 次 LLM 响应）`,
         `  输入(prompt): ${fmt(prompt)}  | 输出(completion): ${fmt(completion)}  | 合计: ${fmt(total)}`,
         `  缓存命中: ${fmt(cacheHit)}（${cacheRate}%）  | 缓存未命中: ${fmt(cacheMiss)}`,
         `  主 agent: ${fmt(mainTotal)}  | 子 agent(spawn/workflow): ${fmt(subTotal)}`,
-        `  提示：并行 workflow 会放大子 agent 用量；缓存命中率越高，输入成本越低。`,
-    ].join("\n");
+    ];
+    if (sessionRuns.length > 0) {
+        const ss = summarizeUsage(sessionRuns);
+        const abortedPct = ss.mainRuns > 0 ? Math.round((ss.stopReasons.aborted / ss.mainRuns) * 100) : 0;
+        const avgRounds = ss.mainRuns > 0 ? (ss.mainRounds / ss.mainRuns).toFixed(1) : "0";
+        lines.push(`  ▎本会话 ${ss.mainRuns} 个 run：${ss.mainRounds} 轮（均 ${avgRounds} 轮/run）· 中止 ${ss.stopReasons.aborted}/${ss.mainRuns}（${abortedPct}%）`);
+        for (const r of sessionRuns.filter(x => x.depth === 0).slice(-6)) {
+            const tools = topTools(r.tools, 3).map(([n, c]) => `${n}×${c}`).join(" ") || "（无工具调用）";
+            lines.push(`    ${String(r.ts).slice(5, 16).replace("T", " ")}  ${r.rounds}轮  ${fmtK(r.totalTokens ?? 0)} tok  ${STOP_LABEL[r.stopReason] ?? r.stopReason}  ${tools}`);
+        }
+    }
+    const week = summarizeUsage(await readUsageRecords(7));
+    if (week.runs > 0) {
+        const weekHit = week.promptTokens > 0 ? ((week.cachedTokens / week.promptTokens) * 100).toFixed(1) : "0.0";
+        const weekAbort = week.mainRuns > 0 ? Math.round((week.stopReasons.aborted / week.mainRuns) * 100) : 0;
+        const weekAvg = week.mainRuns > 0 ? (week.mainRounds / week.mainRuns).toFixed(1) : "0";
+        const tools = topTools(week.tools, 4).map(([n, c]) => `${n}×${c}`).join("、");
+        lines.push(
+            `  ▎近 7 天（使用日志 · 全项目）：${week.mainRuns} runs · ${week.mainRounds} 轮（均 ${weekAvg} 轮/run）· 中止 ${weekAbort}% · ${fmtK(week.totalTokens)} tok（缓存命中 ${weekHit}%）`,
+            `    常用工具: ${tools || "（无）"}`,
+        );
+    }
+    lines.push(`  提示：并行 workflow 会放大子 agent 用量；缓存命中率越高，输入成本越低。`);
+    return lines.join("\n");
 };
 
 /** /context：当前上下文窗口治理参数 + 最近一轮 prompt token + 已归档条数。 */
