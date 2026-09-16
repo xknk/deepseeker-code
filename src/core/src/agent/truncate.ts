@@ -15,7 +15,7 @@
 import { appConfig } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
-import { msgText, degradeImagesForAux } from "@/session/contentParts.ts";
+import { msgText, degradeImagesForAux, collapseToText } from "@/session/contentParts.ts";
 import { decayOldToolResults } from "@/session/content.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
@@ -410,19 +410,126 @@ export const compactSlotNarrative = async (slotContent: string, _modelWindow: nu
     synthesizeSlotNarrative(slotContent, '', signal);
 
 /**
+ * 单批 token 预算：单元超预算不可跨批（保配对硬约束），但超预算单元必须先经 pretruncateOversizedUnit
+ * 确定性预截断再入批——「进辅助模型的每个请求 ≤ 预算」不变量由此成立。
+ */
+export const MAX_BATCH_TOKENS = 16000;
+
+/** 预截断地板：单条消息可折叠质量低于此值不再截——再截即毁摘要价值（宁留小尾巴，不毁上下文语义）。 */
+const PRETRUNCATE_FLOOR_TOKENS = 512;
+
+/**
+ * 消息的「可折叠文本质量」（token 口径）：与 estimateTokens 同源折算（整消息估算 − 每消息固定开销 4），
+ * 判定与折叠共用同一口径，避免「按字符截完仍超预算」的二次返工。
+ */
+const foldableTokensOf = (m: Msg): number => Math.max(0, estimateTokens([m]) - 4);
+
+/**
+ * 按目标 token 质量折叠纯文本：头尾保留、去中段（与 truncateToolResult 同款形态）。
+ * 保留长度由该消息自身的「字符/token 密度」反推——CJK 1:1 与 ASCII ÷4 两种形态都能一次折叠到位。
+ */
+const foldTextToTarget = (text: string, curTokens: number, targetTokens: number): string => {
+    const density = text.length / Math.max(1, curTokens); // 字符/token
+    const keepChars = Math.max(64, Math.floor(targetTokens * density));
+    const half = Math.floor(keepChars / 2);
+    const totalLines = text.split("\n").length;
+    const omitted = Math.max(0, totalLines - text.slice(0, half).split("\n").length - text.slice(-half).split("\n").length);
+    return [text.slice(0, half), "", `…[压缩预截断：超出单批压缩预算，已去中段约 ${omitted} 行（共 ${totalLines} 行）；完整内容可经 recall 工具检索]…`, "", text.slice(-half)].join("\n");
+};
+
+/**
+ * 折叠 tool_calls 的 arguments：只折叠超长字符串值（递归遍历、JSON 合法性不破坏）——摘要批仍以对话消息
+ * 形态送辅助模型，非法 arguments JSON 会被 API 再拒（换一个 400 根因，白治）。解析失败整体替换为合法 JSON 占位。
+ */
+const foldArguments = (args: string, maxChars: number): string => {
+    if (args.length <= maxChars) return args;
+    try {
+        const walk = (v: any): any => {
+            if (typeof v === "string") return v.length > maxChars ? `…[已折叠 ${v.length} 字符]` : v;
+            if (Array.isArray(v)) return v.map(walk);
+            if (v && typeof v === "object") {
+                for (const k of Object.keys(v)) v[k] = walk(v[k]);
+            }
+            return v;
+        };
+        return JSON.stringify(walk(JSON.parse(args)));
+    } catch {
+        return JSON.stringify(`[工具参数过长已折叠，原 ${args.length} 字符]`);
+    }
+};
+
+/**
+ * 折叠单条消息到目标文本质量（返回【新对象】，原消息零改写——压缩失败时下一轮重试仍拿全文）。
+ * tool_calls 消息折 arguments；其余折 string content（数组 content 已在入口折叠为 string）。
+ */
+const foldMessageTo = (m: Msg, targetTokens: number): Msg => {
+    const mm: any = m;
+    const keepChars = Math.max(256, targetTokens * 4); // arguments 是结构化 JSON，按 ÷4 折算密度
+    if (Array.isArray(mm.tool_calls) && mm.tool_calls.length > 0) {
+        let content = mm.content;
+        if (typeof content === "string" && content.length > keepChars) {
+            content = foldTextToTarget(content, Math.max(1, foldableTokensOf(m)), targetTokens);
+        }
+        return {
+            ...mm,
+            content,
+            tool_calls: mm.tool_calls.map((c: any) => c?.function?.arguments
+                ? { ...c, function: { ...c.function, arguments: foldArguments(String(c.function.arguments), keepChars) } }
+                : c),
+        } as Msg;
+    }
+    if (typeof mm.content === "string" && mm.content.length > 0) {
+        return { ...mm, content: foldTextToTarget(mm.content, Math.max(1, foldableTokensOf(m)), targetTokens) } as Msg;
+    }
+    return m;
+};
+
+/**
+ * 超预算单元的确定性预截断（压缩熔断单点治理，2026-09-16）：
+ * 单元（assistant(tool_calls)+tool = 不可分割）自身超批预算时，旧做法「独占一批硬送辅助模型」——
+ * 巨型工具结果（超长 run_command 输出 = 高频场景）超辅助模型窗口反复 400 → 连续 3 次失败物理熔断，
+ * 长会话被一个坏结果卡死，且报错误导性指向「网络/提供商崩溃」。现改为：配对原样不动、迭代折叠当前
+ * 最大的可折叠目标（每轮至少折半 → 几何收敛）直到入预算；折叠视图带 recall 检索指引，全文不丢
+ * （入口截断触发过的结果 sidecar 全文在盘，recall with_full 取回；未触发的入库视图也在 transcript）。
+ *  ★ 数组 content 先折叠为纯 string（与摘要批 text-only 口径一致），顺带把图片计价脱水成占位文本——
+ *    贴图堆积型超预算单元不再按 image part 单价虚占预算。
+ *  ★ 产出【新消息对象】：活动历史零改写（压缩失败时下一轮重试仍拿全文，摘要只见折叠视图）。
+ */
+export const pretruncateOversizedUnit = (unit: Msg[], budgetTokens: number = MAX_BATCH_TOKENS): Msg[] => {
+    let out = unit.map(m => (Array.isArray((m as any).content) ? collapseToText(m) as Msg : m));
+    let guard = unit.length * 16 + 16; // 每轮目标质量至少折半 → 收敛是几何级，guard 只防理论死循环
+    while (estimateTokens(out) > budgetTokens && guard-- > 0) {
+        let idx = -1, maxT = 0;
+        for (let i = 0; i < out.length; i++) {
+            const t = foldableTokensOf(out[i]);
+            if (t > maxT) { maxT = t; idx = i; }
+        }
+        if (idx < 0 || maxT <= PRETRUNCATE_FLOOR_TOKENS) break; // 剩余皆小消息：接受残余超出（病态构成，极端罕见）
+        out[idx] = foldMessageTo(out[idx], Math.floor(maxT / 2));
+    }
+    return out;
+};
+
+/**
  * 按对话单元封批（纯函数）：16K token/批上限；assistant(tool_calls)+紧跟的 tool 结果 = 不可分割单元，
  * 复用 splitUntils 同款 groupUnits，保证一个工具调用回合永不跨批（跨批即产生
  * "tool_calls must be followed by tool messages" 类 400 → 多批同失败 → 物理熔断）。
+ * ★ 超预算单元先经确定性预截断再入批（pretruncateOversizedUnit）——独占一批的单元不再携带超窗体量，
+ *   进辅助模型的每个请求都落在窗口内（压缩熔断单点治理，2026-09-16）。
  */
 export const splitIntoBatches = (toCompact: Msg[]): Msg[][] => {
-    const MAX_BATCH_TOKENS = 16000;
     const units = groupUnits(toCompact);
     const batches: Msg[][] = [];
     let batch: Msg[] = []; // 当前累积的待压缩批次
     let batchTokens = 0;
-    for (const unit of units) {
-        const size = estimateTokens(unit);
-        // 当前批放不下该单元且已非空 → 先封批；若单元自身超预算，只能独占一批（不可拆，拆即破坏配对）
+    for (let unit of units) {
+        let size = estimateTokens(unit);
+        // ★ 超预算单元：先确定性预截断（保配对、去中段；产出新对象，原消息零改写）再入批。
+        if (size > MAX_BATCH_TOKENS) {
+            unit = pretruncateOversizedUnit(unit);
+            size = estimateTokens(unit);
+        }
+        // 当前批放不下该单元且已非空 → 先封批
         if (batchTokens + size > MAX_BATCH_TOKENS && batch.length > 0) {
             batches.push(batch); // 封批
             batch = [];
@@ -660,7 +767,14 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             })
             // 4. 【终极物理断流闸门】：触线报警，保护钱包！
             if (nextFailures >= 3) {
-                throw new Error(`❌ [物理熔断] 上下文压缩已连续遭遇 ${nextFailures} 次失败。为防止天价账单死循环，系统已强行拦截。请排查网络或大模型提供商是否崩溃。`);
+                // ★ 熔断文案指真根因 + 自愈指引（压缩熔断单点治理，2026-09-16）：超长单元已由分批前
+                //   确定性预截断兜住（见 pretruncateOversizedUnit），仍连败多为辅助模型服务/网络异常；
+                //   旧文案误导性指向「网络/提供商崩溃」且无自愈指引，把可恢复问题演成会话死刑。
+                throw new Error(
+                    `❌ [压缩熔断] 上下文压缩连续 ${nextFailures} 次失败，为防天价账单死循环已暂停自动压缩。`
+                    + `常见根因：摘要辅助模型服务异常或网络不通（可查 DEEP_SEEK_AUX_MODEL 服务可用性；超长工具结果已由系统自动预截断，一般不再是主因）。`
+                    + `自愈：直接重发消息即可重试（成功压缩一次计数即清零）；或 /fork 分叉续接、/new 开新会话。`
+                );
             }
             // =============================================================
             break;
