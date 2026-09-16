@@ -8,7 +8,8 @@
  *  纯数据契约：不 yield / 不 message.push / 不 appendMessage——副作用（yield tool.end / message.push /
  *  appendMessage）由调度层（toolScheduling）统一 flush。
  */
-import { collectToolResult, truncateToolResult } from "./truncate.ts";
+import { truncateToolResult } from "./truncate.ts";
+import { collectToolResult } from "./toolResultCollect.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus, ToolExecuteResult } from "@/tool/index.ts";
 import { validateToolArgs } from "@/tool/argsValidator.ts";
 import { requestApproval, isProtectedWrite, getActiveWorkspaceRoot } from "@/tool/guard.ts";
@@ -20,17 +21,11 @@ import { beforeMutationBackup } from "@/tool/undo/backup.ts";
 import { runAutoCheck, matchCommandDeny, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
 import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
-import fs from "fs/promises";
 import path from "path";
-import { getSessionsDirPath } from "@/session/store.ts";
+import { writeSidecarArchive } from "@/session/sidecar.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
-
-// ★ sidecar 目录 ensure 缓存：原实现每次写侧车（超预算工具结果）都 fs.mkdir(recursive)——目录首次
-//   建立后进程内不会再消失（deleteSession 删的是整个会话目录，该会话此后不再写侧车），重复 mkdir
-//   是纯浪费系统调用。与 store.ts ensuredSessionDirs / observability ensuredTraceDirs 同款模式。
-const ensuredSidecarDirs = new Set<string>();
 
 // ★ #8b（2026-09-16）：成败前缀嗅探通道（FAILED_PREFIXES + explicitOk）结构性退役——
 //   ok 判定唯一来源是本函数内 resultStatus 结构化跟踪：execute 返回的 ToolExecuteResult.status /
@@ -402,23 +397,11 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   被去中间的原文若不另存将无处可寻。仅在确会触发截断时落盘（缓存定位、非真相源；recall 的
     //   with_full 按需取回）。判定条件是“原始长度超预算”的超集（microcompact 只缩不涨，故截断必命中
     //   本条件；反之可能白存一份无人引用的缓存，无害）。失败仅降级为普通截断提示，绝不阻断回灌。
-    let sidecarNote: string | undefined;
+    //   路径/标记文案/总量闸经 session/sidecar.ts 共享契约（写读两侧单一出处，防隐式字符串契约漂移）。
     const truncBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
-    if (result.length > truncBudget) {
-        try {
-            const sidecarDir = path.join(getSessionsDirPath(sessionId), 'tool-outputs');
-            if (!ensuredSidecarDirs.has(sidecarDir)) {
-                await fs.mkdir(sidecarDir, { recursive: true });
-                ensuredSidecarDirs.add(sidecarDir);
-            }
-            // tool_call.id 来自模型（通常形如 call_0_xxx），白名单清洗防路径注入
-            const safeId = String(toolCall.id).replace(/[^A-Za-z0-9_-]/g, '');
-            await fs.writeFile(path.join(sidecarDir, `${safeId}.txt`), result, 'utf-8');
-            sidecarNote = `完整原文已存档，recall 工具传 with_full="${toolCall.id}" 可取回`;
-        } catch (e) {
-            console.warn(`⚠️ [sidecar] 工具原文存档失败（已降级为普通截断提示）:`, e instanceof Error ? e.message : e);
-        }
-    }
+    const sidecarNote = result.length > truncBudget
+        ? await writeSidecarArchive(sessionId, String(toolCall.id), result)
+        : undefined;
     result = truncateToolResult(result, matchedTool?.function.maxOutputCharacters, sidecarNote);
     // ★ #8b：ok 判定唯一来源 = 结构化状态（前缀嗅探/explicitOk 已退役）
     const ok = resultStatus === 'success';
@@ -435,9 +418,17 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     // ★ PostToolUse hook 改写（第二梯队 #3）：仅替换模型视图，用户视图保持工具真实输出；
     //   套用工具自身 maxOutputCharacters 同上限（override 由用户 hook 产生，同样需有界）。
     //   transcript 落盘的是 resultForModel → 模型实际所见，回放/压缩/fork 天然一致。
+    //   ★ 改写视图同样接侧车（2026-09-16 顺手登记项收口）：此前 override 超预算截断后无存档无提示，
+    //   被截去的改写内容无处可寻。覆盖写同 id 侧车——模型视图已被 hook 改写，with_full 的「取回该
+    //   结果全文」语义跟随改写后视图；override 未超预算时不写不提示（原工具结果侧车若已存在则保留，
+    //   recall 语义不变）。
     if (postHookOverride !== undefined) {
         console.log(`✏️ [Post-hook] [${calledName}] 模型视图结果已被 hook 改写`);
-        resultForModel = truncateToolResult(postHookOverride, matchedTool?.function?.maxOutputCharacters);
+        const overrideBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
+        const overrideNote = postHookOverride.length > overrideBudget
+            ? await writeSidecarArchive(sessionId, String(toolCall.id), postHookOverride)
+            : undefined;
+        resultForModel = truncateToolResult(postHookOverride, matchedTool?.function?.maxOutputCharacters, overrideNote);
     }
     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok, imageAttachments };
 };

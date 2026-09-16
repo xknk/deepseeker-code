@@ -43,6 +43,14 @@ const READ_REPEAT_THRESHOLD = 3;     // 同一路径第 3 次读取 → nudge（
 const GREP_REPEAT_THRESHOLD = 2;     // 同一检索第 2 次即 nudge（grep 重复几乎必为浪费）
 const REPEAT_NUDGE_MAX = 3;          // 整个 run 最多推 3 次重复检索 nudge（推满即停，避免与无效模型无限拉扯）
 
+// —— todo 完成度守卫（TODO_INCOMPLETE）——
+//   final 时任务清单仍有未完成项 → 推一轮核对（更新清单或继续推进）。清单状态直接取模型本 run 最后一次
+//   todo_write 的 args（进程内、零 IO，比 looksComplete 关键词判定可靠）；与 EARLY_FINAL 互补——
+//   那个只管 ≤2 轮的草率收尾，这个管全程（第 N 轮收尾时清单没勾完同样拦）。按信号武装：仅本 run
+//   发生过 todo_write 才拦（没建过清单的任务无从核对，不误伤）。预算 1 次/run（防模型有意弃单时拉扯）。
+const TODO_INCOMPLETE_FENCE = "⟦DSC:TODO_INCOMPLETE⟧";
+const TODO_INCOMPLETE_MAX = 1;       // 整个 run 最多推 1 次（与 EARLY_FINAL 同级死循环保险）
+
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
 const EARLY_FINAL_TEXT = (round: number): string =>
@@ -94,6 +102,9 @@ const REPEAT_READ_TEXT = (p: string, n: number): string =>
     `你已第 ${n} 次读取「${p}」——该文件内容你早已拥有，无需整文件重读。如需某处细节请回看之前的工具结果（早前读取可能已被归档，可用 recall 工具检索取回原文）；若该文件刚被改动、确需确认，只读改动附近几行即可，不要整文件重读。`;
 const REPEAT_GREP_TEXT = (q: string, n: number): string =>
     `你已第 ${n} 次检索「${q}」——之前的结果你已拥有。请改用 read_file 读完整目标文件理解上下文，或缩小/调整检索范围，不要重复同一检索。`;
+/** todo 完成度守卫文案：openItems 为清单里未完成项的内容（最多取 3 条做提示）。 */
+const TODO_INCOMPLETE_TEXT = (openItems: string[]): string =>
+    `你的任务清单仍有 ${openItems.length} 项未完成${openItems.length ? `（如：${openItems.slice(0, 3).join("；")}）` : ""}。请核对：若这些子目标确已落地，先调 todo_write 把对应项置 completed 再收尾；若确未完成，继续推进，不要拿着未勾完的清单草率总结；若任务已被用户取消或变更，也用 todo_write 更新清单以反映最新计划。`;
 
 /**
  * 创建一个 nudge 调度器（持有跨轮可变状态）。runAgent 每次 run 创建一个实例。
@@ -132,6 +143,11 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
     const nudgedGreps = new Set<string>();           // 已 nudge 过的检索词
     let repeatNudges = 0;                            // 本 run 已注入的重复检索 nudge 次数（受 REPEAT_NUDGE_MAX 约束）
     let repeatRetrievalPending: NudgeMsg | null = null;
+    // —— todo 完成度守卫状态（per-run）——
+    let todosTouchedThisRun = false;                 // 本 run 是否发生过 todo_write（守卫武装信号）
+    let lastTodos: Array<{ content: string; status: string }> = []; // 模型最后一次 todo_write 的清单快照
+    let todoNudges = 0;                              // 本 run 已注入的 todo nudge 次数（受 TODO_INCOMPLETE_MAX 约束）
+    let todoPending: NudgeMsg | null = null;
 
     return {
         pickNudge(round) {
@@ -140,10 +156,12 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
                 planFirstSent = true;
                 return { role: 'system', content: `${PLAN_FIRST_FENCE}\n${PLAN_FIRST_TEXT}` };
             }
-            // 优先级：tool_digest（工具消化收尾）> phantom（空回复）> early_final（早收尾）> 周期 nudge；前三者一次性消费
+            // 优先级：tool_digest（工具消化收尾）> phantom（空回复）> early_final（早收尾）> todo 未完成核对
+            //   > 周期 nudge；前四者一次性消费
             if (toolDigestPending) { const m = toolDigestPending; toolDigestPending = null; return m; }
             if (phantomPending) { const m = phantomPending; phantomPending = null; return m; }
             if (earlyFinalPending) { const m = earlyFinalPending; earlyFinalPending = null; return m; }
+            if (todoPending) { const m = todoPending; todoPending = null; return m; }
             // 重复检索 nudge：工具轮 noteToolCall 命中阈值时设入，下一轮推理前消费。优先级低于收尾守护
             //   （空回复/早收尾/工具消化属正确性兜底，先于效率类 nudge），高于周期 NUDGE。
             if (repeatRetrievalPending) { const m = repeatRetrievalPending; repeatRetrievalPending = null; return m; }
@@ -185,6 +203,17 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
                 earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n${EARLY_FINAL_TEXT(round)}` };
                 return true;
             }
+            // TODO_INCOMPLETE：本 run 建过/更新过任务清单，final 时清单仍有未完成项 → 推一轮核对。
+            //   与 EARLY_FINAL 互补：那个只管 ≤2 轮的草率收尾，这个管全程（任何轮次收尾都核对清单）。
+            //   清单状态取模型最后一次 todo_write 的 args 快照（进程内零 IO）；预算 1 次，放行后不拦。
+            if (todosTouchedThisRun && todoNudges < TODO_INCOMPLETE_MAX) {
+                const open = lastTodos.filter((t) => t && t.status !== "completed" && t.content).map((t) => t.content);
+                if (open.length > 0) {
+                    todoNudges++;
+                    todoPending = { role: 'system', content: `${TODO_INCOMPLETE_FENCE}\n${TODO_INCOMPLETE_TEXT(open)}` };
+                    return true;
+                }
+            }
             return false;
         },
         noteToolCall(round, toolCalls) {
@@ -200,6 +229,12 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
             if (!Array.isArray(toolCalls)) return;
             for (const tc of toolCalls) {
                 const { name, args } = parseToolCall(tc);
+                // ★ TODO_INCOMPLETE 武装：记录本 run 的 todo_write 快照（进程内零 IO），final 时核对完成度。
+                if (name === "todo_write") {
+                    todosTouchedThisRun = true;
+                    lastTodos = Array.isArray(args?.todos) ? args.todos : [];
+                    continue;
+                }
                 if (name === "edit_file" || name === "write_file" || name === "create_file") {
                     const p = normPath(args?.path);
                     if (p) { editedPaths.add(p); readCounts.set(p, 0); nudgedReads.delete(p); }

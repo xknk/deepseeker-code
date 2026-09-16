@@ -22,11 +22,14 @@ const FENCE = {
     TOOL_DIGEST: "⟦DSC:TOOL_DIGEST⟧",
     NUDGE: "⟦DSC:NUDGE⟧",
     REPEAT: "⟦DSC:REPEAT_RETRIEVAL⟧",
+    TODO_INCOMPLETE: "⟦DSC:TODO_INCOMPLETE⟧",
 } as const;
 
 const readCall = (path: string) => ({ function: { name: "read_file", arguments: JSON.stringify({ path }) } });
 const grepCall = (query: string) => ({ function: { name: "search_grep", arguments: JSON.stringify({ query }) } });
 const editCall = (path: string) => ({ function: { name: "edit_file", arguments: JSON.stringify({ path }) } });
+const todoCall = (todos: Array<{ content: string; status: string }>) =>
+    ({ function: { name: "todo_write", arguments: JSON.stringify({ todos }) } });
 
 /** ≥20 字、含「多个文件」标记（looksComplex 命中）且非 QUERY_LEAD 开头的首条 prompt 样例。 */
 const COMPLEX_PROMPT = "请帮我实现一个完整的用户登录功能模块，涉及多个文件的组织与鉴权流程";
@@ -158,6 +161,64 @@ describe("EARLY_FINAL（早收尾守护）", () => {
         s.noteToolCall(1, [readCall("a.ts")]);
         assert.equal(s.interceptFinal("先这样", 2), true);
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TOOL_DIGEST));
+    });
+});
+
+describe("TODO_INCOMPLETE（todo 完成度守卫，2026-09-16）", () => {
+    it("本 run 未碰过 todo_write → 永不拦（武装条件）", () => {
+        const s = createNudgeScheduler();
+        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 5), false, "无 todo 史不拦");
+    });
+
+    it("todo_write 后 final 仍有未完成项 → 拦一次，文案带未完成项与前 3 项列举", () => {
+        const s = createNudgeScheduler();
+        s.noteToolCall(1, [todoCall([
+            { content: "实现登录接口", status: "completed" },
+            { content: "补齐鉴权中间件", status: "in_progress" },
+            { content: "写集成测试", status: "pending" },
+        ])]);
+        // LONG_INCOMPLETE（≥30 字）在 round 3 已出 EARLY_FINAL 窗、超 TOOL_DIGEST 限长 → 落到 TODO 守卫
+        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 3), true);
+        const m = s.pickNudge(3)!;
+        assert.ok(m.content.startsWith(FENCE.TODO_INCOMPLETE));
+        assert.ok(m.content.includes("2 项未完成"));
+        assert.ok(m.content.includes("补齐鉴权中间件") && m.content.includes("写集成测试"), "应列举未完成项");
+        assert.ok(!m.content.includes("实现登录接口"), "已完成项不进列举");
+    });
+
+    it("清单全部 completed → 放行（不拦真实收尾）", () => {
+        const s = createNudgeScheduler();
+        s.noteToolCall(1, [todoCall([
+            { content: "任务A", status: "completed" },
+            { content: "任务B", status: "completed" },
+        ])]);
+        assert.equal(s.interceptFinal("已全部完成，总结如下。", 3), false);
+    });
+
+    it("预算 1 次：拦截消费后第二次 final 放行（死循环保险）", () => {
+        const s = createNudgeScheduler();
+        s.noteToolCall(1, [todoCall([{ content: "未竟之事", status: "pending" }])]);
+        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE));
+        assert.equal(s.interceptFinal("已全部完成", 3), false, "预算已用尽");
+    });
+
+    it("中途 todo_write 全勾 → 快照以最后一次为准，放行", () => {
+        const s = createNudgeScheduler();
+        s.noteToolCall(1, [todoCall([{ content: "未竟之事", status: "pending" }])]);
+        s.noteToolCall(2, [todoCall([{ content: "未竟之事", status: "completed" }])]);
+        assert.equal(s.interceptFinal("已全部完成", 4), false);
+    });
+
+    it("优先级：TODO pending 高于 REPEAT（同轮双命中时先消费 TODO）", () => {
+        const s = createNudgeScheduler();
+        s.noteToolCall(1, [
+            todoCall([{ content: "未竟之事", status: "pending" }]),
+            readCall("a.ts"), readCall("a.ts"), readCall("a.ts"),
+        ]);
+        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE));
+        assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.REPEAT), "REPEAT pending 顺延消费");
     });
 });
 

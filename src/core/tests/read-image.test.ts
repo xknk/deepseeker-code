@@ -17,7 +17,7 @@ const SANDBOX = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-read-image-"));
 process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 
 const { fsTools } = await import("@/tool/registry/fs.ts");
-const { collectToolResult } = await import("@/agent/truncate.ts");
+const { collectToolResult } = await import("@/agent/toolResultCollect.ts");
 const { buildImageFollowUpParts, MAX_IMAGE_BYTES } = await import("@/session/contentParts.ts");
 
 const readImage = fsTools.find((t: any) => t.function.name === "read_image");

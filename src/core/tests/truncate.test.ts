@@ -8,7 +8,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { collectToolResult } from "@/agent/truncate.ts";
+import { collectToolResult } from "@/agent/toolResultCollect.ts";
 
 /** 假流式工具：模拟 run_command 逐块 yield stdout。 */
 async function* fakeStream(chunks: string[]): AsyncGenerator<string> {

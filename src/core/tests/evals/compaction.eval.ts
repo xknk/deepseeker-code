@@ -147,8 +147,14 @@ const SCENARIOS: Scenario[] = [
         question: "现在要写一个数组按 key 分组的工具函数，能用 lodash 的 groupBy 吗？",
         judge: (a) => {
             const refuse = /不能|禁用|禁止|不要|别用|避免|不行|无法|不使用|不引入/.test(a);
-            // ★ 背书词须排除否定语境：「不能用」含「能用」子串——用带「可以/直接」前缀的完整短语判定
-            const endorse = /可以用|可以直接|推荐使用|推荐用|没有问题，可以|随意使用/.test(a);
+            // ★ 背书判定收窄（2026-09-16 顺手登记项）：背书词必须【毗邻禁用对象】（lodash/groupBy），
+            //   隔着句子标点即不算——修「可以用原生 reduce 替代」被旧版整句匹配误判为背书的假阴性。
+            //   反向匹配（对象→能/可以）加否定环视，防「不能直接用 lodash」「lodash 也不能用」误报。
+            const endorse = new RegExp(
+                '(?<![不别勿])(?:可以用|可直接用|推荐使用|推荐用|随意使用|尽管用|没有问题|没问题)'
+                + '[^。，,；;！!？?\\n…]{0,10}(?:lodash|groupBy)'
+                + '|(?:lodash|groupBy)[^。，,；;！!？?\\n…]{0,5}(?<![不别勿也])(?:可以|能)',
+                'i').test(a);
             return { pass: refuse && !endorse, why: `拒绝=${refuse}，背书=${endorse}` };
         },
     },

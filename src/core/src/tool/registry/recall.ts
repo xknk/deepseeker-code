@@ -16,7 +16,7 @@
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot } from "../guard.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
-import { getSessionsDirPath } from "@/session/store.ts";
+import { getToolOutputSidecarPath, safeSidecarId, SIDECAR_ARCHIVED_MARK } from "@/session/sidecar.ts";
 import fs from "fs/promises";
 import path from "path";
 
@@ -102,9 +102,9 @@ export const recallTools: CustomTool[] = [
                 try {
                     // ———— 分支一：with_full 取回侧车存档全文（分页读，chunk 卡在 16K 预算内防二次截断） ————
                     if (args.with_full) {
-                        const safeId = String(args.with_full).replace(/[^A-Za-z0-9_-]/g, '');
+                        const safeId = safeSidecarId(args.with_full);
                         if (!safeId) return toolFailure("[recall] with_full 含非法字符。");
-                        const sidecar = path.join(getSessionsDirPath(ctx.sessionId), 'tool-outputs', `${safeId}.txt`);
+                        const sidecar = getToolOutputSidecarPath(ctx.sessionId, args.with_full);
                         let full = '';
                         try { full = await fs.readFile(sidecar, 'utf-8'); }
                         catch { return toolFailure(`[recall] 未找到该 id 的存档原文（可能未曾触发截断存档、或会话已清理）：${args.with_full}`); }
@@ -136,6 +136,9 @@ export const recallTools: CustomTool[] = [
 
                     const limit = Math.min(Math.max(Math.floor(args.limit ?? 6), 1), 12);
                     const runFilter = args.run_id?.trim();
+                    // ★ legacy 会话兜底：无任何 run.start 事件行的旧转录里 runId 恒为空串，runFilter 判定
+                    //   会滤掉【所有】行（恒不命中）——此时跳过 run 过滤，全量检索（2026-09-16 顺手登记项）。
+                    const hasRunEvents = lines.some((l) => isEventLine(l) && (l as any).dscEvent === 'run.start');
                     const blocks: string[] = [];
                     let runN = 0;
                     let runId = '';
@@ -146,7 +149,7 @@ export const recallTools: CustomTool[] = [
                         }
                         const role = (l as any).role;
                         if (role === 'system') continue; // 槽位/系统注入不属对话历史
-                        if (runFilter && !(runId && runId.startsWith(runFilter))) continue;
+                        if (runFilter && hasRunEvents && !(runId && runId.startsWith(runFilter))) continue;
                         let info: { name: string; args: any; ts?: string } | undefined;
                         if (role === 'tool') {
                             info = toolCallInfo.get((l as any).tool_call_id);
@@ -162,7 +165,7 @@ export const recallTools: CustomTool[] = [
                         let header = `── 命中${blocks.length + 1} · run#${runN}${runId ? `(${runId.slice(0, 8)})` : ''} · ${roleDesc} · ${ts ?? '时间未知'} ──`;
                         if (role === 'tool') {
                             header += `\n校验：${await annotateStaleness(info?.args, ts)}`;
-                            if (typeof (l as any).content === 'string' && (l as any).content.includes('完整原文已存档')) {
+                            if (typeof (l as any).content === 'string' && (l as any).content.includes(SIDECAR_ARCHIVED_MARK)) {
                                 header += `\n✂️ 该结果曾被截断，传 with_full="${(l as any).tool_call_id}" 可取存档全文`;
                             }
                         }
