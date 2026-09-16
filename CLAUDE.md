@@ -1,11 +1,3 @@
-<!--
- * @Author: fanqianliang 2438756801@qq.com
- * @Date: 2026-08-10 12:35:39
- * @LastEditors: fanqianliang 2438756801@qq.com
- * @LastEditTime: 2026-08-10 14:05:10
- * @FilePath: \deepSeekCode\CLAUDE.md
- * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
--->
 # DeepSeeker-Code
 
 基于 DeepSeek 的 AI 编码助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills。
