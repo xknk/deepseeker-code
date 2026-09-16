@@ -79,14 +79,14 @@ describe("workflow/validateWorkflowArgs（参数校验）", () => {
         assert.ok(validateWorkflowArgs({ steps: "nope" }, maxSteps));
         assert.ok(validateWorkflowArgs(null, maxSteps));
     });
-    it("超过 maxSteps → 报错", () => {
+    it("超过 maxSteps → 报错（#8b 结构化失败）", () => {
         const steps = Array.from({ length: maxSteps + 1 }, () => ({ task: "x" }));
         const err = validateWorkflowArgs({ steps }, maxSteps);
-        assert.ok(err && err.includes("超过上限"));
+        assert.ok(err && err.status === "failed" && err.content.includes("超过上限"));
     });
-    it("某步 task 空白 → 报错（带下标）", () => {
+    it("某步 task 空白 → 报错（带下标，#8b 结构化失败）", () => {
         const err = validateWorkflowArgs({ steps: [{ task: "ok" }, { task: "   " }] }, maxSteps);
-        assert.ok(err && err.includes("steps[1].task"));
+        assert.ok(err && err.status === "failed" && err.content.includes("steps[1].task"));
     });
     it("合法（多步、可选字段齐全）→ null", () => {
         const err = validateWorkflowArgs({

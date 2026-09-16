@@ -124,7 +124,7 @@ export const notebookTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【Notebook 编辑审批】\n文件：${args?.path}\n模式：${args?.edit_mode ?? "replace"}${args?.cell_id ? ` / cell_id=${args.cell_id}` : args?.cell_index !== undefined ? ` / cell_index=${args.cell_index}` : ""}${args?.cell_type ? ` / 类型=${args.cell_type}` : ""}${args?.new_source !== undefined ? `\n新内容：\n${String(args.new_source).slice(0, 500)}` : ""}`,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const relPath = args?.path;
                 if (typeof relPath !== "string" || !relPath.trim()) return toolFailure("[notebook_edit] 缺少参数 path。");
                 if (!relPath.toLowerCase().endsWith(".ipynb")) return toolFailure(`[notebook_edit] 仅支持 .ipynb 文件：${relPath}`);

@@ -84,7 +84,8 @@ const joinContentText = (result: any): string => {
         .join("\n");
     const capped = capResultText(text);
     if (result?.isError) {
-        return toolFailure(`[MCP 工具报错]\n${capped || JSON.stringify(result)}`);
+        // callTool 契约为 raw string（loader 的 mcp_call execute 再经 toolFailure 结构化包装）
+        return toolFailure(`[MCP 工具报错]\n${capped || JSON.stringify(result)}`).content;
     }
     return capped || JSON.stringify(result);
 };

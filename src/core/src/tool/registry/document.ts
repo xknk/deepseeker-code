@@ -39,7 +39,7 @@ export const documentTools: CustomTool[] = [
             // ★ 文档正文可能很长，独立预算脱离通用 16K 兜底（与 read_file 同口径的宽松读取）。
             maxOutputCharacters: 48000,
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { path: string; start_char?: number; max_chars?: number }): Promise<string> {
+            async execute(args: { path: string; start_char?: number; max_chars?: number }) {
                 try {
                     const absPath = resolveReadablePath(args.path);
                     // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
@@ -90,7 +90,7 @@ export const documentTools: CustomTool[] = [
             isSync: true,
             maxOutputCharacters: 48000,
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { path: string; start_char?: number; max_chars?: number }): Promise<string> {
+            async execute(args: { path: string; start_char?: number; max_chars?: number }) {
                 try {
                     const absPath = resolveReadablePath(args.path);
                     const readBlock = await assertReadable(absPath, args.path);

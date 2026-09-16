@@ -1,5 +1,7 @@
 
-import { toolFailure } from "@/tool/type.ts";/**
+import { toolFailure, type ToolExecuteResult } from "@/tool/type.ts";
+
+/**
  * @file tool/registry/workflowHelpers.ts
  * @description run_workflow 的纯逻辑层：参数校验 / 标签 / 流水线上下文拼接 / 结果聚合格式化。
  *
@@ -27,8 +29,8 @@ export type StepOutcome = {
     diff?: string;
 };
 
-/** 参数校验：非法返回错误串，合法返回 null（纯函数，可单测）。 */
-export const validateWorkflowArgs = (args: any, maxSteps: number): string | null => {
+/** 参数校验：非法返回结构化失败（#8b：经 run_workflow execute 直返执行层），合法返回 null（纯函数，可单测）。 */
+export const validateWorkflowArgs = (args: any, maxSteps: number): ToolExecuteResult | null => {
     const steps = args?.steps;
     if (!Array.isArray(steps) || steps.length === 0) {
         return toolFailure("[工作流] steps 必须是非空数组（至少 1 个步骤）。");

@@ -119,7 +119,7 @@ function wrapTool(serverName: string, rawTool: any, client: McpClient): CustomTo
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【MCP 工具审批】\n服务: ${serverName} / 工具: ${rawTool.name}\n参数: ${JSON.stringify(args)}`,
-            async execute(args: any, _ctx?: ToolContext): Promise<string> {
+            async execute(args: any, _ctx?: ToolContext) {
                 const result = await client.callTool(rawTool.name, args);
                 return `[MCP ${serverName}/${rawTool.name}]\n${result}`;
             },
@@ -152,7 +152,7 @@ const mcpResourceTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const server = args?.server;
                 const out: any[] = [];
                 for (const c of clients) {
@@ -191,7 +191,7 @@ const mcpResourceTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【MCP 资源读取审批】\n服务: ${args?.server} / uri: ${args?.uri}\n（将把 MCP server 提供的内容拉入模型上下文；请确认来源可信、不含敏感数据）`,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const { server, uri } = args ?? {};
                 if (!server || !uri) return toolFailure("[read_mcp_resource] 缺少 server 或 uri。");
                 const c = findClient(server);
@@ -222,7 +222,7 @@ const mcpPromptTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const server = args?.server;
                 const out: any[] = [];
                 for (const c of clients) {
@@ -262,7 +262,7 @@ const mcpPromptTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【MCP prompt 获取审批】\n服务: ${args?.server} / prompt: ${args?.name}\n（将把 MCP server 渲染的 prompt 文本拉入模型上下文；请确认来源可信）`,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const { server, name, arguments: pargs } = args ?? {};
                 if (!server || !name) return toolFailure("[get_mcp_prompt] 缺少 server 或 name。");
                 const c = findClient(server);
@@ -309,7 +309,7 @@ const mcpDispatcherTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const server = args?.server;
                 const lines: string[] = [];
                 for (const c of clients) {
@@ -350,7 +350,7 @@ const mcpDispatcherTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【MCP 工具审批】\n服务: ${args?.server} / 工具: ${args?.tool}\n参数: ${args?.args}`,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const { server, tool } = args ?? {};
                 if (!server || !tool) return toolFailure("[mcp_call] 缺少 server 或 tool（先用 mcp_list_tools 查目录）。");
                 let parsed: any = {};

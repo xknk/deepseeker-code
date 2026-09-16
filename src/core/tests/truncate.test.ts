@@ -16,30 +16,34 @@ async function* fakeStream(chunks: string[]): AsyncGenerator<string> {
 }
 
 describe("collectToolResult onChunk 契约（实时 stdout 接线依赖）", () => {
-    it("AsyncGenerator：onChunk 每块回调一次，顺序与内容正确，结果为拼接", async () => {
+    it("AsyncGenerator：onChunk 每块回调一次，顺序与内容正确，结果为拼接（#8b 结构化 success）", async () => {
         const chunks = ["aaa", "bbb", "ccc"];
         const seen: string[] = [];
         const full = await collectToolResult(fakeStream(chunks), (s) => seen.push(s));
         assert.deepEqual(seen, chunks, "onChunk 应每块回调一次，保持顺序");
-        assert.equal(full, "aaabbbccc", "结果应为各块拼接");
+        assert.equal(full.status, "success");
+        assert.equal(full.content, "aaabbbccc", "结果应为各块拼接");
     });
 
     it("不传 onChunk：仍正确拼接，不抛错（向后兼容）", async () => {
         const full = await collectToolResult(fakeStream(["x", "y"]));
-        assert.equal(full, "xy");
+        assert.equal(full.status, "success");
+        assert.equal(full.content, "xy");
     });
 
     it("空流：onChunk 不回调，结果为空串", async () => {
         const seen: string[] = [];
         const full = await collectToolResult(fakeStream([]), (s) => seen.push(s));
         assert.equal(seen.length, 0);
-        assert.equal(full, "");
+        assert.equal(full.status, "success");
+        assert.equal(full.content, "");
     });
 
     it("Promise<string>（非流式）：不走 generator 分支，不触发 onChunk", async () => {
         const seen: string[] = [];
         const full = await collectToolResult(Promise.resolve("done"), (s) => seen.push(s));
-        assert.equal(full, "done");
+        assert.equal(full.status, "success");
+        assert.equal(full.content, "done");
         assert.equal(seen.length, 0, "Promise 模式不应触发 onChunk");
     });
 });
@@ -59,13 +63,14 @@ describe("collectToolResult 非流式安全网超时 / abort 打断（P0-1）", 
         else process.env[envKey] = prev;
     };
 
-    it("Promise 永不 resolve → 安全网超时熔断，返回超时提示（不抛错）", async () => {
+    it("Promise 永不 resolve → 安全网超时熔断，返回结构化失败（#8b：不抛错）", async () => {
         const prev = process.env[envKey];
         setEnv("50");
         try {
             const hang = new Promise<string>(() => { /* 永不 resolve，模拟 hang 工具 */ });
             const full = await collectToolResult(hang);
-            assert.match(full, /超时/, "应返回超时熔断提示，让模型自行决策下一步");
+            assert.equal(full.status, "failed", "超时熔断应结构化判失败");
+            assert.match(full.content, /超时/, "应返回超时熔断提示，让模型自行决策下一步");
         } finally {
             restoreEnv(prev);
         }
@@ -86,12 +91,13 @@ describe("collectToolResult 非流式安全网超时 / abort 打断（P0-1）", 
         }
     });
 
-    it("正常 Promise 仍按原样返回（超时/abort 不影响正常路径）", async () => {
+    it("正常 Promise 仍按原样返回（超时/abort 不影响正常路径，#8b 结构化 success）", async () => {
         const prev = process.env[envKey];
         setEnv("50");
         try {
             const full = await collectToolResult(Promise.resolve("ok"));
-            assert.equal(full, "ok");
+            assert.equal(full.status, "success");
+            assert.equal(full.content, "ok");
         } finally {
             restoreEnv(prev);
         }

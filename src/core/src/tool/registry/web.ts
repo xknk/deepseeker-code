@@ -555,7 +555,7 @@ export const webTools: CustomTool[] = [
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: { url: string; allow_private?: boolean }) =>
                 `⚠️【联网抓取审批】\n目标 URL: ${args.url}${args.allow_private ? "\n🔓 allow_private=true：已放行内网/回环地址（云元数据端点仍拦）" : ""}\n（将发起对外网络请求，且抓取到的内容会进入云端模型上下文；请确认 URL 来源可信、不含敏感回传数据）`,
-            async execute(args: { url: string; max_length?: number; allow_private?: boolean }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { url: string; max_length?: number; allow_private?: boolean }, ctx?: ToolContext) {
                 const maxChars = args.max_length && args.max_length > 0 ? args.max_length : DEFAULT_MAX_CHARS;
                 // allow_private：参数优先，否则取全局 env 默认（WEB_FETCH_ALLOW_PRIVATE=1）
                 const allowPrivate = args.allow_private ?? appConfig.webFetchAllowPrivate;
@@ -647,7 +647,7 @@ export const webTools: CustomTool[] = [
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: { query: string }) =>
                 `⚠️【联网搜索审批】\n搜索词: ${args.query}\n（将发起对外搜索请求，结果会进入云端模型上下文）`,
-            async execute(args: { query: string; max_results?: number }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { query: string; max_results?: number }, ctx?: ToolContext) {
                 const provider = pickSearchProvider();
                 const maxResults = Math.max(1, Math.min(args.max_results ?? 5, 10));
                 const signals: AbortSignal[] = [AbortSignal.timeout(SEARCH_TIMEOUT_MS)];

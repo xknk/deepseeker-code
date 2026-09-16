@@ -14,7 +14,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { toolFailure, asToolFailure, CustomTool, ToolSafetyLevel, ToolContext, ToolExecuteResult } from "../type.ts";
 import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative, checkSupportedSourceExt } from "../tsHost.ts";
 import { resolveReadablePath, getContainingRoot } from "../guard.ts";
 import { assertReadable, maskSecretsInContent } from "./fs.ts";
@@ -33,8 +33,8 @@ const toDisplayPath = (wsRoot: string, abs: string): string => {
 const isLibFile = (abs: string): boolean =>
     /(?:^|\/)node_modules\//.test(abs.replace(/\\/g, "/")) || /\.d\.ts$/i.test(abs);
 
-/** 读门 + 扩展名闸门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示串或 null（放行）。 */
-const precheck = async (displayPath: string, absPath: string): Promise<string | null> => {
+/** 读门 + 扩展名闸门 + 体积上限（get_diagnostics / goto_definition 共用前置）。返回拦截提示（#8b：扩展名闸门为结构化失败）或 null（放行）。 */
+const precheck = async (displayPath: string, absPath: string): Promise<string | ToolExecuteResult | null> => {
     const readBlock = await assertReadable(absPath, displayPath);
     if (readBlock) return readBlock;
     const extBlock = checkSupportedSourceExt(displayPath);
@@ -67,11 +67,11 @@ type TsModule = NonNullable<Awaited<ReturnType<typeof getTs>>>;
  */
 const diagnoseOneFile = async (
     TS: TsModule, displayPath: string, checkJs?: boolean,
-): Promise<{ ok: true; errors: number; warnings: number; text: string } | { ok: false; text: string }> => {
+): Promise<{ ok: true; errors: number; warnings: number; text: string } | { ok: false; result: ToolExecuteResult }> => {
     try {
         const absPath = realpathNative(resolveReadablePath(displayPath));
         const block = await precheck(displayPath, absPath);
-        if (block) return { ok: false, text: block };
+        if (block) return { ok: false, result: typeof block === "string" ? asToolFailure(block) : block };
 
         const { ls } = await getLanguageService(TS, absPath, { checkJs });
         const syntactic = ls.getSyntacticDiagnostics(absPath);
@@ -109,7 +109,7 @@ const diagnoseOneFile = async (
         const tail = overflow ? `\n…(另有 ${overflow} 条诊断未显示，请缩小范围或用 run_command 跑 tsc 看全量)…` : "";
         return { ok: true, errors, warnings, text: `[Diagnostics: ${displayPath}] ${errors} error(s), ${warnings} warning(s)\n${body}${tail}` };
     } catch (e: any) {
-        return { ok: false, text: toolFailure(`类型诊断失败 [${displayPath}]: ${e?.message ?? e}`) };
+        return { ok: false, result: toolFailure(`类型诊断失败 [${displayPath}]: ${e?.message ?? e}`) };
     }
 };
 
@@ -137,7 +137,7 @@ export const typescriptTools: CustomTool[] = [
             maxOutputCharacters: 48000, // ★ 批量多文件后上调（原单文件 24K；中心 truncateToolResult 仍是最终兜底）
             privacyMaskingRules: maskSecretsInContent,
             validateEnvironment: async () => !!(await getTs()),
-            async execute(args: { path?: string; paths?: string[]; check_js?: boolean }, _ctx?: ToolContext): Promise<string> {
+            async execute(args: { path?: string; paths?: string[]; check_js?: boolean }, _ctx?: ToolContext) {
                 try {
                     const TS = await getTs();
                     if (!TS) return `⚠️ [类型诊断不可用]：typescript 模块未加载（VSCode 扩展内可用；CLI 环境未必安装 typescript）。可改用 run_command 跑 \`tsc --noEmit\`。`;
@@ -151,14 +151,14 @@ export const typescriptTools: CustomTool[] = [
                     const results = [];
                     for (const p of targets) results.push(await diagnoseOneFile(TS, p, args.check_js));
 
-                    // 单文件：直返该文件完整输出（与历史行为一致）
-                    if (results.length === 1) return results[0].text;
+                    // 单文件：直返该文件完整输出（与历史行为一致）。#8b：失败为结构化 ToolExecuteResult，透传结构
+                    if (results.length === 1) return results[0].ok ? results[0].text : results[0].result;
 
                     let totalErr = 0, totalWarn = 0, clean = 0, failed = 0;
                     const sections: string[] = [];
                     for (let i = 0; i < results.length; i++) {
                         const r = results[i];
-                        if (!r.ok) { failed++; sections.push(`—— ${targets[i]}（诊断未产出）——\n${r.text}`); continue; }
+                        if (!r.ok) { failed++; sections.push(`—— ${targets[i]}（诊断未产出）——\n${r.result.content}`); continue; }
                         totalErr += r.errors; totalWarn += r.warnings;
                         if (r.errors === 0 && r.warnings === 0) clean++;
                         sections.push(`—— ${targets[i]} ——\n${r.text}`);
@@ -192,7 +192,7 @@ export const typescriptTools: CustomTool[] = [
             isSync: true,
             privacyMaskingRules: maskSecretsInContent,
             validateEnvironment: async () => !!(await getTs()),
-            async execute(args: { path: string; line: number; column: number }, _ctx?: ToolContext): Promise<string> {
+            async execute(args: { path: string; line: number; column: number }, _ctx?: ToolContext) {
                 const { path: displayPath, line, column } = args;
                 try {
                     const TS = await getTs();
@@ -256,7 +256,7 @@ export const typescriptTools: CustomTool[] = [
             maxOutputCharacters: 48000, // 200 条引用 × ~160 字符摘录的理论上界之内；中心 truncateToolResult 仍是最终兜底
             privacyMaskingRules: maskSecretsInContent,
             validateEnvironment: async () => !!(await getTs()),
-            async execute(args: { path: string; line: number; column: number }, _ctx?: ToolContext): Promise<string> {
+            async execute(args: { path: string; line: number; column: number }, _ctx?: ToolContext) {
                 const { path: displayPath, line, column } = args;
                 try {
                     const TS = await getTs();

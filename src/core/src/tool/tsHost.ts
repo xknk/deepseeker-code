@@ -16,7 +16,7 @@ import type * as ts from "typescript";   // type-only——esbuild 编译期剥�
 import fsSync from "fs";
 import path from "path";
 import { getContainingRoot } from "./guard.ts";
-import { toolFailure } from "./type.ts";
+import { toolFailure, type ToolExecuteResult } from "./type.ts";
 
 /** 已加载的 typescript 模块类型别名（getTs 成功后即此类型）。 */
 export type TsModule = typeof import("typescript");
@@ -245,11 +245,11 @@ const SUPPORTED_SOURCE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".c
  * "Could not find source file"（误导性报错）；createSourceFile 则无视 parseDiagnostics 静默
  * 按 TS 语法硬解，产出残缺伪大纲（[Class] 碰巧对、方法签名错乱），比报错更误导模型。
  */
-export const checkSupportedSourceExt = (displayPath: string): string | null => {
+export const checkSupportedSourceExt = (displayPath: string): ToolExecuteResult | null => {
     const ext = path.extname(displayPath).toLowerCase();
     if (SUPPORTED_SOURCE_EXTS.has(ext)) return null;
-    return toolFailure(`[文件类型不支持]：[${displayPath}] 的扩展名 ${ext || "(无)"} 不在 TS 引擎支持范围（仅 .ts/.tsx/.js/.jsx/.mjs/.cjs）。`) +
-        `请改用 read_file/grep 查看内容；编译/类型类验证用 run_command 跑对应语言工具链（如 mvn compile / tsc --noEmit）。`;
+    // #8b：结构化失败出口（此前 object + string 拼接会把工厂产物吃成 "[object Object]"——由 gate 测试抓出）
+    return toolFailure(`[文件类型不支持]：[${displayPath}] 的扩展名 ${ext || "(无)"} 不在 TS 引擎支持范围（仅 .ts/.tsx/.js/.jsx/.mjs/.cjs）。请改用 read_file/grep 查看内容；编译/类型类验证用 run_command 跑对应语言工具链（如 mvn compile / tsc --noEmit）。`);
 };
 
 /** 1-based { line, column } → 0-based offset（goto_definition 输入转 TS 位置）。 */

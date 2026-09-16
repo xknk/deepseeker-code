@@ -39,7 +39,7 @@ export const todoTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE, // 纯状态写，无副作用，免审批，保障模型自主规划流畅度
             isSync: true,
-            async execute(args: { todos: Todo[] }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { todos: Todo[] }, ctx?: ToolContext) {
                 if (!ctx?.sessionId) {
                     return toolFailure(`[todo_write 失败]：缺少会话上下文（sessionId），无法持久化任务清单。`);
                 }

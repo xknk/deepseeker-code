@@ -22,6 +22,7 @@ import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
+import type { ToolExecuteResult } from "@/tool/type.ts";
 
 /** ANSI / OSC 转义序列（终端着色等） */
 const ANSI_ESCAPE = /\u001b\[[\d;?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
@@ -803,18 +804,20 @@ function isAsyncGenerator(x: any): x is AsyncGenerator<string> {
 }
 
 /**
- * 归一化工具执行结果：工具可返回 Promise<string> 或 AsyncGenerator<string>（流式）。
+ * 归一化工具执行结果：工具可返回 Promise<string | ToolExecuteResult> 或 AsyncGenerator<string>（流式）。
  *  对流式结果逐块拼接（可选回调 onChunk 实时透出），对非字符串结果 JSON.stringify。
+ *  ★ #8b：返回结构化 ToolExecuteResult——string 归一为 success；两类「[⏳」熔断分支置 failed/runtime
+ *  （文案不变），执行层据此判 ok（原 FAILED_PREFIXES 前缀嗅探通道退役）。
  * @param ret 工具返回值
  * @param onChunk 流式分块回调（可选）
  * @param signal 主动中止信号（可选）：用户中止时即时打断 await，冒泡走工具 catch → 主循环 aborted 收尾
- * @return 归一化后的字符串结果
+ * @return 归一化后的结构化结果
  */
 export const collectToolResult = async (
-    ret: Promise<string> | AsyncGenerator<string>,
+    ret: Promise<string | ToolExecuteResult> | AsyncGenerator<string>,
     onChunk?: (s: string) => void,
     signal?: AbortSignal,
-): Promise<string> => {
+): Promise<ToolExecuteResult> => {
     if (isAsyncGenerator(ret)) {
         let full = '';
         // ★ R-2：idle 超时熔断——非后台流式工具两个 chunk 间超过阈值无产出，判定 generator 卡死
@@ -836,15 +839,18 @@ export const collectToolResult = async (
             if (outcome.timedOut) {
                 full += `\n\n[⏳ 工具流式输出 idle 超时（${Math.round(idleMs / 1000)}s 无新块），已熔断返回已收集内容]`;
                 try { await ret.return(undefined); } catch { /* 尽力释放 generator（触发其 finally 清理资源） */ }
-                break;
+                return { content: full, status: 'failed', errorCategory: 'runtime' };
             }
             if (outcome.step.done) break;
-            full += outcome.step.value;
-            onChunk?.(outcome.step.value);
+            // 块归一：协议允许 yield 结构化载荷（后台工具首 yield 的 toolFailure 对象由 runBackgroundTool
+            // 消费，正常到不了这里；防御非字符串块，避免 '+=' 拼出 '[object Object]'）
+            const chunk = typeof outcome.step.value === 'string' ? outcome.step.value : String((outcome.step.value as any)?.content ?? outcome.step.value ?? '');
+            full += chunk;
+            onChunk?.(chunk);
         }
-        return full;
+        return { content: full, status: 'success' };
     }
-    // ★ 非流式（Promise<string>）安全网超时（上线前 P0-1 修复）：
+    // ★ 非流式（Promise<string | ToolExecuteResult>）安全网超时（上线前 P0-1 修复）：
     //   流式分支有 idle 超时（见上）、后台工具有 30min 兜底（MAX_BACKGROUND_TOOL_MS），唯独本路径曾直接
     //   `await ret` 无任何熔断——若某工具（典型：网络型 MCP）hang 且不响应 abortSignal，会永久阻塞 agent
     //   主循环（await 不返回，连用户中止都难救）。此处复用 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS（与 LLM/工具流式
@@ -857,13 +863,13 @@ export const collectToolResult = async (
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     const raced = await Promise.race<{
-        kind: 'ok'; value: string;
+        kind: 'ok'; value: string | ToolExecuteResult;
     } | {
         kind: 'timeout';
     } | {
         kind: 'abort';
     }>([
-        Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: typeof v === 'string' ? v : JSON.stringify(v) })),
+        Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: v })),
         new Promise<{ kind: 'timeout' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs); }),
         ...(signal ? [new Promise<{ kind: 'abort' }>((resolve) => {
             onAbort = () => resolve({ kind: 'abort' });
@@ -876,10 +882,15 @@ export const collectToolResult = async (
     //   finalize 的解绑写法；{once:true} 只保证 abort 时触发后移除，不触发就永久滞留。
     if (onAbort && signal) signal.removeEventListener('abort', onAbort);
     if (raced.kind === 'timeout') {
-        return `[⏳ 工具执行超时（${Math.round(timeoutMs / 1000)}s 未返回），已熔断跳过。该工具可能 hang 或不响应中止信号。]`;
+        return { content: `[⏳ 工具执行超时（${Math.round(timeoutMs / 1000)}s 未返回），已熔断跳过。该工具可能 hang 或不响应中止信号。]`, status: 'failed', errorCategory: 'runtime' };
     }
     if (raced.kind === 'abort') {
         throw new Error('aborted');
     }
-    return raced.value;
+    // 结构化归一（#8b）：string → success；{content,status} 合法形态 → 原样；非法对象 → JSON.stringify 视为 success（保持现状）
+    const v = raced.value;
+    if (typeof v === 'string') return { content: v, status: 'success' };
+    if (v && typeof v === 'object' && typeof (v as ToolExecuteResult).content === 'string'
+        && ((v as ToolExecuteResult).status === 'success' || (v as ToolExecuteResult).status === 'failed')) return v;
+    return { content: JSON.stringify(v), status: 'success' };
 }

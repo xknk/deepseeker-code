@@ -20,7 +20,7 @@ export const undoTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(_args: any, ctx: ToolContext): Promise<string> {
+            async execute(_args: any, ctx: ToolContext) {
                 if (!ctx?.sessionId) return toolFailure(`[undo_list 失败]：缺少会话上下文。`);
                 const list = await listUndoable(ctx.sessionId);
                 if (!list.length) return `（当前会话没有可回退的变更。）`;
@@ -49,7 +49,7 @@ export const undoTools: CustomTool[] = [
                 args?.restore_last
                     ? `申请回退最近一次文件变更（restore_last）。该操作会改写磁盘文件。`
                     : `申请回退文件变更（undoId=${String(args?.undoId ?? "").slice(0, 8)}）。该操作会改写磁盘文件。`,
-            async execute(args: any, ctx: ToolContext): Promise<string> {
+            async execute(args: any, ctx: ToolContext) {
                 if (!ctx?.sessionId) return toolFailure(`[undo_restore 失败]：缺少会话上下文。`);
                 try {
                     if (args?.restore_last) return await restoreLast(ctx.sessionId);

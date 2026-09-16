@@ -62,7 +62,7 @@ export const spreadsheetTools: CustomTool[] = [
             maxOutputCharacters: 48000,
             // ★ 复用 read_file 的内容脱敏：单元格内硬编码密钥（apiKey/token 串）回灌模型前先脱敏。
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { path: string; sheet?: string; start_row?: number; max_rows?: number }): Promise<string> {
+            async execute(args: { path: string; sheet?: string; start_row?: number; max_rows?: number }) {
                 try {
                     const absPath = resolveReadablePath(args.path);
                     // ★ 读保护闸门（与 read_file 对称）：敏感凭证拒读。跨界读同 read_file（resolveReadablePath 不围栏）。

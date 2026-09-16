@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { commandTools } from "@/tool/registry/command.ts";
 import { backgroundTools, resolveWinShell } from "@/tool/registry/background.ts";
 import { appConfig } from "@/config/index.ts";
-import { ToolContext, ToolExecutionResultStatus } from "@/tool/type.ts";
+import { ToolContext, ToolExecutionResultStatus, type ToolExecuteResult } from "@/tool/type.ts";
 
 const runCommand = commandTools.find((t: any) => t.function.name === "run_command")!;
 const runBg = backgroundTools.find((t: any) => t.function.name === "run_in_background")!;
@@ -76,8 +76,9 @@ describe("run_command 自动转后台（auto-degrade）", () => {
             assert.ok(taskId, "应能提取 task_id");
             const st = (await getBg.function.execute({ task_id: taskId! }, ctx)) as string;
             assert.match(st, /状态: running/, "收编后任务应在运行");
-            const other = (await getBg.function.execute({ task_id: taskId! }, makeCtx("other-session"))) as string;
-            assert.match(other, /未找到/, "跨会话不可见（session 隔离）");
+            const other = (await getBg.function.execute({ task_id: taskId! }, makeCtx("other-session"))) as string | ToolExecuteResult;
+            const otherText = typeof other === "string" ? other : other.content; // #8b：跨会话未命中现走结构化失败
+            assert.match(otherText, /未找到/, "跨会话不可见（session 隔离）");
             await stopQuiet(taskId);
         });
     });

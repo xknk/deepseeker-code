@@ -97,7 +97,7 @@ export const recallTools: CustomTool[] = [
             isSync: true,
             // ★ 检索结果预算与 web 等工具对齐 16000 口径；命中数 × 单片段双重限流防 context thrashing
             maxOutputCharacters: 16000,
-            async execute(args: { query?: string; is_regex?: boolean; run_id?: string; limit?: number; with_full?: string; full_offset?: number }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { query?: string; is_regex?: boolean; run_id?: string; limit?: number; with_full?: string; full_offset?: number }, ctx?: ToolContext) {
                 if (!ctx?.sessionId) return toolFailure("[recall] 缺少会话上下文（sessionId），无法检索。");
                 try {
                     // ———— 分支一：with_full 取回侧车存档全文（分页读，chunk 卡在 16K 预算内防二次截断） ————

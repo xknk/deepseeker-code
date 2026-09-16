@@ -37,7 +37,7 @@ export const gitTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE, // 纯读操作，安全级别高
             isSync: true,
-            async execute(args: { path?: string }): Promise<string> {
+            async execute(args: { path?: string }) {
                 try {
                     const diffArgs = ["diff", "HEAD", "--no-color"];
                     if (args.path) diffArgs.push("--", resolveSafePath(args.path)); // ★ 统一过 resolveSafePath（拒越界 / ..），与其他 fs 工具口径一致
@@ -92,7 +92,7 @@ export const gitTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(): Promise<string> {
+            async execute() {
                 try {
                     // -sb：short + branch，首行给出分支与远端领先/落后，后续每行一个文件状态
                     const { stdout } = await runGit(["status", "-sb", "--no-column"]);
@@ -123,7 +123,7 @@ export const gitTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { limit?: number }): Promise<string> {
+            async execute(args: { limit?: number }) {
                 try {
                     const limit = Math.max(1, Math.min(args.limit ?? 20, 100));
                     const { stdout } = await runGit([
@@ -164,7 +164,7 @@ export const gitTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: { message: string; stage_all?: boolean }) =>
                 `申请 Git 提交${args.stage_all ? "（🔥 含 git add -A 暂存全部改动）" : "（仅提交已暂存改动）"}\n提交说明: ${args.message}`,
-            async execute(args: { message: string; stage_all?: boolean }): Promise<string> {
+            async execute(args: { message: string; stage_all?: boolean }) {
                 try {
                     if (args.stage_all) {
                         await runGit(["add", "-A"]);

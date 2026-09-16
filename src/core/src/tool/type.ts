@@ -32,24 +32,44 @@ export enum ToolSafetyLevel {
 }
 
 /**
- * 工具底层硬编码断言的执行状态结果
+ * 工具底层硬编码断言的执行状态结果（verifyResult 专用）
  * 用于防止大模型对错误日志产生幻觉（如选择性无视编译报错）
+ * ★ #8b（2026-09-16）：死枚举 TIMEOUT/ABORTED 删除（零生产零消费——超时/中止在执行层分别由
+ *   collectToolResult 熔断分支与 abortSignal 驱动，从不经本枚举表达）。
  */
 export enum ToolExecutionResultStatus {
     SUCCESS = 'success',
-    FAILED = 'failed',
-    TIMEOUT = 'timeout',
-    ABORTED = 'aborted'
+    FAILED = 'failed'
 }
 
 /**
- * 失败文案统一工厂（FAILED_PREFIXES 结构性退役，2026-09-15）：
- * 执行层 FAILED_PREFIXES（toolExecution.ts）靠「❌」前缀嗅探判成败——裸失败文案会被误判 ok=true
- * （历史两次补漏：glob / search）。一切面向模型的失败/拒绝/越界/超时提示**必须经本工厂出口**；
- * tests/tool-failure-consistency.test.ts 扫描工具出口的裸失败文案——写不对就过不了测试。
- * 只做前缀拼接，不触碰审批链 / explicitOk 语义。
+ * 结构化工具结果（#8b，2026-09-16）：execute 可返回；缺省 string 返回视为 success。
+ * **ok 判定唯一来源**——执行层不再做任何文案前缀嗅探（FAILED_PREFIXES/explicitOk 已退役），
+ * 动态透传的命令 stdout 恰以 "❌" 等前缀开头不再被误判失败。
  */
-export const toolFailure = (msg: string) => `❌ ${msg}`;
+export type ToolExecuteResult = {
+    /** 面向模型的文本（与旧字符串结果同视：脱敏 → 截断 → outputFilter 照常生效） */
+    content: string;
+    status: 'success' | 'failed';
+    /** 失败归类（与 verifyResult.errorCategory 对齐）：syntax=调用形态错，runtime=执行期错误，permission=拒绝/越权，unknown=未分类 */
+    errorCategory?: 'syntax' | 'runtime' | 'permission' | 'unknown';
+};
+
+/**
+ * 把已带前缀的文本包成结构化失败——供中间层把字符串契约升格为结构化出口
+ * （如 subagent 内部 result.output 为纯文本契约，spawn_agent 在工具出口统一结构化）。
+ */
+export const asToolFailure = (content: string, errorCategory: ToolExecuteResult['errorCategory'] = 'runtime'): ToolExecuteResult =>
+    ({ content, status: 'failed', errorCategory });
+
+/**
+ * 失败文案统一工厂（#8b 起返回结构化 ToolExecuteResult，content 仍为 `❌ ${msg}`）：
+ * 一切面向模型的失败/拒绝/越界/超时提示**必须经本工厂出口**——文本前缀保证人类/模型可读性，
+ * status:'failed' 保证执行层结构化判失败（不再依赖前缀嗅探）。
+ * tests/tool-failure-consistency.test.ts 扫描工具出口的裸失败文案——写不对就过不了测试。
+ */
+export const toolFailure = (msg: string, errorCategory: ToolExecuteResult['errorCategory'] = 'runtime'): ToolExecuteResult =>
+    asToolFailure(`❌ ${msg}`, errorCategory);
 
 
 /**
@@ -114,8 +134,10 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         /**
          * 工具核心执行逻辑
          * - 支持返回 AsyncGenerator 以实现流式输出（如 tail -f 的实时日志或长任务进度）
+         * - 返回 string 视为 success；失败经 toolFailure() 返回结构化 ToolExecuteResult（#8b），
+         *   执行层按 status 判 ok，不再嗅探文案前缀
          */
-        execute: (args: any, ctx: ToolContext) => Promise<string> | AsyncGenerator<string>;
+        execute: (args: any, ctx: ToolContext) => Promise<string | ToolExecuteResult> | AsyncGenerator<string | ToolExecuteResult>;
 
         /**
          * 是否可以同步执行

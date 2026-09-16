@@ -13,13 +13,14 @@
  */
 import { acquireLock, releaseLock } from "@/tool/lockManager.ts";
 import { appConfig } from "@/config/index.ts";
-import { toolFailure } from "@/tool/type.ts";
+import { toolFailure, ToolExecuteResult } from "@/tool/type.ts";
 
-/** 把单个 yield 值归一化为字符串（兼容 string 与 {content} 载荷） */
-function normalizeYield(v: any): string {
-    if (typeof v === 'string') return v;
-    if (v && typeof v === 'object' && 'content' in v) return String((v as any).content ?? '');
-    return String(v ?? '');
+/** 把首个 yield 值归一化为结构化结果（#8b）：string → success；{content,status} 合法形态
+ *  （如 toolFailure 出品的启动失败）原样透传；其余 String() 兜底视为 success。 */
+function normalizeYield(v: any): ToolExecuteResult {
+    if (typeof v === 'string') return { content: v, status: 'success' };
+    if (v && typeof v === 'object' && typeof v.content === 'string' && (v.status === 'success' || v.status === 'failed')) return v;
+    return { content: String(v ?? ''), status: 'success' };
 }
 
 /**
@@ -32,14 +33,14 @@ function normalizeYield(v: any): string {
  * @param lockKey 互斥锁 key（null 表示无锁）
  * @param toolName 工具名（日志用）
  * @param signal  中止信号：abort 时立即收尾 generator 并释放锁，避免后台任务脱离中止控制继续占用资源/锁
- * @returns 即时结果字符串（回给模型上下文，不等待后台完成）
+ * @returns 即时结构化结果（回给模型上下文，不等待后台完成）
  */
 export async function runBackgroundTool(
     gen: AsyncGenerator<any>,
     lockKey: string | null,
     toolName: string,
     signal?: AbortSignal,
-): Promise<string> {
+): Promise<ToolExecuteResult> {
     let aborted = false;
     let lockReleased = false;
     // 先声明引用槽再赋值，避免 const 互引的 TDZ（finalize ↔ onAbort/bgTimer 互相引用）
@@ -60,7 +61,8 @@ export async function runBackgroundTool(
     if (lockKey && !acquireLock(lockKey)) {
         // generator 未被消费，主动关闭避免资源泄漏（未启动的 generator 关闭不应抛错，抛错属异常信号）
         try { await gen.return(undefined as any); } catch (e) { console.warn('⚠️ 关闭未消费的后台 generator 失败:', e instanceof Error ? e.message : e); }
-        return `🔒 [互斥锁阻塞]：锁 [${lockKey}] 已被占用，[${toolName}] 未启动。`;
+        // ★ #8b：锁占用=结构化失败（原 🔒 前缀靠 FAILED_PREFIXES 嗅探判失败，已退役；文案不变）
+        return { content: `🔒 [互斥锁阻塞]：锁 [${lockKey}] 已被占用，[${toolName}] 未启动。`, status: 'failed', errorCategory: 'runtime' };
     }
 
     // ★ abort 已发生：直接收尾，不启动后台（避免脱离中止控制的任务继续占用资源/锁）
@@ -79,8 +81,8 @@ export async function runBackgroundTool(
         return toolFailure(`[后台启动失败]：${e?.message ?? e}`);
     }
 
-    const immediate = first.done
-        ? "(后台任务未产出即时结果，已直接结束)"
+    const immediate: ToolExecuteResult = first.done
+        ? { content: "(后台任务未产出即时结果，已直接结束)", status: 'success' }
         : normalizeYield(first.value);
 
     // 若 generator 已立即结束（无后台部分），直接收尾

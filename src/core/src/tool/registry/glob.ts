@@ -89,7 +89,7 @@ export const globTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { pattern: string; path?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：约束明确的返回值类型
+            async execute(args: { pattern: string; path?: string }, ctx?: ToolContext) { // 💡 优化 1：约束明确的返回值类型
                 try {
                     const cleanPattern = (args.pattern || "").trim();
                     if (!cleanPattern) return toolFailure("[Glob失败]：传入的检索 pattern 不能为空。");
@@ -158,7 +158,7 @@ export const globTools: CustomTool[] = [
                     }
                     return `${prefix}[Glob: ${cleanPattern} | ${hits.length} 个匹配]\n` + hits.join("\n");
                 } catch (error: any) {
-                    // ★ 失败文案必须经 toolFailure() 出厂（❌ 前缀供 FAILED_PREFIXES 嗅探判成败），
+                    // ★ 失败文案必须经 toolFailure() 出厂（#8b 起返回结构化 ToolExecuteResult，status='failed'），
                     //   tests/tool-failure-consistency.test.ts 扫裸失败文案守门（2026-09-15 起不再靠自觉）
                     return toolFailure(`glob 检索失败: ${error.message}`);
                 }

@@ -97,7 +97,7 @@ export const commandTools: CustomTool[] = [
                     toUser: rawOutput,
                 };
             },
-            async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
+            async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext) {
                 // ★ 已移除「高危词黑名单」：它可被空格/大小写/变量/管道轻易变形绕过，反而制造「已拦截」的
                 //   虚假安全感，还会误杀合法命令（如 git commit -m "remove unused format"）。
                 //   唯一可靠防线是 DANGER 级强制用户审批（现叠加 token 鉴权 + 审批绑定 sessionId + 127.0.0.1 监听）。
@@ -116,7 +116,9 @@ export const commandTools: CustomTool[] = [
                 const isWin = process.platform === "win32";
                 // ★ 若进入工具时 signal 已 aborted，spawn 会同步抛 ERR_ABORTED；前置兜底避免击穿 generator
                 if (ctx?.abortSignal?.aborted) {
-                    yield toolFailure(`[已中止]：命令 [${args.command}] 未执行（用户已中断）。`);
+                    // ★ #8b：流式 generator 协议保持纯 string（toolFailure().content 取 ❌ 文本），
+                    //   失败语义由末尾 EXIT 失败哨兵 → verifyResult 判 FAILED 结构化表达
+                    yield toolFailure(`[已中止]：命令 [${args.command}] 未执行（用户已中断）。`).content;
                     yield EXIT_SENTINEL(-1); // ★ H-2：中止也追加失败哨兵，避免 verifyResult 无哨兵时默认判 SUCCESS
                     return;
                 }
@@ -130,7 +132,7 @@ export const commandTools: CustomTool[] = [
                         signal: ctx?.abortSignal,
                     });
                 } catch (e: any) {
-                    yield toolFailure(`[启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`);
+                    yield toolFailure(`[启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`).content;
                     yield EXIT_SENTINEL(-1); // ★ H-2：启动失败追加失败哨兵，避免 verifyResult 默认判 SUCCESS
                     return;
                 }

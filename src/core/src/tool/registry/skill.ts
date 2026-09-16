@@ -41,7 +41,7 @@ export const skillTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const name = args?.name;
                 if (typeof name !== "string" || !name.trim()) {
                     return toolFailure("[load_skill] 缺少参数 name。请先查看【可用技能目录】中的技能名。");

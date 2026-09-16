@@ -46,7 +46,7 @@ export const askTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { question?: string; options?: { label?: string; description?: string }[]; multiSelect?: boolean }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { question?: string; options?: { label?: string; description?: string }[]; multiSelect?: boolean }, ctx?: ToolContext) {
                 const question = (args?.question ?? "").trim();
                 const options = Array.isArray(args?.options) ? args.options : [];
                 const cleanOptions = options

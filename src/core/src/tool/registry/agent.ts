@@ -1,4 +1,4 @@
-import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, asToolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
 import { runSubagent } from "@/agent/subagent.ts";
 
 /**
@@ -34,7 +34,7 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：强制约束返回值类型
+            async execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext) { // 返回类型经 CustomTool 协议约束（#8b 起允许 string | ToolExecuteResult）
                 if (!ctx) return toolFailure("[派生失败]：spawn_agent 缺少必须的智能体运行上下文。");
 
                 // ★ 派生内核：深度 / manifest / 子系统词 / 工具收权 / runAgent 驱动 / 异常熔断 / 续跑校验均在内
@@ -45,8 +45,9 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
                     getGlobalTools,
                 );
 
-                // 失败（深度熔断 / manifest 未命中 / 崩溃 / 中止 / 续跑校验 / 外层异常）：原样透传 ❌ 错误串
-                if (!res.ok) return res.output;
+                // 失败（深度熔断 / manifest 未命中 / 崩溃 / 中止 / 续跑校验 / 外层异常）：升格为结构化失败
+                //（#8b：output 为纯文本契约含 ❌ 前缀，asToolFailure 包结构——执行层按 status 判失败，不再嗅探前缀）
+                if (!res.ok) return asToolFailure(res.output);
 
                 // 💡 成功：【状态同步防护】注入高亮醒目的硬性契约提示
                 // 强迫父 Agent 在拿到报告的第一时间，如果需要继续操作文件，必须先调用 read_file 刷新其对代码的"视网膜缓存"

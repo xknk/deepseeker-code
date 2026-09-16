@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { registerSkill, clearSkills, listSkills, getSkillManifest, getSkillCatalog, SkillManifest } from "@/skills/registry.ts";
 import { skillTools } from "@/tool/registry/skill.ts";
+import type { ToolExecuteResult } from "@/tool/type.ts";
 
 /** 构造一个合法 manifest（字段可覆盖；allowedTools/triggers 默认空） */
 const mk = (over: Partial<SkillManifest> = {}): SkillManifest => ({
@@ -22,10 +23,12 @@ const mk = (over: Partial<SkillManifest> = {}): SkillManifest => ({
     ...over,
 });
 
-/** load_skill 工具的 execute 句柄（skill.execute 仅用 args、忽略 ctx、恒返回 string；
- *  CustomTool 接口签名要求 2 参 + 返回联合类型，此处宽松包装以便单测直接断言 string）。 */
-const loadSkillExecute = (args: any): Promise<string> =>
-    (skillTools[0].function as any).execute(args) as Promise<string>;
+/** load_skill 工具的 execute 句柄（skill.execute 仅用 args、忽略 ctx；#8b 失败路径返回结构化
+ *  ToolExecuteResult，此处统一取文案，以便单测直接断言 string）。 */
+const loadSkillExecute = async (args: any): Promise<string> => {
+    const r: unknown = await (skillTools[0].function as any).execute(args);
+    return typeof r === "string" ? r : (r as ToolExecuteResult).content;
+};
 
 describe("skills/registry（allowed-tools/context/triggers 元数据）", () => {
     it("getSkillManifest 返回含三新字段的完整 manifest", () => {
@@ -61,13 +64,13 @@ describe("skills/registry（allowed-tools/context/triggers 元数据）", () => 
 });
 
 describe("load_skill.execute（软约束拼装：body + 附加上下文 + 工具限定）", () => {
-    it("缺 name 参数 → 友好报错", async () => {
+    it("缺 name 参数 → 友好报错（#8b 结构化失败，单测取文案断言）", async () => {
         clearSkills();
         const out = await loadSkillExecute({} as any);
         assert.match(out, /缺少参数 name/);
     });
 
-    it("未知技能 → 友好报错", async () => {
+    it("未知技能 → 友好报错（#8b 结构化失败，单测取文案断言）", async () => {
         clearSkills();
         const out = await loadSkillExecute({ name: "nope" });
         assert.match(out, /未找到技能：nope/);

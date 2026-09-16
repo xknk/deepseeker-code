@@ -95,7 +95,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
             isSync: true,
             // 聚合输出整体兜底截断（各子 agent 结果已按 workflowPerStepChars 单独截断）。
             maxOutputCharacters: 18000,
-            async execute(args: any, ctx?: ToolContext): Promise<string> {
+            async execute(args: any, ctx?: ToolContext) {
                 if (!ctx) return toolFailure("[工作流]：run_workflow 缺少必须的智能体运行上下文。");
 
                 const maxSteps = appConfig.workflowMaxSteps;
@@ -164,7 +164,8 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     try {
                         wt = await createWorktree(ctx.sessionId, String(index));
                     } catch (e: any) {
-                        const msg = toolFailure(`[worktree 创建失败]：${e?.message ?? e}（worktree 隔离需要主工作区是 git 仓库）。该步骤未执行。`);
+                        // StepOutcome.output 为文本契约（#8b：步骤失败属信息性，聚合层不判失败），此处仅取文案
+                        const msg = toolFailure(`[worktree 创建失败]：${e?.message ?? e}（worktree 隔离需要主工作区是 git 仓库）。该步骤未执行。`).content;
                         done++;
                         ctx.emitProgress?.(`并行编排：${done}/${total} worktree 创建失败（${stepLabel(step, index)}）`);
                         return { ok: false, output: msg, label: stepLabel(step, index) };

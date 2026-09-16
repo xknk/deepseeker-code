@@ -9,7 +9,7 @@
 import fs from "fs/promises";
 import type * as ts from "typescript";   // P0-1：type-only——esbuild 编译期剥离，运行时不 resolve（CLI 不发布 typescript）
 import path from "path";
-import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecuteResult } from "../type.ts";
 // typescript 模块惰性加载（view_symbol_outline 的 AST + 代码导航/诊断的 LanguageService 共用）已收敛到 tsHost，
 //   本文件不再持私有副本。CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩；
 //   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
@@ -317,7 +317,7 @@ type EditFileArgs = {
  */
 export const applyOneEditToContent = (
     normalizedContent: string, oldStr: string, newStr: string, replaceAll: boolean,
-): { ok: true; content: string; summary: string } | { ok: false; error: string } => {
+): { ok: true; content: string; summary: string } | { ok: false; error: ToolExecuteResult } => {
     const normalizedNew = newStr.replace(/\r\n/g, "\n");
     const normalizedOldRaw = oldStr.replace(/\r\n/g, "\n");
 
@@ -468,7 +468,7 @@ export const fsTools: CustomTool[] = [
                     return `[File: ${args.path} | Lines ${start}-${realEnd}]\n${formattedCode}${hasMore ? `\n\n[... 后面还有代码已被隐藏，你可以调整 start_line 继续分片读取。]` : ""}`;
 
                 } catch (error: any) {
-                    return `读取文件失败 [${args.path}]: ${error.message}`;
+                    return toolFailure(`读取文件失败 [${args.path}]: ${error.message}`);
                 }
             },
         },
@@ -488,7 +488,7 @@ export const fsTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { max_depth?: number }): Promise<string> {
+            async execute(args: { max_depth?: number }) {
                 try {
                     // ★ 上限 10 + 计数熔断：防模型传极大 max_depth 或未被 gitignore 覆盖的深树（如 node_modules）递归扫描失控
                     const maxDepth = Math.min(args.max_depth ? Math.max(1, args.max_depth) : 3, 10);
@@ -546,7 +546,7 @@ export const fsTools: CustomTool[] = [
 
                 } catch (error: any) {
                     // catch 块也严格返回 string，确保类型安全
-                    return `项目树扫描失败: ${error.message}`;
+                    return toolFailure(`项目树扫描失败: ${error.message}`);
                 }
             }
         }
@@ -616,9 +616,10 @@ export const fsTools: CustomTool[] = [
                         const r = applyOneEditToContent(content, editList[i].old_str, editList[i].new_str ?? "", !!editList[i].replace_all);
                         if (!r.ok) {
                             // 单条直返原文案（与历史行为一致）；批量时前缀定位到第几条（剥内层重复的 ❌ 前缀），并明确整体未写入（原子）
+                            // ★ #8b：r.error 已是结构化 ToolExecuteResult——单条直返透传结构；批量取 .content 剥内层前缀再工厂包装
                             return editList.length === 1
                                 ? r.error
-                                : toolFailure(`[代码修补失败]：edits 第 ${i + 1}/${editList.length} 条未命中，已整体放弃（文件未做任何改动，可修正该条后整组重试）。${r.error.replace(/^❌ \[代码修补失败\]：/, "")}`);
+                                : toolFailure(`[代码修补失败]：edits 第 ${i + 1}/${editList.length} 条未命中，已整体放弃（文件未做任何改动，可修正该条后整组重试）。${r.error.content.replace(/^❌ \[代码修补失败\]：/, "")}`);
                         }
                         content = r.content;
                         summaries.push(editList.length === 1 ? r.summary : `  ${i + 1}. ${r.summary}`);
@@ -631,7 +632,7 @@ export const fsTools: CustomTool[] = [
                         ? `✅ [代码修补成功]：文件 [${args.path}] ${summaries[0]}`
                         : `✅ [代码修补成功]：文件 [${args.path}] 已按序完成 ${editList.length} 处修改（单次原子写入）：\n${summaries.join("\n")}`;
                 } catch (error: any) {
-                    return `操作失败: ${error.message}`;
+                    return toolFailure(`操作失败: ${error.message}`);
                 }
             }
         }
@@ -656,7 +657,7 @@ export const fsTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: { path: string; content?: string }) =>
                 `申请新建文件 [${args.path}]，初始长度: ${(args.content || "").length} 字符`,
-            async execute(args: { path: string; content?: string }): Promise<string> {
+            async execute(args: { path: string; content?: string }) {
                 let tmpPath: string | null = null;
                 try {
                     const absPath = resolveSafePath(args.path);
@@ -683,7 +684,7 @@ export const fsTools: CustomTool[] = [
 
                     return `✅ [创建成功]：新文件 [${args.path}] 已创建，写入 ${content.length} 字符。`;
                 } catch (error: any) {
-                    return `操作失败: ${error.message}`;
+                    return toolFailure(`操作失败: ${error.message}`);
                 } finally {
                     // ★ 残留 tmp 清理（rename 跨卷失败 / 被中断时兜底，与 write_file 对称）
                     if (tmpPath) {
@@ -731,7 +732,7 @@ export const fsTools: CustomTool[] = [
                 } catch { /* 目标不存在时用通用标签 */ }
                 return `⚠️【最高安全警报】申请永久销毁 [${cleanPath}]（目标物理属性为：${label}）。该操作完全不可逆！`;
             },
-            async execute(args: { path: string }): Promise<string> { // 💡 显式声明返回值，保证类型安全
+            async execute(args: { path: string }) { // 💡 显式声明返回值，保证类型安全
                 try {
                     const cleanPath = (args.path || "").trim();
 
@@ -772,7 +773,7 @@ export const fsTools: CustomTool[] = [
                     const targetTypeLabel = isDirectory ? "一整个文件夹目录" : "纯物理文件";
                     return `✅ [路径销毁成功]：已成功永久销毁${targetTypeLabel} [${cleanPath}]。`;
                 } catch (error: any) {
-                    return `操作失败: ${error.message}`;
+                    return toolFailure(`操作失败: ${error.message}`);
                 }
             }
         }
@@ -797,7 +798,7 @@ export const fsTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: { path: string; content: string }) =>
                 `申请全量写入文件 [${args.path}]（${args.content.length} 字符，若已存在将被整体覆盖）`,
-            async execute(args: { path: string; content: string }): Promise<string> { // 💡 显式声明返回值，确保类型安全
+            async execute(args: { path: string; content: string }) { // 💡 显式声明返回值，确保类型安全
                 // 建立一个需要手动清理的临时路径变量
                 let tmpPath: string | null = null;
                 try {
@@ -825,7 +826,7 @@ export const fsTools: CustomTool[] = [
                             await fs.unlink(tmpPath);
                         } catch { /* 忽略删除失败 */ }
                     }
-                    return `操作失败: ${error.message}`;
+                    return toolFailure(`操作失败: ${error.message}`);
                 }
             }
         },
@@ -846,7 +847,7 @@ export const fsTools: CustomTool[] = [
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { path: string }): Promise<string> {
+            async execute(args: { path: string }) {
                 try {
                     const absPath = resolveReadablePath(args.path);
                     // ★ 读保护闸（与 read_file 对称）：敏感凭证文件拒读。跨界读同 read_file（resolveReadablePath 不围栏）。
@@ -934,7 +935,7 @@ export const fsTools: CustomTool[] = [
 
                     return `[File Symbol Outline: ${args.path}]\n` + outlineLines.join("\n");
                 } catch (error: any) {
-                    return `符号大纲分析失败 [${args.path}]: ${error.message}`;
+                    return toolFailure(`符号大纲分析失败 [${args.path}]: ${error.message}`);
                 }
             }
         }
@@ -965,7 +966,7 @@ export const fsTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: { source: string; destination: string }) =>
                 `申请移动/重命名 [${args.source}] → [${args.destination}]`,
-            async execute(args: { source: string; destination: string }): Promise<string> {
+            async execute(args: { source: string; destination: string }) {
                 try {
                     const srcAbs = resolveSafePath(args.source);
                     const dstAbs = resolveSafePath(args.destination);
@@ -980,7 +981,7 @@ export const fsTools: CustomTool[] = [
                     await fs.rename(srcAbs, dstAbs);
                     return `✅ [移动成功]：[${args.source}] → [${args.destination}]。`;
                 } catch (error: any) {
-                    return `操作失败: ${error.message}`;
+                    return toolFailure(`操作失败: ${error.message}`);
                 }
             }
         }

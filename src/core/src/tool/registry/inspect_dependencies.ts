@@ -15,7 +15,7 @@ export const dependencyTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(): Promise<string> {
+            async execute() {
                 try {
                     const pjsPath = path.join(getActiveWorkspaceRoot(), "package.json");
                     const raw = await fs.readFile(pjsPath, "utf-8");

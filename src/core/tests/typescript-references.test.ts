@@ -40,8 +40,11 @@ after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { 
 const execTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const tool = typescriptTools.find(t => (t.function as { name: string }).name === name);
     assert.ok(tool, `工具 ${name} 未注册`);
-    return runWithWorkspaceRoot(tmp, () =>
-        tool.function.execute(args as never, undefined as never)) as Promise<string>;
+    // #8b：失败路径（扩展名闸门等）现返回结构化 ToolExecuteResult——本文件钉文案语义，统一取 content
+    return runWithWorkspaceRoot(tmp, async () => {
+        const out = await tool.function.execute(args as never, undefined as never);
+        return typeof out === "string" ? out : (out as { content: string }).content;
+    });
 };
 
 describe("find_references — 类型感知引用查找", () => {

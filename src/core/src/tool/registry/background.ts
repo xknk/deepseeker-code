@@ -238,7 +238,7 @@ export const backgroundTools: CustomTool[] = [
             },
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【后台命令审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}\n（将启动常驻后台进程，持续占用资源直至手动停止；同命令互斥）`,
-            async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext): AsyncGenerator<string> {
+            async *execute(args: { command: string; cwd?: string }, ctx?: ToolContext) {
                 const cwd = args.cwd ? resolveSafePath(args.cwd) : getActiveWorkspaceRoot();
                 const isWin = process.platform === "win32";
 
@@ -264,6 +264,7 @@ export const backgroundTools: CustomTool[] = [
                     proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin, env: scrubCommandEnv() });
                     proc.unref?.(); // 父进程（agent）不必等待它退出
                 } catch (e: any) {
+                    // ★ #8b：首个 yield 经 runBackgroundTool normalizeYield 结构化透传（对象形态保留 status:'failed'）
                     yield toolFailure(`[后台启动失败]：${e.message}`);
                     return;
                 }
@@ -310,7 +311,7 @@ export const backgroundTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { task_id: string; tail_lines?: number; wait_seconds?: number }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { task_id: string; tail_lines?: number; wait_seconds?: number }, ctx?: ToolContext) {
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {
                     // 跨会话不可见：统一返回未找到，不泄露 task 是否存在
@@ -355,7 +356,7 @@ export const backgroundTools: CustomTool[] = [
             safetyLevel: ToolSafetyLevel.MUTATION,
             isSync: true,
             requireApproval: (args: { task_id: string }) => `申请终止后台任务 ${args.task_id}（及其子进程树）`,
-            async execute(args: { task_id: string }, ctx?: ToolContext): Promise<string> {
+            async execute(args: { task_id: string }, ctx?: ToolContext) {
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {
                     return toolFailure(`[终止失败]：未找到 task_id=${args.task_id}（或不属于当前会话）。`);

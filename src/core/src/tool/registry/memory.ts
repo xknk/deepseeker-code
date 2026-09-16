@@ -90,7 +90,7 @@ export const memoryTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const name = sanitizeLine(args?.name);
                 const description = sanitizeLine(args?.description);
                 const body = typeof args?.body === "string" ? args.body : "";
@@ -124,7 +124,7 @@ export const memoryTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const name = sanitizeLine(args?.name);
                 const m = getMemory(name);
                 if (!m) return toolFailure(`未找到记忆：${name}。可调用 memory_list 查看全部记忆名。`);
@@ -140,7 +140,7 @@ export const memoryTools: CustomTool[] = [
             parameters: { type: "object", properties: {}, required: [] },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(): Promise<string> {
+            async execute() {
                 const all = listMemories();
                 if (all.length === 0) return "（暂无记忆）";
                 const lines = all.slice().sort((a, b) => a.name.localeCompare(b.name))
@@ -163,7 +163,7 @@ export const memoryTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: any): Promise<string> {
+            async execute(args: any) {
                 const name = sanitizeLine(args?.name);
                 const m = getMemory(name);
                 if (!m) return toolFailure(`未找到记忆：${name}（可能已被删除）。`);

@@ -53,7 +53,7 @@ export const httpTools: CustomTool[] = [
                 parts.push("（将发起网络请求；默认放行 localhost/内网便于联调，仍拦云元数据；响应会进入云端模型上下文，请确认不含敏感回传）");
                 return parts.join("\n");
             },
-            async execute(args: any, ctx?: ToolContext): Promise<string> {
+            async execute(args: any, ctx?: ToolContext) {
                 const method = ((args.method as string) || "GET").toUpperCase();
                 if (!(ALLOWED_METHODS as readonly string[]).includes(method)) {
                     return toolFailure(`[http_request] 不支持的方法：${args.method}（允许 ${ALLOWED_METHODS.join("/")})`);

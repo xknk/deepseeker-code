@@ -57,6 +57,7 @@ export interface TraceBase {
         toolName?: string;  // 调用工具的名称
         toolSource?: "builtin" | "skill" | "mcp" | "policy" | "registry" | "guard"; // 工具来源
         ok?: boolean;       // 执行是否成功
+        errorCategory?: 'syntax' | 'runtime' | 'permission' | 'unknown'; // 失败归类（#8b 结构化工具结果；tool.failed 事件随附）
         durationMs?: number; // 该步骤消耗的时长（毫秒）
         attempt?: number;   // 重试次数
         round?: number; // 运行次数

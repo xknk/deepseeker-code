@@ -35,7 +35,7 @@ export const worktreeTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【进入 worktree 审批】\n原因：${args?.reason ?? "(未提供)"}\n（将创建临时分支的 git worktree 并把会话工作区切换过去；改动隔离，需 commit/merge 才能并回主仓）`,
-            async execute(args: any, ctx?: ToolContext): Promise<string> {
+            async execute(args: any, ctx?: ToolContext) {
                 const sessionId = ctx?.sessionId;
                 if (!sessionId) return toolFailure("[enter_worktree] 缺少会话上下文（sessionId）。");
                 if (getSessionWorktree(sessionId)) {
@@ -74,7 +74,7 @@ export const worktreeTools: CustomTool[] = [
             isSync: true,
             requireApproval: (args: any) =>
                 `⚠️【退出 worktree 审批】\n（将删除当前 worktree 及其临时分支；未提交改动会丢失。如需保留请先 commit。）`,
-            async execute(_args: any, ctx?: ToolContext): Promise<string> {
+            async execute(_args: any, ctx?: ToolContext) {
                 const sessionId = ctx?.sessionId;
                 if (!sessionId) return toolFailure("[exit_worktree] 缺少会话上下文（sessionId）。");
                 const wt = clearSessionWorktree(sessionId);
@@ -97,7 +97,7 @@ export const worktreeTools: CustomTool[] = [
             parameters: { type: "object", properties: {} },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(_args: any, ctx?: ToolContext): Promise<string> {
+            async execute(_args: any, ctx?: ToolContext) {
                 const sessionId = ctx?.sessionId;
                 if (!sessionId) return "（无会话上下文）";
                 const wt = getSessionWorktree(sessionId);

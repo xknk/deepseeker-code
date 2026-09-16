@@ -41,7 +41,7 @@ export const searchTools: CustomTool[] = [
             maxOutputCharacters: 48000,
             // ★ 复用 read_file 的内容级脱敏：源码内硬编码密钥（apiKey/token 等）经 grep 命中行回灌模型前先脱敏
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { query: string; is_regex?: boolean; path?: string; context?: number }, ctx?: ToolContext): Promise<string> { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
+            async execute(args: { query: string; is_regex?: boolean; path?: string; context?: number }, ctx?: ToolContext) { // 💡 优化 1：显式声明返回值类型，堵死上层接口编译报错
                 try {
                     const cleanQuery = (args.query || "").trim();
                     if (!cleanQuery) return toolFailure("[检索失败]：传入的检索关键词不能为空。");
@@ -124,7 +124,7 @@ export const searchTools: CustomTool[] = [
                     if (error.code === 1) return `未找到与 "${args.query}" 相关的任何代码匹配项。`;
                     // ★ 超时（30s 兜底触发）：给友好提示而非裸"检索失败"，建议缩小范围
                     if (error.killed || error.signal) return toolFailure(`⏳ [检索超时]：30s 内未完成（疑似命中巨型/异常文件）。建议缩小关键词或限定目录后重试。`);
-                    // ★ 失败文案必须经 toolFailure() 出厂（❌ 前缀供 FAILED_PREFIXES 嗅探判成败），
+                    // ★ 失败文案必须经 toolFailure() 出厂（#8b 起返回结构化 ToolExecuteResult，status='failed'），
                     //   tests/tool-failure-consistency.test.ts 扫裸失败文案守门（2026-09-15 起不再靠自觉）
                     return toolFailure(`检索失败: ${error.message}`);
                 }
@@ -143,7 +143,7 @@ export const searchTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(): Promise<string> {
+            async execute() {
                 // F-5：事实标准是 CLAUDE.md（Claude Code / 本项目），新多 agent 约定 AGENTS.md（复数），旧占位 AGENT.md。
                 //   逐个尝试命中第一个存在的，避免在大多数项目里因文件名错位永远走兜底骨架。
                 const GUIDE_CANDIDATES = ["CLAUDE.md", "AGENTS.md", "AGENT.md"];

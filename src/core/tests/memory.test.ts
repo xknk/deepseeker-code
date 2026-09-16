@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import type { MemoryManifest } from "@/memory/registry.ts"; // 纯类型导入（编译期擦除）——不影响上面 env 前置顺序
+import type { ToolExecuteResult } from "@/tool/type.ts";
 
 const TMP_ROOT = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-memory-"));
 const ORIG_CWD = process.cwd();
@@ -46,7 +47,7 @@ const resetState = async (): Promise<void> => {
 const exec = (name: string) => {
     const t = (memoryTools as any[]).find((x) => x.function.name === name);
     if (!t) throw new Error(`tool not found: ${name}`);
-    return (args?: any): Promise<string> => (t.function as any).execute(args);
+    return (args?: any): Promise<string | ToolExecuteResult> => (t.function as any).execute(args);
 };
 const save = exec("memory_save");
 const memRead = exec("memory_read");
@@ -228,7 +229,7 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
     it("save project=true → 项目源", async () => {
         await resetState();
         const out = await save({ name: "proj-mem", description: "项目记忆", body: "b", type: "project", project: true });
-        assert.ok(out.includes("（project，项目源）"), out);
+        assert.ok(typeof out === "string" && out.includes("（project，项目源）"), typeof out === "string" ? out : out.content);
         const raw = await fs.readFile(path.join(PROJECT_DIR, "proj-mem.md"), "utf-8");
         assert.ok(raw.includes("type: project"));
         assert.equal(getMemory("proj-mem")!.source, "project");
@@ -256,9 +257,9 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
             await save({ name: "ok-name-5", description: "x".repeat(201), body: "b" }),
         ];
         for (const o of outs) {
-            assert.ok(o.startsWith("❌"), `应拒绝：${o}`);
+            assert.ok(typeof o !== "string" && o.status === "failed" && o.content.startsWith("❌"), `应拒绝：${typeof o !== "string" ? o.content : o}`);
         }
-        assert.match(outs[5], /description 超过 200 字符上限/);
+        assert.match(typeof outs[5] !== "string" ? outs[5].content : String(outs[5]), /description 超过 200 字符上限/);
         const leftover = await fs.readdir(GLOBAL_MEMORY_DIR).catch(() => [] as string[]); // 目录可不存在（全拒则无人 mkdir）
         assert.equal(leftover.length, 0, "拒绝项零落盘");
         assert.equal(getMemory("ok-name-1"), undefined, "拒绝项不进注册表");
@@ -277,7 +278,7 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
         await save({ name: "readable", description: "d", body: "完整\n正文", type: "user" });
         assert.equal(await memRead({ name: "readable" }), "## readable（user）\n\n完整\n正文");
         const miss = await memRead({ name: "nope" });
-        assert.ok(miss.startsWith("❌") && miss.includes("memory_list"), miss);
+        assert.ok(typeof miss !== "string" && miss.status === "failed" && miss.content.startsWith("❌") && miss.content.includes("memory_list"), typeof miss !== "string" ? miss.content : String(miss));
     });
 
     it("list：计数头 + 排序行；空 → 暂无记忆", async () => {
@@ -295,11 +296,11 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
         await resetState();
         await save({ name: "doomed", description: "d", body: "b" });
         const out = await memDelete({ name: "doomed" });
-        assert.ok(out.startsWith("✅"), out);
+        assert.ok(typeof out === "string" && out.startsWith("✅"), typeof out === "string" ? out : out.content);
         await assert.rejects(() => fs.readFile(path.join(GLOBAL_MEMORY_DIR, "doomed.md"), "utf-8"));
         assert.equal(getMemory("doomed"), undefined);
         const again = await memDelete({ name: "doomed" });
-        assert.ok(again.startsWith("❌"), again);
+        assert.ok(typeof again !== "string" && again.status === "failed" && again.content.startsWith("❌"), typeof again !== "string" ? again.content : String(again));
     });
 
     it("落盘保真：save 后重扫（loadMemories）字段一致", async () => {

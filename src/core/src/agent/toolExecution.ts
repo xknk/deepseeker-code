@@ -9,7 +9,7 @@
  *  appendMessage）由调度层（toolScheduling）统一 flush。
  */
 import { collectToolResult, truncateToolResult } from "./truncate.ts";
-import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus } from "@/tool/index.ts";
+import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus, ToolExecuteResult } from "@/tool/index.ts";
 import { requestApproval, isProtectedWrite, getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
 import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
@@ -31,15 +31,11 @@ import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
 //   是纯浪费系统调用。与 store.ts ensuredSessionDirs / observability ensuredTraceDirs 同款模式。
 const ensuredSidecarDirs = new Set<string>();
 
-/**
- * ★ 成败前缀嗅探清单（ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p))）：
- * "❌" 收 toolFailure() 工厂出品的全部工具失败文案；其余条目收无法/不宜走工厂的历史前缀
- * （"工具执行失败"/"参数解析失败" 由本层 catch 生成，"【系统判定" 由 verifyResult 注入，
- * "[⏳" 收 collectToolResult 两类熔断文案（工具执行超时/流式 idle 超时），"🔒"/"读取文件失败"等
- * 为先于工厂存在的约定前缀）。**改本清单必须 conscious**——tests/tool-failure-consistency.test.ts
- * 已把内容钉死，任何增删会在 CI 红（防静默漂移：漏加前缀 = 对应失败被误判 ok=true）。
- */
-export const FAILED_PREFIXES = ["工具执行失败", "参数解析失败", "❌", "【系统判定", "🔒", "读取文件失败", "项目树扫描失败", "符号大纲分析失败", "操作失败:", "[⏳"];
+// ★ #8b（2026-09-16）：成败前缀嗅探通道（FAILED_PREFIXES + explicitOk）结构性退役——
+//   ok 判定唯一来源是本函数内 resultStatus 结构化跟踪：execute 返回的 ToolExecuteResult.status /
+//   verifyResult 的 FAILED / 各拒绝路径显式置 failed。文案不再承载成败语义，动态透传的命令 stdout
+//   恰以 "❌" 等前缀开头不再被误判失败（路线 #8 痛点修正）。防漂移断言见
+//   tests/tool-failure-consistency.test.ts（C 规则：本文件不得再出现嗅探设施）。
 
 /**
  * 应用工具声明的隐私脱敏规则（防云端模型读到 .env / 密钥等机密）：
@@ -174,11 +170,20 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   统一到 getActiveWorkspaceRoot() 消除错位（ToolCallContext.cwd 字段仍保留，供 subagent/runAgent 透传）。
     const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode };
     let result = "";
-    let explicitOk: boolean | null = null;
+    // ★ #8b 结构化成败跟踪（替代 FAILED_PREFIXES 前缀嗅探 + explicitOk 手工短路）：
+    //   默认 success；拒绝/熔断/解析失败/verifyResult FAILED 显式置 failed。文案只是呈现，成败看状态。
+    let resultStatus: ToolExecuteResult['status'] = 'success';
+    let errorCategory: ToolExecuteResult['errorCategory'];
+    /** 置失败文案 + 状态（errorCategory 缺省 runtime；syntax 收模型调用形态错） */
+    const failResult = (text: string, cat: ToolExecuteResult['errorCategory'] = 'runtime'): void => {
+        result = text;
+        resultStatus = 'failed';
+        errorCategory = cat;
+    };
     // ★ PostToolUse hook 改写的模型视图结果（在 outputFilter 之后套用；用户视图 resultForUser 不动）
     let postHookOverride: string | undefined;
     if (parseFailed) {
-        result = `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`;
+        failResult(`参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`, 'syntax');
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
     } else if (matchedTool && typeof matchedTool.function.execute === 'function') {
         // ★ 安全分级审批：SAFE 免审；MUTATION/DANGER 执行前请求用户审批
@@ -201,7 +206,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
             if (veto.deny) {
                 denied = true;
-                result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`;
+                failResult(veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`, 'permission');
             } else if (veto.argsOverride !== undefined && veto.argsOverride !== null && typeof veto.argsOverride === 'object' && !Array.isArray(veto.argsOverride)) {
                 console.log(`✏️ [Pre-hook] [${calledName}] args 已被 hook 改写`);
                 calledArgs = veto.argsOverride;
@@ -217,7 +222,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const hitProtected = protectedPaths.find(p => typeof p === 'string' && isProtectedWrite(p, toolCtx.cwd));
         if (hitProtected) {
             denied = true;
-            result = `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${hitProtected}。`;
+            failResult(`❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${hitProtected}。`, 'permission');
         }
         // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
         let perm: ReturnType<typeof checkPermission> = null;
@@ -225,7 +230,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             // ★ P1-MCP dispatcher 兼容：mcp_call 在权限层用合成名 mcp__<server>__<tool> 匹配规则
             //   （用户既有 permissions 规则含 mcp__server__* 通配，语义不变）；其余工具名原样。
             perm = checkPermission(resolveMcpPermissionName(calledName, calledArgs), calledArgs, matchedTool.function.primaryArg);
-            if (perm === 'deny') { denied = true; result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`; }
+            if (perm === 'deny') { denied = true; failResult(`❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`, 'permission'); }
             else if (perm === 'allow') { needApproval = false; }
             else if (perm === 'ask') { needApproval = true; }
         } catch { perm = null; /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
@@ -264,7 +269,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         if ((calledName === 'run_command' || calledName === 'run_in_background')
             && matchCommandDeny(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
             denied = true;
-            result = `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`;
+            failResult(`❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`, 'permission');
         }
         // ★ isSync:false 后台工具的互斥锁（快查）：锁被持有则直接拒绝，省去一次无谓审批弹窗。
         //   真正的获锁在 runBackgroundTool 启动时执行、其 finalize 必定释放——
@@ -273,7 +278,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const lockKey = isBgTool ? computeLockKey(matchedTool.function.exclusiveLock, calledArgs, toolCtx) : null;
         if (lockKey && isLockHeld(lockKey)) {
             denied = true;
-            result = `🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`;
+            failResult(`🔒 [互斥锁阻塞]：已有后台任务持有锁 [${lockKey}]，[${calledName}] 调用被跳过。`);
         }
         // ★ 分类器审批（P1-6，2026-08-06 两档）：
         //   default（permissionMode!=='auto'）：文件增删改 + 命令执行（run_command/run_in_background）跑分类器——高频。
@@ -291,19 +296,19 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             const auto = await runAutoCheck(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx, permissionMode === 'auto',
                 { autoApproval: matchedTool.function.autoApproval, pathArgs: matchedTool.function.pathArgs, primaryArg: matchedTool.function.primaryArg });
             if (auto === 'allow') { needApproval = false; }
-            else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
+            else if (auto === 'deny') { denied = true; failResult(`❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`, 'permission'); }
             // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
         }
         if (needApproval && !denied) {
             const ra = matchedTool.function.requireApproval;
             let detail = `申请执行高危工具 [${calledName}]`;
             try { if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra; }
-            catch (e: any) { denied = true; result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
+            catch (e: any) { denied = true; failResult(`❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`, 'permission'); }
             if (!denied) {
                 let approved = false;
                 try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs, matchedTool.function.primaryArg); }
-                catch (e: any) { denied = true; result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
-                if (!approved && !denied) { denied = true; result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`; }
+                catch (e: any) { denied = true; failResult(`❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`, 'permission'); }
+                if (!approved && !denied) { denied = true; failResult(`❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`, 'permission'); }
             }
         }
         // ★ pre-hooks（旧位兜底）：开关关时保持改造前行为（审批后、仅 deny，改写字段已被 dispatch 忽略）；
@@ -313,38 +318,46 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             // ★ P1-MCP 对称性：同上方改写位，hook 匹配用合成名（见 runPreHooks 首个调用点注释）
             try { veto = await runPreHooks(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx); }
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
-            if (veto.deny) { denied = true; result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`; }
+            if (veto.deny) { denied = true; failResult(veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`, 'permission'); }
         }
         // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前快照原文件/目录（凡改必可回退，失败则阻断写入）。
         //   ★ #8a 声明化：是否备份/备份策略改读工具声明 triggersUndo（原 MUTATION_TOOLS 名单退役）。
         if (!denied && matchedTool.function.triggersUndo) {
             try { await beforeMutationBackup(matchedTool.function.triggersUndo, calledName, calledArgs, toolCall.id, sessionId); }
-            catch (e: any) { denied = true; result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`; }
+            catch (e: any) { denied = true; failResult(`❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`); }
         }
         if (!denied) {
             try {
                 events({ sessionId, eventType: 'tool.execute.start', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin' }, payload: { output: JSON.stringify(calledArgs) } });
                 // 执行工具（取消由 ctx.abortSignal 驱动；长任务走 isSync:false 后台模式，不挂固定 timeout）
                 const execRet = matchedTool.function.execute(calledArgs, toolCtx);
-                if (isBgTool) {
-                    // 后台工具：取首个 yield 为即时结果，剩余后台排空，锁在任务结束时释放
-                    result = await runBackgroundTool(execRet as any, lockKey, calledName, signal);
-                } else {
-                    // 流式工具：逐块 yield → emitProgress → tool.progress UIEvent（运行期间逐行可见）
-                    result = await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk), signal);
-                }
-                // verifyResult 判定：FAILED 时前置警告（防模型对报错产生"成功"幻觉）
+                // ★ #8b：两条收集路径均已结构化——string 自动归一 success，toolFailure() 返回体携带 failed
+                const collected: ToolExecuteResult = isBgTool
+                    ? await runBackgroundTool(execRet as any, lockKey, calledName, signal)
+                    : await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk), signal);
+                result = collected.content;
+                resultStatus = collected.status;
+                if (collected.status === 'failed') errorCategory = collected.errorCategory ?? 'runtime';
+                // verifyResult 判定：FAILED 时置结构化失败并前置警告（防模型对报错产生"成功"幻觉）。
+                //   ★ #8b：ok 不再依赖「【系统判定」文案前缀——状态由 verdict 直接驱动，文案仅保留提示职责。
                 if (matchedTool.function.verifyResult) {
                     const verdict = matchedTool.function.verifyResult(result, toolCtx);
                     if (verdict.status === ToolExecutionResultStatus.FAILED) {
                         result = `【系统判定：执行失败】${verdict.summary ?? ''}\n请正视下方输出，不要乐观假设成功。\n\n${result}`;
+                        resultStatus = 'failed';
+                        errorCategory = verdict.errorCategory ?? 'unknown';
                     }
                 }
-                events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: result } });
+                // ★ #8b：end 事件按结构化成败分流（原硬编码 ok:true——toolFailure 字符串返回时误报成功）
+                if (resultStatus === 'success') {
+                    events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: result } });
+                } else {
+                    events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round, errorCategory: errorCategory ?? 'unknown' }, payload: { output: result } });
+                }
             } catch (err) {
                 console.error(`❌ 执行工具 ${calledName} 时发生错误:`, err);
-                result = `工具执行失败: ${err instanceof Error ? err.message : String(err)}`;
-                events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
+                failResult(`工具执行失败: ${err instanceof Error ? err.message : String(err)}`);
+                events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round, errorCategory: errorCategory ?? 'runtime' }, payload: { output: result } });
             }
             // ★ post-hooks：执行后观察（不拦截，自身异常仅告警）+ 开关开时收集 resultOverride
             //   （改写模型视图；hook 观察到的 result 是 4K 截断视图，其自写回的 override 不受该截断）
@@ -357,8 +370,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             }
         }
     } else {
-        result = `错误：未知工具 "${calledName}" 或该工具无可执行函数`;
-        explicitOk = false; // 未知工具显式失败，避免前缀嗅探误判为成功
+        failResult(`错误：未知工具 "${calledName}" 或该工具无可执行函数`, 'syntax');
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
     }
     // 脱敏（verifyResult 之后、truncate 之前；只影响发往云端模型的视图）
@@ -385,7 +397,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         }
     }
     result = truncateToolResult(result, matchedTool?.function.maxOutputCharacters, sidecarNote);
-    const ok = explicitOk ?? !FAILED_PREFIXES.some(p => result.startsWith(p));
+    // ★ #8b：ok 判定唯一来源 = 结构化状态（前缀嗅探/explicitOk 已退役）
+    const ok = resultStatus === 'success';
     // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
     let resultForModel = result;
     let resultForUser = result;
