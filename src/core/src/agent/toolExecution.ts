@@ -10,6 +10,7 @@
  */
 import { collectToolResult, truncateToolResult } from "./truncate.ts";
 import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus, ToolExecuteResult } from "@/tool/index.ts";
+import { validateToolArgs } from "@/tool/argsValidator.ts";
 import { requestApproval, isProtectedWrite, getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
 import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
@@ -212,6 +213,22 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 calledArgs = veto.argsOverride;
             }
         }
+        // ★ #8c 运行时参数校验（后续路线 #8c，2026-09-16）：位置在 pre-hook argsOverride 之后
+        //   （改写后的 args 才是被校验对象），保护路径检查之前——与 parseFailed 同类：模型产出
+        //   畸形调用早退，不发审批弹窗、不进锁/undo 备份/hook 后续，也不执行工具。
+        //   schema 缺省的工具、MCP wrapped 的宽松回退、schema 编译失败（fail-open）天然零影响。
+        //   coerceTypes 就地修正的 args 直接供后续门禁/execute 使用（修正后的值才是被执行对象）。
+        {
+            const paramsSchema = matchedTool.function.parameters;
+            if (paramsSchema && typeof paramsSchema === 'object' && !Array.isArray(paramsSchema)) {
+                const verdict = validateToolArgs(paramsSchema as Record<string, unknown>, calledArgs);
+                if (!verdict.ok) {
+                    denied = true;
+                    failResult(`❌ 参数校验失败：${verdict.message}；请修正参数后重试（schema 要求见工具 parameters）。`, 'syntax');
+                    events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
+                }
+            }
+        }
         // ★ P1-7 / P0-3 保护路径硬规则：写工具碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒。
         //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
         //   ★ #8a 声明化：取参按工具声明 pathArgs（缺省：triggersUndo 工具 ['path']，否则不检查）——
@@ -297,7 +314,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 { autoApproval: matchedTool.function.autoApproval, pathArgs: matchedTool.function.pathArgs, primaryArg: matchedTool.function.primaryArg });
             if (auto === 'allow') { needApproval = false; }
             else if (auto === 'deny') { denied = true; failResult(`❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`, 'permission'); }
-            // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
+            // 'ask'（risky/不确定/超时/异常/未声明 autoApproval/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
         }
         if (needApproval && !denied) {
             const ra = matchedTool.function.requireApproval;

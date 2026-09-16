@@ -21,6 +21,7 @@ import fs from "fs/promises";
 import path from "path";
 import { homedir } from "os";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
+import { validateToolArgs } from "@/tool/argsValidator.ts";
 import { appConfig } from "@/config/index.ts";
 import {
     McpClient,
@@ -336,32 +337,62 @@ const mcpDispatcherTools: CustomTool[] = [
         type: "function",
         function: {
             name: "mcp_call",
-            description: "调用指定 MCP server 的外部工具。server 与工具名必填——均来自 mcp_list_tools 的目录输出（用原名，不要改写）。args 为该工具参数的 JSON 字符串（参数名见目录；无参数传 \"{}\"）。执行外部逻辑，每次调用需审批。",
+            description: "调用指定 MCP server 的外部工具。server 与工具名必填——均来自 mcp_list_tools 的目录输出（用原名，不要改写）。args 为该工具参数的对象（参数名见目录；无参数传 {}）；历史兼容也接受 JSON 字符串。执行外部逻辑，每次调用需审批。",
             parameters: {
                 type: "object",
                 properties: {
                     server: { type: "string", description: "MCP server 名（见 mcp_list_tools 输出）" },
                     tool: { type: "string", description: "工具名（见 mcp_list_tools 输出，用原名）" },
-                    args: { type: "string", description: '工具参数的 JSON 字符串，如 {"query":"..."}；无参数传 "{}"' },
+                    args: {
+                        // #8c：收回结构化 object（历史 JSON 字符串兼容保留——防旧 prompt 缓存/模型惯性）。
+                        // anyOf 双形态而非仅 object：否则旧形态调用会被执行层 #8c 参数校验早退，兼容形同虚设。
+                        anyOf: [
+                            { type: "object", additionalProperties: true, description: '工具参数对象，如 {"query":"..."}；无参数传 {}' },
+                            { type: "string", description: '（历史兼容）工具参数的 JSON 字符串，如 "{\\"query\\":\\"...\\"}"；无参数传 "{}"' },
+                        ],
+                    },
                 },
                 required: ["server", "tool"],
             },
             safetyLevel: ToolSafetyLevel.DANGER,
             isSync: true,
-            requireApproval: (args: any) =>
-                `⚠️【MCP 工具审批】\n服务: ${args?.server} / 工具: ${args?.tool}\n参数: ${args?.args}`,
+            requireApproval: (args: any) => {
+                const a = args?.args;
+                const rendered = a === undefined || a === null ? "{}" : typeof a === "string" ? a : JSON.stringify(a);
+                return `⚠️【MCP 工具审批】\n服务: ${args?.server} / 工具: ${args?.tool}\n参数: ${rendered}`;
+            },
             async execute(args: any) {
                 const { server, tool } = args ?? {};
                 if (!server || !tool) return toolFailure("[mcp_call] 缺少 server 或 tool（先用 mcp_list_tools 查目录）。");
                 let parsed: any = {};
-                if (typeof args.args === "string" && args.args.trim() && args.args.trim() !== "{}") {
-                    try { parsed = JSON.parse(args.args); }
-                    catch {
-                        return toolFailure(`[mcp_call] args 不是合法 JSON：${String(args.args).slice(0, 200)}。请传该工具参数的 JSON 字符串（无参数传 "{}"）。`);
+                if (args.args !== undefined && args.args !== null) {
+                    if (typeof args.args === "string") {
+                        // 历史 string 兼容（旧 prompt 缓存/模型惯性）；非法 JSON 诚实报错
+                        if (args.args.trim() && args.args.trim() !== "{}") {
+                            try { parsed = JSON.parse(args.args); }
+                            catch {
+                                return toolFailure(`[mcp_call] args 不是合法 JSON：${String(args.args).slice(0, 200)}。请传该工具参数的对象（无参数传 {}）。`, "syntax");
+                            }
+                        }
+                    } else if (typeof args.args === "object" && !Array.isArray(args.args)) {
+                        parsed = args.args;
+                    } else {
+                        return toolFailure(`[mcp_call] args 需为参数对象或 JSON 字符串，收到 ${typeof args.args}。请修正后重试。`, "syntax");
                     }
                 }
                 const c = findClient(server);
                 if (!c) return toolFailure(`未连接的 MCP server：${server}（用 mcp_list_tools 查看已连接列表）`);
+                // ★ #8c 增强校验：按目标工具声明的 inputSchema 校验 parsed（查不到 schema/server 未列则跳过）。
+                //   错误文案与执行层参数校验同源（「参数校验失败」），模型可据此自纠。
+                try {
+                    const target = (await c.listTools()).find(t => t.name === tool);
+                    if (target?.inputSchema && typeof target.inputSchema === "object") {
+                        const verdict = validateToolArgs(target.inputSchema as Record<string, unknown>, parsed);
+                        if (!verdict.ok) {
+                            return toolFailure(`参数校验失败：${server}/${tool} ${verdict.message}；请修正 args 后重试（schema 见 mcp_list_tools 目录）。`, "syntax");
+                        }
+                    }
+                } catch { /* 目录查询失败不拦执行（校验是增强，不是新的失败面） */ }
                 const result = await c.callTool(tool, parsed);
                 return `[MCP ${server}/${tool}]\n${result}`;
             },
