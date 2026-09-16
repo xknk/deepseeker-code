@@ -76,6 +76,8 @@ export const globTools: CustomTool[] = [
         type: "function",
         function: {
             name: "glob",
+            planAllowed: true,
+            primaryArg: 'pattern',
             description: "按文件名 glob 模式快速查找文件（如 '**/*.ts'、'src/**/test*'、'**/*.test.ts'）。★ 支持花括号多选：'**/*.{ts,tsx,vue}'、'src/{api,components}/**' 一次查多类型/多目录，勿分多次调用。与 search_grep（按内容检索）互补。自动套用 .gitignore / 通用黑名单过滤。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",

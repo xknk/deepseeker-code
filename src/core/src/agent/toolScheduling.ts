@@ -17,7 +17,6 @@ import { appendMessage } from "@/session/transcript.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
 import { checkPermission } from "@/tool/permissions.ts";
-import { isUndoTrigger } from "@/tool/undo/backup.ts";
 
 /** 调度结果（判别联合）：
  *  - completed —— 本轮工具全部执行完，主循环继续下一轮推理；
@@ -68,13 +67,15 @@ export const scheduleToolCalls = async function* (
     const canParallelize = (name: string, args: any, parseFailed: boolean): boolean => {
         if (!parallelSafeToolsEnabled || parseFailed || signal?.aborted) return false;
         if (name === 'exit_plan_mode' || name === 'enter_plan_mode' || name === 'ask_question') return false;
-        if (isUndoTrigger(name)) return false;
         const matched = rawTools.find((t: any) => t.function.name === name);
         if (!matched) return false;
+        // ★ #8a 声明化：写工具（声明 triggersUndo）强制串行——屏障保证 undo 备份读到未改原文件
+        //   （原 isUndoTrigger/MUTATION_TOOLS 名单退役，改读声明）
+        if (matched.function.triggersUndo) return false;
         if (matched.function.safetyLevel !== ToolSafetyLevel.SAFE) return false;
         if (matched.function.isSync === false) return false;
         try {
-            const perm = checkPermission(name, args);
+            const perm = checkPermission(name, args, matched.function.primaryArg);
             if (perm === 'ask' || perm === 'deny') return false;
         } catch { return false; }
         return true;

@@ -100,7 +100,7 @@ export const appConfig = {
      *  最终聚合再受工具 maxOutputCharacters 兜底。 */
     workflowPerStepChars: 6000,
     /** ★ P0-A 计划模式强制位置：'runtime'（默认）= 工具表全会话恒定（两态统一 appendPlanControlTools），
-     *  计划期写工具由 processToolCall 执行层按 PLAN_ALLOWED_TOOLS 拒绝——保 DeepSeek 前缀缓存
+     *  计划期写工具由 processToolCall 执行层按工具声明 planAllowed 拒绝——保 DeepSeek 前缀缓存
      *  （tools 参数序列化在请求头部，计划模式裁表翻转 = 全会话历史 re-prefill 两次）；
      *  'schema' = 旧路径（计划期裁成只读白名单子表）。env DEEP_SEEK_PLAN_ENFORCEMENT=schema 回退。 */
     planEnforcement: (process.env.DEEP_SEEK_PLAN_ENFORCEMENT === "schema" ? "schema" : "runtime") as "runtime" | "schema",

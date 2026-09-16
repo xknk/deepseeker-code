@@ -131,6 +131,49 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          */
         safetyLevel: ToolSafetyLevel;
 
+        /* ================= 3.2.1 策略声明层 (Strategy Declarations) =================
+         *  五处「按工具名硬编码的中心名单」（undo/backup MUTATION_TOOLS、autoPermission AUTO_SCOPE 系列、
+         *  permissions PRIMARY_ARG、planMode PLAN_ALLOWED_TOOLS、toolExecution move_file 特判）的结构性退役
+         *  （后续路线 #8a，2026-09-16）：名单改读本层声明——新增工具只声明不动名单，漏声明 = fail-closed
+         *  （多一次人工审批 / 计划期不可用），不再静默降级。防漂移断言见 tests/tool-declaration-drift.test.ts。 */
+
+        /**
+         * Undo 备份策略；存在即触发：undo 写前备份 + 保护路径检查 + 串行调度屏障（替代 MUTATION_TOOLS 名单）。
+         * 值 = 备份策略，beforeMutationBackup 按此分发（restore 侧本就按 backupKind 分发，天然兼容新工具）：
+         * - 'overwrite'：快照 args[path] 原内容（edit/write/notebook 类，文件不存在时自动记 creation_marker）
+         * - 'create'：creation_marker（create 类，回退 = 删除新建文件）
+         * - 'delete'：文件全文 / 目录整树快照（delete 类）
+         */
+        triggersUndo?: 'overwrite' | 'create' | 'delete';
+
+        /**
+         * 权限规则 ToolName(argGlob) 的主参数名（替代 permissions.ts PRIMARY_ARG 名单）。
+         * 缺省 = 带作用域规则退化为按裸名匹配、allow-always 不持久化（宁窄勿宽的现状语义）。
+         */
+        primaryArg?: string;
+
+        /**
+         * 需保护路径硬规则检查的参数名列表（.git/.ssh/.aws/.deepseeker-code 等，guard.isProtectedWrite）。
+         * 缺省：triggersUndo 工具为 ['path']，否则 []。move_file 以此声明双路径（['source','destination']），
+         * 替代 toolExecution / autoPermission 里按名硬编码的 move_file 特判（P0-3 洞的声明化收口）。
+         */
+        pathArgs?: string[];
+
+        /**
+         * 分类器自动审批作用域（替代 autoPermission.ts AUTO_SCOPE / AUTO_DEFAULT_EXTRA / AUTO_AGGRESSIVE_EXTRA 三名单）：
+         * - 'file'：default 档（工作区围栏 + 敏感文件 deny，按 pathArgs 取参）
+         * - 'command'：default 档（COMMAND_DENY 灾难命令硬拒）
+         * - 'aggressive'：仅 /auto 档（web / git_commit 类，prompt injection 重灾区或不可 undo）
+         * 缺省 = 恒转人工审批（fail-closed，现状语义；如 notebook_edit 刻意不声明以维持恒人工审批）。
+         */
+        autoApproval?: 'file' | 'command' | 'aggressive';
+
+        /**
+         * 计划模式白名单（替代 planMode.ts PLAN_ALLOWED_TOOLS 名单）：true = 计划期（只读调研）可用。
+         * 缺省 = 计划期拒绝（写工具 / 命令 / 后台任务等，现状语义）。
+         */
+        planAllowed?: boolean;
+
         /**
          * 声明式风险标记（仅在 safetyLevel 为 MUTATION 或 DANGER 时被执行层消费）
          * - 真正的拦截由执行层统一完成，工具本身不感知弹窗协议

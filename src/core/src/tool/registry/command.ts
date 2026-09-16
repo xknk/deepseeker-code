@@ -42,6 +42,8 @@ export const commandTools: CustomTool[] = [
         type: "function",
         function: {
             name: "run_command",
+            primaryArg: 'command',
+            autoApproval: 'command',
             description: "在工作区执行 shell 命令（短平快的测试 / 构建 / git 等），流式返回 stdout/stderr 并附带退出码。属于高危操作，每次执行都需要用户审批。预计运行数分钟以上的长任务（全量测试 / 大构建 / 大体积安装）请改用 run_in_background 后台执行；若本工具执行过久仍未结束，系统会自动把进程转入后台并返回 task_id（用 get_background_output 查结果、stop_background_task 终止）。",
             parameters: {
                 type: "object",

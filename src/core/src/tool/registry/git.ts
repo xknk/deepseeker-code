@@ -27,6 +27,7 @@ export const gitTools: CustomTool[] = [
         type: "function",
         function: {
             name: "get_git_diff",
+            planAllowed: true,
             description: "获取当前工作区中所有相比于 Git 暂存区/最近一次提交的未提交代码改动（红绿色 Diff 差异）。适合在修改代码后、或运行测试前，自主走查修改是否精准无低级错误。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -83,6 +84,7 @@ export const gitTools: CustomTool[] = [
         type: "function",
         function: {
             name: "git_status",
+            planAllowed: true,
             description: "查看当前 Git 工作区状态（当前分支、与远端的领先/落后、以及改动/暂存/未跟踪文件的精简清单）。纯读，免审批，用于替代走 run_command 跑 git status 的繁琐。★ 可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -111,6 +113,7 @@ export const gitTools: CustomTool[] = [
         type: "function",
         function: {
             name: "git_log",
+            planAllowed: true,
             description: "查看当前分支的最近若干条提交历史（短哈希 + 日期 + 提交说明）。纯读，免审批。用于了解项目演进、定位某次改动或确认提交是否成功。★ 可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -146,6 +149,8 @@ export const gitTools: CustomTool[] = [
         type: "function",
         function: {
             name: "git_commit",
+            // ★ #8a：分类器仅 /auto 激进档纳入（不可 undo，显式 opt-in）
+            autoApproval: 'aggressive',
             description: "将当前暂存区的改动提交为一次新的 Git commit。可选 stage_all=true 一并执行 git add -A（暂存全部改动含新增/删除）后再提交。注意：不会自动 push。",
             parameters: {
                 type: "object",

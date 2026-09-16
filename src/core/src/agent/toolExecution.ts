@@ -15,14 +15,13 @@ import { checkPermission } from "@/tool/permissions.ts";
 import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
-import { beforeMutationBackup, isUndoTrigger } from "@/tool/undo/backup.ts";
+import { beforeMutationBackup } from "@/tool/undo/backup.ts";
 import { runAutoCheck, matchCommandDeny, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
 import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
 import { getSessionsDirPath } from "@/session/store.ts";
-import { PLAN_ALLOWED_TOOLS } from "./planMode.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
@@ -154,18 +153,20 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const placeholder = "（已中止，未执行）";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
     }
+    const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
     // ★ P0-A 计划模式执行层门禁（runtime 档，默认）：工具表全会话恒定（systemInjections 两态统一
-    //   appendPlanControlTools），计划期改由此处按 PLAN_ALLOWED_TOOLS 拒绝写工具——不发审批、不加锁、
+    //   appendPlanControlTools），计划期改由此处拒绝未声明 planAllowed 的工具——不发审批、不加锁、
     //   不进 hook 流水线，直接以结果文案引导模型转只读/提交方案（计划先于执行的语义不变）。
-    //   schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
+    //   ★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单退役，白名单改读工具声明 planAllowed（缺省 = 拒绝，
+    //   fail-closed）——matchedTool 匹配相应前移至本门禁之前。enter/exit_plan_mode 为终结类已在上方
+    //   拦截返回，此处保留显式豁免（双保险）。schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
     if (!parseFailed && planMode && appConfig.planEnforcement === 'runtime'
         && calledName !== 'enter_plan_mode' && calledName !== 'exit_plan_mode'
-        && !PLAN_ALLOWED_TOOLS.has(calledName)) {
+        && matchedTool?.function?.planAllowed !== true) {
         const note = `❌ [计划模式] 当前为只读调研阶段，禁止 ${calledName}。完成方案请调 exit_plan_mode 提交，经用户审批后进入实现阶段。`;
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: note } });
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: false };
     }
-    const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
     // ★ toolCtx.cwd 与工具内部根同源：所有工具（fs/glob/search/command）内部 spawn/读取/搜索根都走 ALS 的
     //   getActiveWorkspaceRoot()。原先 cwd: getActiveCwd(cwd) 回退 process.cwd()，与 getActiveWorkspaceRoot()
     //   的回退（process.env.WORKSPACE_ROOT || process.cwd()）不同源——在 VSCode 多根重定向未 chdir / run_workflow
@@ -208,11 +209,11 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         }
         // ★ P1-7 / P0-3 保护路径硬规则：写工具碰受保护目录（.git/.ssh/.aws/.deepseeker-code 等）→ 无论授权都拒。
         //   优先级最高（先于 checkPermission 用户规则）：即使用户 allow 了，也禁改 VCS/凭证/项目配置目录。
-        //   P0-3：与 isUndoTrigger 解耦——move_file 不在 Undo 名单（双路径超 schema），但同样必须拦截，
-        //     否则可 move 进 .git/hooks/、.deepseeker-code/settings.json 实现持久化 RCE / 配置注入。
-        const protectedPaths = calledName === 'move_file'
-            ? [calledArgs?.source, calledArgs?.destination]
-            : (isUndoTrigger(calledName) ? [calledArgs?.path] : []);
+        //   ★ #8a 声明化：取参按工具声明 pathArgs（缺省：triggersUndo 工具 ['path']，否则不检查）——
+        //   原 move_file 按名特判（P0-3：双路径不进 Undo 名单但同样必须拦，否则可 move 进 .git/hooks/ 实现
+        //   持久化 RCE）退役，move_file 以 pathArgs:['source','destination'] 声明携带，新工具漏声明不再静默豁免。
+        const pathArgs: string[] = matchedTool.function.pathArgs ?? (matchedTool.function.triggersUndo ? ['path'] : []);
+        const protectedPaths = pathArgs.map(k => calledArgs?.[k]);
         const hitProtected = protectedPaths.find(p => typeof p === 'string' && isProtectedWrite(p, toolCtx.cwd));
         if (hitProtected) {
             denied = true;
@@ -223,7 +224,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         try {
             // ★ P1-MCP dispatcher 兼容：mcp_call 在权限层用合成名 mcp__<server>__<tool> 匹配规则
             //   （用户既有 permissions 规则含 mcp__server__* 通配，语义不变）；其余工具名原样。
-            perm = checkPermission(resolveMcpPermissionName(calledName, calledArgs), calledArgs);
+            perm = checkPermission(resolveMcpPermissionName(calledName, calledArgs), calledArgs, matchedTool.function.primaryArg);
             if (perm === 'deny') { denied = true; result = `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`; }
             else if (perm === 'allow') { needApproval = false; }
             else if (perm === 'ask') { needApproval = true; }
@@ -287,7 +288,8 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             // ★ P1-MCP：同上，auto 分类器亦按合成名参与（isMcpTool / aggressive 档判定与旧逐工具名路径一致）
             //   scriptRunnerBlocked 命令跳过分类器：分类器只见命令串、看不见 scripts 内容，无法负责任地判 safe
             //   （含 /auto 档——供应链面不因 opt-in 激进档而豁免人工首验；用户可预配 allow 规则跳过）。
-            const auto = await runAutoCheck(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx, permissionMode === 'auto');
+            const auto = await runAutoCheck(resolveMcpPermissionName(calledName, calledArgs), calledArgs, toolCtx, permissionMode === 'auto',
+                { autoApproval: matchedTool.function.autoApproval, pathArgs: matchedTool.function.pathArgs, primaryArg: matchedTool.function.primaryArg });
             if (auto === 'allow') { needApproval = false; }
             else if (auto === 'deny') { denied = true; result = `❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`; }
             // 'ask'（risky/不确定/超时/异常/非 AUTO_SCOPE/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
@@ -299,7 +301,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             catch (e: any) { denied = true; result = `❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
             if (!denied) {
                 let approved = false;
-                try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs); }
+                try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs, matchedTool.function.primaryArg); }
                 catch (e: any) { denied = true; result = `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`; }
                 if (!approved && !denied) { denied = true; result = `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`; }
             }
@@ -313,9 +315,10 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             catch (e: any) { veto = { deny: true, reason: `❌ [Pre-hook 异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。` }; }
             if (veto.deny) { denied = true; result = veto.reason || `❌ [Hook 拦截]：pre-hook 拒绝了 [${calledName}] 的执行。`; }
         }
-        // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前快照原文件/目录（凡改必可回退，失败则阻断写入）
-        if (!denied && isUndoTrigger(calledName)) {
-            try { await beforeMutationBackup(calledName, calledArgs, toolCall.id, sessionId); }
+        // ★ Undo 写前备份：审批+pre-hook 放行后、execute 写盘前快照原文件/目录（凡改必可回退，失败则阻断写入）。
+        //   ★ #8a 声明化：是否备份/备份策略改读工具声明 triggersUndo（原 MUTATION_TOOLS 名单退役）。
+        if (!denied && matchedTool.function.triggersUndo) {
+            try { await beforeMutationBackup(matchedTool.function.triggersUndo, calledName, calledArgs, toolCall.id, sessionId); }
             catch (e: any) { denied = true; result = `❌ [Undo 备份失败·安全熔断]：${e?.message ?? e}。写入已阻止（凡改必可回退原则）。`; }
         }
         if (!denied) {

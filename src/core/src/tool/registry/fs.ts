@@ -391,6 +391,9 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "read_file",
+            // ★ #8a 策略声明：计划模式可用；权限规则作用域主参数
+            planAllowed: true,
+            primaryArg: 'path',
             description: "读取指定【文本】文件的文本内容，并自动带上用于对齐定位的物理行号。支持大文件分片读取，防止 Token 爆炸。★ 仅处理文本文件——二进制文件会读出乱码：.xlsx 改用 read_xlsx，.docx 改用 read_docx，.pdf 改用 read_pdf。★ 需读多个文件时，把多个 read_file 调用放进同一条消息并行发出（自动并发执行），勿读完一个再发下一个。",
             parameters: {
                 type: "object",
@@ -474,6 +477,8 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "list_dir",
+            planAllowed: true,
+            primaryArg: 'path',
             description: "扫描并精简列出当前项目的工作区目录树。本工具自动合并通用忽略规则与多层子目录级 .gitignore 规范。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -550,6 +555,10 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "edit_file",
+            // ★ #8a 策略声明：undo 备份（快照原内容）+ 分类器作用域 + 权限主参数；计划模式缺省拒绝
+            triggersUndo: 'overwrite',
+            autoApproval: 'file',
+            primaryArg: 'path',
             description: "对文件做局部精准修改。★ 同一文件多处要改时一次传 edits 数组全部完成（按序应用、整体原子：任一处失败全部不写入），勿逐处多次调用。old_str 须与文件原文逐字符一致：去掉 read_file 返回的「<行号>: 」前缀，保留原缩进（Tab/空格）与行尾空白。默认须全文唯一；replace_all=true 替换全部匹配（批量重命名/统一改写）。",
             parameters: {
                 type: "object",
@@ -631,6 +640,9 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "create_file",
+            triggersUndo: 'create',
+            autoApproval: 'file',
+            primaryArg: 'path',
             description: "在工作区内创建一个全新的文件，并写入初始内容。如果文件已存在，本工具会拒绝执行以防止源码被全量误覆盖。请直接写入用户指定的最终路径，勿自行发明暂存/临时目录（如 .dsc_tmp）——产物会真实落盘且对用户可见。",
             parameters: {
                 type: "object",
@@ -686,6 +698,9 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "delete_path",
+            triggersUndo: 'delete',
+            autoApproval: 'file',
+            primaryArg: 'path',
             description: "从本地磁盘内永久删除一个指定的文件或者一整个文件夹目录。如果是目录，工具会自动执行深度递归强行销毁。此操作不可逆，请万分小心。",
             parameters: {
                 type: "object",
@@ -766,6 +781,9 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "write_file",
+            triggersUndo: 'overwrite',
+            autoApproval: 'file',
+            primaryArg: 'path',
             description: "将完整内容全量写入指定文件（覆盖）。文件不存在则新建（含父目录）；已存在则整体覆盖。★ 仅用于【新建文件】或【彻底重写整个文件】；修改既有文件一律改用 edit_file（局部精准替换、最小 diff）。",
             parameters: {
                 type: "object",
@@ -816,6 +834,7 @@ export const fsTools: CustomTool[] = [
         type: "function",
         function: {
             name: "view_symbol_outline",
+            planAllowed: true,
             description: "通过抽象语法树(AST)快速提取指定 TS/JS 源文件中的符号大纲（类、接口、函数名、导出项、入参签名等）。适合在不读取几千行具体代码的前提下，宏观了解文件架构。仅支持 .ts/.tsx/.js/.jsx/.mjs/.cjs；其他类型文件（.java/.vue/.py 等）直接拒绝，请改用 read_file。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -928,6 +947,11 @@ export const fsTools: CustomTool[] = [
             // 注：move 涉及双路径（source+destination），超出当前 Undo 单路径 schema，暂不纳入写前备份（不可回退），
             //   已在描述中明示；后续若扩展 UndoRecord 双路径字段可再接入。
             name: "move_file",
+            // ★ #8a 策略声明：双路径都受保护路径硬规则检查（P0-3 洞的声明化收口；特判已退役）。
+            //   刻意不声明 triggersUndo：move 语义可手动移回，维持「不在 Undo 回退范围」现状。
+            primaryArg: 'src',
+            autoApproval: 'file',
+            pathArgs: ['source', 'destination'],
             description: "移动或重命名文件/目录（同卷原子操作）。源不存在则失败；目标已存在则拒绝（防误覆盖，如需覆盖请先 delete_path 再 move_file）。自动创建目标父目录。⚠️ 本操作暂不在 Undo 回退范围内（不可撤销）。",
             parameters: {
                 type: "object",

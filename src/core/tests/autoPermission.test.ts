@@ -51,26 +51,43 @@ describe("matchCommandDeny（灾难命令硬拒清单 / P0-2 独立闸门）", (
     });
 });
 
-describe("runAutoCheck scope（default 档命令分类器下沉）", () => {
+describe("runAutoCheck scope（default 档命令分类器下沉；#8a 声明化——作用域改读工具声明）", () => {
     // ★ 不依赖模型：COMMAND_DENY 在 inScope 之后、分类器之前——命中即 deny，到不了分类器。
     //   故「default 档 run_command + 灾难命令 → deny」等价于「run_command 已过 inScope 关、进了 scope」。
-    //   改动前 default 档 run_command 在 inScope 就 return 'ask'（到不了 COMMAND_DENY），本组即钉住该下沉。
+    //   #8a：作用域名单（AUTO_*）退役，改由调用方从 CustomTool 声明读出 decl 传入——此处按注册表真实声明传参。
     const ctx = { cwd: "/tmp/proj" } as any;
+    const cmdDecl = { autoApproval: 'command' as const, primaryArg: 'command' };
+    const fileDecl = { autoApproval: 'file' as const, primaryArg: 'path' };
 
     it("default 档 run_command 进 scope：灾难命令 → deny（证明已过 inScope 关，到分类器前的 COMMAND_DENY）", async () => {
-        assert.equal(await runAutoCheck("run_command", { command: "rm -rf /" }, ctx, false), "deny");
-        assert.equal(await runAutoCheck("run_command", { command: "mkfs.ext4 /dev/sda" }, ctx, false), "deny");
+        assert.equal(await runAutoCheck("run_command", { command: "rm -rf /" }, ctx, false, cmdDecl), "deny");
+        assert.equal(await runAutoCheck("run_command", { command: "mkfs.ext4 /dev/sda" }, ctx, false, cmdDecl), "deny");
     });
 
     it("default 档 run_in_background 进 scope：灾难命令 → deny", async () => {
-        assert.equal(await runAutoCheck("run_in_background", { command: "rm -rf /" }, ctx, false), "deny");
+        assert.equal(await runAutoCheck("run_in_background", { command: "rm -rf /" }, ctx, false, cmdDecl), "deny");
     });
 
     it("default 档 web_fetch / web_search / git_commit / mcp__* 不进 scope → ask（仍 /auto 专享）", async () => {
-        assert.equal(await runAutoCheck("web_fetch", { url: "https://x.com" }, ctx, false), "ask");
-        assert.equal(await runAutoCheck("web_search", { query: "x" }, ctx, false), "ask");
-        assert.equal(await runAutoCheck("git_commit", { message: "x" }, ctx, false), "ask");
-        assert.equal(await runAutoCheck("mcp__foo__bar", {}, ctx, false), "ask");
+        assert.equal(await runAutoCheck("web_fetch", { url: "https://x.com" }, ctx, false,
+            { autoApproval: 'aggressive', primaryArg: 'url' }), "ask");
+        assert.equal(await runAutoCheck("web_search", { query: "x" }, ctx, false,
+            { autoApproval: 'aggressive', primaryArg: 'query' }), "ask");
+        assert.equal(await runAutoCheck("git_commit", { message: "x" }, ctx, false,
+            { autoApproval: 'aggressive' }), "ask");
+        assert.equal(await runAutoCheck("mcp__foo__bar", {}, ctx, false), "ask"); // MCP：按合成名前缀判定，无 decl 仍 aggressive 档纳入
+    });
+
+    it("#8a 未声明 autoApproval（如 notebook_edit）→ 恒 ask（fail-closed 现状语义保持）", async () => {
+        assert.equal(await runAutoCheck("notebook_edit", { path: "a.ipynb" }, ctx, false), "ask");
+        assert.equal(await runAutoCheck("some_unregistered_tool", {}, ctx, false, {}), "ask");
+    });
+
+    it("#8a file 类围栏按声明 pathArgs 取参：destination 越界 → ask（确定性分支，不触达分类器）", async () => {
+        // 测试不依赖模型：仅钉围栏确定性分支。move_file 声明 pathArgs:['source','destination']——
+        // 双路径特判退役后由声明携带，destination 越界即 ask（进不了分类器）。
+        const dualDecl = { autoApproval: 'file' as const, pathArgs: ['source', 'destination'], primaryArg: 'src' };
+        assert.equal(await runAutoCheck("move_file", { source: "a.txt", destination: "../../evil" }, ctx, false, dualDecl), "ask");
     });
 });
 

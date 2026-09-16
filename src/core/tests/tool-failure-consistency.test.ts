@@ -41,15 +41,16 @@ const FAILURE_RE = /失败|无法|不存在|不支持|拒绝|越界|非法|缺�
  */
 const ALLOWLIST = new Set([
     // verifyResult.summary：执行层注入「【系统判定」前缀（FAILED_PREFIXES 已收），此处非裸文案
-    "command.ts:73",
+    //（行号含 #8a 声明插入的偏移）
+    "command.ts:75",
     // 用户主动中止 ≠ 工具失败（⏹️ 通知；ok 语义刻意维持现状，勿顺手改成 ❌）
-    "http.ts:123", "web.ts:619", "web.ts:662",
+    "http.ts:123", "web.ts:622", "web.ts:668",
     // recall 检索成功后的 staleness 标注（⚠️ 文件已变动提示，属信息性附注非工具失败）
     "recall.ts:63",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）
-    "search.ts:112", "search.ts:122",
+    "search.ts:114", "search.ts:124",
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）
-    "web.ts:589",
+    "web.ts:592",
     // 工作流聚合报告内的步骤级中止标注（该步未执行，非工具调用失败）
     "workflow.ts:191", "workflow.ts:208",
 ]);

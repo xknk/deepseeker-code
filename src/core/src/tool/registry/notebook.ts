@@ -104,6 +104,9 @@ export const notebookTools: CustomTool[] = [
         type: "function",
         function: {
             name: "notebook_edit",
+            // ★ #8a：undo 备份同 edit_file（快照原内容）；刻意不声明 autoApproval——维持「分类器不覆盖、恒人工审批」现状
+            triggersUndo: 'overwrite',
+            primaryArg: 'path',
             description: "编辑 Jupyter notebook（.ipynb）的单元格。支持三种模式：replace（替换某 cell 内容/类型）、insert（插入新 cell）、delete（删除 cell）。用 cell_id 或 cell_index 定位。仅支持 .ipynb 文件。",
             parameters: {
                 type: "object",

@@ -537,6 +537,9 @@ export const webTools: CustomTool[] = [
         type: "function",
         function: {
             name: "web_fetch",
+            planAllowed: true,
+            primaryArg: 'url',
+            autoApproval: 'aggressive',
             description: "抓取指定公开 URL 的网页内容并转为干净的 Markdown 文本，用于查阅 API 文档、报错说明、官方 changelog 等外部资料。仅支持 http/https，默认拦截内网/回环/链路本地地址（防 SSRF）；本地开发/自动化测试需抓 localhost 服务或内网页面时，传 allow_private=true 放行（云元数据端点仍拦）。",
             parameters: {
                 type: "object",
@@ -627,6 +630,9 @@ export const webTools: CustomTool[] = [
         type: "function",
         function: {
             name: "web_search",
+            planAllowed: true,
+            primaryArg: 'query',
+            autoApproval: 'aggressive',
             description: "联网搜索外部资料（API 文档、报错解法、库用法、最新信息等），返回结果列表（标题/URL/片段）。默认用 Bing（免注册、中国/全球皆可用）；配置了 TAVILY_API_KEY 会自动升级到 Tavily（结果更干净、带摘要）；可用环境变量 SEARCH_PROVIDER=bing|ddg|tavily 强制指定。查询陌生库或报错时优先用本工具替代凭记忆作答。结果按长度熔断。",
             parameters: {
                 type: "object",

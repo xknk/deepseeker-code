@@ -1,10 +1,14 @@
 /**
  * @file tool/undo/type.ts
  * @description 文件回退（Undo）机制的类型定义：
- *  UndoRecord（单次文件变更的备份索引记录）、BackupKind、UndoOperationType。
+ *  UndoRecord（单次文件变更的备份索引记录）、BackupKind。
  */
-/** 受 Undo 管理的变更工具集合（与四个 fs 写工具 + notebook_edit 一一对应）。 */
-export type UndoOperationType = 'edit_file' | 'write_file' | 'create_file' | 'delete_path' | 'notebook_edit';
+// ★ 后续路线 #8a（2026-09-16）：原 UndoOperationType（'edit_file'|'write_file'|... 工具名联合）随
+//   MUTATION_TOOLS 名单一并退役——UndoRecord.operationType 放宽为 string（工具名仅审计/展示；
+//   备份策略由 CustomTool 声明 triggersUndo 携带，restore 按 backupKind 分发，本就不依赖工具名）。
+
+/** Undo 备份策略（CustomTool 声明 triggersUndo 的值域；beforeMutationBackup 按此分发备份动作）。 */
+export type UndoStrategy = 'overwrite' | 'create' | 'delete';
 
 /**
  * 备份内容形态：
@@ -28,8 +32,8 @@ export interface UndoRecord {
     toolsId: string;
     /** 完整 sessionId（含 __sub__ 后缀），便于回溯发起者；归档目录由 getFileName 剥后缀。 */
     sessionId: string;
-    /** 产生本次变更的工具名。 */
-    operationType: UndoOperationType;
+    /** 产生本次变更的工具名（仅审计/展示；备份与回退分发不依赖它——restore 按 backupKind 分发）。 */
+    operationType: string;
     /** 相对 WORKSPACE_ROOT 的 POSIX 路径（正斜杠），回退时喂给 resolveSafePath。 */
     relativePath: string;
     /** 备份内容形态，决定回退分发逻辑。 */

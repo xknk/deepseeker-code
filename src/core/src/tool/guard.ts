@@ -263,7 +263,8 @@ export const assertWithinWorkspace = (absPath: string, base?: string): void => {
 /**
  * 🛡️ P1-7 受保护目录清单：写/删工具无论授权与否一律禁碰，防 VCS（.git/.hg/.svn）、凭证（.ssh/.aws）、
  * 项目配置（.deepseeker-code：hooks/permissions/skills/agents，防 agent 自我篡改提权）被改。
- * 仅作用于写工具（isUndoTrigger：edit_file/write_file/create_file/delete_path）；读不受限（模型可读 .git/.env 调试）。
+ * 仅作用于声明了受检路径参数的工具（#8a 声明化：pathArgs 缺省为 triggersUndo 工具的 ['path']；
+ * move_file 声明双路径）；读不受限（模型可读 .git/.env 调试）。
  * 注：单个敏感文件（.env 等）不在此列——由 auto deny 清单（auto 模式）/ 人工审批（默认模式）处理，避免阻碍常规编辑。
  */
 export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.deepseeker-code'];
@@ -441,6 +442,9 @@ export const requestApproval = async (
     safetyLevel?: ToolSafetyLevel,
     // 本次调用的参数：仅供构造精确值作用域的 allow 规则（宿主审批通道不感知）。
     args?: any,
+    // 工具声明的主参数名（CustomTool.function.primaryArg，#8a 声明化透传）：allow-always 持久化作用域用；
+    //   缺省 = 无法安全作用域 → 不持久化，降级 allow-once（宁窄勿宽现状语义）。
+    primaryArg?: string,
 ): Promise<boolean> => {
     // 🔒 审批详情瘦身闸：大 diff（如上千行 edit_file 的 old_str/new_str）仅保留头尾，
     //   防止单条 SSE 帧过大与前端渲染卡顿；完整改动可经工具参数或 read_file 核对。
@@ -470,7 +474,7 @@ export const requestApproval = async (
         //   路径类落顶层目录（edit_file(src/*)）；无法安全作用域（无主参数映射 / MCP / 缺值）时返回 null → 不持久化，
         //   降级为 allow-once（旧版回退裸工具名会把该工具所有后续调用静默放行，对 MCP DANGER 工具尤其危险）。
         //   项目级未信任目录时 addPermissionRule 内部降级（不落盘，仅本次生效）。
-        const ruleStr = buildScopedAllowRule(toolName, args);
+        const ruleStr = buildScopedAllowRule(toolName, args, primaryArg);
         if (ruleStr) {
             const persisted = await addPermissionRule('project', 'allow', ruleStr).catch(() => false);
             console.log(persisted

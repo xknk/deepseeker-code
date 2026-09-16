@@ -16,14 +16,7 @@ import { getUndoBackupRoot, ensureUndoDir } from "./store.ts";
 import { appendUndoRecord } from "./index.ts";
 import { maybeCleanupAfterUndoAppend } from "./cleanup.ts";
 import { getTodayDateString } from "@/observability/traceCalculate.ts";
-import { UndoRecord, UndoOperationType } from "./type.ts";
-
-/** 受 Undo 管理的变更工具名单（单一来源，供 runAgent 与本模块共用判断）。 */
-const MUTATION_TOOLS = new Set<UndoOperationType>(['edit_file', 'write_file', 'create_file', 'delete_path', 'notebook_edit']);
-
-/** 判定某工具是否触发 Undo 写前备份（供 runAgent 调度层调用）。 */
-export const isUndoTrigger = (toolName: string): boolean =>
-    MUTATION_TOOLS.has(toolName as UndoOperationType);
+import { UndoRecord, UndoStrategy } from "./type.ts";
 
 /** Buffer 的 SHA-1 hex。 */
 const sha1Buf = (buf: Buffer): string => crypto.createHash('sha1').update(buf).digest('hex');
@@ -87,17 +80,17 @@ type CommonFields = Pick<UndoRecord, 'undoId' | 'toolsId' | 'sessionId' | 'opera
  * 写前备份入口。返回 UndoRecord（已备份并写索引）；
  * 若 undo 关闭或敏感策略 skip 则返回 null（直通写入，该次不可回退）。
  * 备份失败一律抛 Error —— 调用方（runAgent）据此阻断写入（凡改必可回退）。
+ * ★ #8a：MUTATION_TOOLS 名单退役——备份策略由调用方从 CustomTool 声明 triggersUndo 读出传入，
+ *   按策略分发备份动作（restore 侧按 backupKind 分发，天然兼容新增的声明式写工具）。
  */
 export async function beforeMutationBackup(
+    strategy: UndoStrategy,
     toolName: string,
     args: any,
     toolCallId: string,
     sessionId: string,
 ): Promise<UndoRecord | null> {
     if (appConfig.undoEnabled === false) return null;
-    if (!MUTATION_TOOLS.has(toolName as UndoOperationType)) {
-        throw new Error(`[undo] 不在变更工具名单: ${toolName}`);
-    }
     const relativePath = String(args?.path ?? "").replace(/\\/g, "/");
 
     // 敏感文件策略（隐私防线）
@@ -116,20 +109,18 @@ export async function beforeMutationBackup(
         undoId,
         toolsId: toolCallId,
         sessionId,
-        operationType: toolName as UndoOperationType,
+        operationType: toolName,
         relativePath,
         timestamp: now.toISOString(),
         bornDate: getTodayDateString(),
     };
 
     let record: UndoRecord;
-    switch (toolName) {
-        case 'edit_file':
-        case 'write_file':
-        case 'notebook_edit': record = await backupFileOverwrite(common, undoDir, args); break;
-        case 'create_file': record = await backupFileCreate(common); break;
-        case 'delete_path': record = await backupDelete(common, undoDir, relativePath); break;
-        default: throw new Error(`[undo] 未知工具: ${toolName}`);
+    switch (strategy) {
+        case 'overwrite': record = await backupFileOverwrite(common, undoDir, args); break;
+        case 'create': record = await backupFileCreate(common); break;
+        case 'delete': record = await backupDelete(common, undoDir, relativePath); break;
+        default: throw new Error(`[undo] 未知备份策略: ${strategy}`);
     }
 
     await appendUndoRecord(record, sessionId);
@@ -165,8 +156,9 @@ async function backupFileOverwrite(common: CommonFields, undoDir: string, args: 
         contentHashBefore: sha1Buf(content),
         fileSizeBefore: content.byteLength,
         argsSnapshot: {
-            old_str: common.operationType === 'edit_file' ? truncate(args?.old_str) : undefined,
-            new_str: common.operationType === 'edit_file' ? truncate(args?.new_str) : undefined,
+            // ★ #8a：原按 operationType==='edit_file' 特判，改按参数存在性判定——行为不变，泛化到任何声明式 overwrite 写工具
+            old_str: typeof args?.old_str === 'string' ? truncate(args.old_str) : undefined,
+            new_str: typeof args?.new_str === 'string' ? truncate(args.new_str) : undefined,
             contentLength: typeof args?.content === "string" ? args.content.length : undefined,
         },
     };

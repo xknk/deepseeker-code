@@ -37,26 +37,11 @@ interface PermissionRules {
 }
 
 /**
- * 工具名 → 「用于 glob 匹配的主参数」字段名映射。
- * 未列出的工具：规则仅按工具名匹配（argGlob 被忽略，等价于裸 ToolName）。
- * 这是最常用、最具区分度的那个 string 参数（命令/路径/url/query/pattern）。
+ * ★ 后续路线 #8a（2026-09-16）：原 PRIMARY_ARG 名单（工具名 → 主参数字段）结构性退役——
+ * 主参数名改由 CustomTool 声明 primaryArg 携带，调用方（toolExecution/toolScheduling/guard 审批链）
+ * 从匹配到的工具对象读出后经参数透传进来。未传（未登记工具/测试直调）：带作用域规则退化为按裸名
+ * 匹配、allow-always 不持久化（宁窄勿宽的现状语义，fail-closed）。
  */
-const PRIMARY_ARG: Record<string, string> = {
-    run_command: 'command',
-    run_in_background: 'command',
-    web_fetch: 'url',
-    web_search: 'query',
-    read_file: 'path',
-    list_dir: 'path',
-    edit_file: 'path',
-    create_file: 'path',
-    write_file: 'path',
-    delete_path: 'path',
-    notebook_edit: 'path',
-    move_file: 'src',
-    search_grep: 'query',
-    glob: 'pattern',
-};
 
 let rules: PermissionRules = { allow: [], deny: [], ask: [] };
 // 项目级配置是否受信任（initPermissions 据 bootstrap 信任闸门设置）。
@@ -161,12 +146,11 @@ const toolNameMatches = (pattern: string, name: string): boolean => {
 };
 
 /** 判断单条编译规则是否命中当前工具调用 */
-const ruleMatches = (rule: CompiledRule, toolName: string, args: any): boolean => {
+const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg?: string): boolean => {
     if (!toolNameMatches(rule.toolName, toolName)) return false;
     if (rule.argRegex === null) return true; // 裸工具名：任意调用都命中（含末尾通配名）
-    const argKey = PRIMARY_ARG[toolName];
-    if (!argKey) return true; // 工具无主参数映射：带括号的规则退化为按名匹配
-    const val = args?.[argKey];
+    if (!primaryArg) return true; // 工具未声明主参数：带括号的规则退化为按名匹配
+    const val = args?.[primaryArg];
     if (typeof val !== "string") return false;
     return rule.argRegex.test(val);
 };
@@ -192,13 +176,15 @@ export const initPermissions = async (includeProject: boolean): Promise<void> =>
 /**
  * 权限裁决（运行期纯内存查表）。
  * 优先级：deny > ask > allow；都未命中返回 null（走 safetyLevel 默认）。
+ * @param primaryArg 工具声明的主参数名（CustomTool.function.primaryArg，#8a 声明化透传）；
+ *   缺省 = 带作用域规则退化为按裸名匹配（未登记工具的现状语义）。
  * 任何异常一律返回 null（fail-safe：降级为默认审批流，绝不阻断工具执行）。
  */
-export const checkPermission = (toolName: string, args: any): PermissionVerdict => {
+export const checkPermission = (toolName: string, args: any, primaryArg?: string): PermissionVerdict => {
     try {
-        for (const r of rules.deny) if (ruleMatches(r, toolName, args)) return 'deny';
-        for (const r of rules.ask) if (ruleMatches(r, toolName, args)) return 'ask';
-        for (const r of rules.allow) if (ruleMatches(r, toolName, args)) return 'allow';
+        for (const r of rules.deny) if (ruleMatches(r, toolName, args, primaryArg)) return 'deny';
+        for (const r of rules.ask) if (ruleMatches(r, toolName, args, primaryArg)) return 'ask';
+        for (const r of rules.allow) if (ruleMatches(r, toolName, args, primaryArg)) return 'allow';
         return null;
     } catch {
         return null;
@@ -231,8 +217,8 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *  安全兜底：COMMAND_DENY 独立硬闸门（run_command/run_in_background，不依赖 allow）+ PROTECTED_WRITE_DIRS 保护路径硬拒，
  *    allow 了也拦 rm -rf / 改 .git。
  */
-export const buildScopedAllowRule = (toolName: string, args: any): string | null => {
-    const argKey = PRIMARY_ARG[toolName];
+export const buildScopedAllowRule = (toolName: string, args: any, primaryArg?: string): string | null => {
+    const argKey = primaryArg;
     const val = argKey ? args?.[argKey] : undefined;
     if (!argKey || typeof val !== 'string' || !val) return null;
     if (argKey === 'command') {

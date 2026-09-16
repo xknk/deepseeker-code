@@ -4,7 +4,8 @@
  *  非纯工具——它改变 runAgent 的工具可见性与循环终结条件，故归 agent 层而非 tool/registry。
  *
  *  三件套（手动/计划轮方向）：
- *  1) PLAN_ALLOWED_TOOLS —— 计划模式允许的只读/研究类工具名集合（排除一切写操作与 spawn_agent）；
+ *  1) CustomTool 声明 planAllowed —— 计划模式允许的只读/研究类工具标记
+ *     （★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单已退役，改读工具声明；缺省 = 计划期拒绝）；
  *  2) exitPlanModeToolSchema —— 暴露给模型的 exit_plan_mode 工具 schema（runAgent 特殊拦截，不走常规 execute）；
  *  3) filterToolsForPlanMode —— 过滤工具表为允许集合并注入 exit_plan_mode。
  *
@@ -14,19 +15,9 @@
  */
 import { CustomTool } from "@/tool/index.ts";
 
-/** 计划模式允许的工具：只读 / 研究类。排除所有写工具、命令执行、后台任务、spawn_agent、todo_write。 */
-export const PLAN_ALLOWED_TOOLS = new Set<string>([
-    "read_file", "list_dir", "view_symbol_outline", "read_project_guide",
-    "search_grep", "glob",
-    "get_git_diff", "git_status", "git_log", "inspect_dependencies",
-    "get_diagnostics", "goto_definition", // ★ P0-A 补漏：LSP 导航/诊断恰是调研阶段最需要的（原白名单漂移漏登记，schema 档与 runtime 档共用此表）
-    "recall", // 只读检索本会话历史（长调研中早前轮次可能已被压缩归档，调研阶段恰是 recall 主场景）
-    "web_fetch", "web_search", // 只读研究类（虽为 DANGER 但不写本地状态；仍走各自审批）
-]);
-
 // P0-4：计划模式约束已静态化进 SYSTEM_PROMPT（agent/systemPrompt.ts【计划模式】段），不再随 planMode 状态
 //   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档（默认）由 toolExecution
-//   按 PLAN_ALLOWED_TOOLS 在执行层拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
+//   按工具声明 planAllowed 在执行层拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
 
 /**
  * exit_plan_mode 工具 schema。
@@ -49,13 +40,12 @@ export const exitPlanModeToolSchema = {
 
 /**
  * 将完整工具表过滤为计划模式允许的只读/研究子集，并注入 exit_plan_mode。
+ * ★ #8a：白名单改读工具声明 planAllowed（缺省 = 计划期不可用，fail-closed）。
  * @param tools 完整工具表（agentTools）
  * @returns 计划模式工具表（只读工具 + exit_plan_mode）
  */
 export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
-    // 注：(t.function as any).name —— openai 6.x 下 CustomTool.function 为联合类型，
-    //   直接 .name 在某一分支上不存在（TS2339），用 any 断言绕过联合窄化。
-    const allowed = tools.filter(t => PLAN_ALLOWED_TOOLS.has((t.function as any).name));
+    const allowed = tools.filter(t => (t.function as any).planAllowed === true);
     return [...allowed, exitPlanModeToolSchema as unknown as CustomTool];
 }
 

@@ -118,6 +118,7 @@ export const typescriptTools: CustomTool[] = [
         type: "function",
         function: {
             name: "get_diagnostics",
+            planAllowed: true,
             description:
                 "对一个或多个 TS/JS 文件取类型+语义诊断（类型错误/未用变量/不可达代码），输出行:列/严重度/TS 错误码，格式对齐 tsc。" +
                 "★ 改完多个文件后验证：传 paths 数组一次诊断全部（最多 20 个），勿逐文件多次调用。" +
@@ -173,6 +174,7 @@ export const typescriptTools: CustomTool[] = [
         type: "function",
         function: {
             name: "goto_definition",
+            planAllowed: true,
             description:
                 "跳转到 TS/JS 文件某行某列符号的定义位置，返回 rel/path:line:col（可多处）。跨文件追踪函数/类型/变量的来源，替代 grep 猜测。" +
                 "落点在 node_modules/.d.ts 时标注 (declaration/library)。行列 1-based。" +

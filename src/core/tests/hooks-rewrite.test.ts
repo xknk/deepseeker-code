@@ -283,6 +283,9 @@ describe("processToolCall 集成（开关开 · 前置位）", () => {
             function: {
                 name: 'move_file', description: '', parameters: {},
                 safetyLevel: ToolSafetyLevel.MUTATION,
+                // #8a 声明化：保护路径门禁按 pathArgs 声明取参（原 move_file 按名特判已退役），
+                // 假工具与注册表真实声明同构——本测试同时证明门禁读的是声明而非名单。
+                pathArgs: ['source', 'destination'],
                 execute: async () => { executed = true; return '不应执行'; },
             },
         };
