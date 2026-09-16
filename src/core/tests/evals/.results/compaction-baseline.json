@@ -1,0 +1,12 @@
+{
+  "createdAt": "2026-09-16T07:45:11.501Z",
+  "model": "default",
+  "results": {
+    "S1 下一步正确性/checkpoint": true,
+    "S1 下一步正确性/legacy": true,
+    "S2 约束保持/checkpoint": true,
+    "S2 约束保持/legacy": true,
+    "S3 关键上下文/checkpoint": true,
+    "S3 关键上下文/legacy": true
+  }
+}

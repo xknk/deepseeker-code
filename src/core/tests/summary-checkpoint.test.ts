@@ -107,6 +107,102 @@ describe("extractArchiveEntities 版本号形态过滤", () => {
     });
 });
 
+describe("extractArchiveEntities 中文会话召回增强（路线 #10①）", () => {
+    const extractFrom = (text: string) => extractArchiveEntities([{ role: "assistant", content: text } as any]);
+
+    it("中文连续实体串入索引（未加任何引号的散文实体，≤14 字整段收录）", () => {
+        const ents = extractFrom("上游网关连接超时，检查负载均衡配置后重试即可恢复");
+        assert.ok(ents.includes("上游网关连接超时"), `中文实体应入索引：${ents.join(" | ")}`);
+    });
+
+    it("超长中文句段（>14 字）不做实体（散文切片是噪声）", () => {
+        const ents = extractFrom("这一段是很长的中文散文叙述不应该被切进实体索引里面去因为它们不是名词性检索词");
+        const long = ents.filter((e: string) => e.length > 14);
+        assert.equal(long.length, 0, `不应有超长实体：${long.join(" | ")}`);
+    });
+
+    it("中文文件路径入索引（路径段含 CJK）", () => {
+        const ents = extractFrom("修改了 src/工具/解析器.ts 的实现");
+        assert.ok(ents.includes("src/工具/解析器.ts"), `中文路径应入索引：${ents.join(" | ")}`);
+    });
+
+    it("双引号报错原文入索引；中文引号「」同样收", () => {
+        const ents = extractFrom('接口返回 "Internal server error: db pool exhausted"，前端提示「加载失败」');
+        assert.ok(ents.includes("Internal server error: db pool exhausted"), `双引号报错原文应入索引：${ents.join(" | ")}`);
+        assert.ok(ents.includes("加载失败"), "中文引号实体应入索引");
+    });
+
+    it("单引号无空白错误码入索引；带空白的撇号散文误报不收", () => {
+        const ents = extractFrom("请求失败 'ECONNRESET'，先查重试配置；另外英文缩写 don't 之类的撇号串不算 t 恰好这不是实体 break");
+        assert.ok(ents.includes("ECONNRESET"), `错误码应入索引：${ents.join(" | ")}`);
+        assert.equal(ents.some((e: string) => e.includes(" ")), false, "带空白的单引号串（撇号散文误报）不应入索引");
+    });
+
+    it("URL 入索引（截到空白/中文标点止）", () => {
+        const ents = extractFrom("接口文档见 https://example.com/docs/api-guide?v=2#auth ，按第 3 节改");
+        assert.ok(ents.includes("https://example.com/docs/api-guide?v=2#auth"), `URL 应入索引：${ents.join(" | ")}`);
+    });
+
+    it("大小写归一去重：README.md 与 readme.md 只占一个名额（recall 检索本身大小写不敏感）", () => {
+        const ents = extractFrom("改 docs/README.md 时同步检查 docs/readme.md 的链接");
+        const hits = ents.filter((e: string) => e.toLowerCase().endsWith("readme.md"));
+        assert.equal(hits.length, 1, `大小写变体应合并为一个名额：${hits.join(" | ")}`);
+        assert.ok(ents.includes("docs/README.md"), "保留首个原始写法");
+    });
+
+    it("含竖线的候选拒收（不破坏索引的 | 分隔格式）", () => {
+        const ents = extractFrom('表格行 "a | b" 这类内容不能进索引');
+        assert.equal(ents.some((e: string) => e.includes("|")), false, `含 | 的实体应拒收：${ents.join(" | ")}`);
+    });
+
+    it("argsText 只扫高置信三类：JSON 双引号键名与中文片段不灌索引，路径照收", () => {
+        const ents = extractArchiveEntities([
+            {
+                role: "assistant", content: "",
+                tool_calls: [{
+                    id: "c1", type: "function",
+                    function: { name: "edit_file", arguments: '{"path":"src/注释文件.ts","old_str":"旧的实现说明","new_str":"新的实现说明附更详细注释"}' },
+                }],
+            } as any,
+        ]);
+        assert.ok(!ents.some((e: string) => e === "path" || e === "old_str" || e === "new_str"), `JSON 键名不得入索引：${ents.join(" | ")}`);
+        assert.ok(!ents.includes("旧的实现说明"), "args 中文片段不入索引（edit 中文注释场景防泛滥）");
+        assert.ok(ents.includes("src/注释文件.ts"), "args 里的文件路径仍要入索引");
+    });
+
+    it("mergeSummarySlot 跨轮合并同口径大小写归一（README.md 与 readme.md 不再累积双份）", () => {
+        const old = "⟦DSC:ARCHIVE-INDEX⟧ 指引行\nREADME.md | src/a.ts\n⟦DSC:ARCHIVE-NOTES⟧\n- 笔记";
+        const merged = mergeSummarySlot(old, "", ["readme.md", "new.ts"]);
+        const { index } = parseSummarySlot(merged);
+        const hits = index.filter((e) => e.toLowerCase() === "readme.md");
+        assert.equal(hits.length, 1, `跨轮合并应大小写归一：${index.join(" | ")}`);
+    });
+});
+
+describe("decayOldToolResults 衰减折叠提示指向 recall（路线 #10②）", () => {
+    it("折叠提示包含 recall 指引与确切 with_full=tool_call_id，不再只说重新调用工具", async () => {
+        const { decayOldToolResults } = await import("@/session/content.ts");
+        const longText = "x".repeat(800); // > BOUNDARY_TOOL_KEEP_CHARS(500) 才触发折叠
+        const msgs: any[] = [];
+        for (let i = 0; i < 8; i++) {
+            msgs.push({ role: "user", content: `u${i}` });
+            msgs.push({ role: "assistant", content: "", tool_calls: [{ id: `call_${i}`, type: "function", function: { name: "search_grep", arguments: "{}" } }] });
+            msgs.push({ role: "tool", tool_call_id: `call_${i}`, content: longText });
+        }
+        const out = decayOldToolResults(msgs);
+        const decayed = out.filter((m: any) => m.role === "tool" && String(m.content).includes("已折叠"));
+        assert.ok(decayed.length > 0, "超出保留区的旧工具结果应被折叠");
+        for (const m of decayed) {
+            const c = String(m.content);
+            assert.ok(c.includes("recall"), "折叠提示应指向 recall 工具");
+            assert.match(c, new RegExp(`with_full="${(m as any).tool_call_id}"`), "应给出 with_full 与该结果确切的 tool_call_id");
+            assert.ok(c.length < 1500, "折叠视图应有界（保留头 + 提示）");
+        }
+        // 保留区最近单元不折叠
+        assert.equal(out.some((m: any) => m.role === "tool" && m.tool_call_id === "call_7" && m.content === longText), true, "最近单元全文保留");
+    });
+});
+
 describe("parseSummarySlot 对检查点式叙述的宽容解析", () => {
     it("「## 」分节叙述不破坏槽结构：索引与叙述各自完整取回", () => {
         const slot = [

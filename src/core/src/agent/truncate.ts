@@ -217,34 +217,62 @@ const ARCHIVE_INDEX_MAX_ENTRIES = 120;
 /** 单批次提取的实体数上限（防一个巨型工具结果把索引撑爆） */
 const ARCHIVE_INDEX_BATCH_CAP = 60;
 
+/** 实体入索长度下限：ASCII 实体 3 字符起（2 字符误报率高），含 CJK 的 2 字符即可（中文词信息密度高） */
+const entityMinLen = (s: string): number => (/[一-鿿]/.test(s) ? 2 : 3);
+
 /**
- * 从待压缩消息中确定性提取检索实体：文件路径（含分隔符+扩展名）与反引号/引号包裹的强调词。
- *  纯代码提取（零 token、零 LLM 依赖），提取不到就算了——索引是尽力而为的检索辅助，不是承诺。
+ * 从待压缩消息中确定性提取检索实体（召回辅助，尽力而为，纯代码零 LLM）：
+ *  ① 文件路径（含 CJK 路径段，如 src/工具/解析器.ts）；② 反引号/引号包裹的强调词与报错原文
+ *  （中文引号「」『』“” 也收——中文会话报错原文常无反引号）；③ 无空白的单引号串（错误码/token，
+ *  如 'ECONNRESET'——带空白的单引号串不收，撇号散文误报太多）；④ URL；⑤ 中文连续实体串（≤14 字，
+ *  更长的多为散文句段不宜做检索词）。大小写归一去重（recall 检索本身大小写不敏感，索引同口径）。
+ *
+ *  扫描面分两层（★ base64 三不进红线延续：只扫 text 视图，不 stringify parts）：
+ *  - contentText（消息正文 = assistant/user 叙述 + 工具结果原文）：全部五类候选；
+ *  - argsText（tool_calls 的 arguments JSON）：仅路径/反引号/URL 三类高置信候选——双引号在 JSON
+ *    里是键值包装符，提取会把 "path"/"old_str" 等键名全灌进索引；中文实体同理（edit 中文注释文件
+ *    时 old_str 片段会挤爆名额）。
  */
 export const extractArchiveEntities = (batch: Msg[]): string[] => {
-    let text = '';
+    let contentText = '';
+    let argsText = '';
     for (const m of batch) {
         // ★ 多模态防泄漏：只扫 text 视图——JSON.stringify 会把 dataURL base64 灌进正则扫描面
-        if (m.content) text += ` ${msgText(m.content)}`;
+        if (m.content) contentText += ` ${msgText(m.content)}`;
         const calls = (m as any).tool_calls;
-        if (Array.isArray(calls)) for (const c of calls) text += ` ${c?.function?.name ?? ''} ${c?.function?.arguments ?? ''}`;
+        if (Array.isArray(calls)) for (const c of calls) argsText += ` ${c?.function?.name ?? ''} ${c?.function?.arguments ?? ''}`;
     }
     const found: string[] = [];
-    const seen = new Set<string>();
+    const seen = new Set<string>(); // 小写归一键（保留首个原始写法；与 recall 大小写不敏感检索同口径）
     const push = (raw: string) => {
         const s = raw.trim();
-        if (!s || s.length < 3 || s.length > 60 || seen.has(s)) return;
+        if (!s || s.length < entityMinLen(s) || s.length > 60 || seen.has(s.toLowerCase()) || s.includes('|')) return;
         // ★ 版本号形态过滤：末段纯数字/点（如 UA 碎片 AppleWebKit/537.36、Chrome/152.0.0.0）恰似
         //   「路径+数字扩展名」会被路径正则误收，挤占 120 条实体名额（真实索引中曾占 ~10 条）。
         const lastSeg = s.split(/[\\/]/).pop() ?? '';
         if (/^[\d.]+$/.test(lastSeg)) return;
-        seen.add(s);
+        seen.add(s.toLowerCase());
         found.push(s);
     };
-    // 文件路径：须含路径分隔符且带扩展名（裸词如 node.js 的散文误报不收；示例避免 glob 星号写法）
-    for (const m of text.match(/(?:[A-Za-z]:)?[\w.\-]+(?:[/\\][\w.\-]+)+\.[A-Za-z0-9]{1,6}/g) ?? []) push(m);
-    // 反引号包裹的强调词（模型自己标注的实体，置信度高）
-    for (const m of text.match(/`([^`\n]{2,48})`/g) ?? []) push(m.slice(1, -1));
+    // 扫描面拆分后按置信度从高到低提取（高置信候选优先占满 60/批名额）
+    const scanSurfaces = [contentText, argsText];
+    for (const text of scanSurfaces) {
+        // 文件路径：须含路径分隔符且带扩展名；路径段放行 CJK（中文文件名/目录入索引）
+        for (const m of text.match(/(?:[A-Za-z]:)?[\w.\-一-鿿]+(?:[/\\][\w.\-一-鿿]+)+\.[A-Za-z0-9]{1,6}/g) ?? []) push(m);
+        // 反引号包裹的强调词（模型自己标注的实体，置信度高）
+        for (const m of text.match(/`([^`\n]{2,48})`/g) ?? []) push(m.slice(1, -1));
+        // URL（截到空白/引号/常见中文标点止）
+        for (const m of text.match(/https?:\/\/[^\s"'<>（）【】，。]+/g) ?? []) push(m);
+    }
+    // 以下两类只扫正文（argsText 是 JSON，双引号/中文实体噪声见函数头说明）
+    const text = contentText;
+    // 双引号 + 中文引号包裹的强调词/报错原文（模型与用户标注的实体，中文会话常不加反引号）
+    for (const m of text.match(/"([^"\n]{2,48})"/g) ?? []) push(m.slice(1, -1));
+    for (const m of text.match(/[「“]([^」”\n]{2,48})[」”]/g) ?? []) push(m.slice(1, -1));
+    // 单引号且内容无空白：错误码/枚举/token（'ECONNRESET'）；含空白不收（撇号散文误报如 don't … don't）
+    for (const m of text.match(/'([^'\n]{2,48})'/g) ?? []) if (!m.slice(1, -1).includes(' ')) push(m.slice(1, -1));
+    // 中文实体：CJK 连续串整段 ≤14 字才收（更长的多为散文句段，截片段也是噪声，不做查询词）
+    for (const m of text.match(/[一-鿿][一-鿿0-9A-Za-z_]+/g) ?? []) if (m.length <= 14) push(m);
     return found.slice(0, ARCHIVE_INDEX_BATCH_CAP);
 }
 
@@ -270,10 +298,10 @@ export const parseSummarySlot = (content: string): { index: string[]; notes: str
 export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[]): string => {
     const { index, notes } = parseSummarySlot(oldContent);
     const merged: string[] = [];
-    const seen = new Set<string>();
+    const seen = new Set<string>(); // 小写归一（与提取端、recall 大小写不敏感检索同口径，README.md/readme.md 不再各占名额）
     for (const e of [...newEntities, ...index]) {
-        if (!e || seen.has(e)) continue;
-        seen.add(e);
+        if (!e || seen.has(e.toLowerCase())) continue;
+        seen.add(e.toLowerCase());
         merged.push(e);
         if (merged.length >= ARCHIVE_INDEX_MAX_ENTRIES) break;
     }

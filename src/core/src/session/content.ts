@@ -51,7 +51,10 @@ export const decayOldToolResults = (msgs: Msg[]): Msg[] => {
         const mm = m as any;
         if (mm.role === 'tool' && decayIds.has(mm.tool_call_id) && typeof mm.content === 'string' && mm.content.length > keep) {
             const head = mm.content.slice(0, keep);
-            return { ...mm, content: `${head}\n\n[… 该历史工具输出已折叠（共 ${mm.content.length} 字符），如需细节请重新调用工具 …]` } as Msg;
+            // ★ 提示与摘要槽头部引导（truncate.ts）同口径：先 recall 检索、with_full 取存档原文，
+            //   均无果再重跑工具——只说「重新调用工具」会诱导模型白白重跑昂贵调用。
+            //   tool_call_id 本消息自带，with_full 有确切值可传（未存档时 recall 会明确回报「未曾触发截断」）。
+            return { ...mm, content: `${head}\n\n[… 历史工具输出已折叠（共 ${mm.content.length} 字符）：细节先用 recall 工具按关键词检索本会话历史（原文若曾截断存档，recall 传 with_full="${mm.tool_call_id}" 可取回全文），无果再重新调用工具 …]` } as Msg;
         }
         // ★ 多模态折叠：老单元的贴图消息 image part → 占位文本（内存视图，transcript 原件不动）
         return replaceImageParts(mm, '[历史图片已折叠：原图仍在会话归档中，如需再次查看请重新提供该图片]') as Msg;

@@ -13,12 +13,17 @@
  *    checkpoint（新）：compactToLine 行式摘要（仅交换格式）→ synthesizeSlotNarrative 检查点合成；
  *    legacy（旧复刻）：同样的 compactToLine 行 → 「概括成一段话」自收敛（改动前的自收敛语义）。
  *
+ *  ★ 基线固化（路线 #10④）：checkpoint 路径逐场景通过位与 .results/compaction-baseline.json 对比——
+ *    基线 pass → 本轮 fail = 压缩质量回退，退出码 1（legacy 对照路径只展示不挡门，它本来就是参照物）。
+ *    --save-baseline 固化本轮为基线。
+ *
  *  ★ 打真实 aux 模型（deepseek flash 系，~24 次小请求，成本可忽略），不进 CI：
  *    npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/compaction.eval.ts
  */
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // 沙盒：压缩管线会 appendEvent / 读 dataDir，指向临时目录防污染真实会话。
 process.env.DEEPSEEKER_CODE_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-eval-compaction-"));
@@ -161,8 +166,21 @@ const SCENARIOS: Scenario[] = [
 
 // ==================== 主流程 ====================
 
+const RESULTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.results');
+const BASELINE_PATH = path.join(RESULTS_DIR, 'compaction-baseline.json');
+interface CompactionBaseline {
+    createdAt: string;
+    model: string;
+    /** key = `${scenario}/${path}`；value = 该格本轮是否通过 */
+    results: Record<string, boolean>;
+}
+
+const saveBaselineFlag = process.argv.includes('--save-baseline');
+
 const main = async (): Promise<void> => {
     console.log("== 压缩质量评估试点：checkpoint（新） vs legacy（旧复刻）==\n");
+    let baseline: CompactionBaseline | null = null;
+    try { baseline = JSON.parse(await fs.readFile(BASELINE_PATH, 'utf-8')) as CompactionBaseline; } catch { baseline = null; }
     const rows: Array<{ scenario: string; path: string; pass: boolean; why: string; answer: string }> = [];
     for (const sc of SCENARIOS) {
         for (const variant of [
@@ -174,7 +192,9 @@ const main = async (): Promise<void> => {
                 const answer = await askAfterCompaction(slot, sc.question);
                 const { pass, why } = sc.judge(answer);
                 rows.push({ scenario: sc.name, path: variant.key, pass, why, answer });
-                console.log(`[${sc.name} / ${variant.key}] ${pass ? "PASS" : "FAIL"}（${why}）\n  答：${answer.slice(0, 240)}\n`);
+                const base = baseline?.results[`${sc.name}/${variant.key}`];
+                const vs = base === undefined ? '新增' : base && pass ? '=' : base && !pass ? '回退!' : '修复';
+                console.log(`[${sc.name} / ${variant.key}] ${pass ? "PASS" : "FAIL"}（${why}）vs基线 ${vs}\n  答：${answer.slice(0, 240)}\n`);
             } catch (e: any) {
                 rows.push({ scenario: sc.name, path: variant.key, pass: false, why: `执行异常：${e?.message ?? e}`, answer: "" });
                 console.error(`[${sc.name} / ${variant.key}] 异常：${e?.message ?? e}`);
@@ -185,10 +205,38 @@ const main = async (): Promise<void> => {
     const score = (p: string) => `${sum(p).filter((r) => r.pass).length}/${sum(p).length}`;
     console.log("\n== 汇总 ==");
     console.log(`checkpoint（新）：${score("checkpoint")}   legacy（旧）：${score("legacy")}`);
-    if (!sum("checkpoint").length) console.error("\n提示：全部执行异常通常是 DEEP_SEEK_API_KEY 未配置/网络不可达，请检查后重跑。");
+    if (!sum("checkpoint").length) {
+        console.error("\n提示：全部执行异常通常是 DEEP_SEEK_API_KEY 未配置/网络不可达，请检查后重跑。");
+        process.exitCode = 1;
+        return;
+    }
+
+    // ★ 基线固化（路线 #10④）：checkpoint 是现行压缩路径，其逐场景通过位回退 = 压缩质量回退，退出码 1。
+    //   legacy 只是对照参照物（本就该劣于 checkpoint），波动不挡门。
+    const checkpointRegressions = rows.filter((r) =>
+        r.path === 'checkpoint' && !r.pass && baseline?.results[`${r.scenario}/${r.path}`] === true);
+    if (baseline) {
+        console.log(`基线对比：checkpoint 回退 ${checkpointRegressions.length} 个场景${saveBaselineFlag ? '；本轮将固化新基线' : ''}`);
+    } else {
+        console.log('无基线（首轮），本轮可用 --save-baseline 固化');
+    }
+    if (checkpointRegressions.length > 0) {
+        console.error('\n❌ 压缩质量回退：checkpoint 基线通过的场景本轮未通过（' + checkpointRegressions.map((r) => r.scenario).join('、') + '）');
+        process.exitCode = 1;
+        return;
+    }
+    if (saveBaselineFlag) {
+        const model = process.env.DEEP_SEEK_AUX_MODEL ?? process.env.DEEP_SEEK_MODEL ?? 'default';
+        const results: Record<string, boolean> = {};
+        for (const r of rows) results[`${r.scenario}/${r.path}`] = r.pass;
+        const next: CompactionBaseline = { createdAt: new Date().toISOString(), model, results };
+        await fs.mkdir(RESULTS_DIR, { recursive: true });
+        await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
+        console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${Object.keys(results).length} 格）`);
+    }
 };
 
 main().then(
-    () => process.exit(0),
+    () => process.exit(process.exitCode ?? 0),
     (e) => { console.error(e); process.exit(1); },
 );

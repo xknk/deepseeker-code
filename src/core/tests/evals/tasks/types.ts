@@ -31,4 +31,13 @@ export interface EvalTask {
     checker: (ws: string) => Promise<CheckResult>;
     /** 单任务时长熔断（分钟）。缺省 10：超时 abort，按 fail 记录（runAgent 自身的 idle/stall 守护在其之内） */
     maxMinutes?: number;
+    /**
+     * 扩展面行为级 eval（hooks/skills/subagent/MCP，路线 #10④）：声明后本任务排到标准任务之后、
+     * 逐任务重启引擎跑（initEngine includeProject:true——洁净水别的反向补课）：
+     *  - global 文件写入沙盒 dataDir（全局级 hooks/skills/MCP 配置的加载根），内容支持 ${evalWs}
+     *    占位符（物化时展开为任务工作区绝对路径，供 mcp.json 指向工作区里的 server 脚本）；
+     *  - project 文件物化到任务工作区（项目级 .deepseeker-code/ 配置）。
+     *  跑完即回滚（engine dispose + agentTools 长度快照 splice + 删除全局文件），防跨任务注册表污染。
+     */
+    extensionFixture?: { global?: Record<string, string>; project?: Record<string, string> };
 }

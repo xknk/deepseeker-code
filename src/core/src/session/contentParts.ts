@@ -197,3 +197,28 @@ export const collapseToText = (m: any, imageNote?: string): any => {
 
 /** 摘要批专用：送辅助模型（text-only）前折叠为纯 string（图片降为归档占位尾注）。 */
 export const degradeImagesForAux = (m: any): any => collapseToText(m, "[图片已归档]");
+
+/**
+ * read_image 跟随消息构造器（纯函数）：把工具结果附带的 images 组装成一条独立 user 消息的
+ * parts 数组（text part 在首位、图片随后，与入站贴图同构）。
+ * ★ 为什么不塞进 tool 消息：OpenAI 兼容端点不接受 tool role 携带 image part（直发即 400）——
+ *   由调度层在本波工具全部 flush 完之后统一注入（assistant → tool… → user(图) 顺序合法）。
+ *   下游既有闸门全兼容：vision 关闭折叠 / 跨 run 衰减折叠 / 估算按张计价，均按 parts 数组通用处理。
+ */
+export const buildImageFollowUpParts = (
+    images: NonNullable<import("@/tool/type.ts").ToolExecuteResult["images"]>,
+): WirePart[] => {
+    const labels = images
+        .map((img, i) => `  ${i + 1}. ${img.name || "image"}（${img.mime}）`)
+        .join("\n");
+    return [
+        {
+            type: "text",
+            text: `（系统注入：上一条工具结果读取了 ${images.length} 张图片，附于本消息供视觉分析。若看不清或无法读取，请告知用户当前模型可能不支持图片输入。）\n${labels}`,
+        },
+        ...images.map((img) => ({
+            type: "image_url" as const,
+            image_url: { url: `data:${img.mime};base64,${img.base64}` },
+        })),
+    ];
+};

@@ -1,102 +1,132 @@
 {
-  "createdAt": "2026-09-15T07:10:48.946Z",
+  "createdAt": "2026-09-16T07:35:41.268Z",
   "model": "deepseek/DeepSeek",
   "tasks": {
     "discount-bugfix": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 64994,
-      "durationMs": 13113
+      "totalTokens": 66230,
+      "durationMs": 11149
     },
     "median-implement": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 60779,
-      "durationMs": 8005
+      "totalTokens": 63200,
+      "durationMs": 7221
     },
     "rename-api": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 63312,
-      "durationMs": 10362
+      "totalTokens": 66039,
+      "durationMs": 11063
     },
     "mask-privacy": {
       "pass": true,
-      "rounds": 4,
-      "totalTokens": 48579,
-      "durationMs": 7641
+      "rounds": 5,
+      "totalTokens": 64291,
+      "durationMs": 8339
     },
     "async-race-fix": {
       "pass": true,
       "rounds": 4,
-      "totalTokens": 47805,
-      "durationMs": 6612
+      "totalTokens": 49344,
+      "durationMs": 5860
     },
     "config-extract": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 61627,
-      "durationMs": 10974
+      "totalTokens": 63320,
+      "durationMs": 9143
     },
     "decoy-bugfix": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 63001,
-      "durationMs": 10032
+      "totalTokens": 65220,
+      "durationMs": 8445
     },
     "state-leak-fix": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 60492,
-      "durationMs": 7917
+      "totalTokens": 62381,
+      "durationMs": 5675
     },
     "error-swap-fix": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 62037,
-      "durationMs": 7806
+      "totalTokens": 65433,
+      "durationMs": 9638
     },
     "currency-rename": {
       "pass": true,
-      "rounds": 5,
-      "totalTokens": 67537,
-      "durationMs": 13049
+      "rounds": 6,
+      "totalTokens": 79313,
+      "durationMs": 10006
     },
     "extract-module": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 61881,
-      "durationMs": 9592
+      "totalTokens": 64929,
+      "durationMs": 9277
     },
     "promise-to-async": {
       "pass": true,
-      "rounds": 7,
-      "totalTokens": 91791,
-      "durationMs": 19423
+      "rounds": 5,
+      "totalTokens": 64677,
+      "durationMs": 10618
     },
     "constant-enum": {
       "pass": true,
-      "rounds": 7,
-      "totalTokens": 91768,
-      "durationMs": 18536
+      "rounds": 5,
+      "totalTokens": 67871,
+      "durationMs": 12866
     },
     "pagination-implement": {
       "pass": true,
-      "rounds": 5,
-      "totalTokens": 62275,
-      "durationMs": 10001
+      "rounds": 4,
+      "totalTokens": 51880,
+      "durationMs": 6614
     },
     "csv-report": {
       "pass": true,
       "rounds": 5,
-      "totalTokens": 60239,
-      "durationMs": 8496
+      "totalTokens": 62401,
+      "durationMs": 6751
     },
     "retry-wrapper": {
       "pass": true,
+      "rounds": 8,
+      "totalTokens": 121040,
+      "durationMs": 18298
+    },
+    "subagent-count": {
+      "pass": true,
+      "rounds": 3,
+      "totalTokens": 118582,
+      "durationMs": 13390
+    },
+    "hooks-marker": {
+      "pass": true,
+      "rounds": 3,
+      "totalTokens": 40566,
+      "durationMs": 4453
+    },
+    "hooks-guard": {
+      "pass": true,
       "rounds": 5,
-      "totalTokens": 62662,
-      "durationMs": 10261
+      "totalTokens": 68530,
+      "durationMs": 7111
+    },
+    "skills-release": {
+      "pass": true,
+      "rounds": 6,
+      "totalTokens": 88591,
+      "durationMs": 13311
+    },
+    "mcp-dispatch": {
+      "pass": true,
+      "rounds": 4,
+      "totalTokens": 55800,
+      "durationMs": 4496
     }
   }
 }

@@ -22,6 +22,17 @@ import {
     initializeWorkspaceIgnore,
     checkIsPathIgnored
 } from "../guard.ts";
+import { isVisionEnabled, MAX_IMAGE_BYTES } from "@/session/contentParts.ts";
+
+/** read_image 支持的扩展名 → MIME 映射（OpenAI image_url dataURL 用） */
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+};
 import { createReadStream } from "fs";
 import * as readline from "readline"
 import { Stats } from "fs";
@@ -418,6 +429,7 @@ export const fsTools: CustomTool[] = [
                     // ★ 二进制文件拦截：xlsx/docx/pdf 有专用工具，read_file 强行 UTF-8 读会满屏乱码——
                     //   直接引导到专用工具，省一次无意义的乱码读取（agent 常误用 read_file 读表格/文档）。
                     const lowerExt = absPath.toLowerCase();
+                    if (IMAGE_MIME_BY_EXT[path.extname(lowerExt)]) return `🖼 [${args.path}] 是图片文件，read_file 读不出有用内容。请改用 read_image 读取（图像会以视觉附件直接提供给模型分析）。`;
                     if (lowerExt.endsWith(".xlsx")) return `⚠️ [${args.path}] 是 Excel 二进制文件，read_file 读不了（UTF-8 解码满屏乱码）。请改用 read_xlsx（支持 sheet 选择 / 翻页 / Markdown 表格输出）。`;
                     if (lowerExt.endsWith(".docx")) return `⚠️ [${args.path}] 是 Word 二进制文档，read_file 读不了。请改用 read_docx 提取正文文本。`;
                     if (lowerExt.endsWith(".pdf")) return `⚠️ [${args.path}] 是 PDF 二进制文档，read_file 读不了。请改用 read_pdf 提取文字层。`;
@@ -984,6 +996,57 @@ export const fsTools: CustomTool[] = [
                     return toolFailure(`操作失败: ${error.message}`);
                 }
             }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "read_image",
+            // ★ #8a 策略声明：计划模式可用（只读）；权限规则作用域主参数
+            planAllowed: true,
+            primaryArg: 'path',
+            description: "读取指定【图片】文件并把图像内容提供给模型做视觉分析（png/jpg/jpeg/gif/webp/bmp，≤8MB）。适用：截图调试、UI 对照还原、查看图片素材。图像以视觉附件注入对话（随后的一条消息），不计入本工具的文本输出；当前模型不支持视觉时会明确提示。文本文件请用 read_file。",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: { type: "string", description: "图片路径：相对活动工作区根（支持 ../ 跨兄弟项目）、或绝对路径" },
+                },
+                required: ["path"],
+            },
+            safetyLevel: ToolSafetyLevel.SAFE,
+            isSync: true,
+            async execute(args: { path: string }) {
+                try {
+                    // 与 read_file 同一读入口：跨界读放行、敏感凭证文件硬拒（防把 .env 伪装成图片读出）
+                    const absPath = resolveReadablePath(args.path);
+                    const readBlock = await assertReadable(absPath, args.path);
+                    if (readBlock) return readBlock;
+
+                    const mime = IMAGE_MIME_BY_EXT[path.extname(absPath).toLowerCase()];
+                    if (!mime) return toolFailure(`[read_image] 不支持的图片格式 [${args.path}]：仅支持 png/jpg/jpeg/gif/webp/bmp。文本文件请用 read_file。`);
+
+                    const st = await fs.stat(absPath).catch(() => null);
+                    if (!st || !st.isFile()) return toolFailure(`[read_image] 图片不存在或不是文件：${args.path}`);
+                    if (st.size > MAX_IMAGE_BYTES) {
+                        return toolFailure(`[read_image] 图片 ${(st.size / 1024 / 1024).toFixed(1)}MB 超过 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB 上限：请压缩后重试，或裁剪到需要的区域。`);
+                    }
+
+                    // vision 关闭时不发无谓的 400 探底：能力闸先拦（乐观直发 + 400 自学习降级仍兜底误判场景）
+                    if (!isVisionEnabled()) {
+                        return toolFailure(`[read_image] 当前模型不支持图片输入（视觉能力按端点实测自动判定；可切换 vision 模型或设 DEEP_SEEK_VISION=1 强开后重试）。图片未读取：${args.path}`);
+                    }
+
+                    const buf = await fs.readFile(absPath);
+                    // ★ base64 只进 images 字段（调度层转独立 user 附件消息），content 文本绝不内联
+                    return {
+                        content: `🖼 [read_image] 已读取图片 ${args.path}（${mime}，${st.size} 字节）。图像内容见随后的附件消息，请直接对图片进行分析/对照。`,
+                        status: 'success',
+                        images: [{ name: path.basename(absPath), mime, base64: buf.toString("base64") }],
+                    };
+                } catch (error: any) {
+                    return toolFailure(`读取图片失败 [${args.path}]: ${error.message}`);
+                }
+            },
         }
     }
 ];

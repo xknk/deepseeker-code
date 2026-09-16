@@ -53,6 +53,13 @@ export type ToolExecuteResult = {
     status: 'success' | 'failed';
     /** 失败归类（与 verifyResult.errorCategory 对齐）：syntax=调用形态错，runtime=执行期错误，permission=拒绝/越权，unknown=未分类 */
     errorCategory?: 'syntax' | 'runtime' | 'permission' | 'unknown';
+    /**
+     * ★ 视觉读取（read_image）：随结果附带的图像，调度层在其后注入一条独立 user 消息承载
+     *  （OpenAI 兼容端点不接受 tool role 携带 image part——直接塞 tool 消息会 400）。
+     *  base64 只存此字段，content 文本绝不内联（base64 三不进红线：不进 token 估算/索引扫描/摘要批次）。
+     *  生命周期与 image_url parts 同规：vision 关闸折叠、跨 run 衰减折叠、估算按张计价。
+     */
+    images?: Array<{ name?: string; mime: string; base64: string }>;
 };
 
 /**

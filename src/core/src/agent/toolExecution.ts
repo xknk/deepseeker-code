@@ -76,6 +76,8 @@ export type ToolCallOutcome = {
     ok: boolean;
     aborted?: boolean;
     terminal?: { kind: 'exit_plan_mode' | 'enter_plan_mode'; plan?: string; reason?: string };
+    /** ★ read_image 附带图像（base64 只在此中转，不进 resultForModel 文本）——调度层注入 user 附件消息 */
+    imageAttachments?: ToolExecuteResult['images'];
 };
 
 /**
@@ -183,6 +185,9 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     };
     // ★ PostToolUse hook 改写的模型视图结果（在 outputFilter 之后套用；用户视图 resultForUser 不动）
     let postHookOverride: string | undefined;
+    // ★ 视觉读取：工具结果附带的 images（read_image）——不在 result 文本里（base64 三不进），
+    //   由调度层在本波工具 flush 完后组装成独立 user 附件消息（tool role 携带 image part 会被端点 400）。
+    let imageAttachments: ToolExecuteResult['images'];
     if (parseFailed) {
         failResult(`参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`, 'syntax');
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: result } });
@@ -354,6 +359,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                     : await collectToolResult(execRet, (chunk) => toolCtx.emitProgress?.(chunk), signal);
                 result = collected.content;
                 resultStatus = collected.status;
+                imageAttachments = collected.images;
                 if (collected.status === 'failed') errorCategory = collected.errorCategory ?? 'runtime';
                 // verifyResult 判定：FAILED 时置结构化失败并前置警告（防模型对报错产生"成功"幻觉）。
                 //   ★ #8b：ok 不再依赖「【系统判定」文案前缀——状态由 verdict 直接驱动，文案仅保留提示职责。
@@ -433,5 +439,5 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         console.log(`✏️ [Post-hook] [${calledName}] 模型视图结果已被 hook 改写`);
         resultForModel = truncateToolResult(postHookOverride, matchedTool?.function?.maxOutputCharacters);
     }
-    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok };
+    return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok, imageAttachments };
 };

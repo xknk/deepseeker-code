@@ -125,14 +125,36 @@ const restoreWsEnv = (prev: string | undefined): void => {
 /**
  * 真实跑一个任务：handleUnifiedChat 全管线 + 自动审批宿主 + trace 计量。
  * 工作区定向与 VSCode 宿主同款：运行期重设 WORKSPACE_ROOT（实时读）+ chdir。
+ * extension=true（路线 #10④ 扩展面任务）：额外物化 extensionFixture——全局文件写入沙盒 dataDir
+ * （全局 hooks/skills/MCP 的加载根，${evalWs} 展开为工作区绝对路径），项目文件已在工作区；
+ * 引擎以「项目信任」模式重启（includeProject:true）。跑完三重回滚防跨任务污染：
+ * dispose 引擎 → agentTools 长度快照 splice（MCP dispatcher 等运行期追加不外溢）→ 删全局文件。
  */
-const runOneTask = async (task: EvalTask): Promise<TaskResult> => {
+const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult> => {
     const ws = await fs.mkdtemp(path.join(os.tmpdir(), `dsc-eval-ws-${task.id}-`));
     await materialize(ws, task.fixture);
+    if (extension) await materialize(ws, task.extensionFixture?.project ?? {});
+    const globalWritten: string[] = [];
+    let taskDispose: (() => void) | undefined;
+    let toolsSnapshotLen = -1;
+    // ★ 工作区定向必须在扩展引擎 init 之前：项目级 loader（hooks/skills）读的是 process.cwd()
+    //   下的 .deepseeker-code/——先 chdir 再 initEngine(includeProject:true) 才能加载到任务工作区的项目配置。
     const prevRoot = process.env.WORKSPACE_ROOT;
     const prevCwd = process.cwd();
     process.env.WORKSPACE_ROOT = ws;
     process.chdir(ws);
+    if (extension) {
+        const dataDir = process.env.DEEPSEEKER_CODE_DATA_DIR!;
+        for (const [rel, content] of Object.entries(task.extensionFixture?.global ?? {})) {
+            const abs = path.join(dataDir, rel);
+            await fs.mkdir(path.dirname(abs), { recursive: true });
+            await fs.writeFile(abs, content.split('${evalWs}').join(ws.replace(/\\/g, '/')), 'utf-8');
+            globalWritten.push(abs);
+        }
+        const tools = (await import('@/tool/index.ts')).agentTools;
+        toolsSnapshotLen = tools.length;
+        taskDispose = await initEngine(tools, { includeProject: true });
+    }
 
     const sessionId = `eval-${task.id}-${Date.now().toString(36)}`;
     const agentEvents: any[] = [];   // 只留 round.start / tool.start / final（delta 类噪音不入内存）
@@ -169,6 +191,13 @@ const runOneTask = async (task: EvalTask): Promise<TaskResult> => {
         clearTimeout(timer);
         restoreWsEnv(prevRoot);
         process.chdir(prevCwd);
+        if (extension) {
+            taskDispose?.();
+            if (toolsSnapshotLen >= 0) {
+                (await import('@/tool/index.ts')).agentTools.splice(toolsSnapshotLen);
+            }
+            for (const f of globalWritten) await fs.rm(f, { force: true }).catch(() => { });
+        }
     }
 
     const final = agentEvents.find((e) => e?.type === 'final');
@@ -288,10 +317,21 @@ try {
 
 const rows: TaskResult[] = [];
 try {
-    for (let i = 0; i < selected.length; i++) {
-        const t = selected[i];
+    // 标准任务先行（共享引擎、工具表恒定——既有基线的可比性不被扩展面任务扰动）；
+    // 扩展面任务（extensionFixture 声明者）排后、逐任务重启引擎（洁净水别的反向补课，路线 #10④）。
+    const standardTasks = selected.filter((t) => !t.extensionFixture);
+    const extensionTasks = selected.filter((t) => t.extensionFixture);
+    for (let i = 0; i < standardTasks.length; i++) {
+        const t = standardTasks[i];
         console.log(`\n▶ [${i + 1}/${selected.length}] ${t.id} — ${t.name}`);
         const row = await runOneTask(t);
+        rows.push(row);
+        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
+    }
+    for (let i = 0; i < extensionTasks.length; i++) {
+        const t = extensionTasks[i];
+        console.log(`\n▶ [扩展面 ${i + 1}/${extensionTasks.length}] ${t.id} — ${t.name}`);
+        const row = await runOneTask(t, true);
         rows.push(row);
         console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
     }

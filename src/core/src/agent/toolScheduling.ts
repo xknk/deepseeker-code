@@ -12,8 +12,9 @@
  */
 import type OpenAI from "openai";
 import { AgentEvent } from "./type.ts";
-import { processToolCall, ToolCallContext } from "./toolExecution.ts";
+import { processToolCall, ToolCallContext, ToolCallOutcome } from "./toolExecution.ts";
 import { appendMessage } from "@/session/transcript.ts";
+import { buildImageFollowUpParts } from "@/session/contentParts.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
 import { checkPermission } from "@/tool/permissions.ts";
@@ -42,6 +43,10 @@ export const scheduleToolCalls = async function* (
 ): AsyncGenerator<AgentEvent, ScheduleResult> {
     const { sessionId, signal, rawTools } = ctx;
     let abortedDuringTools = false;
+    // ★ read_image 图像收集：本波全部工具 flush 完后统一注入一条 user 附件消息。不能在工具 result
+    //   flush 时立刻插——OpenAI 兼容端点要求 tool 结果紧随 assistant(tool_calls)，中间夹 user 消息会 400；
+    //   注入点必须在 while 循环外（所有 tool 消息落定之后）。
+    const pendingImages: NonNullable<ToolCallOutcome['imageAttachments']> = [];
     // ★ 终结类工具（enter/exit_plan_mode）拦截返回前，为本条 assistant 消息中【其后】的并行 tool_call
     //   补占位 tool result，避免留下孤儿 tool_call_id——否则会话恢复重建上下文时 API 因配对缺失返回 400。
     //   （修复前依赖「终结工具必单独调用/排在末位」这一模型未保证的前提。）
@@ -116,6 +121,7 @@ export const scheduleToolCalls = async function* (
                 yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
                 message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
                 await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
                 if (oc.aborted) abortedDuringTools = true;
             }
         } else {
@@ -142,9 +148,17 @@ export const scheduleToolCalls = async function* (
             yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
             message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
             await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+            if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
             if (oc.aborted) abortedDuringTools = true;
             idx++;
         }
+    }
+    // ★ read_image 跟随消息注入：本波工具全部落定后追加（含落盘 transcript，跨 run/压缩/重建视图全兼容——
+    //   vision 关闸折叠、衰减折叠、按张计价等既有闸门按 parts 数组通用处理）。中止时跳过（主循环即将收尾）。
+    if (!abortedDuringTools && pendingImages.length > 0) {
+        const parts = buildImageFollowUpParts(pendingImages) as any;
+        message.push({ role: 'user', content: parts });
+        await appendMessage({ sessionId, role: 'user', content: parts });
     }
     // 主动停止：剩余已补占位，主循环据此 yield final(已中止)；否则本轮完成，继续下一轮推理
     if (abortedDuringTools) return { kind: 'aborted' };

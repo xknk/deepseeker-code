@@ -43,3 +43,14 @@ test('任务 id 唯一且 kebab-case（基线对齐主键）', () => {
     assert.equal(new Set(ids).size, ids.length, 'id 重复');
     for (const id of ids) assert.match(id, /^[a-z0-9]+(-[a-z0-9]+)*$/, `${id} 不是 kebab-case`);
 });
+
+test('引用项目级配置（.deepseeker-code/）的任务必须声明 extensionFixture（路线 #10④）', () => {
+    // 洁净室标准阶段 includeProject:false 不加载项目配置——把 .deepseeker-code/ 文件放进普通 fixture
+    // 的任务会静默跑在「扩展面不存在」的环境里（checker 报行为缺失，实为配置未加载）。
+    for (const t of evalTasks) {
+        const projectFiles = Object.keys(t.fixture).filter((k) => k.includes('.deepseeker-code'));
+        if (projectFiles.length > 0) {
+            assert.ok(t.extensionFixture, `${t.id} 在 fixture 里放了项目级配置 [${projectFiles.join(', ')}] 却未声明 extensionFixture——洁净室不会加载它，请移入 extensionFixture.project`);
+        }
+    }
+});

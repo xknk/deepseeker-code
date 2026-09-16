@@ -22,6 +22,11 @@ import { task as constantEnum } from "./constant-enum.ts";
 import { task as paginationImplement } from "./pagination-implement.ts";
 import { task as csvReport } from "./csv-report.ts";
 import { task as retryWrapper } from "./retry-wrapper.ts";
+import { task as hooksMarker } from "./hooks-marker.ts";
+import { task as hooksGuard } from "./hooks-guard.ts";
+import { task as skillsRelease } from "./skills-release.ts";
+import { task as subagentCount } from "./subagent-count.ts";
+import { task as mcpDispatch } from "./mcp-dispatch.ts";
 
 export const evalTasks: EvalTask[] = [
     discountBugfix,
@@ -40,4 +45,10 @@ export const evalTasks: EvalTask[] = [
     paginationImplement,
     csvReport,
     retryWrapper,
+    // ↓ 扩展面行为级任务（路线 #10④）：声明 extensionFixture，排标准任务之后逐任务重启引擎跑
+    hooksMarker,
+    hooksGuard,
+    skillsRelease,
+    subagentCount,
+    mcpDispatch,
 ];
