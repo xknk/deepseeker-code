@@ -2,7 +2,8 @@
  * @file tests/memory.test.ts
  * @description 持久记忆系统单测（memory/loader.ts + registry.ts + inject.ts + tool/registry/memory.ts）。
  *  覆盖：loader 校验矩阵与 project>global 覆盖、registry 索引格式逐字节钉死（软契约：格式漂移=破前缀缓存）、
- *  inject fence 幂等与会话首锁、memory_save/read/list/delete 校验/落盘/注册表同步与往返保真。
+ *  inject fence 幂等与会话首锁、memory_save/read/list/delete 校验/落盘/注册表同步与往返保真、
+ *  生命周期治理三件套（#9：delete 升 MUTATION / 条数与索引字节上限 / last-used 使用画像）。
  *
  *  隔离（同 usage-log.test.ts 惯例）：DEEPSEEK_CODE_DATA_DIR + chdir 都必须在动态 import 前就位——
  *  GLOBAL_MEMORY_DIR 与 project 源目录都是模块加载期常量。真实 ~/.deepseeker-code 与仓库 cwd 全程不被触碰。
@@ -23,7 +24,9 @@ process.chdir(TMP_ROOT); // project 源 = <TMP_ROOT>/.deepseeker-code/memory
 const { GLOBAL_MEMORY_DIR, loadMemories, initMemories } = await import("@/memory/loader.ts");
 const { registerMemory, getMemory, unregisterMemory, clearMemories, getMemoryIndex } = await import("@/memory/registry.ts");
 const { injectMemory } = await import("@/memory/inject.ts");
-const { memoryTools } = await import("@/tool/registry/memory.ts");
+const { getMemoryUsage } = await import("@/memory/usage.ts");
+const { memoryTools, MEMORY_LIMITS } = await import("@/tool/registry/memory.ts");
+const { ToolSafetyLevel } = await import("@/tool/type.ts");
 
 const PROJECT_DIR = path.join(TMP_ROOT, ".deepseeker-code", "memory");
 
@@ -313,5 +316,78 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
         assert.equal(m.type, "feedback");
         assert.equal(m.source, "project");
         assert.equal(m.file, path.join(PROJECT_DIR, "roundtrip.md"));
+    });
+});
+
+describe("记忆生命周期治理（#9，2026-09-16）", () => {
+    it("① memory_delete 升 MUTATION 审批：safetyLevel/requireApproval/primaryArg 三声明齐备", () => {
+        const del = (memoryTools as any[]).find((x) => x.function.name === "memory_delete")!;
+        assert.equal(del.function.safetyLevel, ToolSafetyLevel.MUTATION, "删除跨会话记忆必须人工审批");
+        assert.equal(del.function.primaryArg, "name", "allow-always 落精确名作用域规则");
+        assert.equal(del.function.autoApproval, undefined, "未声明分类器作用域 → 恒转人工（fail-closed）");
+        const detail = (del.function.requireApproval as (a: any) => string)({ name: "some-mem" });
+        assert.match(detail, /some-mem/);
+        // 其余三工具仍 SAFE（save 免审降低摩擦；read/list 纯读）
+        for (const n of ["memory_save", "memory_read", "memory_list"]) {
+            const t = (memoryTools as any[]).find((x) => x.function.name === n)!;
+            assert.equal(t.function.safetyLevel, ToolSafetyLevel.SAFE, `${n} 保持 SAFE`);
+        }
+    });
+
+    it("② 条数上限：新增到顶拒绝并引导治理；覆盖不占名额、删除后可再存", async () => {
+        await resetState();
+        const orig = MEMORY_LIMITS.maxCount;
+        MEMORY_LIMITS.maxCount = 3;
+        try {
+            for (const n of ["m1", "m2", "m3"]) {
+                assert.ok(typeof await save({ name: n, description: `第${n}`, body: "b" }) === "string", n);
+            }
+            const over = await save({ name: "m4", description: "超员", body: "b" });
+            assert.ok(typeof over !== "string" && over.status === "failed" && /条数已达上限 3/.test(over.content), typeof over !== "string" ? over.content : String(over));
+            assert.ok(/memory_list|memory_delete/.test((over as any).content), "拒绝文案引导治理路径");
+            // 覆盖同名不占新名额
+            assert.ok(typeof await save({ name: "m3", description: "覆盖版", body: "b2" }) === "string");
+            // 删除一个后名额释放
+            await memDelete({ name: "m1" });
+            assert.ok(typeof await save({ name: "m4", description: "补位", body: "b" }) === "string");
+        } finally {
+            MEMORY_LIMITS.maxCount = orig;
+        }
+    });
+
+    it("② 索引字节上限：净增超限拒绝；净缩覆盖恒放行（只防增长不阻收缩）", async () => {
+        await resetState();
+        const orig = MEMORY_LIMITS.maxIndexBytes;
+        MEMORY_LIMITS.maxIndexBytes = 120;
+        try {
+            assert.ok(typeof await save({ name: "small", description: "短", body: "b" }) === "string");
+            // 200 字符 CJK description ≈ 600+ 字节索引行 → 超 120 字节闸
+            const over = await save({ name: "big", description: "长".repeat(200), body: "b" });
+            assert.ok(typeof over !== "string" && over.status === "failed" && /字节上限/.test(over.content), typeof over !== "string" ? over.content : String(over));
+            assert.equal(getMemory("big"), undefined, "拒绝项不进注册表");
+            // 净缩覆盖：把已有条目 description 改短——delta<0，即便仍高于上限也放行（以缩治胀不被阻）
+            MEMORY_LIMITS.maxIndexBytes = 1;
+            assert.ok(typeof await save({ name: "small", description: "a", body: "b2" }) === "string");
+            assert.equal(getMemory("small")!.description, "a");
+        } finally {
+            MEMORY_LIMITS.maxIndexBytes = orig;
+        }
+    });
+
+    it("③ last-used：save 触碰、read 计数；.usage.json 不进注册表", async () => {
+        await resetState();
+        await save({ name: "used", description: "画像", body: "b" });
+        const afterSave = await getMemoryUsage();
+        assert.ok(afterSave["used"]?.lastUsed, "save 触碰 lastUsed（淘汰参考）");
+        assert.equal(afterSave["used"]?.reads, 0);
+        await memRead({ name: "used" });
+        await memRead({ name: "used" });
+        const afterRead = await getMemoryUsage();
+        assert.equal(afterRead["used"]?.reads, 2, "read 累计计数");
+        assert.ok(new Date(afterRead["used"]!.lastUsed) >= new Date(afterSave["used"]!.lastUsed));
+        // .usage.json 与记忆 .md 同目录，但 loader 只收 *.md——不进注册表、不占索引
+        const n = await loadMemories(true);
+        assert.equal(n, 1, "画像文件不被当作记忆加载");
+        assert.equal(getMemoryIndex(), "- **used** (reference) — 画像");
     });
 });

@@ -50,6 +50,13 @@ export const unregisterMemory = (name: string): boolean => {
 export const clearMemories = memories.clear;
 
 /**
+ * 记忆索引行格式（单一出处）：memory_list 与预算计算（tool/registry/memory.ts 的索引字节上限）
+ * 必须与此逐字节一致——格式漂移 = 破前缀缓存 / 预算失准。格式本身由 memory.test.ts 钉死。
+ */
+export const memoryIndexLine = (m: Pick<MemoryManifest, "name" | "type" | "description">): string =>
+    `- **${m.name}** (${m.type}) — ${m.description}`;
+
+/**
  * 构建注入系统提示词的「记忆索引」：每条一行（name + 类别 + 描述），按 name 排序。
  * 仅注入索引（省 token）；需要全文时模型调 memory_read。无记忆返回 null（injector 据此 no-op）。
  */
@@ -59,6 +66,6 @@ export const getMemoryIndex = (): string | null => {
     return all
         .slice()
         .sort((a, b) => a.name.localeCompare(b.name))
-        .map((m) => `- **${m.name}** (${m.type}) — ${m.description}`)
+        .map(memoryIndexLine)
         .join("\n");
 };

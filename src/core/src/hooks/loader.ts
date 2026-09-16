@@ -66,6 +66,7 @@ const slimHookContext = (ctx: any): any => {
     };
 };
 import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT, HookResult } from "./types.ts";
+import { isHookCommandApproved, approveHookCommand } from "./trust.ts";
 
 /** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
 interface RawHookRule {
@@ -90,8 +91,16 @@ interface RawHookRule {
     denyOnNonZero?: boolean;
     /** handler 抛错（hook 崩溃）时处置；默认 'allow' 放行，安全类 hook 可设 'deny' fail-closed。prompt 不消费 */
     onError?: 'deny' | 'allow';
-    /** 预留：首次执行走审批网关（MVP 暂不接入，仅校验保留） */
+    /**
+     * 首跑审批门（后续路线 #9，2026-09-16 接线）：true = 该规则首次执行前走审批网关，
+     * 用户「allow-always」后持久化到 trusted_hooks.json 免审。缺省按来源决定——项目级
+     * command/http/agent 规则默认开（clone 未知仓库的攻击面）；全局规则默认关。
+     * ★ 只增不减：配置里的 false / 缺省不能关掉项目级默认门（fail-closed——项目配置自己
+     *   声明 false 等于恶意仓库自摘闸门），显式 true 仅用于给全局规则加门。
+     */
     requireApproval?: boolean;
+    /** 来源打标（loader 内部字段，非用户配置）：true = 本规则来自项目级 settings.json */
+    projectSource?: boolean;
 }
 
 /** 按 event 聚合的规则集合 */
@@ -120,9 +129,11 @@ const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig>
         }
         const hooksBlock = parsed?.hooks;
         if (!hooksBlock || typeof hooksBlock !== "object") continue;
-        appendValidated(merged, hooksBlock, configPath);
+        // ★ 来源打标：项目级配置（paths[1]）的规则带 projectSource —— compileRule 据此默认开首跑审批门
+        appendValidated(merged, hooksBlock, configPath, configPath === paths[1]);
         // ★ 项目级 hook 信任边界告警：其 command 以 shell 执行（等同 git hooks 信任模型）。
-        //   克隆未知仓库前应核查此文件，避免任意命令执行；完整首跑审批门见 requireApproval 字段（预留，后续接入）。
+        //   首跑审批门（下方 compileRule）会拦截项目级 command/http/agent 的首次执行；本告警仍保留——
+        //   让用户在加载期就知道有项目级 hook 存在，克隆未知仓库前可核查此文件。
         if (configPath === paths[1] && Object.keys(hooksBlock).length > 0) {
             console.warn(`⚠️【安全提示】已加载项目级 hook 配置 [${configPath}]，其 command 将以 shell 执行。仅在信任该项目时启用；克隆未知仓库前请核查该文件以防任意命令执行。`);
         }
@@ -130,8 +141,8 @@ const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig>
     return merged;
 };
 
-/** 校验单个 hooks 块，把合法规则追加进 merged */
-const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string): void => {
+/** 校验单个 hooks 块，把合法规则追加进 merged；isProject 用于来源打标（首跑审批门默认档）。 */
+const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string, isProject: boolean): void => {
     for (const [key, val] of Object.entries(hooksBlock)) {
         if (!ALL_EVENTS.includes(key as EventType)) {
             console.warn(`⚠️ [hooks] 未知事件类型 "${key}"（${src}），已跳过`);
@@ -145,7 +156,7 @@ const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string): 
         const list = (merged[event] ??= []);
         val.forEach((item, i) => {
             const rule = validateRule(item, event, src, i);
-            if (rule) list.push(rule);
+            if (rule) list.push(isProject ? { ...rule, projectSource: true } : rule);
         });
     }
 };
@@ -291,13 +302,67 @@ export const parseAgentDecision = (output: string): { deny: boolean; reason?: st
     return { deny: false, explicit: false };
 };
 
+/**
+ * ★ 首跑审批门（后续路线 #9，2026-09-16 接线，替代「MVP 暂不接入」预留）：
+ *  项目级 command/http/agent 规则默认启用（或 requireApproval:true 显式启用）——项目 settings.json
+ *  的命令等同 git hooks 信任模型，加载期一行告警拦不住任意命令执行，这里把审批链接上最后一根线。
+ *  - 已持久信任（trusted_hooks.json，allow-always 落盘，键=命令/URL/任务原串）→ 直通；
+ *  - 有审批通道（ctx.toolContext.requestApproval，Pre/PostToolUse 事件）→ 三态审批：
+ *    allow-always 落盘记住、allow-once 仅本次、deny 跳过该 hook（跳过 ≠ deny 工具调用——
+ *    hook 没跑就没有决策，用户拒绝的是「这条命令」而非该工具本身）；
+ *  - 无审批通道（UserPromptSubmit/SessionStart 等非工具事件、headless serve 未注入审批）→
+ *    fail-closed 跳过并告警（可先在 CLI 工具事件触发时批准「始终允许」，或手动加入 trusted_hooks.json）；
+ *  - 审批通道抛错 → 同跳过（hook 失败不得击垮主流程的既有铁律）。
+ *  prompt 型不接线：纯静态文本注入无执行面，其下游风险由工具审批体系兜底。
+ */
+let gateSeq = 0;
+const firstRunGate = (raw: RawHookRule, ident: string, run: HookRule["run"]): HookRule["run"] => {
+    const gated = raw.requireApproval === true || raw.projectSource === true;
+    if (!gated) return run;
+    return async (ctx: any) => {
+        if (await isHookCommandApproved(ident)) return run(ctx);
+        const req = ctx?.toolContext?.requestApproval;
+        if (typeof req !== "function") {
+            console.warn(`⏭️ [hooks] ${raw.type ?? "command"} hook 首跑待审批且当前事件无审批通道，已跳过：${ident.slice(0, 120)}（可在 CLI 工具事件触发时批准「始终允许」，或手动加入 ~/.deepseeker-code/trusted_hooks.json）`);
+            return { deny: false };
+        }
+        const kindLabel = raw.projectSource ? "项目级" : "全局";
+        const detail = raw.type === "http"
+            ? `${kindLabel} hook 首次运行：请求将上下文 POST 到外部 URL\n${ident}`
+            : raw.type === "agent"
+                ? `${kindLabel} hook 首次运行：派子 agent 评判工具调用\n任务：${ident}`
+                : `${kindLabel} hook 首次运行：执行 shell 命令\n${ident}`;
+        let decision: any;
+        try {
+            decision = await req(detail, {
+                toolName: `hook:${raw.type ?? "command"}`,
+                toolCallId: `hook-${++gateSeq}`,
+                sessionId: ctx?.toolContext?.sessionId ?? "",
+            });
+        } catch (e: any) {
+            console.warn(`⏭️ [hooks] 首跑审批通道异常，已跳过该 hook: ${e?.message ?? e}`);
+            return { deny: false };
+        }
+        if (decision === "deny") {
+            console.warn(`⏭️ [hooks] 首跑审批被拒绝，本次跳过该 hook：${ident.slice(0, 120)}`);
+            return { deny: false };
+        }
+        if (decision === "allow-always") await approveHookCommand(ident);
+        return run(ctx);
+    };
+};
+
 /** 把校验后的规则编译为 HookRule（按 type 分派到 shellExecutor / httpExecutor / prompt 注入 / agent 子 agent）。导出供单测覆盖类型分支。 */
 export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
     // 安全默认：PreToolUse hook 异常（非零/超时/非 2xx）则拦截；其余事件默认不拦截
     const denyOnNonZero = raw.denyOnNonZero ?? (event === "PreToolUse");
     // ★ 梯度超时：用户显式 timeoutMs 优先，否则按事件类型取默认（Start/UserPrompt=10s，工具/Stop=30s，SessionEnd=60s）
     const timeoutMs = raw.timeoutMs ?? DEFAULT_TIMEOUT_BY_EVENT[event];
-    const base = { event, matcher: raw.matcher, source: "config" as const, onError: raw.onError };
+    const base = {
+        event, matcher: raw.matcher, source: "config" as const, onError: raw.onError,
+        // #9 可观测：首跑审批门是否启用（/hooks 展示）
+        firstRunApproval: raw.requireApproval === true || raw.projectSource === true,
+    };
 
     // —— prompt：经 contextAdditions 注入文本（不 deny；仅 UserPromptSubmit，validateRule 已保证）——
     if (raw.type === 'prompt') {
@@ -310,7 +375,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
         const task = raw.task!;
         return {
             ...base,
-            run: async (ctx: any) => {
+            run: firstRunGate(raw, task, async (ctx: any) => {
                 const tc = ctx?.toolContext;
                 // ★ 深度门控：仅主 agent（depth=0）触发。子 agent（depth>0）的工具调用跳过本 hook——
                 //   否则子 agent 的工具调用会再触发 PreToolUse → 再 spawn 子 agent → 树状 fan-out 爆炸。
@@ -342,7 +407,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                 return denyOnNonZero
                     ? { deny: true, reason: "hook agent 未输出明确决策（DENY/ALLOW），按 fail-closed 拒绝" }
                     : { deny: false };
-            },
+            }),
         };
     }
 
@@ -351,7 +416,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
         const url = raw.url!;
         return {
             ...base,
-            run: async (ctx: any) => {
+            run: firstRunGate(raw, url, async (ctx: any) => {
                 const res = await executeHttpHook({
                     url,
                     method: raw.method,
@@ -386,7 +451,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                     return { deny: true, reason: `hook http 状态码 ${res.status}` };
                 }
                 return { deny: false };
-            },
+            }),
         };
     }
 
@@ -394,7 +459,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
     const command = raw.command!;
     return {
         ...base,
-        run: async (ctx: any) => {
+        run: firstRunGate(raw, command, async (ctx: any) => {
             const res = await executeHookCommand({
                 command,
                 cwd: ctx?.cwd,
@@ -418,7 +483,7 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                 if (out) return out;
             }
             return { deny: false };
-        },
+        }),
     };
 };
 

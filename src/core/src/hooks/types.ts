@@ -167,6 +167,11 @@ export interface HookRule {
      *  - 'deny'：fail-closed，安全类 hook（高危命令检测等）显式声明，自身异常即拒绝。
      */
     onError?: 'deny' | 'allow';
+    /**
+     * 首跑审批门是否启用（#9，2026-09-16）：项目级 command/http/agent 规则默认启用，
+     * 或 requireApproval:true 显式启用。仅可观测（listHooks 展示），运行语义见 loader.firstRunGate。
+     */
+    firstRunApproval?: boolean;
 }
 
 /** 可拦截事件集合（deny 语义仅对这些事件生效） */

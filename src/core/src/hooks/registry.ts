@@ -80,14 +80,14 @@ export const replaceDeclarativeHooks = (rs: HookRule[]): void => {
  * matcher 序列化：string 原样 / RegExp → /source/flags / 函数 → [fn]。
  * 不含 run 句柄（不可序列化）。
  */
-export const listHooks = (): { event: string; matcher: string; source: string; onError?: string }[] => {
+export const listHooks = (): { event: string; matcher: string; source: string; onError?: string; firstRunApproval?: boolean }[] => {
     const strMatcher = (m: HookMatcher | undefined): string => {
         if (m === undefined) return '*';
         if (typeof m === 'string') return m;
         if (m instanceof RegExp) return `${m.toString()}`;
         return '[fn]';
     };
-    return rules.map(r => ({ event: r.event, matcher: strMatcher(r.matcher), source: r.source, onError: r.onError }));
+    return rules.map(r => ({ event: r.event, matcher: strMatcher(r.matcher), source: r.source, onError: r.onError, firstRunApproval: (r as any).firstRunApproval === true ? true : undefined }));
 };
 
 /** dispatch 返回：deny/reason（拦截语义）+ contextAdditions（prompt-type hook 注入文本，仅 UserPromptSubmit 消费）
