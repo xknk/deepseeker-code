@@ -56,9 +56,12 @@ export interface QuestionRequest {
 /**
  * 用户的选择回传：selected 为被选选项的 label 数组（单选时长度 1；用户取消时为空数组）。
  * 用 label 而非下标回传——模型用人类可读 label 提问，回传 label 语义自洽。
+ * freeText 为用户在「Other」自由输入档键入的原文（如粘贴 token/路径）：与选项互斥时 selected 为空，
+ * 多选下可同时勾选选项并补充文字；两者皆空 = 取消。
  */
 export interface QuestionAnswer {
     selected: string[];
+    freeText?: string;
 }
 
 /**

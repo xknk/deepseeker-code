@@ -1112,6 +1112,36 @@ body {
   font-size: 10.5px;
 }
 
+/* 提问 Other 自由输入档：行内 label + 输入框（点击行即聚焦） */
+.q-other {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: text;
+}
+
+.q-other .q-other-label {
+  flex: none;
+  white-space: nowrap;
+}
+
+#q-other-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--input-bg);
+  color: var(--input-fg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+#q-other-input:focus {
+  border-color: var(--focus);
+}
+
 #plan-edit {
   width: 100%;
   min-height: 180px;

@@ -100,6 +100,20 @@ function submitQuestionMulti() {
   const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
   sendQuestion({ selected: state.questionPicked.map((i) => values[i] ?? String(options[i] ?? "")) });
 }
+/** Other 自由输入提交：输入框有文本才提交（多选时已勾选项随 freeText 一并回传），否则聚焦回输入框。 */
+function submitQuestionFree() {
+  const req = state.pendingQuestion;
+  if (!req) return;
+  const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
+  const multi = !!(req.multiSelect ?? req.multiple ?? false);
+  const input = $("#q-other-input");
+  const text = (input?.value ?? "").trim();
+  if (!text) { input?.focus(); return; }
+  const values = options.map((o) => (typeof o === "string" ? o : o.value ?? o.label ?? ""));
+  const selected = multi ? state.questionPicked.map((i) => values[i] ?? String(options[i] ?? "")) : [];
+  // ★ 协议 QuestionAnswer.freeText（host/type.ts）：selected 与 freeText 一起回传，ask.ts 拼进工具结果
+  sendQuestion({ selected, freeText: text });
+}
 function toggleQuestionPick(i) {
   const idx = state.questionPicked.indexOf(i);
   if (idx >= 0) state.questionPicked.splice(idx, 1);
@@ -107,7 +121,8 @@ function toggleQuestionPick(i) {
   renderQuestion();
 }
 let questionKeydownBound = false;
-/** 注册一次提问键盘导航：↑↓ 移动高亮、Space 多选勾选、Enter 提交、Esc 取消（空 selected）。 */
+/** 注册一次提问键盘导航：↑↓ 移动高亮（含 Other 自由输入行）、Space 多选勾选、Enter 提交、Esc 取消。
+ *  焦点在 Other 输入框内时按键归输入框自理：Enter 提交 freeText、Esc 取消提问，方向键移文本光标。 */
 function bindQuestionKeydown() {
   if (questionKeydownBound) return;
   questionKeydownBound = true;
@@ -116,7 +131,12 @@ function bindQuestionKeydown() {
     const req = state.pendingQuestion;
     const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
     const multi = !!(req.multiSelect ?? req.multiple ?? false);
-    const n = options.length || 1;
+    if (e.target && e.target.id === "q-other-input") {
+      if (e.key === "Enter") { e.preventDefault(); submitQuestionFree(); }
+      else if (e.key === "Escape") { e.preventDefault(); sendQuestion({ selected: [] }); }
+      return;
+    }
+    const n = options.length + 1; // 末行 = Other 自由输入档
     if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
       state.questionSel = e.key === "ArrowUp"
@@ -125,10 +145,12 @@ function bindQuestionKeydown() {
       renderQuestion();
     } else if (e.key === " " && multi) {
       e.preventDefault();
-      toggleQuestionPick(state.questionSel);
+      if (state.questionSel >= options.length) $("#q-other-input")?.focus();
+      else toggleQuestionPick(state.questionSel);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (multi) submitQuestionMulti();
+      if (state.questionSel >= options.length) submitQuestionFree();
+      else if (multi) submitQuestionMulti();
       else submitQuestionOne(state.questionSel);
     } else if (e.key === "Escape") {
       e.preventDefault();
@@ -147,14 +169,14 @@ function renderQuestion() {
   const prompt = String(req.prompt ?? req.question ?? req.message ?? "请选择：");
   const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
   const multi = !!(req.multiSelect ?? req.multiple ?? false);
-  const sel = Math.min(state.questionSel ?? 0, (options.length || 1) - 1);
+  const sel = Math.min(state.questionSel ?? 0, options.length); // options.length = Other 自由输入行
   anchor.innerHTML = `
     <div class="modal question">
       <div class="modal-title">❓ 请选择</div>
       <div class="modal-detail q-prompt">${escapeHtml(prompt)}</div>
       <div class="modal-options"></div>
       <div class="modal-actions"><button class="btn ${multi ? "ok" : "info"}" id="q-ok">${multi ? "✅ 确定" : "✋ 取消"}</button></div>
-      <div class="modal-hint">${multi ? "↑↓ 选择 · Space 勾选 · Enter 确定 · Esc 取消" : "↑↓ 选择 · Enter 确认 · Esc 取消"}</div>
+      <div class="modal-hint">${multi ? "↑↓ 选择 · Space 勾选 · Enter 确定 · Esc 取消 · Other 可自由输入" : "↑↓ 选择 · Enter 确认 · Esc 取消 · Other 可自由输入"}</div>
     </div>`;
   const optBox = anchor.querySelector(".modal-options");
   options.forEach((opt, i) => {
@@ -171,12 +193,22 @@ function renderQuestion() {
     });
     optBox.appendChild(btn);
   });
+  // ★ Other 自由输入档（对标 Claude Code）：点击选中并聚焦输入框；光标落此行时 renderQuestion 末尾自动聚焦
+  const otherRow = document.createElement("div");
+  otherRow.className = ["btn", "opt", "q-other", sel >= options.length && "selected"].filter(Boolean).join(" ");
+  otherRow.innerHTML = `<span class="q-other-label">✎ Other</span><input id="q-other-input" type="text" placeholder="自由输入（粘贴 token / 路径等），Enter 提交" />`;
+  otherRow.addEventListener("click", () => {
+    state.questionSel = options.length;
+    renderQuestion();
+  });
+  optBox.appendChild(otherRow);
   anchor.querySelector("#q-ok")?.addEventListener("click", () => {
     // 多选 = 确定（提交已选）；单选 = 取消（空 selected，ask.ts 判定用户取消）。
     if (multi) submitQuestionMulti();
     else sendQuestion({ selected: [] });
   });
   bindQuestionKeydown();
+  if (sel >= options.length) $("#q-other-input")?.focus();
 }
 
 // ———————— 模型选择器（面板内：与提问条同一套 modal + ↑↓/Enter/Esc + 点击交互） ————————
