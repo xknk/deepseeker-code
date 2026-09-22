@@ -30,7 +30,7 @@ const UsageFooter = ({ usage }: { usage: NonNullable<TraceBase['usage']> }): Rea
     );
 };
 
-type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" }>; wrapW: number; streamTail?: number };
+type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" | "compact" }>; wrapW: number; streamTail?: number };
 
 /** 列表项前缀检测：`- ` / `* ` / `• ` / `1. ` 等。 */
 const listPrefix = (line: string): { bullet: string; rest: string } | null => {
@@ -211,6 +211,17 @@ export const MessageBlock = ({ row, wrapW, streamTail }: Props): React.ReactElem
         return (
             <Box marginTop={0.25} marginBottom={0.25}>
                 <Text color={THEME.grayDim}>{"* "}{row.text}</Text>
+            </Box>
+        );
+    }
+
+    if (row.kind === "compact") {
+        // 压缩完成行（对标 CC「Compacted chat」）：淡色斜体，无前缀符号
+        const freed = Math.max(0, (row.tokensBefore || 0) - (row.tokensAfter || 0));
+        const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
+        return (
+            <Box marginTop={0.25} marginBottom={0.25}>
+                <Text italic color={THEME.grayDim}>已压缩上下文 · {row.trigger === "manual" ? "手动" : "自动"} · 释放 {freedText} tokens</Text>
             </Box>
         );
     }

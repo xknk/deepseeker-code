@@ -151,6 +151,15 @@ switch (evt.type) {
         addInfo(`🖼 模型 ${String(evt.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
         break;
       }
+      case "compact.done": {
+        // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行
+        closeStreaming();
+        const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
+        const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
+        const trigger = evt.trigger === "manual" ? "手动" : "自动";
+        appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens` });
+        break;
+      }
       default:
         break;
     }

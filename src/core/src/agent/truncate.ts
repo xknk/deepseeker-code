@@ -686,6 +686,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
     let keep = event.keepRecentUnits;
     let lastSize = estReal(event.messageArr); // 校准后的真实口径 token 总量
+    const preCompactSize = Math.round(lastSize); // 压缩前快照（compact.done 的 tokensBefore；lastSize 循环内会滚动更新）
     const startTime = performance.now();
     let round = 0
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
@@ -814,6 +815,21 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
 
     // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
     await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
+
+    // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 且确有释放时发 UI 事件（免费衰减早退路径不动
+    //   摘要槽、走不到这里）。子 agent（depth>0）不发——其压缩是父上下文治理的内部细节，不进用户消息流。
+    if (event.onUIEvent && event.depth === 0) {
+        const afterSize = Math.round(estReal(event.messageArr));
+        if (preCompactSize - afterSize > 0) {
+            event.onUIEvent({
+                type: 'compact.done',
+                tokensBefore: preCompactSize,
+                tokensAfter: afterSize,
+                durationMs: Math.round(performance.now() - startTime),
+                trigger: 'auto',
+            });
+        }
+    }
 
     // ★ 兜底阈值派生自 compactRatio：原硬编码 0.9 与可配 compactRatio 耦合——compactRatio 调高时
     //   兜底反而比压缩目标还低、反向更早抛错。现取 compactRatio + 0.13 并封顶 0.95，保证兜底始终

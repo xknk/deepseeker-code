@@ -31,7 +31,9 @@ export type ChatRow =
         progress?: string;
     }
     /** 任务清单行（内联于消息流）：active=true 时留动态区随状态更新；新轮开始冻结为 Static，留在原位（新消息上方）。 */
-    | { id: number; kind: "todos"; todos: Todo[]; active?: boolean };
+    | { id: number; kind: "todos"; todos: Todo[]; active?: boolean }
+    /** 压缩完成行（对标 CC「Compacted chat」）：淡色斜体插消息流；UI 事件实时行，转录不落盘故不参与回放重建。 */
+    | { id: number; kind: "compact"; tokensBefore: number; tokensAfter: number; trigger: "auto" | "manual" };
 
 /**
  * 从转录行重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。

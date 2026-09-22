@@ -185,6 +185,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         lastRealPromptTokens,
                         lastCachedTokens,
                         toolsTokens,
+                        onUIEvent: options.onUIEvent,
                     }
 
                 );
@@ -214,6 +215,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 userDecisionSource, llmDecisionSource, signal,
                 cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
                 events, keepRecentUnits, compactRatio, modelWindow, toolsTokens,
+                onUIEvent: options.onUIEvent,
             });
             if (infResult.kind === 'aborted') {
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent

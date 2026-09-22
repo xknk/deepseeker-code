@@ -172,6 +172,9 @@ break;
 case "info":
       wrap.innerHTML = `<div class="info-line">› ${escapeHtml(row.text)}</div>`;
       break;
+    case "compact":
+      wrap.innerHTML = `<div class="compact-line">${escapeHtml(row.text)}</div>`;
+      break;
     case "system":
       wrap.innerHTML = `<div class="system-line">! ${escapeHtml(row.text)}</div>`;
       break;

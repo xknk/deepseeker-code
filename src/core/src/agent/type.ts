@@ -116,6 +116,9 @@ export interface ensureOptions  {
      *  API 真实 prompt_tokens 含此段而 estimateTokens(messageArr) 不含——压缩阈值须显式加上，
      *  否则校准 EMA 被迫把它吸收成乘数（长对话后期乘数虚高 → 提前压缩 → 无谓击穿前缀缓存）。缺省 0。 */
     toolsTokens?: number,
+    /** 压缩完成 UI 事件（compact.done）出口：仅主 agent 且确有释放时发（前端消息流插「已压缩」淡色行）。
+     *  未注入（headless / 子 agent 过滤在 emit 处）则跳过，零影响。 */
+    onUIEvent?: (evt: UIEvent) => void,
 }
 
 /**

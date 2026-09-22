@@ -98,4 +98,6 @@ export type UIEvent =
     | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string }
     | { type: 'tool.denied'; toolsId: string; toolName: string }
     | { type: 'tool.progress'; toolsId?: string; toolName?: string; message: string }
-    | { type: 'todo.update'; todos: Todo[] };
+    | { type: 'todo.update'; todos: Todo[] }
+    /** 上下文压缩完成（对标 CC「Compacted chat」行）：仅主 agent（depth 0）且确有释放时发。前端在消息流插淡色一行。 */
+    | { type: 'compact.done'; tokensBefore: number; tokensAfter: number; durationMs: number; trigger: 'auto' | 'manual' };

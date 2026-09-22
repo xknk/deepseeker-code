@@ -282,6 +282,17 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }
                 break;
             }
+            case "compact.done": {
+                // 压缩显示（对标 CC「Compacted chat」行）：收尾流式行后插淡色斜体行
+                flush();
+                setRows((prev) => [...prev, {
+                    id: newRowId(), kind: "compact",
+                    tokensBefore: (obj.tokensBefore as number) ?? 0,
+                    tokensAfter: (obj.tokensAfter as number) ?? 0,
+                    trigger: (obj.trigger as "auto" | "manual") ?? "auto",
+                }]);
+                break;
+            }
             case "round.start": {
                 // 仅收尾当前流式行；不渲染轮次分割线（对齐 Claude Code：连续流，不暴露内部轮次）。
                 closeStreaming();

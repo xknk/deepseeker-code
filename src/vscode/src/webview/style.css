@@ -788,6 +788,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 压缩完成行（对标 CC「Compacted chat」）：淡色斜体，与 info 同族但无前缀符号 */
+.row-compact .compact-line {
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
 /* 轮次分割线：─ 第 N 轮 ───── */
 .row-meta {
   margin: 8px 0 4px;

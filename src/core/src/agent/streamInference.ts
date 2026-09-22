@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { Msg } from "@/session/contextCore.ts";
 import { AgentEvent, RunAgentEvents, ThinkingLevel } from "./type.ts";
-import { TraceDecisionSource } from "@/observability/type.ts";
+import { TraceDecisionSource, UIEvent } from "@/observability/type.ts";
 import { activeProvider } from "@/llm/model.ts";
 import type { ProviderUsage } from "@/llm/provider.ts";
 import { ensureFitsWindow } from "./truncate.ts";
@@ -94,6 +94,8 @@ export type StreamInferenceContext = {
     /** ★ 工具 schema 常数项（token，P2 口径修正）：真实 prompt_tokens 含 cleanedToolSchemas 段而
      *  estimateTokens(messages) 不含。llm.request 估算与校准分母都须加上，缺省 0（兼容旧调用方）。 */
     toolsTokens?: number;
+    /** 压缩完成 UI 事件出口：透传给 context_length 降级路径的 ensureFitsWindow（compact.done 行）。缺省不发。 */
+    onUIEvent?: (evt: UIEvent) => void;
 };
 
 /**
@@ -260,6 +262,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                         depth,
                         signal,
                         toolsTokens,
+                        onUIEvent: ctx.onUIEvent,
                     });
                     inferenceMessages = withNudgeTail(message, nudgeMsg);
                     compactedThisRound = true;
