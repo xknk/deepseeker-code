@@ -45,7 +45,8 @@ const ALLOWLIST = new Set([
     //（行号含 #8a 声明插入的偏移）
     "command.ts:75",
     // 用户主动中止 ≠ 工具失败（⏹️ 通知；ok 语义刻意维持现状，勿顺手改成 ❌）
-    "http.ts:123", "web.ts:622", "web.ts:668",
+    //（http.ts:123→142：wait_http_ready 工具入列与文件头注释扩写把中止分支顶到 142；196 为同语义的新增中止分支）
+    "http.ts:142", "http.ts:196", "web.ts:622", "web.ts:668",
     // recall 检索成功后的 staleness 标注（⚠️ 文件已变动提示，属信息性附注非工具失败）
     "recall.ts:63",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）

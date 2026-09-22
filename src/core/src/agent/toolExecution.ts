@@ -25,7 +25,7 @@ import path from "path";
 import { writeSidecarArchive } from "@/session/sidecar.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
-import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
 
 // ★ #8b（2026-09-16）：成败前缀嗅探通道（FAILED_PREFIXES + explicitOk）结构性退役——
 //   ok 判定唯一来源是本函数内 resultStatus 结构化跟踪：execute 返回的 ToolExecuteResult.status /
@@ -96,6 +96,7 @@ export type ToolCallContext = {
     onUIEvent?: (evt: UIEvent) => void;
     requestApproval?: RequestApprovalFn;
     requestQuestion?: RequestQuestionFn;
+    ideAction?: RequestIdeActionFn;
     keepRecentUnits: number;
     compactRatio: number;
     modelWindow: number;
@@ -114,7 +115,7 @@ export type ToolCallContext = {
  */
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const { sessionId, depth, round, startTime, llmDecisionSource, signal, rawTools, events,
-        permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion,
+        permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction,
         keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt } = ctx;
     let calledName = "";
     let calledArgs: any = {};
@@ -166,7 +167,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   的回退（process.env.WORKSPACE_ROOT || process.cwd()）不同源——在 VSCode 多根重定向未 chdir / run_workflow
     //   worktree 子 agent 下，审批网关 isProtectedWrite(path, toolCtx.cwd) 与工具实际操作的根会指向不同目录。
     //   统一到 getActiveWorkspaceRoot() 消除错位（ToolCallContext.cwd 字段仍保留，供 subagent/runAgent 透传）。
-    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode };
+    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode };
     let result = "";
     // ★ #8b 结构化成败跟踪（替代 FAILED_PREFIXES 前缀嗅探 + explicitOk 手工短路）：
     //   默认 success；拒绝/熔断/解析失败/verifyResult FAILED 显式置 failed。文案只是呈现，成败看状态。

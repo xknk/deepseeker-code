@@ -11,3 +11,6 @@ dist/
 src/文章示例/*
 src/core/tests/evals/.results/*
 .claude/
+
+# playwright MCP 浏览器会话产物（console log 等测试痕迹，非源码）
+.playwright-mcp/

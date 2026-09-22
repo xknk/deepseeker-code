@@ -308,6 +308,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 onUIEvent: options.onUIEvent,
                 requestApproval: options.requestApproval,
                 requestQuestion: options.requestQuestion,
+                ideAction: options.ideAction,
                 keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。

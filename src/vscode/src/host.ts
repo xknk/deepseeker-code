@@ -20,7 +20,7 @@ import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
-import type { ApprovalDecision, QuestionRequest, QuestionAnswer } from "@/host/type.ts";
+import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionRequest, IdeActionResult } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import * as fs from "fs";
@@ -34,6 +34,8 @@ export interface ChatHostCallbacks {
   onBusy: (busy: boolean) => void;
   /** 结构化提问（ask_question 工具）→ UI 弹选项。 */
   onQuestion: (req: QuestionRequest) => void;
+  /** IDE 桥（ide_* 三工具）→ 执行打开文件/读诊断/跑任务并回传结构化结果（extension 注入，vscode API 集中在 ideBridge）。 */
+  onIdeAction: (req: IdeActionRequest) => Promise<IdeActionResult>;
   /** 计划方案待审批 → UI 弹方案条。 */
   onPlan: (plan: string) => void;
   /** 会话重置（新会话/切换历史）→ UI 清屏。 */
@@ -279,6 +281,7 @@ export class ChatHost {
       // （onUIEvent 形参为 core 具体事件类型，显式标注 any 以兼容宽松 sink）
       requestApproval: autoApprove ? autoRequestApproval : createWebRequestApproval((evt: any) => this.sink(evt), ac.signal),
       requestQuestion: (req) => this.askQuestion(req),
+      ideAction: (req) => this.callbacks.onIdeAction(req),
       onUIEvent: (evt: any) => this.sink(evt),
       planMode,
       permissionMode: !autoApprove && this.autoMode ? "auto" : undefined,

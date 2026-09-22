@@ -82,6 +82,7 @@ export const prepareToolsAndInjections = async (
         onUIEvent: options.onUIEvent,
         requestApproval: options.requestApproval,
         requestQuestion: options.requestQuestion,
+        ideAction: options.ideAction, // ★ ide_* 三工具 validateEnvironment 据此判定自隐藏（CLI/HTTP 宿主无钩子 → 不暴露）
     };
     const rawTools = await filterByEnvironment(rawToolsPreEnv, validationCtx);
     // 格式化工具消息（剔除 safetyLevel/审批/锁等内部字段，只留 OpenAI 协议所需：type/function{name,description,parameters}）。
