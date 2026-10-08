@@ -99,5 +99,13 @@ export type UIEvent =
     | { type: 'tool.denied'; toolsId: string; toolName: string }
     | { type: 'tool.progress'; toolsId?: string; toolName?: string; message: string }
     | { type: 'todo.update'; todos: Todo[] }
-    /** 上下文压缩完成（对标 CC「Compacted chat」行）：仅主 agent（depth 0）且确有释放时发。前端在消息流插淡色一行。 */
-    | { type: 'compact.done'; tokensBefore: number; tokensAfter: number; durationMs: number; trigger: 'auto' | 'manual' };
+    /** 上下文压缩完成（对标 CC「Compacted chat」行）：仅主 agent（depth 0）且确有释放时发。前端在消息流插淡色一行。
+     *  summary=本次压缩后的归档叙述（⟦DSC:ARCHIVE-NOTES⟧ 段，截断封顶），供前端「查看摘要」展开；缺省=旧格式不可展开。 */
+    | { type: 'compact.done'; tokensBefore: number; tokensAfter: number; durationMs: number; trigger: 'auto' | 'manual'; summary?: string }
+    /** 后台任务退出主动通知（对标 CC「Background command X failed」）：进程退出（含被杀）即发，
+     *  不再依赖模型轮询 get_background_output。ok=exited 且 exitCode===0；killed=用户中止/手动停止。 */
+    | { type: 'task.exit'; taskId: string; command: string; status: 'exited' | 'killed'; exitCode: number | null; ok: boolean }
+    /** 子 agent 运行计数（对标 CC 输入区「● N agent」胶囊）：runSubagent 进入/finally 退出各发一次，
+     *  running=此刻进程内在飞子 agent 数（模块级 activeSubagents.size 为准，并发/嵌套天然准确）。
+     *  前端仅镜像 running；phase/name/depth 供调试与未来扩展。 */
+    | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number };

@@ -94,9 +94,11 @@ switch (evt.type) {
       }
       case "final":
         closeStreaming();
+        if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 兜底归零：同步子 agent 必在 final 前收敛，防事件丢失胶囊卡死
         break;
       case "error": {
         closeStreaming();
+        if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
         appendRow({ key: nextKey(), kind: "system", text: `❌ ${String(evt.message ?? "未知错误")}` });
         break;
       }
@@ -151,13 +153,29 @@ switch (evt.type) {
         addInfo(`🖼 模型 ${String(evt.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
         break;
       }
+      case "subagent.count": {
+        // ★ 子 agent 运行计数（对标 CC「● N agent」胶囊）：镜像 core 在飞 Set size，经 syncToolbar 刷生成中条内胶囊
+        state.runningAgents = Math.max(0, Number(evt.running) || 0);
+        syncToolbar();
+        break;
+      }
+      case "task.exit": {
+        // ★ 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色 info、失败醒目 system、停止中性
+        closeStreaming();
+        const cmd = String(evt.command ?? "");
+        if (evt.ok) addInfo(`📧 后台任务完成（exit=0）：${cmd}`);
+        else if (evt.status === "killed") addInfo(`⏹ 后台任务已停止：${cmd}`);
+        else appendRow({ key: nextKey(), kind: "system", text: `⚠️ 后台任务失败（exit=${evt.exitCode ?? "?"}）：${cmd}` });
+        break;
+      }
       case "compact.done": {
-        // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行
+        // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行；
+        //   附 re-cache 提示；归档摘要随行存储，点击行可展开（Show more）
         closeStreaming();
         const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
         const trigger = evt.trigger === "manual" ? "手动" : "自动";
-        appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens` });
+        appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens · 下条消息将重建缓存`, summary: String(evt.summary ?? "") });
         break;
       }
       default:
@@ -191,11 +209,7 @@ function onMessage(msg) {
       break;
     }
     case "state": {
-      const wasBusy = state.busy;
       state.busy = !!msg.state?.busy;
-      // busy 计秒：true 翻转瞬间记起点；回 false 清零（秒表随轮次，不跨轮累计）
-      if (state.busy && !wasBusy) state.busySince = Date.now();
-      if (!state.busy) state.busySince = 0;
       state.planMode = !!msg.state?.planMode;
       state.autoMode = !!msg.state?.autoMode;
       // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题

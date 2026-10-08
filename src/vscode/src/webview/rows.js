@@ -172,9 +172,22 @@ break;
 case "info":
       wrap.innerHTML = `<div class="info-line">› ${escapeHtml(row.text)}</div>`;
       break;
-    case "compact":
-      wrap.innerHTML = `<div class="compact-line">${escapeHtml(row.text)}</div>`;
+    case "compact": {
+      // 压缩行：附归档摘要时可点击展开/收起（Show more），直接 DOM 切换不走整行重绘
+      const caret = row.summary ? ' <span class="compact-caret">▸</span>' : "";
+      const pre = row.summary ? `<pre class="compact-summary" style="display:${row.expanded ? "block" : "none"}">${escapeHtml(row.summary)}</pre>` : "";
+      wrap.innerHTML = `<div class="compact-line${row.summary ? " expandable" : ""}"${row.summary ? ' title="点击展开归档摘要"' : ""}>${escapeHtml(row.text)}${caret}</div>${pre}`;
+      if (row.summary) {
+        wrap.querySelector(".compact-line")?.addEventListener("click", () => {
+          row.expanded = !row.expanded;
+          const box = wrap.querySelector(".compact-summary");
+          const c = wrap.querySelector(".compact-caret");
+          if (box) box.style.display = row.expanded ? "block" : "none";
+          if (c) c.textContent = row.expanded ? "▾" : "▸";
+        });
+      }
       break;
+    }
     case "system":
       wrap.innerHTML = `<div class="system-line">! ${escapeHtml(row.text)}</div>`;
       break;
@@ -226,6 +239,29 @@ function toggleTurn(seq) {
   if (!hide && nearBottom()) scrollToBottom();
 }
 
+// ———————— CC 风格思考动画行（对标「✳ Creating...」）————————
+// 常驻消息流末尾的动画行：busy 期间显示在最后一条消息下方（内容区里，非输入框上方），
+// 工具执行 / API 等待等「无动静」间隙也有可见生命感。appendRow 一律插到它之前，保证它恒为末行。
+let thinkRowEl = null;
+
+const ensureThinkRow = () => {
+  if (thinkRowEl?.isConnected) return thinkRowEl;
+  thinkRowEl = document.createElement("div");
+  thinkRowEl.className = "row row-think busy-think";
+  thinkRowEl.id = "busy-think";
+  thinkRowEl.hidden = true;
+  thinkRowEl.innerHTML = `<span class="think-glyph">✳&#xFE0E;</span><span id="think-verb">思考中</span><span class="think-ellipsis">…</span>`;
+  messagesEl().appendChild(thinkRowEl);
+  return thinkRowEl;
+};
+
+function setThinkVisible(on) {
+  const el = ensureThinkRow();
+  if (!!on === !el.hidden) return;
+  el.hidden = !on;
+  if (on && !state.replaying && nearBottom()) scrollToBottom(); // 用户贴底时才跟随落底，不抢滚动位置
+}
+
 function appendRow(row) {
   // ★ user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口
   if (row.kind === "user") beginUserTurn(row.text);
@@ -238,7 +274,7 @@ function appendRow(row) {
   if (row.kind !== "turnHeader" && row.turn != null && state.turnHeaderBySeq.get(row.turn)?.collapsed) {
     wrap.style.display = "none";
   }
-  messagesEl().appendChild(wrap);
+  messagesEl().insertBefore(wrap, thinkRowEl?.isConnected ? thinkRowEl : null); // 思考行存在则插它前面（恒为末行）
   if (!state.replaying && nearBottom()) scrollToBottom(); // 回放中不逐条跟随，replayDone 统一落底
   updateEmptyState();
 }
@@ -486,4 +522,5 @@ export {
   scheduleFlush, flush, addInfo,
   appendImagePreview, clearPendingImages, clearMessages,
   renderInitError, renderTodos, buildEmptyState, updateEmptyState,
+  setThinkVisible,
 };

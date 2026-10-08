@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { commandTools } from "@/tool/registry/command.ts";
 import { backgroundTools, resolveWinShell } from "@/tool/registry/background.ts";
 import { appConfig } from "@/config/index.ts";
+import { claimSessionInbox } from "@/agent/inbox.ts";
 import { ToolContext, ToolExecutionResultStatus, type ToolExecuteResult } from "@/tool/type.ts";
 
 const runCommand = commandTools.find((t: any) => t.function.name === "run_command")!;
@@ -196,5 +197,39 @@ describe("run_command 自动转后台（auto-degrade）", () => {
         assert.equal(rest, "", "退出后无额外产出");
         const st = (await getBg.function.execute({ task_id: taskId }, ctx)) as string;
         assert.match(st, /exited/);
+    });
+
+    needShell("task.exit 通知：退出即发 UIEvent——成功 ok=true，非零退出 ok=false 且进 inbox steering", async () => {
+        const events: any[] = [];
+        const ctx = makeCtx();
+        (ctx as unknown as { onUIEvent: unknown }).onUIEvent = (e: unknown) => events.push(e);
+        // 前置清空 inbox（同 sessionId 跨测试残留防抖）：队列纯内存，claim 即原子取走
+        claimSessionInbox(SESSION);
+
+        // ① 成功路径：exit 0 → 恰一次 task.exit(ok=true, exitCode=0)，不进 inbox
+        const genOk = runBg.function.execute({ command: "sleep 1" }, ctx) as AsyncGenerator<string>;
+        await genOk.next(); // 首 yield = task_id；后续 drain 才挂 close 监听（本文件已知坑）
+        await drain(genOk);
+        const exits = events.filter((e: any) => e?.type === "task.exit");
+        assert.equal(exits.length, 1, `成功任务应恰发一次通知，实收 ${JSON.stringify(events.map((e: any) => e?.type))}`);
+        assert.equal(exits[0].ok, true);
+        assert.equal(exits[0].status, "exited");
+        assert.equal(exits[0].exitCode, 0);
+        assert.match(String(exits[0].command), /sleep 1/);
+        assert.equal(claimSessionInbox(SESSION).length, 0, "成功路径不应进 inbox");
+
+        // ② 失败路径：exit 3 → ok=false + sessionId 非空时 pushSessionInbox（模型可见 steering）
+        events.length = 0;
+        const genFail = runBg.function.execute({ command: "exit 3" }, ctx) as AsyncGenerator<string>;
+        await genFail.next();
+        await drain(genFail);
+        const failExits = events.filter((e: any) => e?.type === "task.exit");
+        assert.equal(failExits.length, 1);
+        assert.equal(failExits[0].ok, false);
+        assert.equal(failExits[0].exitCode, 3);
+        const inbox = claimSessionInbox(SESSION);
+        assert.equal(inbox.length, 1, "非零退出应 pushSessionInbox（下轮模型可见）");
+        assert.match(inbox[0]!, /后台任务失败/);
+        assert.match(inbox[0]!, /get_background_output/);
     });
 });

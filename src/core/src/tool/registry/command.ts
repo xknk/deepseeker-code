@@ -7,7 +7,7 @@
 import { spawn } from "child_process";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
-import { adoptRunningProcess, killTree, resolveWinShell, StreamCodec } from "./background.ts";
+import { adoptRunningProcess, killTree, resolveWinShell, makeTaskExitNotifier, StreamCodec } from "./background.ts";
 import { appConfig } from "@/config/index.ts";
 
 /**
@@ -269,7 +269,7 @@ export const commandTools: CustomTool[] = [
                         //   run_in_background 的跨 run 存活语义不同，v1 取舍）；注册表侧 bookkeeping 由 lifecycle 标记 killed。
                         const taskId = adoptRunningProcess(
                             proc,
-                            { command: args.command, cwd, sessionId: ctx?.sessionId, signal: ctx?.abortSignal },
+                            { command: args.command, cwd, sessionId: ctx?.sessionId, signal: ctx?.abortSignal, onExit: makeTaskExitNotifier(ctx) },
                             fullOutput + queue.join(""),
                             codec,
                         );

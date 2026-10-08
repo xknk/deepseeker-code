@@ -116,23 +116,69 @@ body {
   }
 }
 
-/* 输入框上方「生成中」指示条：codicon 自转 + 秒表；busy 结束经 hidden 隐藏。
-   ★ display:flex 会盖过 UA 的 [hidden]{display:none}，必须显式补回，否则常显。 */
-.busy-strip {
+/* 消息流末行 CC 风格思考动画（对标「✳ Creating...」）：转圈星 + 轮换动词 + 省略号。
+   busy 期间常驻最后一条消息下方——工具执行 / API 等待等「无动静」间隙也有可见生命感；空闲 hidden。
+   DOM 归属 rows.js（ensureThinkRow，appendRow 恒插其前），此处只管样式。 */
+.busy-think {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 2px 0;
-  font-size: 11.5px;
+  gap: 7px;
+  margin: 8px 0;
+  padding: 0 2px;
+  font-size: 12px;
   color: var(--fg-dim);
 }
 
-.busy-strip[hidden] {
+.busy-think[hidden] {
   display: none;
 }
 
-.busy-strip .codicon-loading {
-  font-size: 12px;
+/* ✳ 步进旋转（steps(8) 每 1.4s 一圈，CC 同款「哒哒哒」转而不是油滑的匀速）；U+FE0E 强制文本形，防被渲染成彩色 emoji */
+.busy-think .think-glyph {
+  display: inline-block;
+  font-size: 13px;
+  color: var(--fg);
+  animation: dsc-think-spin 1.4s steps(8) infinite;
+}
+
+@keyframes dsc-think-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 子 agent 运行计数胶囊（对标 CC「● N agent」）：操作条常驻项，空闲灰点 0 agent，有子 agent 在跑亮绿点；
+   形态对齐 .model-chip。 */
+.agents-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--fg-faint);
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.agents-pill .agents-dot {
+  font-size: 9px;
+  color: var(--fg-faint);
+  transition: color 0.1s;
+}
+
+.agents-pill.live {
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--diff-add) 10%, transparent);
+}
+
+.agents-pill.live .agents-dot {
+  color: var(--diff-add);
 }
 
 .actions {
@@ -796,6 +842,32 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 压缩行「Show more」：附归档摘要时行可点击展开/收起摘要全文 */
+.row-compact .compact-line.expandable {
+  cursor: pointer;
+}
+
+.row-compact .compact-caret {
+  opacity: 0.7;
+  margin-left: 4px;
+  font-style: normal;
+}
+
+.compact-summary {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--fg-dim) 6%, transparent);
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
 /* 轮次分割线：─ 第 N 轮 ───── */
 .row-meta {
   margin: 8px 0 4px;
@@ -879,10 +951,21 @@ body {
   word-break: break-word;
 }
 
-/* ———————— 浮层（审批/提问/计划/会话） ———————— */
+/* ———————— 浮层（审批/提问/计划/模型选择/会话/分叉）：统一悬浮 ————————
+   全部钉在输入框正上方（相对 #composer bottom:100%）、覆盖消息区——出现/消失零布局影响
+   （修「弹窗出现时消息区/logo 被顶上去」）。空锚点零尺寸，不挡点击。 */
+#approval-anchor,
+#model-picker-anchor,
+#sessions-panel,
+#fork-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 12px;
+  right: 12px;
+  z-index: 40;
+}
+
 #approval-anchor {
-  flex-shrink: 0;
-  padding: 0 14px 8px;
   max-height: 45vh;
   overflow-y: auto;
 }
@@ -1168,13 +1251,14 @@ body {
 /* 历史会话 */
 /* ———————— 历史会话面板（终端风格：搜索 + 单行列表） ———————— */
 .sessions-panel {
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   max-height: 42vh;
-  border-top: 1px solid var(--border-soft);
-  border-bottom: 1px solid var(--border-soft);
-  background: var(--vscode-quickInput-background, transparent);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, transparent));
+  box-shadow: var(--vscode-widget-shadow, 0 4px 14px rgba(0, 0, 0, 0.45));
+  overflow: hidden; /* 圆角裁切内部列表 */
 }
 
 /* 搜索框：无边框，仅底部淡线，透明背景 */
@@ -1379,6 +1463,7 @@ body {
 #composer {
   flex-shrink: 0;
   padding: 0;
+  position: relative; /* 弹层锚点（approval/model-picker/panels）定位基准：bottom:100% 悬浮其上 */
 }
 
 /* ★ 大盒子：按规格 border/radius/padding/margin/background */
@@ -1510,6 +1595,45 @@ body {
 
 .mode-toggle.on {
   color: var(--fg);
+}
+
+/* 模型胶囊（左下角首位）：当前模型 id + 下拉箭头，点击弹候选选择器（同 /switch）；
+   长模型名截断防撑破操作条。形态对齐 .mode-toggle。 */
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  margin-bottom: 2px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--fg-dim);
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+.model-chip:hover {
+  background: rgba(128, 128, 128, 0.16);
+  color: var(--fg);
+}
+
+.model-chip #model-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-chip .codicon {
+  display: block;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.7;
 }
 
 .mode-toggle svg,

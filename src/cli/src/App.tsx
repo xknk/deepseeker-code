@@ -334,6 +334,12 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             case "/debug":
                 state.pushInfo(inspectDebug(state.sessionIdRef.current ?? ""));
                 return true;
+            case "/archive": {
+                // 最近一次压缩的归档摘要（compact.done 随事件下发；运行时态，重启后为空）
+                const s = state.getArchivedSummary();
+                state.pushInfo(s ? `📜 最近一次压缩的归档摘要：\n${s}` : "本会话启动以来尚未发生过压缩（摘要仅保留运行时最近一次）。");
+                return true;
+            }
             case "/plan": {
                 const on = !state.getPlanMode();
                 state.setPlanMode(on);
@@ -614,7 +620,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                         {state.busy ? (
                             <Box marginTop={0.5}>
                                 <Text color={THEME.coralBright}>
-                                    {`${SPINNER_FRAMES[busyClock.frame]} ${S.generating} (${busyClock.sec}s · ${S.escInterrupt})`}
+                                    {`${SPINNER_FRAMES[busyClock.frame]} ${S.thinkVerbs[Math.floor(busyClock.sec / 3) % S.thinkVerbs.length]}… (${busyClock.sec}s · ${S.escInterrupt})`}
+                                    {/* 子 agent 运行计数（对标 CC「● N agent」）：内联追加不增行高，不动动态区稳定性 */}
+                                    {state.runningAgents > 0 ? (
+                                        <Text color="green"> · ● {state.runningAgents} agent{state.runningAgents > 1 ? "s" : ""}</Text>
+                                    ) : null}
                                 </Text>
                             </Box>
                         ) : null}

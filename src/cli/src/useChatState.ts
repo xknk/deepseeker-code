@@ -79,6 +79,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [rows, setRows] = useState<ChatRow[]>([]);
     const [busy, setBusy] = useState(false);
     const [aborting, setAborting] = useState(false);
+    /** 运行中子 agent 数（subagent.count UIEvent 镜像 core 在飞 Set size；生成行旁「● N agent」胶囊）。 */
+    const [runningAgents, setRunningAgents] = useState(0);
     /** 是否展开显示思考全文（Ctrl+T 切换；仅对 streaming 思考生效，已完成思考恒收起）。 */
     const [showThinkingText, setShowThinkingText] = useState(false);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -117,6 +119,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const thinkingLevelRef = useRef<ThinkingLevel>(
         !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high",
     );
+    /** 最近一次压缩的归档摘要（compact.done 随事件下发的 ⟦DSC:ARCHIVE-NOTES⟧ 段；运行时态，/archive 查看）。 */
+    const archivedSummaryRef = useRef("");
     /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
     const outputStyleRef = useRef<string | undefined>(undefined);
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
@@ -283,14 +287,35 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 break;
             }
             case "compact.done": {
-                // 压缩显示（对标 CC「Compacted chat」行）：收尾流式行后插淡色斜体行
+                // 压缩显示（对标 CC「Compacted chat」行）：收尾流式行后插淡色斜体行；摘要存 ref 供 /archive 查看
                 flush();
+                archivedSummaryRef.current = (obj.summary as string) || "";
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "compact",
                     tokensBefore: (obj.tokensBefore as number) ?? 0,
                     tokensAfter: (obj.tokensAfter as number) ?? 0,
                     trigger: (obj.trigger as "auto" | "manual") ?? "auto",
+                    hasSummary: !!(obj.summary as string),
                 }]);
+                break;
+            }
+            case "task.exit": {
+                // 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色、失败醒目、中止中性
+                flush();
+                const cmd = (obj.command as string) ?? "";
+                const id = newRowId();
+                if (obj.ok) {
+                    setRows((prev) => [...prev, { id, kind: "meta", text: `📧 后台任务完成（exit=0）：${cmd}` }]);
+                } else if (obj.status === "killed") {
+                    setRows((prev) => [...prev, { id, kind: "meta", text: `⏹ 后台任务已停止：${cmd}` }]);
+                } else {
+                    setRows((prev) => [...prev, { id, kind: "system", text: `⚠️ 后台任务失败（exit=${(obj.exitCode as number) ?? "?"}）：${cmd}` }]);
+                }
+                break;
+            }
+            case "subagent.count": {
+                // 子 agent 运行计数（对标 CC「● N agent」）：直接镜像 core 的在飞 Set size，生成行旁内联显示
+                setRunningAgents(Math.max(0, (obj.running as number) ?? 0));
                 break;
             }
             case "round.start": {
@@ -315,6 +340,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "final": {
                 closeStreaming();
+                setRunningAgents(0); // 兜底归零：同步子 agent 必在 final 前经 stop 事件收敛，此处防事件丢失后胶囊卡死
                 // ★ 兜底渲染：若本轮未流式产出正文，final.text 承载的是压缩超窗/模型错误/中止等终结消息
                 //   （handleUnifiedChat 已据此决定是否转发；正常完成时 text 为空，不触发）。显示出来避免静默无输出。
                 const ft = (obj.text as string) ?? "";
@@ -326,6 +352,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "error": {
                 closeStreaming();
+                setRunningAgents(0); // 同 final：错误终结时兜底归零
                 const id = newRowId();
                 setRows((prev) => [...prev, { id, kind: "system", text: `❌ ${(obj.message as string) ?? "未知错误"}` }]);
                 break;
@@ -602,6 +629,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const clearRows = useCallback(() => {
         flush();
         setRows([]);
+        setRunningAgents(0); // 清屏/载入/新会话路径一并复位计数胶囊（瞬时态不入转录，无需回放）
         toolRowByCallId.current.clear();
     }, [flush]);
 
@@ -694,16 +722,17 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /output-style 切换输出风格（P2-16）：undefined=中性默认，否则注入对应风格 persona。 */
     const setOutputStyle = useCallback((name: string | undefined) => { outputStyleRef.current = name; }, []);
     const getOutputStyle = useCallback((): string | undefined => outputStyleRef.current, []);
+    const getArchivedSummary = useCallback((): string => archivedSummaryRef.current, []);
 
     return {
         // 状态
-        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
+        rows, busy, aborting, runningAgents, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
         sessionIdRef,
         // 动作
         submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent, runBangCommand,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
-        setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
+        setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };

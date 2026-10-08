@@ -1,15 +1,19 @@
 /**
  * @file vscode/src/webview/toolbar.js
- * @description 顶部工具栏 + 生成中指示 + 模式配置面板（从 app.js 拆出，2026-09-16 防腐化拆分）：
- *  buildToolbar/syncToolbar、1s 心跳 ticker（工具行已耗时/生成中秒表，只改文本节点零重建）、
+ * @description 顶部工具栏 + 模式配置面板（从 app.js 拆出，2026-09-16 防腐化拆分）：
+ *  buildToolbar/syncToolbar、1s 心跳 ticker（工具行已耗时 + 思考动画动词轮换，只改文本节点零重建）、
  *  模式胶囊按钮与弹出面板（btnMode/modePopover 由 composer 挂载后经 modeRefs 回填——
  *  DOM 归属 composer、交互与同步归本模块，模块级可变量经 refs 对象收口）、外链点击委托。
  */
 import { vscode, $, state } from "./state.js";
 import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
+import { setThinkVisible } from "./rows.js";
 
 // 模式配置面板元素（buildComposer 挂载后回填；交互/同步逻辑在本模块）
 export const modeRefs = { btn: null, popover: null };
+
+// CC 风格思考动画的轮换动词（对标「✳ Creating...」）：busy 期间每 2.4s 换一个，给「无动静等待」生命感
+const THINK_VERBS = ["思考中", "构思中", "推敲中", "斟酌中", "酝酿中", "编织中", "提炼中", "灵感涌现中"];
 
 // ———————— 工具栏 ————————
 export function buildToolbar() {
@@ -42,15 +46,20 @@ if (btnSend) {
 btnSend.textContent = state.busy ? "■" : "↑";
 btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
 }
-// 生成中指示条：显示在输入框上方（spinner 由 codicon 自转，秒表由 1s ticker 驱动）
-const strip = $("#busy-strip");
-if (strip) {
-strip.hidden = !state.busy;
-if (state.busy) {
-const lbl = $("#busy-label");
-if (lbl) lbl.textContent = `生成中… ${state.busySince ? Math.round((Date.now() - state.busySince) / 1000) : 0}s`;
+// CC 风格思考动画（对标「✳ Creating...」）：busy 期间常驻消息流末行（内容区里，非输入框上方）——
+// 工具执行 / API 等待等「无动静」间隙也有可见生命感；空闲 hidden。元素归属 rows.js（末行锚点）
+setThinkVisible(state.busy);
+// 子 agent 运行计数胶囊（对标 CC「● N agent」）：常驻显示，>0 亮绿点；随 subagent.count 事件经 syncToolbar 刷新
+const pill = $("#agents-pill");
+if (pill) {
+const n = state.runningAgents || 0;
+pill.classList.toggle("live", n > 0);
+const pillLbl = $("#agents-pill-label");
+if (pillLbl) pillLbl.textContent = `${n} agent${n > 1 ? "s" : ""}`;
 }
-}
+// 模型胶囊：显示当前模型 id（快照 / /model / 选择器切换三条路均经 syncToolbar 刷新）；未快照到时显占位
+const chipLbl = $("#model-chip-label");
+if (chipLbl) chipLbl.textContent = state.model || "默认模型";
 // 项目根：末段文件夹名 + 完整路径 title（让用户一眼看到 agent 工作在哪个项目）
 const rootName = $("#project-root-name");
 if (rootName) {
@@ -61,16 +70,20 @@ rootName.parentElement.title = p ? `项目根：${p}（点击切换）` : "未�
 }
 updateModeToggle();
 }
-// 1s 心跳：只改文本节点——工具行已耗时（.t-elapsed）与生成中条秒表；无行在跑时零 DOM 写。
+// 1s 心跳：只改文本节点——工具行已耗时（.t-elapsed）+ 思考动画动词轮换；无行在跑时零 DOM 写。
 //   刻意不做整行重建（rebuildRow 会闪 + 丢展开态）；spinner 的连续动画由 codicon CSS 无限旋转承担。
 setInterval(() => {
 document.querySelectorAll(".t-elapsed[data-s]").forEach((el) => {
 const s = Number(el.dataset.s);
 if (s) el.textContent = `${Math.max(1, Math.round((Date.now() - s) / 1000))}s`;
 });
-if (state.busy && state.busySince) {
-const lbl = $("#busy-label");
-if (lbl) lbl.textContent = `生成中… ${Math.round((Date.now() - state.busySince) / 1000)}s`;
+// 动词轮换：Date.now() 整除取帧（interval 抖动不跳帧、模态遮挡不乱序）；同值不写 DOM
+if (state.busy) {
+const verbEl = $("#think-verb");
+if (verbEl) {
+const v = THINK_VERBS[Math.floor(Date.now() / 2400) % THINK_VERBS.length];
+if (verbEl.textContent !== v) verbEl.textContent = v;
+}
 }
 }, 1000);
 

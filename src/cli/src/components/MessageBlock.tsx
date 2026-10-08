@@ -216,12 +216,12 @@ export const MessageBlock = ({ row, wrapW, streamTail }: Props): React.ReactElem
     }
 
     if (row.kind === "compact") {
-        // 压缩完成行（对标 CC「Compacted chat」）：淡色斜体，无前缀符号
+        // 压缩完成行（对标 CC「Compacted chat」）：淡色斜体，无前缀符号；附 re-cache 提示 + /archive 指引
         const freed = Math.max(0, (row.tokensBefore || 0) - (row.tokensAfter || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
         return (
             <Box marginTop={0.25} marginBottom={0.25}>
-                <Text italic color={THEME.grayDim}>已压缩上下文 · {row.trigger === "manual" ? "手动" : "自动"} · 释放 {freedText} tokens</Text>
+                <Text italic color={THEME.grayDim}>已压缩上下文 · {row.trigger === "manual" ? "手动" : "自动"} · 释放 {freedText} tokens · 下条消息将重建缓存{row.hasSummary ? "（/archive 看摘要）" : ""}</Text>
             </Box>
         );
     }

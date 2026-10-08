@@ -17,7 +17,8 @@ interface StringDict {
     tipLine: string;
     emptyHints: string[];
     placeholder: string;
-    generating: string;
+    /** 底部「生成中」行的轮换动词（对标 CC 的 whimsical gerund）：每 3s 换一个，渲染时补 …。 */
+    thinkVerbs: string[];
     round: (n: number | string) => string;
     thinkingStreaming: string;
     thinkingCollapsed: (lines: number) => string;
@@ -141,7 +142,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "解释 runAgent 的主循环逻辑",
         ],
         placeholder: "发送消息（Shift+Enter 换行，Enter 发送）…",
-        generating: "生成中…",
+        thinkVerbs: ["思考中", "构思中", "推敲中", "斟酌中", "酝酿中", "编织中", "提炼中", "灵感涌现中"],
         round: (n) => `第 ${n} 轮`,
         thinkingStreaming: "✻ 深度思考中…",
         thinkingCollapsed: (lines) => `✻ 思考过程（${lines} 行）· Ctrl+T 展开`,
@@ -264,6 +265,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "/plan  — 切换计划模式（只读调研 → 方案审批 → 实现）",
             `/model <模型id> — 切换模型（直输，当前 ${model}）`,
             "/switch — 弹出候选模型选择器",
+            "/archive — 查看最近一次压缩的归档摘要",
             `/thinking [off|high|max] — 切换思考等级（当前 ${thinking}）`,
             `/lang [zh|en] — 切换界面语言（当前 ${locale}）`,
             "/sessions  — 选择并载入历史会话（续接对话）",
@@ -290,7 +292,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "Explain runAgent's main loop",
         ],
         placeholder: "Send a message (Shift+Enter newline, Enter to send)…",
-        generating: "Generating…",
+        thinkVerbs: ["Thinking", "Ideating", "Pondering", "Brewing", "Forging", "Weaving", "Distilling", "Synthesizing"],
         round: (n) => `Round ${n}`,
         thinkingStreaming: "✻ Thinking…",
         thinkingCollapsed: (lines) => `✻ Thoughts (${lines} lines) · Ctrl+T expand`,
@@ -412,6 +414,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "/plan  — Toggle plan mode (read-only research → review → implement)",
             `/model <model-id> — Switch model (direct input; current ${model})`,
             "/switch — Open the model picker",
+            "/archive — Show the latest compaction summary",
             `/thinking [off|high|max] — Switch thinking level (current ${thinking})`,
             `/lang [zh|en] — Switch interface language (current ${locale})`,
             "/sessions  — Pick a past session to resume",

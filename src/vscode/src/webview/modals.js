@@ -225,6 +225,14 @@ function closeModelPicker() {
   state.modelPicker = false;
   renderModelPicker();
 }
+/** 模型胶囊点击入口：已开则就地关闭（toggle 语义，修「再点一次关不掉」）；未开走 host 回环取最新候选（与 /switch 同通道）。 */
+export function toggleModelPicker() {
+  if (state.modelPicker) {
+    closeModelPicker();
+    return;
+  }
+  vscode.postMessage({ type: "pickModel" });
+}
 function pickModelLocal(i) {
   const m = state.models[i];
   if (!m) return;
@@ -240,7 +248,8 @@ function renderModelPicker() {
   if (!anchor) {
     anchor = document.createElement("div");
     anchor.id = "model-picker-anchor";
-    document.getElementById("app").insertBefore(anchor, document.getElementById("composer"));
+    // ★ 挂进 #composer（配合 CSS bottom:calc(100%+6px) 悬浮在输入框正上方），不再挤占消息区布局
+    document.getElementById("composer").appendChild(anchor);
   }
   if (!state.modelPicker) {
     anchor.innerHTML = "";

@@ -186,6 +186,9 @@ export const runSubagent = async (
     console.log(`${resuming ? "🔁 续跑" : "🐣 派生"}子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}][${subSessionId}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
 
     activeSubagents.add(subSessionId); // 同 ID 并发护栏（新建 UUID 天然不撞，续跑同会话在此拦住）
+    // ★ UI 侧「运行中子 agent」计数（对标 CC「● N agent」）：add 后立即发 start，finally delete 后发 stop——
+    //   running 取 Set.size（进程级真值），正常/中止/崩溃均经 finally 收敛回 0；嵌套子 agent 同通道汇入，计数天然准确。
+    ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'start', name: manifest?.name, depth: ctx.depth + 1 });
     try {
         // 构建并初始化子智能体的独立消息队列
         const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
@@ -250,5 +253,6 @@ export const runSubagent = async (
         return { ok: false, output: failText(`[派生执行失败]: ${error.message}`), sessionId: subSessionId, manifestName: manifest?.name };
     } finally {
         activeSubagents.delete(subSessionId); // 释放并发护栏（正常/中止/崩溃均走此）
+        ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'stop', name: manifest?.name, depth: ctx.depth + 1 }); // 计数收敛（与 start 配对）
     }
 };

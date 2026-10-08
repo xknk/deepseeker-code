@@ -821,12 +821,20 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     if (event.onUIEvent && event.depth === 0) {
         const afterSize = Math.round(estReal(event.messageArr));
         if (preCompactSize - afterSize > 0) {
+            // 归档叙述（⟦DSC:ARCHIVE-NOTES⟧ 段）随事件下发，供前端「查看摘要」展开（对标 CC Show more）；
+            // 截断封顶防巨 payload（完整版在模型侧摘要槽， recall/续接语义不受影响）。
+            let summary: string | undefined;
+            try {
+                const slotRaw = event.messageArr[1]?.content;
+                summary = parseSummarySlot(typeof slotRaw === "string" ? slotRaw : "").notes.slice(0, 6000) || undefined;
+            } catch { /* 摘要提取失败不影响压缩完成通知 */ }
             event.onUIEvent({
                 type: 'compact.done',
                 tokensBefore: preCompactSize,
                 tokensAfter: afterSize,
                 durationMs: Math.round(performance.now() - startTime),
                 trigger: 'auto',
+                summary,
             });
         }
     }
