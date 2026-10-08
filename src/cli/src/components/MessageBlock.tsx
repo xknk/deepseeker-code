@@ -30,7 +30,7 @@ const UsageFooter = ({ usage }: { usage: NonNullable<TraceBase['usage']> }): Rea
     );
 };
 
-type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" | "compact" | "compact-progress" }>; wrapW: number; streamTail?: number };
+type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" | "compact" | "compact-progress" | "subagent-progress" }>; wrapW: number; streamTail?: number };
 
 /** 列表项前缀检测：`- ` / `* ` / `• ` / `1. ` 等。 */
 const listPrefix = (line: string): { bullet: string; rest: string } | null => {
@@ -232,6 +232,16 @@ export const MessageBlock = ({ row, wrapW, streamTail }: Props): React.ReactElem
         return (
             <Box marginTop={0.25} marginBottom={0.25}>
                 <Text italic color={THEME.grayDim}>正在压缩上下文 {row.done}/{row.total} 批…（辅助模型摘要中，请稍候）</Text>
+            </Box>
+        );
+    }
+
+    if (row.kind === "subagent-progress") {
+        // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行原位刷新，done/终结时删行，不落 Static。
+        // 「↳」前缀示意层级归属（子 agent 在父任务之下干活），淡色斜体与 compact-progress 同款弱存在感。
+        return (
+            <Box marginTop={0.25} marginBottom={0.25}>
+                <Text italic color={THEME.grayDim}>{"↳ 子agent "}{row.text}</Text>
             </Box>
         );
     }

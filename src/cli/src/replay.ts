@@ -36,7 +36,8 @@ export type ChatRow =
     | { id: number; kind: "compact"; tokensBefore: number; tokensAfter: number; trigger: "auto" | "manual"; hasSummary?: boolean }
     /** 压缩进度瞬态行（P1-3 防误中止）：多批压缩期间「正在压缩 n/N」；恒留动态区随进度更新，
      *  完成时由 compact.done 收敛替换（行删除）。UI 事件实时行，不落盘不回放。 */
-    | { id: number; kind: "compact-progress"; done: number; total: number };
+    | { id: number; kind: "compact-progress"; done: number; total: number }
+    | { id: number; kind: "subagent-progress"; text: string };
 
 /**
  * 从转录行重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。

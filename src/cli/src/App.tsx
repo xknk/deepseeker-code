@@ -61,13 +61,15 @@ const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW
 /** 是否留在动态区：仅流式中的 assistant/thinking、运行中的 tool、活动中的 todos 行、压缩进度瞬态行。
  *  ★ 思考行完成后回 Static——之前"始终动态"导致已完成的思考堆积在末尾（消息混乱）。
  *  ★ todos 行 active 时留动态区随状态刷新；pushUser 冻结为 Static，留在原位（新消息上方）。
- *  ★ compact-progress 行生命周期内原位刷新（P1-3），完成即被删除（永进 Static）。 */
+ *  ★ compact-progress 行生命周期内原位刷新（P1-3），完成即被删除（永进 Static）。
+ *  ★ subagent-progress 行同理（P3-7）：子 agent 干活期间原位刷新瞬态行。 */
 const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "assistant" && !!r.streaming) ||
     (r.kind === "thinking" && !!r.streaming) ||
     (r.kind === "tool" && r.status === "running") ||
     (r.kind === "todos" && !!r.active) ||
-    r.kind === "compact-progress";
+    r.kind === "compact-progress" ||
+    r.kind === "subagent-progress";
 
 /** 底部「生成中」行的 braille 帧表（与 Ink Spinner dots 同源）。
  *  ★ 动画只允许出现在这一行——工具卡内严禁逐帧动画（Ink 擦除失准会把上一帧叠在下面，

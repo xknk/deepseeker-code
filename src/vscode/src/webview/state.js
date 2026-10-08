@@ -49,6 +49,7 @@ roundSeq: 0,
 currentTurn: 0,
 turnHeaderBySeq: new Map(),
 compactProgressKey: null, // 压缩进度瞬态行 key（compact.progress 单行更新；compact.done/final/error 收敛删除）
+subagentProgressKey: null, // 子 agent 进度瞬态行 key（P3-7 subagent.progress 单行更新；done/final/error 收敛删除）
 };
 
 /** row key 发放器（单调递增，整个 webview 生命周期唯一）。 */

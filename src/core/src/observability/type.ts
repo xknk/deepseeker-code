@@ -112,4 +112,7 @@ export type UIEvent =
     /** 子 agent 运行计数（对标 CC 输入区「● N agent」胶囊）：runSubagent 进入/finally 退出各发一次，
      *  running=此刻进程内在飞子 agent 数（模块级 activeSubagents.size 为准，并发/嵌套天然准确）。
      *  前端仅镜像 running；phase/name/depth 供调试与未来扩展。 */
-    | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number };
+    | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number }
+    /** P3-7 子 agent 中间叙述透出：~1s 节流取最后完整行（纯 UX，防长任务静默被当卡死）。
+     *  done=true 表示该子 agent 已结束 → 前端清瞬态行；并发多子 agent 时单行槽 last-writer-wins（可接受）。 */
+    | { type: 'subagent.progress'; text: string; done?: boolean };

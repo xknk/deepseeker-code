@@ -96,6 +96,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         noEarlyFinal: !!options.noEarlyFinal,
         getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
     });
+    // ★ P3-8 run 级 read_file 读取追踪（path → mtime + 次数）：本 run 内重复读同一文件时结果头标
+    //   「第 N 次读取 · 内容未变更/已变更」，让模型自决是否还需重读。每 run 一个 Map、逐轮传同一引用；
+    //   ★ 刻意不做结果缓存——压缩后旧读取可能已出上下文，硬缓存会饿死模型（只标注，不截断）。
+    const readTracker = new Map<string, { mtimeMs: number; count: number }>();
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -327,6 +331,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   processToolCall 据此收缩截断预算：最坏组合「上下文已 75% 满时跑大输出命令 → 16K 字符
                 //   进上下文 → 下一轮立刻压缩」被釜底抽薪；口径与 ensureFitsWindow/nudge 闭包同公式。
                 contextTokensEst: Math.round(estimateTokens(message) * calibRatio + toolsTokens),
+                readTracker, // ★ P3-8：run 级读取追踪（同一引用透传，跨轮累计）
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。

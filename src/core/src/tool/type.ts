@@ -123,6 +123,10 @@ export interface ToolContext {
     /** 允许工具在异步执行期间，实时向终端用户刷新进度文字（如 "正在下载依赖包 45%..."）。
      *  已注入默认实现：runAgent 构造 toolCtx 时将其转发为 tool.progress UIEvent 推前端（onUIEvent）。 */
     emitProgress?: (message: string) => void;
+    /** P3-8 run 级 read_file 读取追踪（absPath → mtime + 次数）：重复读同一文件时结果头标
+     *  「第 N 次读取（本 run）· 内容自上次读取未变更/已变更」，让模型自决是否还需要重读。
+     *  ★ 刻意不做结果缓存/截断——压缩后旧读取可能已出上下文，硬缓存会饿死模型（只做信息标注）。 */
+    readTracker?: Map<string, { mtimeMs: number; count: number }>;
 }
 
 

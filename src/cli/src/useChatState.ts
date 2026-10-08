@@ -130,6 +130,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         compactProgressIdRef.current = null;
         setRows((prev) => prev.filter((r) => r.id !== pid));
     }, []);
+    /** 子 agent 进度瞬态行 id（subagent.progress 单行更新；done/final/error 收敛删除，P3-7 长任务防「只见计数器」）。 */
+    const subagentProgressIdRef = useRef<number | null>(null);
+    /** 删除子 agent 进度瞬态行（done / run 终结共用）。 */
+    const dropSubagentProgressRow = useCallback(() => {
+        const pid = subagentProgressIdRef.current;
+        if (pid == null) return;
+        subagentProgressIdRef.current = null;
+        setRows((prev) => prev.filter((r) => r.id !== pid));
+    }, []);
     /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
     const outputStyleRef = useRef<string | undefined>(undefined);
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
@@ -345,6 +354,24 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 setRunningAgents(Math.max(0, (obj.running as number) ?? 0));
                 break;
             }
+            case "subagent.progress": {
+                // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行，单行原位更新；
+                // done / run 终结时清行。纯 UX，恒留动态区（isDynamicRow），不落 Static。
+                flush();
+                if (obj.done) { dropSubagentProgressRow(); break; }
+                const ptext = String(obj.text ?? "").slice(0, 160);
+                if (!ptext) break;
+                if (subagentProgressIdRef.current == null) {
+                    const id = newRowId();
+                    subagentProgressIdRef.current = id;
+                    setRows((prev) => [...prev, { id, kind: "subagent-progress", text: ptext }]);
+                } else {
+                    const pid = subagentProgressIdRef.current;
+                    setRows((prev) => prev.map((r) =>
+                        r.id === pid && r.kind === "subagent-progress" ? { ...r, text: ptext } : r));
+                }
+                break;
+            }
             case "round.start": {
                 // 仅收尾当前流式行；不渲染轮次分割线（对齐 Claude Code：连续流，不暴露内部轮次）。
                 closeStreaming();
@@ -368,6 +395,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             case "final": {
                 closeStreaming();
                 dropCompactProgressRow(); // 压缩失败/中止等终结路径：进度瞬态行随 run 终结清理（不留「压缩中」僵尸行）
+                dropSubagentProgressRow(); // 同上：子 agent 进度瞬态行随 run 终结清理
                 setRunningAgents(0); // 兜底归零：同步子 agent 必在 final 前经 stop 事件收敛，此处防事件丢失后胶囊卡死
                 // ★ 兜底渲染：若本轮未流式产出正文，final.text 承载的是压缩超窗/模型错误/中止等终结消息
                 //   （handleUnifiedChat 已据此决定是否转发；正常完成时 text 为空，不触发）。显示出来避免静默无输出。
@@ -381,6 +409,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             case "error": {
                 closeStreaming();
                 dropCompactProgressRow(); // 同 final：错误终结时清理进度行
+                dropSubagentProgressRow(); // 同 final：错误终结时清理子 agent 进度行
                 setRunningAgents(0); // 同 final：错误终结时兜底归零
                 const id = newRowId();
                 setRows((prev) => [...prev, { id, kind: "system", text: `❌ ${(obj.message as string) ?? "未知错误"}` }]);

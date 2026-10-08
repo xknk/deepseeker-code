@@ -95,11 +95,13 @@ switch (evt.type) {
       case "final":
         closeStreaming();
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 压缩失败/中止终结路径：不留「压缩中」僵尸行
+        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同上：子 agent 进度瞬态行随 run 终结清理
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 兜底归零：同步子 agent 必在 final 前收敛，防事件丢失胶囊卡死
         break;
       case "error": {
         closeStreaming();
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 同 final：错误终结时清理进度行
+        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同 final：错误终结时清理子 agent 进度行
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
         appendRow({ key: nextKey(), kind: "system", text: `❌ ${String(evt.message ?? "未知错误")}` });
         break;
@@ -159,6 +161,26 @@ switch (evt.type) {
         // ★ 子 agent 运行计数（对标 CC「● N agent」胶囊）：镜像 core 在飞 Set size，经 syncToolbar 刷生成中条内胶囊
         state.runningAgents = Math.max(0, Number(evt.running) || 0);
         syncToolbar();
+        break;
+      }
+      case "subagent.progress": {
+        // ★ P3-7 子 agent 中间叙述（~1s 节流的最后完整行）：单行原位更新，done=true 清瞬态行。
+        //   复用 compact 行型（同款淡色斜体样式，P1-3 先例）；并发多子 agent 时单行槽 last-writer-wins。
+        closeStreaming();
+        if (evt.done) {
+          if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; }
+          break;
+        }
+        const ptext = String(evt.text ?? "").slice(0, 160);
+        if (!ptext) break;
+        const pline = `↳ 子agent ${ptext}`;
+        if (state.subagentProgressKey != null && state.rowMap.has(state.subagentProgressKey)) {
+          updateRow(state.subagentProgressKey, { text: pline });
+        } else {
+          const pkey = nextKey();
+          state.subagentProgressKey = pkey;
+          appendRow({ key: pkey, kind: "compact", text: pline });
+        }
         break;
       }
       case "task.exit": {
