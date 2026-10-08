@@ -174,3 +174,58 @@ describe("流式重试单层化（stream.ts maxRetries:0 + streamInference 应�
         }
     });
 });
+
+// ============ idle stall 重试门控（P1-1）：完整 tool_call 后流尾部 stall 也自愈 ============
+// 用 replay.test.ts 同款剧本设施（ReplayProvider）：同 specifier 动态 import 保同模块实例（勿改相对路径）。
+
+describe("idle stall 重试门控（P1-1）", () => {
+    /** 挂载回放 provider 执行 fn，结束复位（防泄漏影响其它测试；同 replay.test.ts withReplay）。 */
+    const withReplay = async <T>(script: any, fn: (p: any) => Promise<T>): Promise<T> => {
+        const { createReplayProvider } = await import("@/llm/providers/replay/index.ts");
+        const { setActiveProvider, resetActiveProvider } = await import("@/llm/model.ts");
+        const p = createReplayProvider(script);
+        setActiveProvider(p);
+        try {
+            return await fn(p);
+        } finally {
+            resetActiveProvider();
+        }
+    };
+
+    it("吐完整 tool_call 后流尾部 stall → 重试成功 completed（旧门控回归则 error 收尾），出站恰 2 次", async () => {
+        const ret = await withReplay({
+            turns: [{
+                kind: 'reply',
+                content: '让我读取文件',
+                toolCalls: [{ name: 'read_file', args: { path: '/x' } }],
+                fault: { type: 'idle', afterChars: 5, withToolCalls: true },   // 前导文案 + 完整 tool_call 流出后再抛 idle
+            }],
+        }, async (p) => {
+            const events: any[] = [];
+            const gen = streamInference(makeInfCtx());
+            let v = await gen.next();
+            while (!v.done) { events.push(v.value); v = await gen.next(); }
+            return { result: v.value, events, calls: p.calls };
+        });
+        assert.equal(ret.calls.length, 2, "stall 1 次 + 干净重入 1 次（完整 tool_call 不得挡住重试）");
+        assert.equal((ret.result as any).kind, "completed");
+        const am: any = (ret.result as any).assistantMessage;
+        assert.equal(am.tool_calls[0].function.name, "read_file", "重入后 tool_call 完整拼装");
+        assert.deepEqual(JSON.parse(am.tool_calls[0].function.arguments), { path: "/x" });
+        assert.ok(ret.events.some((e: any) => e.type === "text.reset"), "重试前发 text.reset 丢弃已推文本");
+        assert.equal(am.content, "让我读取文件", "重试后全文重推，无重复拼接");
+    });
+
+    it("stall 预算耗尽（每次重入都抛）→ error 收尾（预算仍是硬上限，不无限重试）", async () => {
+        const ret = await withReplay({
+            turns: [{ kind: 'reply', content: 'x', fault: { type: 'idle', times: 99 } }],
+        }, async (p) => {
+            const gen = streamInference(makeInfCtx());
+            let v = await gen.next();
+            while (!v.done) v = await gen.next();
+            return { result: v.value, calls: p.calls };
+        });
+        assert.equal(ret.calls.length, 3, "首发 + MAX_STREAM_RETRIES=2 次重试，恰 3 次出站");
+        assert.equal((ret.result as any).kind, "error");
+    });
+});

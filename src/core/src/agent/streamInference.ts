@@ -155,9 +155,12 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         let reasoningBuf = ""; // 思考增量累积（provider 映射后的 reasoning chunk；工具调用轮后续须回传给 API）
         const toolCallsBuf = new Map<number, { id?: string; type?: string; function: { name: string; arguments: string } }>();
         let lastUsage: ProviderUsage | undefined;
-        // ★ 流式 stall 有限重试：provider 的 idle 超时会抛 stream_idle_timeout。仅当本回合【尚未产出任何内容】
-        //   （三个 buffer 全空 = stall 发生在首 chunk 之前，最常见的连接级 stall）时重试，避免已 yield 给前端的
-        //   文本/思考在重试后重复输出。重试耗尽、或已有部分输出、或非 idle 错误 → 抛交外层 catch 优雅收尾
+        // ★ 流式 stall 有限重试：provider 的 idle 超时会抛 stream_idle_timeout。只要重试预算未耗尽就重试
+        //   （P1-1：工具执行严格发生在 streamInference 返回之后——runAgent yield* 委托 → scheduleToolCalls，
+        //   缓冲区里的 tool_call 只是解析好的文本、零副作用；旧门控「已拼出完整 tool_call 则不重试（避免重复
+        //   执行已敲定的工具）」理由不成立，只会让「连接在 finish 事件前断掉」这一中低频高伤害场景以 error
+        //   死亡，被迫手动续接一次全量 re-prefill）。已 yield 给前端的文本/思考在重试前经 text.reset 丢弃
+        //   （重试重新生成，不重复显示）。重试耗尽、或非 idle 错误 → 抛交外层 catch 优雅收尾
         //   （emit llm.error + return error → 主循环 yield final，busy 自动清零，杜绝永久卡死）。
         const MAX_STREAM_RETRIES = 2;
         // ★ API 瞬时错误（429/5xx/网络复位）的有限重试预算：与 idle 重试独立计数，互不挤占。每轮重置，
@@ -204,18 +207,19 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                 // 用户中止：provider 已干净 break 不会到此；防御性判断交外层 signal.aborted 分支处理
                 if (signal?.aborted) throw streamErr;
                 const isIdleTimeout = streamErr instanceof Error && streamErr.message === 'stream_idle_timeout';
-                // ★ 放宽 stall 重试门控：原 noOutputYet 要求「完全无输出」才重试，但工具调用轮几乎总有前导文案
-                //   （"让我读取 X…"），导致工具调用前的 stall 永不重试、等满 120s 后直接放弃（用户症状"卡了"）。
-                //   现改为：只要【尚未拼出完整可执行的 tool_call】（arguments 不可解析 = 仍在流式中）就允许重试；
-                //   已拼出完整 tool_call 则不重试（避免重复执行已敲定的工具）。这是用户卡死症状的直接修复。
+                // stall 形态仅用于日志文案（三种情形）：尚无输出 / 已有完整 tool_call（流尾部 stall）/ tool_call 未流完
                 const hasCompleteToolCall = [...toolCallsBuf.values()].some(
                     tc => { try { JSON.parse(tc.function.arguments); return true; } catch { return false; } }
                 );
                 const noOutputYet = !contentBuf && !reasoningBuf && toolCallsBuf.size === 0;
-                if (isIdleTimeout && (noOutputYet || !hasCompleteToolCall) && streamAttempt < MAX_STREAM_RETRIES) {
+                // ★ P1-1 放开门控：只要重试预算未耗尽就重试。「已拼出完整 tool_call 则不重试（避免重复执行
+                //   已敲定的工具）」的旧理由不成立——工具执行严格发生在 streamInference 返回之后，缓冲区里的
+                //   tool_call 只是解析好的文本、零副作用；不重试只会让 run 以「发生错误」死亡（一次全量 re-prefill）。
+                if (isIdleTimeout && streamAttempt < MAX_STREAM_RETRIES) {
                     // ★ 重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃这部分（重试会重新生成，避免重复显示）
                     if (!noOutputYet) yield { type: 'text.reset' };
-                    console.warn(`⚠️ 流式 stall（idle 超时${noOutputYet ? '，尚无输出' : '，tool_call 未流完'}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
+                    const stallShape = noOutputYet ? '，尚无输出' : hasCompleteToolCall ? '，已有完整 tool_call（流尾部 stall）' : '，tool_call 未流完';
+                    console.warn(`⚠️ 流式 stall（idle 超时${stallShape}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;
                 }

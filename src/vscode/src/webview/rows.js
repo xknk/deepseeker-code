@@ -287,6 +287,15 @@ function updateRow(key, patch) {
   if (!state.replaying && nearBottom()) scrollToBottom();
 }
 
+/** 整行删除（state 与 DOM 同步清理）：压缩进度瞬态行收敛删除等瞬态行生命周期用。 */
+function removeRow(key) {
+  if (key == null || !state.rowMap.has(key)) return;
+  state.rowMap.delete(key);
+  state.order = state.order.filter((k) => k !== key);
+  messagesEl().querySelector(`[data-key="${CSS.escape(String(key))}"]`)?.remove();
+  updateEmptyState();
+}
+
 // ———————— 流式缓冲（text/thinking/progress）与节流 flush ————————
 // 缓冲本体模块内私有；事件侧（events.js）经下方 appendXxx/setProgress/resetStreams 操作——
 // 缓冲只被 flush 消费，跨模块只暴露动作、不暴露变量（防止绕过节流直接改缓冲）。
@@ -517,7 +526,7 @@ el.style.display = state.order.length > 0 ? "none" : "";
 
 export {
   messagesEl, nearBottom, scrollToBottom,
-  appendRow, updateRow, rebuildRow,
+  appendRow, updateRow, rebuildRow, removeRow,
   closeStreaming, ensureAssistantRow, closeThinking, ensureThinkingRow,
   scheduleFlush, flush, addInfo,
   appendImagePreview, clearPendingImages, clearMessages,

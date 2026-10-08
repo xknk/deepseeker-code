@@ -33,7 +33,10 @@ export type ChatRow =
     /** 任务清单行（内联于消息流）：active=true 时留动态区随状态更新；新轮开始冻结为 Static，留在原位（新消息上方）。 */
     | { id: number; kind: "todos"; todos: Todo[]; active?: boolean }
     /** 压缩完成行（对标 CC「Compacted chat」）：淡色斜体插消息流；UI 事件实时行，转录不落盘故不参与回放重建。 */
-    | { id: number; kind: "compact"; tokensBefore: number; tokensAfter: number; trigger: "auto" | "manual"; hasSummary?: boolean };
+    | { id: number; kind: "compact"; tokensBefore: number; tokensAfter: number; trigger: "auto" | "manual"; hasSummary?: boolean }
+    /** 压缩进度瞬态行（P1-3 防误中止）：多批压缩期间「正在压缩 n/N」；恒留动态区随进度更新，
+     *  完成时由 compact.done 收敛替换（行删除）。UI 事件实时行，不落盘不回放。 */
+    | { id: number; kind: "compact-progress"; done: number; total: number };
 
 /**
  * 从转录行重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。

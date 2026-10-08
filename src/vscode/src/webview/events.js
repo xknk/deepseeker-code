@@ -8,7 +8,7 @@
  */
 import { vscode, state, nextKey } from "./state.js";
 import {
-  appendRow, updateRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
+  appendRow, updateRow, removeRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
@@ -94,10 +94,12 @@ switch (evt.type) {
       }
       case "final":
         closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 压缩失败/中止终结路径：不留「压缩中」僵尸行
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 兜底归零：同步子 agent 必在 final 前收敛，防事件丢失胶囊卡死
         break;
       case "error": {
         closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 同 final：错误终结时清理进度行
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
         appendRow({ key: nextKey(), kind: "system", text: `❌ ${String(evt.message ?? "未知错误")}` });
         break;
@@ -168,10 +170,27 @@ switch (evt.type) {
         else appendRow({ key: nextKey(), kind: "system", text: `⚠️ 后台任务失败（exit=${evt.exitCode ?? "?"}）：${cmd}` });
         break;
       }
+      case "compact.progress": {
+        // ★ 压缩进度瞬态行（P1-3 防误中止）：多批压缩 2~5 次辅助调用、每次数十秒，静默会被当成卡死而中止。
+        //   单行原位更新「正在压缩 n/N」，完成时由 compact.done 收敛替换；复用 compact 行型（同款淡色斜体样式）。
+        closeStreaming();
+        const done = Math.max(0, Number(evt.done) || 0);
+        const total = Math.max(0, Number(evt.total) || 0);
+        const text = `正在压缩上下文 ${done}/${total} 批…（辅助模型摘要中，请稍候）`;
+        if (state.compactProgressKey != null && state.rowMap.has(state.compactProgressKey)) {
+          updateRow(state.compactProgressKey, { text });
+        } else {
+          const key = nextKey();
+          state.compactProgressKey = key;
+          appendRow({ key, kind: "compact", text });
+        }
+        break;
+      }
       case "compact.done": {
         // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行；
         //   附 re-cache 提示；归档摘要随行存储，点击行可展开（Show more）
         closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 进度瞬态行收敛替换
         const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
         const trigger = evt.trigger === "manual" ? "手动" : "自动";

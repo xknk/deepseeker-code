@@ -121,6 +121,15 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     );
     /** 最近一次压缩的归档摘要（compact.done 随事件下发的 ⟦DSC:ARCHIVE-NOTES⟧ 段；运行时态，/archive 查看）。 */
     const archivedSummaryRef = useRef("");
+    /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
+    const compactProgressIdRef = useRef<number | null>(null);
+    /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
+    const dropCompactProgressRow = useCallback(() => {
+        const pid = compactProgressIdRef.current;
+        if (pid == null) return;
+        compactProgressIdRef.current = null;
+        setRows((prev) => prev.filter((r) => r.id !== pid));
+    }, []);
     /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
     const outputStyleRef = useRef<string | undefined>(undefined);
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
@@ -286,9 +295,27 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }
                 break;
             }
+            case "compact.progress": {
+                // 压缩进度瞬态行（P1-3 防误中止）：多批压缩期间「正在压缩 n/N」，单行原位更新；
+                // 完成时由 compact.done 收敛替换（先删进度行再插完成行）。恒留动态区（isDynamicRow）。
+                flush();
+                const done = (obj.done as number) ?? 0;
+                const total = (obj.total as number) ?? 0;
+                if (compactProgressIdRef.current == null) {
+                    const id = newRowId();
+                    compactProgressIdRef.current = id;
+                    setRows((prev) => [...prev, { id, kind: "compact-progress", done, total }]);
+                } else {
+                    const pid = compactProgressIdRef.current;
+                    setRows((prev) => prev.map((r) =>
+                        r.id === pid && r.kind === "compact-progress" ? { ...r, done, total } : r));
+                }
+                break;
+            }
             case "compact.done": {
                 // 压缩显示（对标 CC「Compacted chat」行）：收尾流式行后插淡色斜体行；摘要存 ref 供 /archive 查看
                 flush();
+                dropCompactProgressRow(); // 进度瞬态行收敛替换
                 archivedSummaryRef.current = (obj.summary as string) || "";
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "compact",
@@ -340,6 +367,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "final": {
                 closeStreaming();
+                dropCompactProgressRow(); // 压缩失败/中止等终结路径：进度瞬态行随 run 终结清理（不留「压缩中」僵尸行）
                 setRunningAgents(0); // 兜底归零：同步子 agent 必在 final 前经 stop 事件收敛，此处防事件丢失后胶囊卡死
                 // ★ 兜底渲染：若本轮未流式产出正文，final.text 承载的是压缩超窗/模型错误/中止等终结消息
                 //   （handleUnifiedChat 已据此决定是否转发；正常完成时 text 为空，不触发）。显示出来避免静默无输出。
@@ -352,6 +380,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "error": {
                 closeStreaming();
+                dropCompactProgressRow(); // 同 final：错误终结时清理进度行
                 setRunningAgents(0); // 同 final：错误终结时兜底归零
                 const id = newRowId();
                 setRows((prev) => [...prev, { id, kind: "system", text: `❌ ${(obj.message as string) ?? "未知错误"}` }]);

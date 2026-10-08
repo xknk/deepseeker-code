@@ -21,6 +21,7 @@ import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
+import { UIEvent } from "@/observability/type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 
 /** ANSI / OSC 转义序列（终端着色等） */
@@ -576,9 +577,20 @@ export const splitIntoBatches = (toCompact: Msg[]): Msg[][] => {
  * 传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
  * 末批（紧邻保留区）传 tailContext 框定：摘要模型知道自己在「为保留区补背景」，写出的背景才可
  * 直接被续接模型使用（否则只是正确但无用的流水账）。
+ * ★ onUIEvent（P1-3 防误中止）：多批压缩 2~5 次辅助调用、每次数十秒，期间 UI 静默会被当成卡死而中止
+ * （整轮压缩白做 + 上下文原样超限）。启动前发 {done:0,total:N}，各批完成时按完成序递增（并行批完成序
+ * 与请求序无关）；完成后由 compact.done 收敛替换（前端删瞬态进度行）。门禁在调用方（仅 depth=0 且有出口）。
  */
-const compactBatches = async (batches: Msg[][], signal?: AbortSignal): Promise<string> => {
-    const lines = await Promise.all(batches.map((b, i) => compactBatch(b, signal, i === batches.length - 1)));
+const compactBatches = async (batches: Msg[][], signal?: AbortSignal, onUIEvent?: (evt: UIEvent) => void): Promise<string> => {
+    if (onUIEvent && batches.length > 0) onUIEvent({ type: 'compact.progress', done: 0, total: batches.length });
+    let done = 0;
+    const lines = await Promise.all(batches.map((b, i) =>
+        compactBatch(b, signal, i === batches.length - 1).then((line) => {
+            done++;
+            onUIEvent?.({ type: 'compact.progress', done, total: batches.length });
+            return line;
+        })
+    ));
     return lines.join("\n");
 }
 
@@ -709,7 +721,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 const batches = splitIntoBatches(toCompact);
                 summaryMsg.content = batches.length === 1
                     ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal)
-                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal), event.signal);
+                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined), event.signal);
                 // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
                 //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。

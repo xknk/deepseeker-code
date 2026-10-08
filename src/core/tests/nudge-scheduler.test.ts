@@ -243,6 +243,44 @@ describe("pickNudge —— 周期自评与 pending 优先级", () => {
     });
 });
 
+describe("P1-2 上下文用量注入（惰性闭包）", () => {
+    it("周期 NUDGE 文案附用量百分比（标「估算」），闭包仅在该轮被调用一次", () => {
+        let calls = 0;
+        const s = createNudgeScheduler({ getContextUsage: () => { calls++; return { usedTokens: 90000, windowTokens: 128000 }; } });
+        assert.equal(s.pickNudge(40), null);
+        assert.equal(calls, 0, "非 nudge 轮闭包零调用（惰性：pickNudge 每轮都调，不能每轮全量扫描）");
+        const m = s.pickNudge(41)!;
+        assert.ok(m.content.startsWith(FENCE.NUDGE));
+        assert.ok(m.content.includes("约 70%"), `应含百分比：${m.content}`);
+        assert.ok(m.content.includes("估算"), "数字必须标「估算」（EMA 口径，非 API 真实值）");
+        assert.ok(m.content.includes("90000/128000"));
+        assert.equal(calls, 1, "闭包只在真正返回 nudge 的分支调用");
+    });
+
+    it("闭包返回 null → 不附用量；未注入闭包 → 行为逐字节不变", () => {
+        const s1 = createNudgeScheduler({ getContextUsage: () => null });
+        assert.ok(!s1.pickNudge(41)!.content.includes("估算"), "null 快照 → 不附用量");
+        const s2 = createNudgeScheduler();
+        const m2 = s2.pickNudge(41)!;
+        assert.ok(m2.content.startsWith(FENCE.NUDGE));
+        assert.ok(m2.content.includes("约 41 轮"));
+        assert.ok(!m2.content.includes("估算"), "未注入闭包 → 与 P1-2 之前行为一致");
+    });
+
+    it("REPEAT pending 消费时同样附用量（重复读大文件正是撑爆窗口的典型路径）", () => {
+        const s = createNudgeScheduler({ getContextUsage: () => ({ usedTokens: 64000, windowTokens: 128000 }) });
+        s.noteToolCall(1, [readCall("a.ts"), readCall("a.ts"), readCall("a.ts")]);
+        const m = s.pickNudge(2)!;
+        assert.ok(m.content.startsWith(FENCE.REPEAT));
+        assert.ok(m.content.includes("约 50%"), `REPEAT 文案应附用量：${m.content}`);
+        assert.ok(m.content.includes("估算"));
+
+        const s2 = createNudgeScheduler({ getContextUsage: () => null });
+        s2.noteToolCall(1, [readCall("b.ts"), readCall("b.ts"), readCall("b.ts")]);
+        assert.ok(!s2.pickNudge(2)!.content.includes("估算"), "null 快照 → REPEAT 文案不变");
+    });
+});
+
 describe("REPEAT_RETRIEVAL（重复检索检测）", () => {
     it("同路径第 3 次读取才触发（前两次属正常浏览）", () => {
         const s = createNudgeScheduler();

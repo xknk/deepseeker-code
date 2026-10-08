@@ -86,7 +86,16 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         // ★ 多模态：user content 可能是 parts 数组，取纯文本视图（兼容贴图轮的 PLAN_FIRST 判定）
         return msgText(m?.content);
     })();
-    const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode, noEarlyFinal: !!options.noEarlyFinal });
+    // ★ P1-2：给 nudge 调度器传上下文用量闭包（惰性——闭包仅在调度器真正要发 NUDGE/REPEAT nudge 的轮内
+    //   被调用，pickNudge 每轮都调、不能每轮全量扫描 estimateTokens）。口径与 ensureFitsWindow 的 estReal
+    //   同公式（estimateTokens × calibRatio + toolsTokens），nudge 文案里标「估算」；calibRatio 是跨轮 EMA，
+    //   闭包捕获绑定、首次调用在主循环内（晚于下方声明），无 TDZ 问题。
+    const nudges = createNudgeScheduler({
+        firstPrompt,
+        planMode: !!options.planMode,
+        noEarlyFinal: !!options.noEarlyFinal,
+        getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
+    });
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
