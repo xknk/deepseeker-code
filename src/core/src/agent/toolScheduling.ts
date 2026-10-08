@@ -13,7 +13,7 @@
 import type OpenAI from "openai";
 import { AgentEvent } from "./type.ts";
 import { processToolCall, ToolCallContext, ToolCallOutcome } from "./toolExecution.ts";
-import { appendMessage } from "@/session/transcript.ts";
+import { appendMessage, appendMessages } from "@/session/transcript.ts";
 import { buildImageFollowUpParts } from "@/session/contentParts.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
@@ -116,14 +116,17 @@ export const scheduleToolCalls = async function* (
             }
             // 并发执行
             const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc, ctx)));
-            // 串行 flush（请求序）
+            // 串行 flush（请求序）。P2-2：transcript 攒批一次落盘（open 一次多写，省 Windows/杀软下逐条 open 成本）；
+            //   message.push 仍逐条按请求序，落盘顺序 = 攒批顺序 = 请求序，语义不变。
+            const batchEntries: any[] = [];
             for (const oc of outcomes) {
                 yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
                 message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                batchEntries.push({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
                 if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
                 if (oc.aborted) abortedDuringTools = true;
             }
+            await appendMessages(sessionId, batchEntries);
         } else {
             // 串行分支（屏障工具 / 开关关 / 终结类 / 后台 / parseFailed / unknown / ask / deny）
             yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };
