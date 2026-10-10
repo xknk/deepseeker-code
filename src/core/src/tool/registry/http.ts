@@ -1,6 +1,7 @@
 /**
  * @file tool/registry/http.ts
- * @description HTTP 客户端工具：http_request（全方法 + 自定义 header/body + 原始响应）。
+ * @description HTTP 客户端工具：http_request（全方法 + 自定义 header/body + 原始响应）+
+ *  wait_http_ready（loopback-only 服务就绪等待，配套 run-stack 编排流程）。
  *
  *  与 web_fetch 的分工：
  *   - web_fetch：GET 抓「网页」→ 转 Markdown，面向「查文档/读资料」，默认拦内网（对外抓取语义）。
@@ -18,6 +19,24 @@ const HTTP_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_CHARS = 16000;
 const USER_AGENT = "DeepSeeker-Code-Agent/1.0 (+http_request tool)";
 const ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
+
+// ============ wait_http_ready（SAFE 免审的服务就绪等待）============
+// 安全红线：SAFE 免审 + 任意 URL = 审批旁路（免审外呼）。execute 内硬校验 host 必须 loopback，
+// 非 loopback 一律结构化拒绝并引导走 http_request（DANGER 审批）——此校验是本工具 SAFE 资格的前提。
+
+/** 单次探测超时与轮询间隔。 */
+const READY_PROBE_TIMEOUT_MS = 3000;
+const READY_POLL_INTERVAL_MS = 1000;
+const READY_DEFAULT_TIMEOUT_S = 60;
+const READY_MAX_TIMEOUT_S = 180;
+/** 超时线索里附带的失败 body 最大字符数。 */
+const READY_CLUE_CHARS = 200;
+
+const isLoopbackHost = (host: string): boolean => {
+    const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+    return h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "::"
+        || h === "0.0.0.0" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+};
 
 export const httpTools: CustomTool[] = [
     {
@@ -124,6 +143,80 @@ export const httpTools: CustomTool[] = [
                     }
                     return toolFailure(`[http_request 失败 | ${method}]：${error.message}`);
                 }
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "wait_http_ready",
+            description: [
+                "阻塞等待本地服务就绪：1s 间隔轮询 URL 直到服务响应（run-stack 编排用——「起没起来」从猜日志变确定性判定）。",
+                "仅限 loopback 地址（localhost/127.x/[::1]），其他地址直接拒绝——外部 URL 请用 http_request（走审批）。",
+                "expect_status 缺省=收到任意 HTTP 响应即算就绪（端口已服务，404/503 也算；状态码会回执）；指定了则精确匹配该状态码才通过。",
+                "超时时回执带最后一次状态码与 body 摘要，可当排障线索。★ SAFE 免审、可长阻塞，替代逐次 http_request 探测。",
+            ].join(" "),
+            parameters: {
+                type: "object",
+                properties: {
+                    url: { type: "string", description: "等待的本地 URL（如 http://localhost:5173 或健康端点 http://localhost:8080/actuator/health）" },
+                    expect_status: { type: "number", description: "要求的 HTTP 状态码（可选，缺省任意响应即就绪）" },
+                    timeout_seconds: { type: "number", description: `最长等待秒数（默认 ${READY_DEFAULT_TIMEOUT_S}，上限 ${READY_MAX_TIMEOUT_S}）` },
+                },
+                required: ["url"],
+            },
+            safetyLevel: ToolSafetyLevel.SAFE, // loopback-only 硬闸（见文件头安全红线）+ GET 语义探测，免审
+            isSync: true,
+            maxOutputCharacters: 2000,
+            async execute(args: { url?: string; expect_status?: number; timeout_seconds?: number }, ctx?: ToolContext) {
+                // 0. 参数与 loopback 硬闸
+                let parsed: URL;
+                try {
+                    parsed = new URL(String(args?.url ?? ""));
+                } catch {
+                    return toolFailure(`[wait_http_ready] URL 不合法：${args?.url}`);
+                }
+                if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+                    return toolFailure(`[wait_http_ready] 仅允许 http/https，拒绝 ${parsed.protocol}`);
+                }
+                if (!isLoopbackHost(parsed.hostname)) {
+                    return toolFailure(`[wait_http_ready] 仅支持本地地址（localhost/127.x/[::1]），拒绝 ${parsed.hostname}。外部 URL 请用 http_request（DANGER 审批）发起。`, 'permission');
+                }
+                const timeoutS = Math.min(Math.max(args?.timeout_seconds && args.timeout_seconds > 0 ? args.timeout_seconds : READY_DEFAULT_TIMEOUT_S, 1), READY_MAX_TIMEOUT_S);
+                const startedAt = Date.now();
+                const deadline = startedAt + timeoutS * 1000;
+                const elapsedS = () => Math.round((Date.now() - startedAt) / 1000);
+
+                // 1. 轮询：连接级失败（ECONNREFUSED）与状态不符都继续等；最后一次失败响应留 body 摘要当线索
+                let lastLine = "尚未发起探测";
+                let lastClue = "";
+                let attempts = 0;
+                let nextProgressAt = startedAt + 5000;
+                while (Date.now() < deadline) {
+                    if (ctx?.abortSignal?.aborted) return `⏹️ [wait_http_ready 已中止]：用户中断（已等待 ${elapsedS()}s）`;
+                    attempts++;
+                    let status: number | null = null;
+                    try {
+                        const res = await safeFetchFollow(parsed.href, { "User-Agent": USER_AGENT, "Accept": "*/*" },
+                            [AbortSignal.timeout(READY_PROBE_TIMEOUT_MS)], true, { method: "GET" });
+                        status = res.status;
+                        if (args?.expect_status === undefined || status === args.expect_status) {
+                            return `✅ 服务就绪 ${parsed.href}（HTTP ${status}${res.statusText ? " " + res.statusText : ""}，第 ${attempts} 次探测，耗时 ${elapsedS()}s）`;
+                        }
+                        lastLine = `HTTP ${status} ${res.statusText}（期望 ${args.expect_status}，继续等）`;
+                        try {
+                            lastClue = (await readBodyCapped(res, READY_CLUE_CHARS * 4)).text.slice(0, READY_CLUE_CHARS);
+                        } catch { /* 线索拿不到就算了 */ }
+                    } catch (e: any) {
+                        lastLine = e?.name === "TimeoutError" ? "探测超时（服务未响应）" : `连接失败：${e?.message ?? e}`;
+                    }
+                    if (ctx?.emitProgress && Date.now() >= nextProgressAt) {
+                        ctx.emitProgress(`仍在等待 ${parsed.href}（剩余 ${Math.max(Math.ceil((deadline - Date.now()) / 1000), 0)}s）：${lastLine}`);
+                        nextProgressAt = Date.now() + 5000;
+                    }
+                    await new Promise(r => setTimeout(r, READY_POLL_INTERVAL_MS));
+                }
+                return toolFailure(`[wait_http_ready 超时]：${timeoutS}s 内未就绪（共 ${attempts} 次探测）。最后状态：${lastLine}${lastClue ? `\n响应 body 摘要：${lastClue}` : ""}`);
             }
         }
     },

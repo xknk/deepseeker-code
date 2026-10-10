@@ -10,6 +10,7 @@ import { escapeHtml } from "./markdown.js";
 import { addInfo, clearMessages, clearPendingImages, appendImagePreview } from "./rows.js";
 import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
 import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs } from "./toolbar.js";
+import { toggleModelPicker } from "./modals.js";
 
 // ———————— 本地斜杠命令（与 CLI 对齐） ————————
 export function maybeLocalCommand(text) {
@@ -119,13 +120,14 @@ function buildComposer() {
 const c = $("#composer");
 c.innerHTML = `
 <div class="composer-shell">
-<div class="busy-strip" id="busy-strip" hidden><span class="codicon codicon-loading codicon-modifier-spin"></span><span id="busy-label">生成中…</span></div>
 <div class="composer-line">
 <span class="composer-prompt">❯</span>
 <textarea id="input" rows="1" placeholder="输入消息，/ 查看命令" spellcheck="false"></textarea>
 </div>
 <div class="composer-bar">
 <div class="composer-bar-left">
+<span id="agents-pill" class="agents-pill" title="运行中的子 agent 数（subagent.count 实时镜像）"><span class="agents-dot">●</span><span id="agents-pill-label">0 agent</span></span>
+<button class="model-chip" id="btn-model" title="当前模型（点击弹出候选选择器，同 /switch）"><span id="model-chip-label">…</span><span class="codicon codicon-chevron-down"></span></button>
 <button class="icon-btn" id="btn-file" title="上传文件入库（文本，拼入消息）"><span class="codicon codicon-new-file"></span></button>
 <button class="icon-btn" id="btn-image" title="上传图片（识别需配置图像理解 MCP）"><span class="codicon codicon-file-media"></span></button>
 <input type="file" id="file-input" style="display:none" />
@@ -179,6 +181,14 @@ const menu = $("#slash-menu");
 const btnSend = $("#btn-send");
 modeRefs.btn = $("#btn-mode");
 modeRefs.popover = $("#mode-popover");
+
+// ★ 弹层收编为 composer 子节点：配合 CSS（position:absolute; bottom:calc(100%+6px)）悬浮在输入框正上方、
+//   覆盖消息区——出现/消失零布局影响（修「弹窗出现时消息区/logo 被顶上去」）。懒建的 panels 经
+//   approval-anchor.before(panel) 插入时也会落在这里，同样吃悬浮规则。
+for (const floatId of ["approval-anchor", "sessions-panel", "fork-panel"]) {
+    const el = document.getElementById(floatId);
+    if (el) c.appendChild(el);
+}
 
 // 命令驱动表：全部功能经斜杠命令交互，UI 零控件。
 // ★ 与 CLI 的 LOCAL_COMMAND_NAMES 对齐（去掉无意义的 /exit）；obs=true 的命令数据在扩展宿主
@@ -324,6 +334,8 @@ doSend();
 //   大文件（>100KB）拒绝全量入库，引导改用 read_file（避免上下文爆炸）。
 const btnFile = $("#btn-file");
 const btnImage = $("#btn-image");
+// 模型胶囊：toggle 语义——未开弹选择器（host 回环带最新候选），已开就地关闭
+$("#btn-model").addEventListener("click", () => toggleModelPicker());
 const fileInput = $("#file-input");
 const imageInput = $("#image-input");
 btnFile.addEventListener("click", () => fileInput.click());

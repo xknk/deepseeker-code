@@ -17,7 +17,8 @@
  *      context_length    → replayFault 标记（isContextLengthError 自识别；配 afterChars=0 满足 noOutputYet 前提）；
  *      image_unsupported → replayFault 标记（isImageUnsupportedError 自识别；视觉自学习降级通道）；
  *      fatal             → 每次进入该 turn 都抛（重试耗尽 → InferenceResult error → runAgent final 收尾）。
- *    afterChars>0 → 先吐该长度正文再抛（复现「已推文本 → text.reset → 重试」的 mid-stream 场景）。
+ *    afterChars>0 → 先吐该长度正文再抛（复现「已推文本 → text.reset → 重试」的 mid-stream 场景）；
+ *    withToolCalls=true → 抛前先把 turn 的 toolCalls 完整流出（复现 P1-1「完整 tool_call 后流尾部 stall」）。
  *  - 录制器：每次 streamChat 记录入参（messages 快照 + tools + opts），测试据此断言「模型实际看到了什么」
  *    （如 ephemeral nudge 是否注入、inbox steering 是否送达）——这是纯黑盒断言做不到的。
  *  - 剧本耗尽 = 空回复（content null、无 tool_calls）——runAgent 的 PHANTOM 守护接管，确定性收尾，绝不挂死。
@@ -43,6 +44,9 @@ export interface ReplayFault {
     times?: number;
     /** 先 yield 该长度的正文再抛（mid-stream 故障，默认 0 = 未吐任何内容即抛） */
     afterChars?: number;
+    /** 抛故障前先把 turn 的 toolCalls 按干净路径同款分片【完整】流出（arguments 可 JSON.parse）——
+     *  复现 P1-1「流尾部 stall」：已拼出完整 tool_call 后连接断掉。缺省 false（故障轮不吐工具分片）。 */
+    withToolCalls?: boolean;
     /** 自定义错误 message（缺省按类型给确定默认值） */
     message?: string;
 }
@@ -130,6 +134,15 @@ export const createReplayProvider = (script: ReplayScript): ReplayProviderHandle
             const f = fault!;
             const n = Math.min(f.afterChars ?? 0, (turn.content ?? '').length);
             if (n > 0) yield { kind: 'text', text: (turn.content ?? '').slice(0, n) };
+            // withToolCalls：先按干净路径同款分片把 toolCalls 全量吐出再抛（P1-1「流尾部 stall」场景）
+            if (f.withToolCalls) {
+                const fts = turn.toolCalls ?? [];
+                for (let i = 0; i < fts.length; i++) {
+                    const tc = fts[i];
+                    yield { kind: 'tool_call_delta', index: i, id: tc.id ?? `call_replay_${turnIndex}_${i}`, type: 'function', nameDelta: tc.name };
+                    yield { kind: 'tool_call_delta', index: i, argumentsDelta: JSON.stringify(tc.args ?? {}) };
+                }
+            }
             throw makeFaultError(f);
         }
         // 干净流出：reasoning → text → tool_call 分片（每 call：name 一个 delta + arguments 整段一个 delta）→ usage

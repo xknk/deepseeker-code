@@ -14,7 +14,7 @@
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
 import OpenAI from "openai";
-import { appendMessage, appendEvent, UsageSnapshot } from "@/session/transcript.ts";
+import { appendMessage, appendMessages, appendEvent, UsageSnapshot } from "@/session/transcript.ts";
 import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
 import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
@@ -86,7 +86,20 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         // ★ 多模态：user content 可能是 parts 数组，取纯文本视图（兼容贴图轮的 PLAN_FIRST 判定）
         return msgText(m?.content);
     })();
-    const nudges = createNudgeScheduler({ firstPrompt, planMode: !!options.planMode, noEarlyFinal: !!options.noEarlyFinal });
+    // ★ P1-2：给 nudge 调度器传上下文用量闭包（惰性——闭包仅在调度器真正要发 NUDGE/REPEAT nudge 的轮内
+    //   被调用，pickNudge 每轮都调、不能每轮全量扫描 estimateTokens）。口径与 ensureFitsWindow 的 estReal
+    //   同公式（estimateTokens × calibRatio + toolsTokens），nudge 文案里标「估算」；calibRatio 是跨轮 EMA，
+    //   闭包捕获绑定、首次调用在主循环内（晚于下方声明），无 TDZ 问题。
+    const nudges = createNudgeScheduler({
+        firstPrompt,
+        planMode: !!options.planMode,
+        noEarlyFinal: !!options.noEarlyFinal,
+        getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
+    });
+    // ★ P3-8 run 级 read_file 读取追踪（path → mtime + 次数）：本 run 内重复读同一文件时结果头标
+    //   「第 N 次读取 · 内容未变更/已变更」，让模型自决是否还需重读。每 run 一个 Map、逐轮传同一引用；
+    //   ★ 刻意不做结果缓存——压缩后旧读取可能已出上下文，硬缓存会饿死模型（只标注，不截断）。
+    const readTracker = new Map<string, { mtimeMs: number; count: number }>();
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
 
@@ -185,6 +198,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         lastRealPromptTokens,
                         lastCachedTokens,
                         toolsTokens,
+                        onUIEvent: options.onUIEvent,
                     }
 
                 );
@@ -214,6 +228,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 userDecisionSource, llmDecisionSource, signal,
                 cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
                 events, keepRecentUnits, compactRatio, modelWindow, toolsTokens,
+                onUIEvent: options.onUIEvent,
             });
             if (infResult.kind === 'aborted') {
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
@@ -287,13 +302,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             if (repeatVerdict.tripped) {
                 stopReason = 'repeat';
                 // ★ 熔断硬化（事件日志化配套）：assistant 已于上方落盘，若直接 return 会留下孤儿 tool_calls，
-                //   续接时只能靠孤儿修复启发式兜底。镜像 toolScheduling 中止占位写法逐条补齐（push + appendMessage），
+                //   续接时只能靠孤儿修复启发式兜底。镜像 toolScheduling 中止占位写法逐条补齐（push + 落盘），
                 //   使「闭合 run 无孤儿」成为不变式。本路径不写 round.end——缺失即「异常收尾」取证信号。
+                //   P2-2：占位落盘合批一次写（顺序 = tool_calls 序，与逐条一致）。
                 for (const tc of assistantMessage.tool_calls) {
                     const ph = "（重复调用熔断，未执行）";
                     message.push({ role: 'tool', tool_call_id: tc.id, content: ph });
-                    await appendMessage({ sessionId, role: 'tool', tool_call_id: tc.id, content: ph } as any);
                 }
+                await appendMessages(sessionId, assistantMessage.tool_calls.map((tc: any) =>
+                    ({ sessionId, role: 'tool', tool_call_id: tc.id, content: "（重复调用熔断，未执行）" })));
                 yield { type: 'final', text: repeatVerdict.text };
                 return;
             }
@@ -308,7 +325,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 onUIEvent: options.onUIEvent,
                 requestApproval: options.requestApproval,
                 requestQuestion: options.requestQuestion,
+                ideAction: options.ideAction,
                 keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt,
+                // ★ P2-1：本时刻上下文用量估算（此时已含本轮 assistant，常数近似足够，不逐工具更新）——
+                //   processToolCall 据此收缩截断预算：最坏组合「上下文已 75% 满时跑大输出命令 → 16K 字符
+                //   进上下文 → 下一轮立刻压缩」被釜底抽薪；口径与 ensureFitsWindow/nudge 闭包同公式。
+                contextTokensEst: Math.round(estimateTokens(message) * calibRatio + toolsTokens),
+                readTracker, // ★ P3-8：run 级读取追踪（同一引用透传，跨轮累计）
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。

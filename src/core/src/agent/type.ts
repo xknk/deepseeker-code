@@ -9,7 +9,7 @@
  */
 import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { Msg } from "@/session/contextCore.ts";
-import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
 import type { Locale } from "@/common/index.ts";
 
 /**
@@ -52,6 +52,8 @@ export interface RunAgentOptions {
     requestApproval?: RequestApprovalFn;
     /** P2-12 宿主提问钩子：ask_question 工具经此向用户结构化提问。未注入时工具优雅降级（仅交互式 CLI 注入）。 */
     requestQuestion?: RequestQuestionFn;
+    /** IDE 桥钩子：ide_* 三工具经此请求宿主执行 IDE 动作。未注入（CLI/HTTP 宿主）时工具自隐藏。 */
+    ideAction?: RequestIdeActionFn;
     /** 模型上下文窗口大小（token），超出 modelWindow * compactRatio 时触发压缩。 */
     modelWindow: number;
     /** agent 嵌套深度，主 agent 为 0，spawn_agent 子 agent 递增。 */
@@ -114,6 +116,10 @@ export interface ensureOptions  {
      *  API 真实 prompt_tokens 含此段而 estimateTokens(messageArr) 不含——压缩阈值须显式加上，
      *  否则校准 EMA 被迫把它吸收成乘数（长对话后期乘数虚高 → 提前压缩 → 无谓击穿前缀缓存）。缺省 0。 */
     toolsTokens?: number,
+    /** 压缩 UI 事件（compact.done 完成行 + compact.progress 多批进度）出口：仅主 agent 且确有释放/多批时发
+     *  （前端消息流插「已压缩」淡色行，多批压缩期间先显示瞬态进度行防误中止）。
+     *  未注入（headless / 子 agent 过滤在 emit 处）则跳过，零影响。 */
+    onUIEvent?: (evt: UIEvent) => void,
 }
 
 /**

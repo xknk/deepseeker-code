@@ -30,6 +30,7 @@ import { memoryTools } from "./registry/memory.ts";
 import { recallTools } from "./registry/recall.ts";
 import { spreadsheetTools } from "./registry/spreadsheet.ts";
 import { documentTools } from "./registry/document.ts";
+import { ideTools } from "./registry/ide.ts";
 
 export * from "./type.ts";
 
@@ -64,4 +65,5 @@ agentTools.push(
     ...recallTools,      // 会话历史召回（本会话 transcript 检索：归档消息/工具结果 + staleness 校验 + 侧车全文）
     ...spreadsheetTools, // read_xlsx（Excel 工作簿读取，补 read_file 读不了的二进制 xlsx）
     ...documentTools,    // read_docx / read_pdf（Word / PDF 文档读取，补 read_file 读不了的二进制文档）
+    ...ideTools,         // IDE 桥（ide_open_file / ide_diagnostics / ide_run_task；仅 VSCode 宿主注入钩子，否则 validateEnvironment 自隐藏）
 );

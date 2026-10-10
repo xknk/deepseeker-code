@@ -234,3 +234,70 @@ describe("ensureFitsWindow 巨型工具结果：压缩成功、会话可续（�
         assert.equal(store.consecutiveFailures, 3, "连败计数应落盘累计");
     });
 });
+
+// ==================== 压缩进度事件（P1-3 防误中止） ====================
+
+/** 构造两个独立大单元（各 45K ASCII ≈ 11K token，批预算 16K 装不下两个 → 恰 2 批）。
+ *  ★ 单元总数恰 5 = 全局 KEEP_RECENT_UNITS → 免费衰减 no-op（cutoff=0），稳定走 LLM 压缩路线。
+ *  ★ 辅助模型窗口给 200K 字符：批序列化 ~46K 字符必须落在窗口内（30K 假窗会误 400 干扰本场景）。 */
+const buildMultiBatchHistory = (): any[] => [
+    { role: "system", content: "SYS" },
+    { role: "system", content: "" }, // 摘要槽
+    { role: "user", content: "分别读取两个模块的构建日志并定位问题" },
+    {
+        role: "assistant", content: null,
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: '{"path":"m1.log"}' } }],
+    },
+    { role: "tool", tool_call_id: "call_1", content: "L".repeat(45_000) },
+    { role: "assistant", content: "模块 1 日志已定位到问题点" },
+    {
+        role: "assistant", content: null,
+        tool_calls: [{ id: "call_2", type: "function", function: { name: "read_file", arguments: '{"path":"m2.log"}' } }],
+    },
+    { role: "tool", tool_call_id: "call_2", content: "L".repeat(45_000) },
+    { role: "user", content: "汇总一下两个模块的问题" },
+];
+
+describe("compact.progress 多批压缩进度（P1-3）", () => {
+    it("主 agent 多批压缩：onUIEvent 收到 {done:0,total:N} + 完成序递增 1..N，最后 compact.done 收敛", async () => {
+        const { provider, summarizeSizes } = makeWindowedProvider(200_000);
+        const messageArr = buildMultiBatchHistory();
+        const uiEvents: any[] = [];
+
+        await withProvider(provider, async () => {
+            await ensureFitsWindow({
+                ...buildEvent("compact-progress-seq", messageArr),
+                onUIEvent: (e: any) => uiEvents.push(e),
+            });
+        });
+
+        assert.ok(summarizeSizes.length >= 2, `应发生多批压缩（摘要请求 ≥2 次），实际 ${summarizeSizes.length}`);
+        const prog = uiEvents.filter((e) => e.type === "compact.progress");
+        assert.ok(prog.length >= 2, "应发出启动帧 + ≥2 个完成帧");
+        assert.equal(prog[0].done, 0, "首帧 done=0（尚未有批完成）");
+        const total = prog[0].total;
+        assert.ok(total >= 2, `total 应为批数（≥2），实际 ${total}`);
+        // 完成帧 done 单调递增且恰为 1..N（并行批按完成序递增，计数器共享）
+        assert.deepEqual(prog.map((e) => e.done), Array.from({ length: total + 1 }, (_, i) => i));
+        for (const e of prog) assert.equal(e.total, total, "total 全程一致");
+        // 完成行照常发（进度行由它收敛替换）
+        assert.ok(uiEvents.some((e) => e.type === "compact.done"), "压缩确有释放后应发 compact.done");
+    });
+
+    it("子 agent（depth=1）不发进度也不发完成行（门禁与 compact.done 一致）", async () => {
+        const { provider } = makeWindowedProvider(200_000);
+        const messageArr = buildMultiBatchHistory();
+        const uiEvents: any[] = [];
+
+        await withProvider(provider, async () => {
+            await ensureFitsWindow({
+                ...buildEvent("compact-progress-depth1", messageArr),
+                depth: 1,
+                onUIEvent: (e: any) => uiEvents.push(e),
+            });
+        });
+
+        assert.deepEqual(uiEvents.filter((e) => e.type === "compact.progress"), [], "子 agent 不发进度");
+        assert.deepEqual(uiEvents.filter((e) => e.type === "compact.done"), [], "子 agent 不发完成行");
+    });
+});

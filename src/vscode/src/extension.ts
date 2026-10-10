@@ -16,6 +16,7 @@ import { randomUUID } from "crypto";
 // ★ type-only：host 及其 core 依赖必须在 process.chdir(workspaceRoot) 之后动态加载，
 // 否则模块加载期按「插件安装目录」cwd 初始化（createModel 等），导致读取/执行错目录。
 import type { ChatHost, ChatHostCallbacks } from "./host";
+import { createIdeActionHandler } from "./ideBridge";
 import { isVisionEnabled } from "@/session/contentParts.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 
@@ -291,6 +292,8 @@ const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
   sink: (evt) => deliverTo(tab, { type: "evt", evt }),
   onBusy: () => postState(tab),
   onQuestion: (req) => deliverTo(tab, { type: "question", req }),
+  // ★ IDE 桥：ide_* 三工具的 vscode 动作（open/diagnostics/task）在本文件集中委托 ideBridge 执行
+  onIdeAction: createIdeActionHandler(),
   onPlan: (plan) => deliverTo(tab, { type: "plan", plan }),
   onSessionReset: () => deliverTo(tab, { type: "sessionReset" }),
   // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：仅活动页签写——多 Tab 各自续接

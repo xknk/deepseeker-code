@@ -58,14 +58,18 @@ const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW
     return <MessageBlock row={row} wrapW={wrapW} streamTail={streamTail} />;
 };
 
-/** 是否留在动态区：仅流式中的 assistant/thinking、运行中的 tool、活动中的 todos 行。
+/** 是否留在动态区：仅流式中的 assistant/thinking、运行中的 tool、活动中的 todos 行、压缩进度瞬态行。
  *  ★ 思考行完成后回 Static——之前"始终动态"导致已完成的思考堆积在末尾（消息混乱）。
- *  ★ todos 行 active 时留动态区随状态刷新；pushUser 冻结为 Static，留在原位（新消息上方）。 */
+ *  ★ todos 行 active 时留动态区随状态刷新；pushUser 冻结为 Static，留在原位（新消息上方）。
+ *  ★ compact-progress 行生命周期内原位刷新（P1-3），完成即被删除（永进 Static）。
+ *  ★ subagent-progress 行同理（P3-7）：子 agent 干活期间原位刷新瞬态行。 */
 const isDynamicRow = (r: ChatRow): boolean =>
     (r.kind === "assistant" && !!r.streaming) ||
     (r.kind === "thinking" && !!r.streaming) ||
     (r.kind === "tool" && r.status === "running") ||
-    (r.kind === "todos" && !!r.active);
+    (r.kind === "todos" && !!r.active) ||
+    r.kind === "compact-progress" ||
+    r.kind === "subagent-progress";
 
 /** 底部「生成中」行的 braille 帧表（与 Ink Spinner dots 同源）。
  *  ★ 动画只允许出现在这一行——工具卡内严禁逐帧动画（Ink 擦除失准会把上一帧叠在下面，
@@ -103,11 +107,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     const [planEditing, setPlanEditing] = useState(false);
     const [planDraft, setPlanDraft] = useState("");
     const [planCursor, setPlanCursor] = useState(0);
-    /** P2-12 提问模态：qCursor=选项光标，qChecked=多选已勾选项集合。 */
+    /** P2-12 提问模态：qCursor=选项光标（0..n-1 选项，n=Other 自由输入行），qChecked=多选已勾选项集合。 */
     const [qCursor, setQCursor] = useState(0);
     const [qChecked, setQChecked] = useState<Set<number>>(new Set());
+    /** Other 自由输入编辑态：内嵌 MultilineInput 接管打字（同 PlanEditor 模式，主输入框此时 inactive）。 */
+    const [qEditing, setQEditing] = useState(false);
+    const [qDraft, setQDraft] = useState("");
+    const [qDraftCursor, setQDraftCursor] = useState(0);
     const qCursorRef = useRef(0);
     const qCheckedRef = useRef<Set<number>>(new Set());
+    const qEditingRef = useRef(false);
+    const qDraftRef = useRef("");
 
     const inputRef = useRef(input);
     const selectIdxRef = useRef(selectIdx);
@@ -121,6 +131,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     planDraftRef.current = planDraft;
     qCursorRef.current = qCursor;
     qCheckedRef.current = qChecked;
+    qEditingRef.current = qEditing;
+    qDraftRef.current = qDraft;
 
     // ★ P2-16 statusline（对标 Claude Code）：加载用户 settings.json 的 statusLine.command，
     //   按轮次边界 + 5s 慢速轮询刷新底部状态栏；无配置则全程跳过（零开销）。出错保留上次好值防闪烁。
@@ -254,8 +266,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     const inputActive = !menuActive;
 
     useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, state.pendingModel, slashVisible, filteredCommands.length]);
-    // ★ 提问模态打开/切换时重置光标与已勾选
-    useEffect(() => { setQCursor(0); setQChecked(new Set()); }, [state.pendingQuestion]);
+    // ★ 提问模态打开/切换时重置光标、已勾选与 Other 编辑态
+    useEffect(() => { setQCursor(0); setQChecked(new Set()); setQEditing(false); setQDraft(""); setQDraftCursor(0); }, [state.pendingQuestion]);
     // ★ 模型选择器打开时初始定位到当前模型所在行（不在清单则落 0）
     useEffect(() => {
         if (state.pendingModel) {
@@ -326,6 +338,12 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             case "/debug":
                 state.pushInfo(inspectDebug(state.sessionIdRef.current ?? ""));
                 return true;
+            case "/archive": {
+                // 最近一次压缩的归档摘要（compact.done 随事件下发；运行时态，重启后为空）
+                const s = state.getArchivedSummary();
+                state.pushInfo(s ? `📜 最近一次压缩的归档摘要：\n${s}` : "本会话启动以来尚未发生过压缩（摘要仅保留运行时最近一次）。");
+                return true;
+            }
             case "/plan": {
                 const on = !state.getPlanMode();
                 state.setPlanMode(on);
@@ -456,6 +474,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         state.resolvePlan({ action: 'accept', plan: planDraftRef.current });
     };
 
+    /** Other 自由输入提交（编辑态 Enter）：空文本不提交；多选已勾选项随 freeText 一并回传。 */
+    const confirmQuestionDraft = () => {
+        const q = state.pendingQuestion?.req;
+        const text = qDraftRef.current.trim();
+        if (!q || !text) return;
+        const sel = q.multiSelect
+            ? [...qCheckedRef.current].sort((a, b) => a - b).map(i => q.options[i]?.label).filter(Boolean)
+            : [];
+        state.resolveQuestion({ selected: sel, freeText: text });
+    };
+
     // —— 全局按键分发（模态优先） ——
     useInput((ch, key) => {
         if (key.ctrl && ch === "c") { exit(); return; }
@@ -469,14 +498,22 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         }
         if (state.pendingQuestion) {
             const q = state.pendingQuestion.req;
-            const n = q.options.length;
+            const n = q.options.length + 1; // 光标范围含末行 Other 自由输入档
             const multi = !!q.multiSelect;
+            if (qEditingRef.current) {
+                // Other 编辑态：内嵌 MultilineInput 接管打字，本层仅处理 Esc 返回选项
+                if (key.escape || (key.ctrl && ch === "g")) { setQEditing(false); setQDraft(""); setQDraftCursor(0); }
+                return;
+            }
             if (key.upArrow) setQCursor((i) => (i - 1 + n) % n);
             else if (key.downArrow) setQCursor((i) => (i + 1) % n);
             else if (multi && ch === " ") {
-                setQChecked((prev) => { const nx = new Set(prev); nx.has(qCursorRef.current) ? nx.delete(qCursorRef.current) : nx.add(qCursorRef.current); return nx; });
+                // Other 行 Space = 进入自由输入（勾选语义仅对选项行生效）
+                if (qCursorRef.current >= q.options.length) { setQDraft(""); setQDraftCursor(0); setQEditing(true); }
+                else setQChecked((prev) => { const nx = new Set(prev); nx.has(qCursorRef.current) ? nx.delete(qCursorRef.current) : nx.add(qCursorRef.current); return nx; });
             } else if (key.return) {
-                if (multi) {
+                if (qCursorRef.current >= q.options.length) { setQDraft(""); setQDraftCursor(0); setQEditing(true); }
+                else if (multi) {
                     const sel = qCheckedRef.current.size > 0
                         ? [...qCheckedRef.current].sort((a, b) => a - b).map(i => q.options[i]?.label).filter(Boolean)
                         : [q.options[qCursorRef.current]?.label].filter(Boolean);
@@ -587,7 +624,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                         {state.busy ? (
                             <Box marginTop={0.5}>
                                 <Text color={THEME.coralBright}>
-                                    {`${SPINNER_FRAMES[busyClock.frame]} ${S.generating} (${busyClock.sec}s · ${S.escInterrupt})`}
+                                    {`${SPINNER_FRAMES[busyClock.frame]} ${S.thinkVerbs[Math.floor(busyClock.sec / 3) % S.thinkVerbs.length]}… (${busyClock.sec}s · ${S.escInterrupt})`}
+                                    {/* 子 agent 运行计数（对标 CC「● N agent」）：内联追加不增行高，不动动态区稳定性 */}
+                                    {state.runningAgents > 0 ? (
+                                        <Text color="green"> · ● {state.runningAgents} agent{state.runningAgents > 1 ? "s" : ""}</Text>
+                                    ) : null}
                                 </Text>
                             </Box>
                         ) : null}
@@ -606,6 +647,11 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                             cursor={qCursor}
                             checked={qChecked}
                             wrapW={wrapW}
+                            editing={qEditing}
+                            draft={qDraft}
+                            draftCursor={qDraftCursor}
+                            onDraftChange={(v, c) => { setQDraft(v); setQDraftCursor(c); }}
+                            onDraftSubmit={confirmQuestionDraft}
                         />
                     ) : null}
                     {state.pendingPlan ? (

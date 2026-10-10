@@ -56,8 +56,16 @@ const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用�
 const EARLY_FINAL_TEXT = (round: number): string =>
     `你仅 ${round} 轮就准备收尾，且回答中没有明确的完成声明。请自检：若用户输入本就无需工具（寒暄/闲聊/纯问答）、或你在等用户澄清决策，直接正常回应即可，忽略本自检、不要输出任何自检说明；若确有任务未落地（所需信息未获取齐 / 该改的文件未改完 / 未验证），立即继续调用工具推进，不要草率总结收尾；若确已全部完成，请明确回复「已完成」并简述成果。`;
 const TOOL_DIGEST_TEXT = "你刚执行完工具拿到结果，却未基于该结果给出实质回应就准备收尾。请结合工具返回结果继续推进；若结果表明任务尚未完成（如仍在编译/运行、需继续轮询），立即采取下一步行动，不要空手收尾。若确已全部完成，请明确回复「已完成」并简述成果。";
-const NUDGE_TEXT = (round: number): string =>
-    `你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。`;
+/** 上下文用量快照（P1-2）：估算口径（estimateTokens × calibRatio + toolsTokens），非 API 真实值。 */
+type ContextUsage = { usedTokens: number; windowTokens: number };
+/** 用量提示句（P1-2 让模型感知窗口余量）：数字必须标「估算」——calibRatio 是 EMA 口径、与 ensureFitsWindow
+ *  的 estReal 同公式，与 API 真实 prompt_tokens 存在口径差；标估算防模型把数字当精确账本。 */
+const usageNoteText = (usage: ContextUsage): string => {
+    const pct = usage.windowTokens > 0 ? Math.min(100, Math.max(0, Math.round((usage.usedTokens / usage.windowTokens) * 100))) : 0;
+    return `当前上下文已用约 ${pct}%（估算 ≈${usage.usedTokens}/${usage.windowTokens} token）。若占比已高（>70%）：优先收敛收尾、减小单次读取量（search_grep 定位后局部读取），避免触发强制压缩。`;
+};
+const NUDGE_TEXT = (round: number, usage?: ContextUsage | null): string =>
+    `你已执行约 ${round} 轮工具调用。请自评：若任务已可完成，立即给出最终答案、不再调用工具；若确需更多步骤，继续，但确保每步都在实质推进任务、不重复检索。${usage ? usageNoteText(usage) : ""}`;
 
 // —— 首轮 PLAN_FIRST 启发式（判断用户首条 prompt 是否疑似非平凡实现任务）——
 //   ★ 中英双语词表（2026-09-11）：原纯中文词表对英文 prompt 永不命中（detectTextLocale 已按支持英文用户
@@ -115,7 +123,14 @@ const TODO_INCOMPLETE_TEXT = (openItems: string[]): string =>
  *   false 表示放行真实收尾（主循环 yield final）。
  * - noteToolCall()：本轮有 tool_calls（实质推进）时调用，重置空响应预算。
  */
-export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: boolean; noEarlyFinal?: boolean } = {}): {
+export const createNudgeScheduler = (opts: {
+    firstPrompt?: string;
+    planMode?: boolean;
+    noEarlyFinal?: boolean;
+    /** P1-2 上下文用量快照闭包（惰性）：estimateTokens(message) 是全量扫描，而 pickNudge 每轮都调，
+     *  故闭包只在真正要返回 NUDGE / REPEAT_RETRIEVAL nudge 的分支内调用，其余轮零调用。 */
+    getContextUsage?: () => ContextUsage | null;
+} = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
     noteToolCall: (round: number, toolCalls?: any[]) => void;
@@ -164,9 +179,16 @@ export const createNudgeScheduler = (opts: { firstPrompt?: string; planMode?: bo
             if (todoPending) { const m = todoPending; todoPending = null; return m; }
             // 重复检索 nudge：工具轮 noteToolCall 命中阈值时设入，下一轮推理前消费。优先级低于收尾守护
             //   （空回复/早收尾/工具消化属正确性兜底，先于效率类 nudge），高于周期 NUDGE。
-            if (repeatRetrievalPending) { const m = repeatRetrievalPending; repeatRetrievalPending = null; return m; }
+            //   消费时附带上下文用量（P1-2）：重复读大文件正是撑爆窗口的典型路径，此处提醒最对症。
+            if (repeatRetrievalPending) {
+                const m = repeatRetrievalPending; repeatRetrievalPending = null;
+                const usage = opts.getContextUsage?.() ?? null;
+                return usage ? { ...m, content: `${m.content}${usageNoteText(usage)}` } : m;
+            }
             if (round > 1 && round % NUDGE_EVERY === 1) {
-                return { role: 'system', content: `${NUDGE_FENCE}\n${NUDGE_TEXT(round)}` };
+                // ★ P1-2 惰性调用点：只在真正返回周期 NUDGE 的这一轮才全量扫描估算用量（闭包缺省/返回 null → 文案不带用量，行为不变）
+                const usage = opts.getContextUsage?.() ?? null;
+                return { role: 'system', content: `${NUDGE_FENCE}\n${NUDGE_TEXT(round, usage)}` };
             }
             return null;
         },

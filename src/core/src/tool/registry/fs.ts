@@ -9,7 +9,7 @@
 import fs from "fs/promises";
 import type * as ts from "typescript";   // P0-1：type-only——esbuild 编译期剥离，运行时不 resolve（CLI 不发布 typescript）
 import path from "path";
-import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecuteResult } from "../type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecuteResult, ToolContext } from "../type.ts";
 // typescript 模块惰性加载（view_symbol_outline 的 AST + 代码导航/诊断的 LanguageService 共用）已收敛到 tsHost，
 //   本文件不再持私有副本。CLI 经 esbuild 打包且不发布 typescript，顶层静态 import 会让 npm 全局安装后启动即崩；
 //   type-only import（上方）保留类型注解；运行时按需加载，缺失则 view_symbol_outline 降级提示。
@@ -422,7 +422,7 @@ export const fsTools: CustomTool[] = [
             // ★ 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥，
             //   在 verifyResult 之后、回灌云端模型之前由 runAgent 调用，仅影响"发给模型的视图"。
             privacyMaskingRules: maskSecretsInContent,
-            async execute(args: { path: string; start_line?: number; end_line?: number }) {
+            async execute(args: { path: string; start_line?: number; end_line?: number }, toolCtx?: ToolContext) {
                 try {
                     const absPath = resolveReadablePath(args.path);
 
@@ -477,7 +477,23 @@ export const fsTools: CustomTool[] = [
                         // 请求区间完全在文件之外（如 start 超出总行数）：明确提示，避免 header 行号倒挂
                         return `[File: ${args.path}] 请求的行区间 ${start}-${end} 无内容（文件总行数约 ${currentLineNum}）。`;
                     }
-                    return `[File: ${args.path} | Lines ${start}-${realEnd}]\n${formattedCode}${hasMore ? `\n\n[... 后面还有代码已被隐藏，你可以调整 start_line 继续分片读取。]` : ""}`;
+                    // ★ P3-8 读取戳（信息标注，非缓存）：run 级重复读同一文件时在结果头标「第 N 次读取 +
+                    //   内容自上次读取未变更/已变更」，让模型自决是否还需整文件重读。跨 run 不记忆、
+                    //   分片区间不参与判定（mtime 只回答「文件变没变」）；tracker 缺省（异常路径）零开销跳过。
+                    let readStamp = "";
+                    if (toolCtx?.readTracker) {
+                        try {
+                            const st = await fs.stat(absPath);
+                            const prev = toolCtx.readTracker.get(absPath);
+                            const count = (prev?.count ?? 0) + 1;
+                            const changed = prev !== undefined && prev.mtimeMs !== st.mtimeMs;
+                            toolCtx.readTracker.set(absPath, { mtimeMs: st.mtimeMs, count });
+                            if (count > 1) {
+                                readStamp = `[第 ${count} 次读取（本 run）· 内容自上次读取${changed ? "已变更" : "未变更"}]\n`;
+                            }
+                        } catch { /* stat 失败：标注缺失无害，不影响读取本身 */ }
+                    }
+                    return `${readStamp}[File: ${args.path} | Lines ${start}-${realEnd}]\n${formattedCode}${hasMore ? `\n\n[... 后面还有代码已被隐藏，你可以调整 start_line 继续分片读取。]` : ""}`;
 
                 } catch (error: any) {
                     return toolFailure(`读取文件失败 [${args.path}]: ${error.message}`);

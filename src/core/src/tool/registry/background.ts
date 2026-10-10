@@ -22,6 +22,7 @@ import path from "path";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
 import { createUUID, execFileSmart } from "@/common/index.ts";
+import { pushSessionInbox } from "../../agent/inbox.ts";
 
 /**
  * Windows 下解析 POSIX shell（Git Bash）路径，供 run_command / run_in_background 共用。模型生成的命令以 POSIX 为主
@@ -78,6 +79,17 @@ interface BgTask {
 const MAX_BUFFER_CHARS = 100_000; // 每任务输出环形缓冲上限
 const registry = new Map<string, BgTask>();
 
+/** 后台任务退出通知的载荷（attachTaskLifecycle finish 收敛点构造，经 makeTaskExitNotifier 发往 UI/inbox）。 */
+export interface BgExitInfo {
+    taskId: string;
+    command: string;
+    sessionId: string;
+    status: "exited" | "killed";
+    exitCode: number | null;
+    /** exited 且 exitCode===0 才算成功；killed（用户中止/手动停止）恒 false。 */
+    ok: boolean;
+}
+
 /** 追加输出并维持环形缓冲（超出上限从头部丢弃，保留最新日志） */
 function appendOutput(task: BgTask, chunk: string): void {
     task.outputBuffer += chunk;
@@ -130,7 +142,7 @@ const createBgTask = (proc: any, command: string, cwd: string, sessionId: string
 const attachTaskLifecycle = (
     task: BgTask,
     proc: any,
-    opts: { signal?: AbortSignal; codec?: StreamCodec } = {},
+    opts: { signal?: AbortSignal; codec?: StreamCodec; onExit?: (info: BgExitInfo) => void } = {},
 ): Promise<void> => {
     return new Promise<void>((resolve) => {
         let finished = false; // 守卫：abort 与 close 可能先后触发 finish，仅首次生效（防 exitCode 被覆盖 / 日志双写）
@@ -138,6 +150,14 @@ const attachTaskLifecycle = (
             if (finished) return;
             finished = true;
             apply();
+            // ★ 退出主动通知（对标 CC「Background command failed」）：状态/退出码定形后回调一次，异常不击垮收尾
+            try {
+                opts.onExit?.({
+                    taskId: task.taskId, command: task.command, sessionId: task.sessionId,
+                    status: task.status === "killed" ? "killed" : "exited",
+                    exitCode: task.exitCode, ok: task.status === "exited" && task.exitCode === 0,
+                });
+            } catch { /* 通知失败不影响任务收尾 */ }
             // 退出后延迟清理注册表（留 60s 供查询退出码），避免长期累积死任务
             setTimeout(() => registry.delete(task.taskId), 60_000);
             opts.signal?.removeEventListener("abort", onAbort);
@@ -179,6 +199,25 @@ const attachTaskLifecycle = (
 };
 
 /**
+ * 构造后台任务退出通知器（attachTaskLifecycle 的 onExit 回调工厂）：
+ *  - 一律发 task.exit UIEvent（成功淡一笔、失败醒目；对标 CC「Background command failed」斜体通知）；
+ *  - 仅「非零退出的自然失败」额外 pushSessionInbox——模型下一轮即可见，不再蒙在鼓里
+ *    （killed=用户主动停止、成功=无需打断，均不进 inbox）。
+ * 全程 best-effort：UIEvent/inbox 异常都吞掉，不影响任务收尾与宿主。
+ */
+export const makeTaskExitNotifier = (ctx?: ToolContext) => (info: BgExitInfo): void => {
+    const brief = info.command.length > 80 ? `${info.command.slice(0, 80)}…` : info.command;
+    try {
+        ctx?.onUIEvent?.({ type: "task.exit", taskId: info.taskId, command: brief, status: info.status, exitCode: info.exitCode, ok: info.ok });
+    } catch { /* 通知失败不影响主流程 */ }
+    if (!info.ok && info.status === "exited" && info.sessionId) {
+        try {
+            pushSessionInbox(info.sessionId, `⚠️ 后台任务失败（exit=${info.exitCode ?? "未知"}）：${brief}\n（后台命令非零退出。请用 get_background_output(task_id="${info.taskId}") 查看日志，并决定是否修复重跑。）`);
+        } catch { /* inbox 满写失败忽略 */ }
+    }
+};
+
+/**
  * 收编一个已 spawn、仍在运行的前台进程（run_command 超时自动转后台）进注册表。
  * ★ 从注册到换绑监听全程同步（无 await）→ 零丢块/零重放：换绑前到达的块由调用方并入
  *   seedOutput，换绑后的块直达环形缓冲；JS 单线程保证同步块内不会插入 data 事件。
@@ -191,7 +230,7 @@ const attachTaskLifecycle = (
  */
 export const adoptRunningProcess = (
     proc: any,
-    meta: { command: string; cwd: string; sessionId?: string; signal?: AbortSignal },
+    meta: { command: string; cwd: string; sessionId?: string; signal?: AbortSignal; onExit?: (info: BgExitInfo) => void },
     seedOutput: string,
     codec: StreamCodec,
 ): string => {
@@ -205,7 +244,7 @@ export const adoptRunningProcess = (
     const onData = (d: Buffer) => appendOutput(task, codec.decode(d));
     proc.stdout?.on("data", onData);
     proc.stderr?.on("data", onData);
-    void attachTaskLifecycle(task, proc, { signal: meta.signal, codec });
+    void attachTaskLifecycle(task, proc, { signal: meta.signal, codec, onExit: meta.onExit });
     return task.taskId;
 };
 
@@ -291,7 +330,7 @@ export const backgroundTools: CustomTool[] = [
 
                 // ★ 后台挂起：等任务生命周期结束（proc 退出 / 被 stop_background_task 杀掉 / 用户 abort）。
                 //   generator 挂起期间 = 后台任务存活；attachTaskLifecycle resolve → generator 完成 → 自动释放 exclusiveLock
-                await attachTaskLifecycle(task, proc, { signal: ctx?.abortSignal, codec });
+                await attachTaskLifecycle(task, proc, { signal: ctx?.abortSignal, codec, onExit: makeTaskExitNotifier(ctx) });
             }
         }
     },

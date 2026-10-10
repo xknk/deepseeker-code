@@ -98,4 +98,21 @@ export type UIEvent =
     | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string }
     | { type: 'tool.denied'; toolsId: string; toolName: string }
     | { type: 'tool.progress'; toolsId?: string; toolName?: string; message: string }
-    | { type: 'todo.update'; todos: Todo[] };
+    | { type: 'todo.update'; todos: Todo[] }
+    /** 上下文压缩完成（对标 CC「Compacted chat」行）：仅主 agent（depth 0）且确有释放时发。前端在消息流插淡色一行。
+     *  summary=本次压缩后的归档叙述（⟦DSC:ARCHIVE-NOTES⟧ 段，截断封顶），供前端「查看摘要」展开；缺省=旧格式不可展开。 */
+    | { type: 'compact.done'; tokensBefore: number; tokensAfter: number; durationMs: number; trigger: 'auto' | 'manual'; summary?: string }
+    /** 上下文压缩进度（P1-3 防误中止）：多批压缩 2~5 次辅助调用、每次数十秒，期间 UI 静默会被当成卡死而中止
+     *  （整轮压缩白做 + 上下文原样超限）。批压缩启动前发 {done:0,total:N}，各批完成时按完成序递增；
+     *  完成后由 compact.done 行收敛替换（前端删瞬态进度行）。门禁与 compact.done 一致：仅主 agent 且有出口。 */
+    | { type: 'compact.progress'; done: number; total: number }
+    /** 后台任务退出主动通知（对标 CC「Background command X failed」）：进程退出（含被杀）即发，
+     *  不再依赖模型轮询 get_background_output。ok=exited 且 exitCode===0；killed=用户中止/手动停止。 */
+    | { type: 'task.exit'; taskId: string; command: string; status: 'exited' | 'killed'; exitCode: number | null; ok: boolean }
+    /** 子 agent 运行计数（对标 CC 输入区「● N agent」胶囊）：runSubagent 进入/finally 退出各发一次，
+     *  running=此刻进程内在飞子 agent 数（模块级 activeSubagents.size 为准，并发/嵌套天然准确）。
+     *  前端仅镜像 running；phase/name/depth 供调试与未来扩展。 */
+    | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number }
+    /** P3-7 子 agent 中间叙述透出：~1s 节流取最后完整行（纯 UX，防长任务静默被当卡死）。
+     *  done=true 表示该子 agent 已结束 → 前端清瞬态行；并发多子 agent 时单行槽 last-writer-wins（可接受）。 */
+    | { type: 'subagent.progress'; text: string; done?: boolean };

@@ -21,7 +21,7 @@ import { TraceBase, UIEvent } from "@/observability/type.ts";
 import { RunAgentOptions, ThinkingLevel, PermissionMode } from "@/agent/type.ts";
 import type { Locale } from "@/common/index.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
-import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
 import { dispatch } from "@/hooks/registry.ts";
 import { expandSlashCommand } from "@/commands/expand.ts";
 import { runWithSessionContext, getAllowedWorkspaceRoots, getActiveWorkspaceRoot } from "@/tool/guard.ts";
@@ -41,6 +41,8 @@ export interface HostOptions {
     requestApproval?: RequestApprovalFn;
     /** P2-12 宿主提问钩子（ask_question 工具经此向用户提问）。仅交互式 CLI 注入；缺省 undefined（工具优雅降级）。 */
     requestQuestion?: RequestQuestionFn;
+    /** IDE 桥钩子（ide_* 三工具经此执行打开文件/读诊断/跑任务）。仅 VSCode 宿主注入；缺省 undefined（工具自隐藏）。 */
+    ideAction?: RequestIdeActionFn;
     /** 面向前端的 UI 交互事件通道（approval_request / todo.update 等）。缺省走 sseWrite。 */
     onUIEvent?: (evt: UIEvent) => void;
     /** 计划模式（CLI 两阶段用）：true=只读调研，模型 exit_plan_mode 后 yield plan.proposed 并结束本轮。缺省 false。 */
@@ -195,6 +197,7 @@ export const handleUnifiedChat = async (
             onUIEvent,
             requestApproval,
             requestQuestion: opts?.requestQuestion,
+            ideAction: opts?.ideAction,
             // ★ CLI 宿主注入项：计划模式两阶段 / 模型覆盖 / 思考等级。serve 不传 → 均为 undefined，行为不变。
             planMode: opts?.planMode,
             permissionMode: opts?.permissionMode,

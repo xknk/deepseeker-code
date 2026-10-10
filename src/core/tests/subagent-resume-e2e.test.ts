@@ -24,13 +24,14 @@ const { appendMessage, readTranscriptLines } = await import("@/session/transcrip
 const { forkSession } = await import("@/session/fork.ts");
 const { createNudgeScheduler } = await import("@/agent/agentNudges.ts");
 
-// 三轮剧本（每场景一轮）：文本【故意不含】looksComplete 完成声明词（告一段落/处理好了/推进中…）——
+// 四轮剧本（每场景一轮）：文本【故意不含】looksComplete 完成声明词（告一段落/处理好了/推进中…）——
 // 子 agent 经 noEarlyFinal 关闭了 EARLY_FINAL 早收尾守护（runSubagent 置位），无声明词也单轮干净收尾；
-// 若守护回退（误开），每场景将被多推一轮 → calls 数变 6、final 错位，D 项断言即红。
+// 若守护回退（误开），每场景将被多推一轮 → calls 数错位、final 错位，D 项断言即红。
 const replay = createReplayProvider({ turns: [
     { kind: "reply", content: "第一轮汇报：任务A的前半部分告一段落，产出已就位。" },
     { kind: "reply", content: "续跑汇报：剩余部分也处理好了，此前进展回顾见上。" },
     { kind: "reply", content: "fork 时间线续跑汇报：基于磁盘最新状态继续推进。" },
+    { kind: "reply", content: "计数场景汇报：任务E的前半部分告一段落，产出已就位。" },
 ] });
 setActiveProvider(replay);
 
@@ -107,6 +108,27 @@ describe("子 Agent 续跑端到端（ReplayProvider）", () => {
     it("D. 游标 sanity：无完成声明词仍每场景单轮收尾（noEarlyFinal 生效），无多余模型调用", () => {
         assert.equal(replay.calls.length, 3);
         assert.equal(replay.cursor, 3);
+    });
+});
+
+describe("subagent.count UIEvent（运行计数胶囊数据源）", () => {
+    it("E. start/stop 配对发出，running 镜像在飞数（进入=1、退出收敛=0），depth=1", async () => {
+        const events: any[] = [];
+        const ctx = makeCtx("p2");
+        ctx.onUIEvent = (evt: any) => events.push(evt);
+        const res = await runSubagent({ task: "执行计数场景任务" }, ctx, () => []);
+        assert.equal(res.ok, true, `应成功：${res.output}`);
+
+        const counts = events.filter((e) => e.type === "subagent.count");
+        assert.equal(counts.length, 2, `start/stop 各恰好一条：${JSON.stringify(counts)}`);
+        assert.equal(counts[0]!.phase, "start");
+        assert.equal(counts[0]!.running, 1, "进入后在飞数=1");
+        assert.equal(counts[0]!.depth, 1);
+        assert.equal(counts[1]!.phase, "stop");
+        assert.equal(counts[1]!.running, 0, "退出（正常收尾）后收敛回 0");
+        // 顺序：start 必在 stop 前（事件序即真实时序，前端直接镜像无需自己配对）
+        assert.ok(events.findIndex((e) => e.type === "subagent.count" && e.phase === "start")
+            < events.findIndex((e) => e.type === "subagent.count" && e.phase === "stop"), "start 先于 stop");
     });
 });
 

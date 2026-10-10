@@ -20,6 +20,7 @@ export const askTools: CustomTool[] = [
             description: [
                 "向用户提出多选问题并等待作答：技术方案二选一、路径取舍、范围确认等需用户拍板的决策或歧义澄清——勿用于能从代码/上下文自行确定的问题。",
                 "2-4 个选项（label + 可选 description）；multiSelect=true 多选（默认单选）。用户取消返回空选择（改用默认或重新提问）。",
+                "宿主模态恒有「Other」自由输入档：需要用户提供选项之外的资料（token、路径、链接等）时，把它设计成一个选项即可，用户会经 Other 粘贴文本回传（结果含「补充输入」字样）。",
                 "仅交互式环境可用；结果提示「不支持」时改用纯文本提问。",
             ].join("\n"),
             parameters: {
@@ -60,7 +61,7 @@ export const askTools: CustomTool[] = [
                     return toolFailure("[提问不支持]：当前宿主不支持结构化提问（多为非交互环境）。请改用纯文本直接向用户列出选项并提问。");
                 }
 
-                let answer: { selected: string[] };
+                let answer: { selected: string[]; freeText?: string };
                 try {
                     answer = await ctx.requestQuestion({
                         question,
@@ -72,7 +73,15 @@ export const askTools: CustomTool[] = [
                 }
 
                 if (!answer.selected || answer.selected.length === 0) {
+                    // Other 自由输入：selected 为空但 freeText 有值 = 用户经 Other 档键入的原文，不是取消
+                    const free = (answer.freeText ?? "").trim();
+                    if (free) return `用户经「Other」补充输入：「${free}」`;
                     return "（用户取消了本次提问，未作选择。可按默认继续，或重新组织问题再次询问。）";
+                }
+                const free = (answer.freeText ?? "").trim();
+                if (free) {
+                    const selPart = answer.selected.map(s => `「${s}」`).join("、");
+                    return `用户选择了 ${selPart}，并经「Other」补充输入：「${free}」`;
                 }
                 return args?.multiSelect
                     ? `用户选择了 ${answer.selected.length} 项：${answer.selected.map(s => `「${s}」`).join("、")}`

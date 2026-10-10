@@ -13,7 +13,7 @@
 import type OpenAI from "openai";
 import { AgentEvent } from "./type.ts";
 import { processToolCall, ToolCallContext, ToolCallOutcome } from "./toolExecution.ts";
-import { appendMessage } from "@/session/transcript.ts";
+import { appendMessage, appendMessages } from "@/session/transcript.ts";
 import { buildImageFollowUpParts } from "@/session/contentParts.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
@@ -27,6 +27,26 @@ export type ScheduleResult =
     | { kind: 'completed' }
     | { kind: 'aborted' }
     | { kind: 'terminal'; terminalText: string };
+
+/**
+ * P3-6 同轮重复 tool_call 去重（纯函数，供单测）：并行批内 name+arguments 完全一致（原始字符串逐字节
+ * 相等，不做归一化——参数本就应由模型确定性生成）的调用只执行首个，其余复用首个的结果。
+ * 同轮完全重复 = 模型抽风/循环前兆，重复执行纯浪费；SAFE 只读限定下复用无副作用歧义。
+ * @returns plan 请求序全量（dupOf 指向首个同签名 tc，flush 时照发 start/end 防前端卡片滞留 running）；
+ *          batch 去重后待执行的首个集合（保持请求序）。
+ */
+export const dedupeSameRoundCalls = (tcs: any[]): { batch: any[]; plan: Array<{ tc: any; dupOf?: any }> } => {
+    const batch: any[] = [];
+    const plan: Array<{ tc: any; dupOf?: any }> = [];
+    const firstBySig = new Map<string, any>();
+    for (const tc of tcs) {
+        const sig = `${tc?.function?.name ?? ""}::${tc?.function?.arguments ?? ""}`;
+        const first = firstBySig.get(sig);
+        if (first) plan.push({ tc, dupOf: first });
+        else { firstBySig.set(sig, tc); batch.push(tc); plan.push({ tc }); }
+    }
+    return { batch, plan };
+};
 
 /**
  * 分波调度工具调用。yield 工具流程事件，return ScheduleResult。
@@ -100,30 +120,47 @@ export const scheduleToolCalls = async function* (
         const tc = tcs[idx];
         const { name: pname, args: pargs, parseFailed: pparseFailed } = parseTc(tc);
         if (canParallelize(pname, pargs, pparseFailed)) {
-            // 收集连续可并发段
-            const batch: any[] = [];
+            // 收集连续可并发段 + P3-6 同轮重复去重（name+arguments 逐字节一致只执行首个，flush 仍按请求序）
+            const seg: any[] = [];
             while (idx < tcs.length) {
                 const btc = tcs[idx];
                 const bp = parseTc(btc);
                 if (!canParallelize(bp.name, bp.args, bp.parseFailed)) break;
-                batch.push(btc);
+                seg.push(btc);
                 idx++;
             }
-            // 先发所有 tool.start（请求序）
-            for (const btc of batch) {
-                const bp = parseTc(btc);
-                yield { type: 'tool.start', toolCallId: btc.id, toolName: bp.name, args: bp.args };
+            const { batch, plan } = dedupeSameRoundCalls(seg);
+            // 先发所有 tool.start（请求序，重复项照发——前端按 toolCallId 开卡片，缺 end 会滞留 running）
+            for (const p of plan) {
+                const bp = parseTc(p.tc);
+                yield { type: 'tool.start', toolCallId: p.tc.id, toolName: bp.name, args: bp.args };
             }
-            // 并发执行
+            // 并发执行（仅去重后的首个集合）
             const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc, ctx)));
-            // 串行 flush（请求序）
-            for (const oc of outcomes) {
+            const outcomeByTc = new Map<any, ToolCallOutcome>();
+            batch.forEach((btc, i) => outcomeByTc.set(btc, outcomes[i]));
+            // 串行 flush（请求序；重复项复用首个结果并前缀标注，不重复执行）。P2-2：transcript 攒批一次落盘
+            //   （open 一次多写，省 Windows/杀软下逐条 open 成本）；message.push 仍逐条按请求序，语义不变。
+            const batchEntries: any[] = [];
+            const dupSeq = new Map<any, number>(); // 首个 tc → 已复用次数（标注 #N 用）
+            for (const p of plan) {
+                let oc: ToolCallOutcome;
+                if (p.dupOf) {
+                    const firstOc = outcomeByTc.get(p.dupOf)!;
+                    const n = (dupSeq.get(p.dupOf) ?? 1) + 1;
+                    dupSeq.set(p.dupOf, n);
+                    const note = `(同轮重复调用 #${n}，已复用 #1 的结果)\n`;
+                    oc = { ...firstOc, toolCallId: p.tc.id, resultForModel: note + firstOc.resultForModel, resultForUser: note + firstOc.resultForUser, imageAttachments: undefined };
+                } else {
+                    oc = outcomeByTc.get(p.tc)!;
+                }
                 yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
                 message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                batchEntries.push({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
                 if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
                 if (oc.aborted) abortedDuringTools = true;
             }
+            await appendMessages(sessionId, batchEntries);
         } else {
             // 串行分支（屏障工具 / 开关关 / 终结类 / 后台 / parseFailed / unknown / ask / deny）
             yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };

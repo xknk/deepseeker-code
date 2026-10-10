@@ -8,7 +8,7 @@
  */
 import { vscode, state, nextKey } from "./state.js";
 import {
-  appendRow, updateRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
+  appendRow, updateRow, removeRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
@@ -94,9 +94,15 @@ switch (evt.type) {
       }
       case "final":
         closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 压缩失败/中止终结路径：不留「压缩中」僵尸行
+        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同上：子 agent 进度瞬态行随 run 终结清理
+        if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 兜底归零：同步子 agent 必在 final 前收敛，防事件丢失胶囊卡死
         break;
       case "error": {
         closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 同 final：错误终结时清理进度行
+        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同 final：错误终结时清理子 agent 进度行
+        if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
         appendRow({ key: nextKey(), kind: "system", text: `❌ ${String(evt.message ?? "未知错误")}` });
         break;
       }
@@ -151,6 +157,68 @@ switch (evt.type) {
         addInfo(`🖼 模型 ${String(evt.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
         break;
       }
+      case "subagent.count": {
+        // ★ 子 agent 运行计数（对标 CC「● N agent」胶囊）：镜像 core 在飞 Set size，经 syncToolbar 刷生成中条内胶囊
+        state.runningAgents = Math.max(0, Number(evt.running) || 0);
+        syncToolbar();
+        break;
+      }
+      case "subagent.progress": {
+        // ★ P3-7 子 agent 中间叙述（~1s 节流的最后完整行）：单行原位更新，done=true 清瞬态行。
+        //   复用 compact 行型（同款淡色斜体样式，P1-3 先例）；并发多子 agent 时单行槽 last-writer-wins。
+        closeStreaming();
+        if (evt.done) {
+          if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; }
+          break;
+        }
+        const ptext = String(evt.text ?? "").slice(0, 160);
+        if (!ptext) break;
+        const pline = `↳ 子agent ${ptext}`;
+        if (state.subagentProgressKey != null && state.rowMap.has(state.subagentProgressKey)) {
+          updateRow(state.subagentProgressKey, { text: pline });
+        } else {
+          const pkey = nextKey();
+          state.subagentProgressKey = pkey;
+          appendRow({ key: pkey, kind: "compact", text: pline });
+        }
+        break;
+      }
+      case "task.exit": {
+        // ★ 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色 info、失败醒目 system、停止中性
+        closeStreaming();
+        const cmd = String(evt.command ?? "");
+        if (evt.ok) addInfo(`📧 后台任务完成（exit=0）：${cmd}`);
+        else if (evt.status === "killed") addInfo(`⏹ 后台任务已停止：${cmd}`);
+        else appendRow({ key: nextKey(), kind: "system", text: `⚠️ 后台任务失败（exit=${evt.exitCode ?? "?"}）：${cmd}` });
+        break;
+      }
+      case "compact.progress": {
+        // ★ 压缩进度瞬态行（P1-3 防误中止）：多批压缩 2~5 次辅助调用、每次数十秒，静默会被当成卡死而中止。
+        //   单行原位更新「正在压缩 n/N」，完成时由 compact.done 收敛替换；复用 compact 行型（同款淡色斜体样式）。
+        closeStreaming();
+        const done = Math.max(0, Number(evt.done) || 0);
+        const total = Math.max(0, Number(evt.total) || 0);
+        const text = `正在压缩上下文 ${done}/${total} 批…（辅助模型摘要中，请稍候）`;
+        if (state.compactProgressKey != null && state.rowMap.has(state.compactProgressKey)) {
+          updateRow(state.compactProgressKey, { text });
+        } else {
+          const key = nextKey();
+          state.compactProgressKey = key;
+          appendRow({ key, kind: "compact", text });
+        }
+        break;
+      }
+      case "compact.done": {
+        // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行；
+        //   附 re-cache 提示；归档摘要随行存储，点击行可展开（Show more）
+        closeStreaming();
+        if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 进度瞬态行收敛替换
+        const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
+        const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
+        const trigger = evt.trigger === "manual" ? "手动" : "自动";
+        appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens · 下条消息将重建缓存`, summary: String(evt.summary ?? "") });
+        break;
+      }
       default:
         break;
     }
@@ -182,11 +250,7 @@ function onMessage(msg) {
       break;
     }
     case "state": {
-      const wasBusy = state.busy;
       state.busy = !!msg.state?.busy;
-      // busy 计秒：true 翻转瞬间记起点；回 false 清零（秒表随轮次，不跨轮累计）
-      if (state.busy && !wasBusy) state.busySince = Date.now();
-      if (!state.busy) state.busySince = 0;
       state.planMode = !!msg.state?.planMode;
       state.autoMode = !!msg.state?.autoMode;
       // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题

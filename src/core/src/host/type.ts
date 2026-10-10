@@ -56,9 +56,12 @@ export interface QuestionRequest {
 /**
  * 用户的选择回传：selected 为被选选项的 label 数组（单选时长度 1；用户取消时为空数组）。
  * 用 label 而非下标回传——模型用人类可读 label 提问，回传 label 语义自洽。
+ * freeText 为用户在「Other」自由输入档键入的原文（如粘贴 token/路径）：与选项互斥时 selected 为空，
+ * 多选下可同时勾选选项并补充文字；两者皆空 = 取消。
  */
 export interface QuestionAnswer {
     selected: string[];
+    freeText?: string;
 }
 
 /**
@@ -66,6 +69,41 @@ export interface QuestionAnswer {
  * 未注入时（如 headless HTTP）ask_question 工具优雅降级（返回「不支持，请用纯文本提问」）。
  */
 export type RequestQuestionFn = (req: QuestionRequest) => Promise<QuestionAnswer>;
+
+// ============ IDE 桥（ide_open_file / ide_diagnostics / ide_run_task 三工具的宿主钩子）============
+
+/** IDE 桥诊断条目：宿主在边界把 vscode.Diagnostic 映射成纯数据，vscode 类型不进 core。 */
+export interface IdeDiagnosticItem {
+    /** 相对工作区根的展示路径 */
+    file: string;
+    /** 1-based 行/列 */
+    line: number;
+    column: number;
+    severity: 'error' | 'warning' | 'info';
+    message: string;
+    /** 诊断来源语言服务器/工具（'vue' | 'typescript' | 'eslint' …） */
+    source?: string;
+    code?: string | number;
+}
+
+/** IDE 动作请求（三动作 discriminated union，与 ide.ts 三工具一一对应）。 */
+export type IdeActionRequest =
+    | { action: 'open'; path: string; line?: number; column?: number }
+    | { action: 'diagnostics'; path?: string; severity?: 'error' | 'warning' | 'all' }
+    | { action: 'task'; name?: string };
+
+export type IdeActionResult =
+    | { ok: true; action: 'open'; message: string }
+    | { ok: true; action: 'diagnostics'; items: IdeDiagnosticItem[]; truncated?: number }
+    | { ok: true; action: 'task'; message: string }
+    | { ok: false; message: string };
+
+/**
+ * 宿主 IDE 桥钩子：core 工具请求宿主执行 IDE 动作并拿回结构化结果。
+ * 仅 VSCode 宿主注入；未注入时 ide_* 三工具经 validateEnvironment 自隐藏（不暴露给模型），
+ * execute 内的兜底降级（仿 ask.ts）为第二层防御。
+ */
+export type RequestIdeActionFn = (req: IdeActionRequest) => Promise<IdeActionResult>;
 
 /**
  * 宿主审批钩子：核心在执行 MUTATION/DANGER 工具前调用，由宿主决定放行/拒绝。

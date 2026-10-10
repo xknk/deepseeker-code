@@ -14,7 +14,7 @@ import path from "node:path";
 
 process.env.DEEPSEEKER_CODE_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-tev-"));
 // ★ 动态 import：appConfig / store 在模块加载期固化 dataDir，必须先设 env 再加载
-const { appendMessage, appendEvent, readTranscriptLines, readMessages, isEventLine } = await import("../src/session/transcript.ts");
+const { appendMessage, appendMessages, appendEvent, readTranscriptLines, readMessages, isEventLine } = await import("../src/session/transcript.ts");
 const { detectInterruption, repairOrphanToolCalls, reconcileCompaction, recoverSession } = await import("../src/session/recovery.ts");
 const { buildContextMessages } = await import("../src/session/content.ts");
 const { derivePrefix, forkSession } = await import("../src/session/fork.ts");
@@ -244,5 +244,42 @@ describe("listSessions（事件行不计数）", () => {
         assert.ok(item, "会话应被枚举到");
         assert.equal(item?.messageCount, 2, "事件行不计入消息数");
         assert.equal(item?.preview, "计数", "首条 user 预览正常");
+    });
+});
+
+describe("appendMessages 批量落盘（P2-2 合批）", () => {
+    it("批量写入后读取顺序 = 请求序；行结构与单条一致（id/ts 盖章、sessionId 剥除、tool_call_id 保留）", async () => {
+        const s = sid();
+        const entries = ["a", "b", "c"].map((t) => ({ sessionId: s, role: "tool", tool_call_id: `call-${t}`, content: `result-${t}` }));
+        await appendMessages(s, entries as any);
+        const msgs = (await readMessages(s)) as any[];
+        assert.deepEqual(msgs.map((m) => m.content), ["result-a", "result-b", "result-c"], "落盘顺序=请求序");
+        assert.deepEqual(msgs.map((m) => m.tool_call_id), ["call-a", "call-b", "call-c"]);
+        assert.ok(msgs.every((m) => m.id && m.ts && m.sessionId === undefined), "id/ts 盖章、sessionId 剥除");
+    });
+
+    it("空数组 no-op 不落行；单条批等价 appendMessage", async () => {
+        const s1 = sid();
+        await appendMessages(s1, [] as any);
+        assert.equal((await readTranscriptLines(s1)).length, 0, "空批零行");
+        const s2 = sid();
+        await appendMessages(s2, [{ sessionId: s2, role: "user", content: "one" }] as any);
+        const lines2 = await readTranscriptLines(s2);
+        assert.equal(lines2.length, 1);
+        assert.equal((lines2[0] as any).content, "one");
+    });
+
+    it("批量+单条+事件行混写保持全局顺序（模拟工具轮：assistant → 批量 tool 结果 → round.end）", async () => {
+        const s = sid();
+        await appendMessage({ sessionId: s, role: "assistant", content: "", tool_calls: assistantWithCalls("t1", "t2").tool_calls } as any);
+        await appendMessages(s, [toolResult("t1"), toolResult("t2")].map((m) => ({ sessionId: s, ...m })) as any);
+        await appendEvent(s, { dscEvent: "round.end", runId: "r", round: 1 });
+        const lines = await readTranscriptLines(s);
+        assert.equal(lines.length, 4, "4 行全量保序");
+        assert.equal((lines[1] as any).tool_call_id, "t1");
+        assert.equal((lines[2] as any).tool_call_id, "t2");
+        assert.equal(isEventLine(lines[3]), true, "事件行殿后");
+        const dangling = findDangling(await readMessages(s) as any[]);
+        assert.deepEqual(dangling, [], "无悬空 tool_call（配对语义不变）");
     });
 });

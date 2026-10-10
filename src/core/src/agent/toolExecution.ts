@@ -25,7 +25,7 @@ import path from "path";
 import { writeSidecarArchive } from "@/session/sidecar.ts";
 import { RunAgentEvents, PermissionMode } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
-import { RequestApprovalFn, RequestQuestionFn } from "@/host/type.ts";
+import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
 
 // ★ #8b（2026-09-16）：成败前缀嗅探通道（FAILED_PREFIXES + explicitOk）结构性退役——
 //   ok 判定唯一来源是本函数内 resultStatus 结构化跟踪：execute 返回的 ToolExecuteResult.status /
@@ -96,10 +96,34 @@ export type ToolCallContext = {
     onUIEvent?: (evt: UIEvent) => void;
     requestApproval?: RequestApprovalFn;
     requestQuestion?: RequestQuestionFn;
+    ideAction?: RequestIdeActionFn;
     keepRecentUnits: number;
     compactRatio: number;
     modelWindow: number;
     parentSystemPrompt: string;
+    /** ★ P2-1 本时刻上下文用量估算（token，estReal 口径）：截断预算随窗口余量自适应收缩。
+     *  每轮构造 toolCallCtx 时算一次（已含本轮 assistant，常数近似足够，不逐工具更新）；
+     *  缺省 undefined → 不缩放，截断行为逐字节不变（向后兼容）。 */
+    contextTokensEst?: number;
+    /** ★ P3-8 run 级 read_file 读取追踪（runAgent 每 run 建一个 Map、逐轮传同一引用），见 ToolContext.readTracker。 */
+    readTracker?: Map<string, { mtimeMs: number; count: number }>;
+};
+
+/**
+ * P2-1 截断预算随窗口余量自适应（纯函数，供单测）：
+ *  - fill≤0.5 原值（半满以下不干预——小结果不缩，省下的没几个 token，白添截断噪声）；
+ *  - 0.5<fill≤0.85 线性降到 0.4×base；
+ *  - fill>0.85 取 0.35×base（已近满窗，最坏组合「最满时来最大输出」正是高发压缩诱因）；
+ *  - 下限 2000 字符（且绝不高于 base——极小自定义预算不被「下限」反向抬高）。
+ * fill 缺省/非有限 → 原值（缺省路径逐字节不变）。
+ */
+export const scaleTruncBudget = (base: number, fill: number | undefined): number => {
+    if (!Number.isFinite(base) || base <= 0) return base;
+    if (fill === undefined || !Number.isFinite(fill) || fill <= 0.5) return base;
+    const floor = Math.min(base, 2000);
+    if (fill > 0.85) return Math.max(floor, Math.floor(base * 0.35));
+    const factor = 1 - ((fill - 0.5) / 0.35) * 0.6; // (0.5,1.0] → (0.85,0.4] 线性内插
+    return Math.max(floor, Math.floor(base * factor));
 };
 
 /**
@@ -114,8 +138,8 @@ export type ToolCallContext = {
  */
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const { sessionId, depth, round, startTime, llmDecisionSource, signal, rawTools, events,
-        permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion,
-        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt } = ctx;
+        permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction,
+        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker } = ctx;
     let calledName = "";
     let calledArgs: any = {};
     let parseFailed = false;
@@ -166,7 +190,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   的回退（process.env.WORKSPACE_ROOT || process.cwd()）不同源——在 VSCode 多根重定向未 chdir / run_workflow
     //   worktree 子 agent 下，审批网关 isProtectedWrite(path, toolCtx.cwd) 与工具实际操作的根会指向不同目录。
     //   统一到 getActiveWorkspaceRoot() 消除错位（ToolCallContext.cwd 字段仍保留，供 subagent/runAgent 透传）。
-    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode };
+    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode, readTracker };
     let result = "";
     // ★ #8b 结构化成败跟踪（替代 FAILED_PREFIXES 前缀嗅探 + explicitOk 手工短路）：
     //   默认 success；拒绝/熔断/解析失败/verifyResult FAILED 显式置 failed。文案只是呈现，成败看状态。
@@ -393,16 +417,21 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     }
     // 脱敏（verifyResult 之后、truncate 之前；只影响发往云端模型的视图）
     result = applyPrivacyMasking(matchedTool?.function?.privacyMaskingRules, calledArgs, result);
+    // ★ P2-1 截断预算随窗口余量自适应：fill=上下文已填充比（contextTokensEst/modelWindow）。
+    //   ★ 顺序红线：先算 scaled truncBudget，再做 result.length > truncBudget 的侧车落盘判定——预算变小后
+    //   判定条件仍是「截断条件」的超集（microcompact 只缩不涨），『截断必命中侧车』不变量保持；若顺序颠倒
+    //   （先按旧预算判侧车、再按新预算截断）会出现「截了却没存档」的信息丢失。
+    const fill = ctx.contextTokensEst !== undefined && modelWindow > 0 ? ctx.contextTokensEst / modelWindow : undefined;
+    const truncBudget = scaleTruncBudget(matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS, fill);
     // ★ 侧车原文存档（recall 配套）：此处 result 已脱敏、尚未截断——transcript 落盘的是截断后视图，
     //   被去中间的原文若不另存将无处可寻。仅在确会触发截断时落盘（缓存定位、非真相源；recall 的
     //   with_full 按需取回）。判定条件是“原始长度超预算”的超集（microcompact 只缩不涨，故截断必命中
     //   本条件；反之可能白存一份无人引用的缓存，无害）。失败仅降级为普通截断提示，绝不阻断回灌。
     //   路径/标记文案/总量闸经 session/sidecar.ts 共享契约（写读两侧单一出处，防隐式字符串契约漂移）。
-    const truncBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
     const sidecarNote = result.length > truncBudget
         ? await writeSidecarArchive(sessionId, String(toolCall.id), result)
         : undefined;
-    result = truncateToolResult(result, matchedTool?.function.maxOutputCharacters, sidecarNote);
+    result = truncateToolResult(result, truncBudget, sidecarNote);
     // ★ #8b：ok 判定唯一来源 = 结构化状态（前缀嗅探/explicitOk 已退役）
     const ok = resultStatus === 'success';
     // outputFilter：分流 toModel（精简，喂模型）/ toUser（完整，给用户看）；未声明则两者均原 result
@@ -424,11 +453,12 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   recall 语义不变）。
     if (postHookOverride !== undefined) {
         console.log(`✏️ [Post-hook] [${calledName}] 模型视图结果已被 hook 改写`);
-        const overrideBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
+        // ★ P2-1：override 与主截断同尺度（同一 fill），先算 scaled 预算再判侧车（顺序红线同上）
+        const overrideBudget = scaleTruncBudget(matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS, fill);
         const overrideNote = postHookOverride.length > overrideBudget
             ? await writeSidecarArchive(sessionId, String(toolCall.id), postHookOverride)
             : undefined;
-        resultForModel = truncateToolResult(postHookOverride, matchedTool?.function?.maxOutputCharacters, overrideNote);
+        resultForModel = truncateToolResult(postHookOverride, overrideBudget, overrideNote);
     }
     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok, imageAttachments };
 };

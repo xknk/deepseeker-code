@@ -30,7 +30,7 @@ const UsageFooter = ({ usage }: { usage: NonNullable<TraceBase['usage']> }): Rea
     );
 };
 
-type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" }>; wrapW: number; streamTail?: number };
+type Props = { row: Extract<ChatRow, { kind: "user" | "assistant" | "system" | "info" | "meta" | "compact" | "compact-progress" | "subagent-progress" }>; wrapW: number; streamTail?: number };
 
 /** 列表项前缀检测：`- ` / `* ` / `• ` / `1. ` 等。 */
 const listPrefix = (line: string): { bullet: string; rest: string } | null => {
@@ -211,6 +211,37 @@ export const MessageBlock = ({ row, wrapW, streamTail }: Props): React.ReactElem
         return (
             <Box marginTop={0.25} marginBottom={0.25}>
                 <Text color={THEME.grayDim}>{"* "}{row.text}</Text>
+            </Box>
+        );
+    }
+
+    if (row.kind === "compact") {
+        // 压缩完成行（对标 CC「Compacted chat」）：淡色斜体，无前缀符号；附 re-cache 提示 + /archive 指引
+        const freed = Math.max(0, (row.tokensBefore || 0) - (row.tokensAfter || 0));
+        const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
+        return (
+            <Box marginTop={0.25} marginBottom={0.25}>
+                <Text italic color={THEME.grayDim}>已压缩上下文 · {row.trigger === "manual" ? "手动" : "自动"} · 释放 {freedText} tokens · 下条消息将重建缓存{row.hasSummary ? "（/archive 看摘要）" : ""}</Text>
+            </Box>
+        );
+    }
+
+    if (row.kind === "compact-progress") {
+        // 压缩进度瞬态行（P1-3 防误中止）：多批压缩耗时数十秒，静默会被当成卡死而中止（整轮压缩白做）。
+        // 恒留动态区原位刷新，完成时由 compact.done 收敛替换（行删除），不落 Static。
+        return (
+            <Box marginTop={0.25} marginBottom={0.25}>
+                <Text italic color={THEME.grayDim}>正在压缩上下文 {row.done}/{row.total} 批…（辅助模型摘要中，请稍候）</Text>
+            </Box>
+        );
+    }
+
+    if (row.kind === "subagent-progress") {
+        // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行原位刷新，done/终结时删行，不落 Static。
+        // 「↳」前缀示意层级归属（子 agent 在父任务之下干活），淡色斜体与 compact-progress 同款弱存在感。
+        return (
+            <Box marginTop={0.25} marginBottom={0.25}>
+                <Text italic color={THEME.grayDim}>{"↳ 子agent "}{row.text}</Text>
             </Box>
         );
     }

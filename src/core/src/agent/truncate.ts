@@ -21,6 +21,7 @@ import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
 import { ensureOptions, RunAgentEvents } from "./type.ts";
+import { UIEvent } from "@/observability/type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 
 /** ANSI / OSC 转义序列（终端着色等） */
@@ -576,9 +577,20 @@ export const splitIntoBatches = (toCompact: Msg[]): Msg[][] => {
  * 传入每个子请求，任一失败 Promise.all reject 冒泡至 ensureFitsWindow 的 try/catch 熔断计数。
  * 末批（紧邻保留区）传 tailContext 框定：摘要模型知道自己在「为保留区补背景」，写出的背景才可
  * 直接被续接模型使用（否则只是正确但无用的流水账）。
+ * ★ onUIEvent（P1-3 防误中止）：多批压缩 2~5 次辅助调用、每次数十秒，期间 UI 静默会被当成卡死而中止
+ * （整轮压缩白做 + 上下文原样超限）。启动前发 {done:0,total:N}，各批完成时按完成序递增（并行批完成序
+ * 与请求序无关）；完成后由 compact.done 收敛替换（前端删瞬态进度行）。门禁在调用方（仅 depth=0 且有出口）。
  */
-const compactBatches = async (batches: Msg[][], signal?: AbortSignal): Promise<string> => {
-    const lines = await Promise.all(batches.map((b, i) => compactBatch(b, signal, i === batches.length - 1)));
+const compactBatches = async (batches: Msg[][], signal?: AbortSignal, onUIEvent?: (evt: UIEvent) => void): Promise<string> => {
+    if (onUIEvent && batches.length > 0) onUIEvent({ type: 'compact.progress', done: 0, total: batches.length });
+    let done = 0;
+    const lines = await Promise.all(batches.map((b, i) =>
+        compactBatch(b, signal, i === batches.length - 1).then((line) => {
+            done++;
+            onUIEvent?.({ type: 'compact.progress', done, total: batches.length });
+            return line;
+        })
+    ));
     return lines.join("\n");
 }
 
@@ -686,6 +698,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
     let keep = event.keepRecentUnits;
     let lastSize = estReal(event.messageArr); // 校准后的真实口径 token 总量
+    const preCompactSize = Math.round(lastSize); // 压缩前快照（compact.done 的 tokensBefore；lastSize 循环内会滚动更新）
     const startTime = performance.now();
     let round = 0
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
@@ -708,7 +721,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 const batches = splitIntoBatches(toCompact);
                 summaryMsg.content = batches.length === 1
                     ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal)
-                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal), event.signal);
+                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined), event.signal);
                 // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
                 //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
@@ -814,6 +827,29 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
 
     // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
     await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
+
+    // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 且确有释放时发 UI 事件（免费衰减早退路径不动
+    //   摘要槽、走不到这里）。子 agent（depth>0）不发——其压缩是父上下文治理的内部细节，不进用户消息流。
+    if (event.onUIEvent && event.depth === 0) {
+        const afterSize = Math.round(estReal(event.messageArr));
+        if (preCompactSize - afterSize > 0) {
+            // 归档叙述（⟦DSC:ARCHIVE-NOTES⟧ 段）随事件下发，供前端「查看摘要」展开（对标 CC Show more）；
+            // 截断封顶防巨 payload（完整版在模型侧摘要槽， recall/续接语义不受影响）。
+            let summary: string | undefined;
+            try {
+                const slotRaw = event.messageArr[1]?.content;
+                summary = parseSummarySlot(typeof slotRaw === "string" ? slotRaw : "").notes.slice(0, 6000) || undefined;
+            } catch { /* 摘要提取失败不影响压缩完成通知 */ }
+            event.onUIEvent({
+                type: 'compact.done',
+                tokensBefore: preCompactSize,
+                tokensAfter: afterSize,
+                durationMs: Math.round(performance.now() - startTime),
+                trigger: 'auto',
+                summary,
+            });
+        }
+    }
 
     // ★ 兜底阈值派生自 compactRatio：原硬编码 0.9 与可配 compactRatio 耦合——compactRatio 调高时
     //   兜底反而比压缩目标还低、反向更早抛错。现取 compactRatio + 0.13 并封顶 0.95，保证兜底始终

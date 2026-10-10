@@ -79,6 +79,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [rows, setRows] = useState<ChatRow[]>([]);
     const [busy, setBusy] = useState(false);
     const [aborting, setAborting] = useState(false);
+    /** 运行中子 agent 数（subagent.count UIEvent 镜像 core 在飞 Set size；生成行旁「● N agent」胶囊）。 */
+    const [runningAgents, setRunningAgents] = useState(0);
     /** 是否展开显示思考全文（Ctrl+T 切换；仅对 streaming 思考生效，已完成思考恒收起）。 */
     const [showThinkingText, setShowThinkingText] = useState(false);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -117,6 +119,26 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const thinkingLevelRef = useRef<ThinkingLevel>(
         !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high",
     );
+    /** 最近一次压缩的归档摘要（compact.done 随事件下发的 ⟦DSC:ARCHIVE-NOTES⟧ 段；运行时态，/archive 查看）。 */
+    const archivedSummaryRef = useRef("");
+    /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
+    const compactProgressIdRef = useRef<number | null>(null);
+    /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
+    const dropCompactProgressRow = useCallback(() => {
+        const pid = compactProgressIdRef.current;
+        if (pid == null) return;
+        compactProgressIdRef.current = null;
+        setRows((prev) => prev.filter((r) => r.id !== pid));
+    }, []);
+    /** 子 agent 进度瞬态行 id（subagent.progress 单行更新；done/final/error 收敛删除，P3-7 长任务防「只见计数器」）。 */
+    const subagentProgressIdRef = useRef<number | null>(null);
+    /** 删除子 agent 进度瞬态行（done / run 终结共用）。 */
+    const dropSubagentProgressRow = useCallback(() => {
+        const pid = subagentProgressIdRef.current;
+        if (pid == null) return;
+        subagentProgressIdRef.current = null;
+        setRows((prev) => prev.filter((r) => r.id !== pid));
+    }, []);
     /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
     const outputStyleRef = useRef<string | undefined>(undefined);
     /** 最近一次 llm.response 的真实 usage（经 onTrace 透传），收尾时附到 assistant 行。 */
@@ -282,6 +304,74 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }
                 break;
             }
+            case "compact.progress": {
+                // 压缩进度瞬态行（P1-3 防误中止）：多批压缩期间「正在压缩 n/N」，单行原位更新；
+                // 完成时由 compact.done 收敛替换（先删进度行再插完成行）。恒留动态区（isDynamicRow）。
+                flush();
+                const done = (obj.done as number) ?? 0;
+                const total = (obj.total as number) ?? 0;
+                if (compactProgressIdRef.current == null) {
+                    const id = newRowId();
+                    compactProgressIdRef.current = id;
+                    setRows((prev) => [...prev, { id, kind: "compact-progress", done, total }]);
+                } else {
+                    const pid = compactProgressIdRef.current;
+                    setRows((prev) => prev.map((r) =>
+                        r.id === pid && r.kind === "compact-progress" ? { ...r, done, total } : r));
+                }
+                break;
+            }
+            case "compact.done": {
+                // 压缩显示（对标 CC「Compacted chat」行）：收尾流式行后插淡色斜体行；摘要存 ref 供 /archive 查看
+                flush();
+                dropCompactProgressRow(); // 进度瞬态行收敛替换
+                archivedSummaryRef.current = (obj.summary as string) || "";
+                setRows((prev) => [...prev, {
+                    id: newRowId(), kind: "compact",
+                    tokensBefore: (obj.tokensBefore as number) ?? 0,
+                    tokensAfter: (obj.tokensAfter as number) ?? 0,
+                    trigger: (obj.trigger as "auto" | "manual") ?? "auto",
+                    hasSummary: !!(obj.summary as string),
+                }]);
+                break;
+            }
+            case "task.exit": {
+                // 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色、失败醒目、中止中性
+                flush();
+                const cmd = (obj.command as string) ?? "";
+                const id = newRowId();
+                if (obj.ok) {
+                    setRows((prev) => [...prev, { id, kind: "meta", text: `📧 后台任务完成（exit=0）：${cmd}` }]);
+                } else if (obj.status === "killed") {
+                    setRows((prev) => [...prev, { id, kind: "meta", text: `⏹ 后台任务已停止：${cmd}` }]);
+                } else {
+                    setRows((prev) => [...prev, { id, kind: "system", text: `⚠️ 后台任务失败（exit=${(obj.exitCode as number) ?? "?"}）：${cmd}` }]);
+                }
+                break;
+            }
+            case "subagent.count": {
+                // 子 agent 运行计数（对标 CC「● N agent」）：直接镜像 core 的在飞 Set size，生成行旁内联显示
+                setRunningAgents(Math.max(0, (obj.running as number) ?? 0));
+                break;
+            }
+            case "subagent.progress": {
+                // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行，单行原位更新；
+                // done / run 终结时清行。纯 UX，恒留动态区（isDynamicRow），不落 Static。
+                flush();
+                if (obj.done) { dropSubagentProgressRow(); break; }
+                const ptext = String(obj.text ?? "").slice(0, 160);
+                if (!ptext) break;
+                if (subagentProgressIdRef.current == null) {
+                    const id = newRowId();
+                    subagentProgressIdRef.current = id;
+                    setRows((prev) => [...prev, { id, kind: "subagent-progress", text: ptext }]);
+                } else {
+                    const pid = subagentProgressIdRef.current;
+                    setRows((prev) => prev.map((r) =>
+                        r.id === pid && r.kind === "subagent-progress" ? { ...r, text: ptext } : r));
+                }
+                break;
+            }
             case "round.start": {
                 // 仅收尾当前流式行；不渲染轮次分割线（对齐 Claude Code：连续流，不暴露内部轮次）。
                 closeStreaming();
@@ -304,6 +394,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "final": {
                 closeStreaming();
+                dropCompactProgressRow(); // 压缩失败/中止等终结路径：进度瞬态行随 run 终结清理（不留「压缩中」僵尸行）
+                dropSubagentProgressRow(); // 同上：子 agent 进度瞬态行随 run 终结清理
+                setRunningAgents(0); // 兜底归零：同步子 agent 必在 final 前经 stop 事件收敛，此处防事件丢失后胶囊卡死
                 // ★ 兜底渲染：若本轮未流式产出正文，final.text 承载的是压缩超窗/模型错误/中止等终结消息
                 //   （handleUnifiedChat 已据此决定是否转发；正常完成时 text 为空，不触发）。显示出来避免静默无输出。
                 const ft = (obj.text as string) ?? "";
@@ -315,6 +408,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "error": {
                 closeStreaming();
+                dropCompactProgressRow(); // 同 final：错误终结时清理进度行
+                dropSubagentProgressRow(); // 同 final：错误终结时清理子 agent 进度行
+                setRunningAgents(0); // 同 final：错误终结时兜底归零
                 const id = newRowId();
                 setRows((prev) => [...prev, { id, kind: "system", text: `❌ ${(obj.message as string) ?? "未知错误"}` }]);
                 break;
@@ -591,6 +687,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const clearRows = useCallback(() => {
         flush();
         setRows([]);
+        setRunningAgents(0); // 清屏/载入/新会话路径一并复位计数胶囊（瞬时态不入转录，无需回放）
         toolRowByCallId.current.clear();
     }, [flush]);
 
@@ -683,16 +780,17 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /output-style 切换输出风格（P2-16）：undefined=中性默认，否则注入对应风格 persona。 */
     const setOutputStyle = useCallback((name: string | undefined) => { outputStyleRef.current = name; }, []);
     const getOutputStyle = useCallback((): string | undefined => outputStyleRef.current, []);
+    const getArchivedSummary = useCallback((): string => archivedSummaryRef.current, []);
 
     return {
         // 状态
-        rows, busy, aborting, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
+        rows, busy, aborting, runningAgents, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
         sessionIdRef,
         // 动作
         submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent, runBangCommand,
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
-        setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle,
+        setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };

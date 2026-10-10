@@ -65,6 +65,34 @@ const RESUME_NOTE = [
     `请先对照历史简要回顾已完成 / 未完成部分，再继续执行新任务；最终汇报也请先概述此前进展。`,
 ].join("\n");
 
+/**
+ * P3-7 子 agent 进度节流器（纯逻辑抽出让单测可打）：累积 text.delta，按 throttleMs 节流、
+ * 取最后「完整」行（已落 \n 的非空行；末元素是未写完的当前行不取）回调，限宽 120 字符。
+ * now 可注入（单测用假时钟）。检查即武装（即便无完整行也推进节流点）——发送节奏恒 ≤1 条/秒。
+ */
+export const createProgressThrottler = (
+    onEmit: (line: string) => void,
+    throttleMs = 1000,
+    now: () => number = Date.now,
+): { push: (delta: string) => void } => {
+    let acc = "";
+    let lastAt = 0;
+    return {
+        push(delta: string): void {
+            acc += delta ?? "";
+            const t = now();
+            if (t - lastAt < throttleMs) return;
+            lastAt = t;
+            const lines = acc.split("\n");
+            const complete = lines.slice(0, -1).filter((l) => l.trim().length > 0);
+            let last = complete[complete.length - 1] ?? "";
+            if (!last) return;
+            if (last.length > 120) last = last.slice(0, 119) + "…"; // 进度行限宽，防巨量单行刷屏
+            onEmit(last);
+        },
+    };
+};
+
 /** runSubagent 的返回：纯数据，调用方据此包装文案 / 聚合。 */
 export interface SubagentResult {
     /** 是否成功拿到 final 文本（深度/manifest/崩溃/中止/异常均 false）。 */
@@ -186,6 +214,9 @@ export const runSubagent = async (
     console.log(`${resuming ? "🔁 续跑" : "🐣 派生"}子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}][${subSessionId}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
 
     activeSubagents.add(subSessionId); // 同 ID 并发护栏（新建 UUID 天然不撞，续跑同会话在此拦住）
+    // ★ UI 侧「运行中子 agent」计数（对标 CC「● N agent」）：add 后立即发 start，finally delete 后发 stop——
+    //   running 取 Set.size（进程级真值），正常/中止/崩溃均经 finally 收敛回 0；嵌套子 agent 同通道汇入，计数天然准确。
+    ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'start', name: manifest?.name, depth: ctx.depth + 1 });
     try {
         // 构建并初始化子智能体的独立消息队列
         const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
@@ -207,6 +238,7 @@ export const runSubagent = async (
             events: ctx.events,
             onUIEvent: ctx.onUIEvent, // ★ 必须透传：否则子 agent 调用需审批工具时前端收不到弹窗，waitForUserApproval 永久挂起（死锁）
             requestApproval: ctx.requestApproval, // ★ 同步透传宿主审批钩子，子 agent 高危工具仍走同一审批通道
+            ideAction: ctx.ideAction, // ★ IDE 桥透传：ide_diagnostics 等 SAFE 只读动作子 agent 也可用（缺省 undefined → 工具自隐藏）
             permissionMode: ctx.permissionMode, // ★ P1-6 透传：子 agent 工作区文件编辑也走 auto 分类器
             noEarlyFinal: true, // ★ 子 agent final 是交付父级的汇报，EARLY_FINAL 误推一轮纯浪费；父可经续跑纠错
             model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
@@ -218,6 +250,11 @@ export const runSubagent = async (
 
         // ★ 异步生存流的异常与中止熔断监控；SubagentStop 在 finally 统一收尾（正常/中止/崩溃均触发）
         let result: SubagentResult | undefined;
+        // ★ P3-7 中间叙述透出：text.delta 经节流器取最后**完整**行转发 onUIEvent——
+        //   长任务几分钟里用户不再只看「● N agent」计数器（静默被当卡死是 P1-3 同族问题）。
+        //   纯 UX 旁路：只读 e.type、不经手任何控制流，final 语义不变；并发多子 agent 时前端单行槽
+        //   last-writer-wins（进度行是瞬态提示，可接受）。
+        const progress = createProgressThrottler((line) => ctx.onUIEvent?.({ type: 'subagent.progress', text: line }));
         try {
             for await (const e of runAgent(subMessages, subOptions)) {
                 if (ctx.abortSignal?.aborted) {
@@ -227,6 +264,8 @@ export const runSubagent = async (
                 if (e.type === 'final') {
                     subResult = e.text;
                     hasFinalResult = true;
+                } else if (e.type === 'text.delta') {
+                    progress.push(e.text ?? "");
                 }
             }
             if (result === undefined) {
@@ -239,6 +278,8 @@ export const runSubagent = async (
         } catch (streamError: any) {
             result = { ok: false, output: failText(`[子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`), sessionId: subSessionId, manifestName: manifest?.name };
         } finally {
+            // ★ P3-7：子 agent 结束（正常/中止/崩溃均走此）→ 通知前端清瞬态进度行
+            try { ctx.onUIEvent?.({ type: 'subagent.progress', text: "", done: true }); } catch { /* 纯 UX 旁路不击垮收尾 */ }
             // ★ P1-8 SubagentStop：观察事件，best-effort（hook 异常不击垮子 agent）。output 截断防巨量回灌 hook
             if (result) {
                 await dispatch('SubagentStop', { ...startCtx, ok: result.ok, output: result.output.slice(0, 2000) }).catch((e: any) => console.warn(`⚠️ SubagentStop hook 异常（已忽略）: ${e?.message ?? e}`));
@@ -249,5 +290,6 @@ export const runSubagent = async (
         return { ok: false, output: failText(`[派生执行失败]: ${error.message}`), sessionId: subSessionId, manifestName: manifest?.name };
     } finally {
         activeSubagents.delete(subSessionId); // 释放并发护栏（正常/中止/崩溃均走此）
+        ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'stop', name: manifest?.name, depth: ctx.depth + 1 }); // 计数收敛（与 start 配对）
     }
 };

@@ -98,7 +98,9 @@ type MessageWithId = OpenAI.Chat.ChatCompletionMessageParam & {
  *   极端场景，且原实现同样无法防御外部改写）。
  */
 const appendSizeCache = new Map<string, number>(); // path → 已知字节长度（写入前大小）
-const appendLineWithRetry = async (p: string, payload: string): Promise<void> => {
+/** @param handle P2-2 合批快路径：调用方已 open 的追加句柄（省逐条 open+close）；缺省走旧路径 fs.appendFile。
+ *   重试/截断回滚/水位语义与旧路径完全一致（truncate 按 path 进行，句柄以 O_APPEND 打开互不干扰）。 */
+const appendLineWithRetry = async (p: string, payload: string, handle?: fs.FileHandle | null): Promise<void> => {
     const MAX_ATTEMPTS = 3;
     const payloadBytes = Buffer.byteLength(payload, "utf-8");
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -108,7 +110,8 @@ const appendLineWithRetry = async (p: string, payload: string): Promise<void> =>
             try { beforeSize = (await fs.stat(p)).size; } catch { /* 文件不存在 → beforeSize=0 */ }
         }
         try {
-            await fs.appendFile(p, payload, "utf-8");
+            if (handle) await handle.appendFile(payload, "utf-8"); // O_APPEND：总是落到当前文件尾
+            else await fs.appendFile(p, payload, "utf-8");
             appendSizeCache.set(p, beforeSize + payloadBytes); // ★ 水位推进：下次 append 免 stat
             return;
         } catch (e) {
@@ -142,6 +145,44 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
     } catch (e) {
         // 容错优先：持续失败仍不阻断推理，但明确告警内存/磁盘可能不一致
         console.warn(`⚠️ 消息落盘失败（已重试 3 次，内存与磁盘转录可能不一致）:`, e);
+    }
+}
+
+/**
+ * 批量追加多条消息（P2-2 落盘合批）：open('a') 一次、逐条 handle.appendFile、finally close——
+ * Windows + 杀软实时扫描下小文件 open+append 常见 5~20ms/次，一个 N 工具轮的 N+1 次独立写夹在轮间，
+ * 合批后每轮只付一次打开成本。行构造与 appendMessage 同式（id/ts 盖章 + U+FFFD 体检，两处同步维护），
+ * 顺序语义与逐条 appendMessage 完全一致（按请求序逐行落盘）。
+ * 单条失败：appendLineWithRetry 已含重试+截断回滚；仍抛错则该条起回落逐条旧路径（appendMessage，
+ * 失败行已被截断回滚，逐条重写不产生半行/重复）。与 appendMessage 同容错——任何失败只 warn 不抛。
+ */
+export const appendMessages = async (sessionId: string, entries: MessageWithId[]): Promise<void> => {
+    if (entries.length === 0) return;
+    if (entries.length === 1) return appendMessage(entries[0]);
+    try {
+        await ensureSessionsDir(sessionId);
+        const p = getTranscriptPath(sessionId);
+        const payloads = entries.map((entry) => {
+            const { sessionId: _sid, ...rest } = entry;
+            return JSON.stringify({ id: createUUID(), ts: new Date().toISOString(), ...rest }) + "\n";
+        });
+        // 编码体检（与单条路径同款，批量汇总计数；不擅改内容，原样落盘便于追溯乱码来源）
+        const FFFD = String.fromCharCode(0xfffd); // 无效 UTF-8 替换符（ASCII 写法，避免源码转义歧义）
+        const fffdTotal = payloads.reduce((n, pl) => n + (pl.split(FFFD).length - 1), 0);
+        if (fffdTotal > 0) console.warn(`[transcript] 批量消息含 ${fffdTotal} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
+        let handle: fs.FileHandle | null = null;
+        let i = 0;
+        try {
+            handle = await fs.open(p, "a");
+            for (; i < payloads.length; i++) await appendLineWithRetry(p, payloads[i], handle);
+        } catch (e) {
+            console.warn(`[transcript] 批量落盘第 ${i + 1}/${payloads.length} 条失败，该条起回落逐条旧路径:`, e instanceof Error ? e.message : e);
+            for (; i < entries.length; i++) await appendMessage(entries[i]);
+        } finally {
+            if (handle) await handle.close().catch(() => { /* 关闭失败无害：句柄随进程回收 */ });
+        }
+    } catch (e) {
+        console.warn(`批量消息落盘失败（内存与磁盘转录可能不一致）:`, e);
     }
 }
 

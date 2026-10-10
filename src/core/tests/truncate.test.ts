@@ -9,6 +9,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { collectToolResult } from "@/agent/toolResultCollect.ts";
+import { scaleTruncBudget } from "@/agent/toolExecution.ts";
 
 /** 假流式工具：模拟 run_command 逐块 yield stdout。 */
 async function* fakeStream(chunks: string[]): AsyncGenerator<string> {
@@ -101,5 +102,37 @@ describe("collectToolResult 非流式安全网超时 / abort 打断（P0-1）", 
         } finally {
             restoreEnv(prev);
         }
+    });
+});
+
+describe("scaleTruncBudget 截断预算随窗口余量自适应（P2-1）", () => {
+    const B = 16000; // appConfig.MAX_TOOL_RESULT_CHARS 口径
+
+    it("fill≤0.5 原值（半满以下不干预）", () => {
+        assert.equal(scaleTruncBudget(B, 0), B);
+        assert.equal(scaleTruncBudget(B, 0.3), B);
+        assert.equal(scaleTruncBudget(B, 0.5), B, "0.5 含边界取原值");
+    });
+
+    it("0.5<fill≤0.85 线性降到 0.4×base（0.85 恰为 0.4×）", () => {
+        assert.equal(scaleTruncBudget(B, 0.85), Math.floor(B * 0.4), "0.85 边界=0.4×");
+        assert.equal(scaleTruncBudget(B, 0.675), Math.floor(B * 0.7), "区间中点=0.7×");
+        const mid = scaleTruncBudget(B, 0.6);
+        assert.ok(mid > Math.floor(B * 0.4) && mid < B, "区间内严格介于原值与 0.4× 之间");
+    });
+
+    it("fill>0.85 取 0.35×base", () => {
+        assert.equal(scaleTruncBudget(B, 0.86), Math.floor(B * 0.35));
+        assert.equal(scaleTruncBudget(B, 1.2), Math.floor(B * 0.35), "超窗同样 0.35×");
+    });
+
+    it("下限 2000 字符；极小自定义预算不被下限反向抬高", () => {
+        assert.equal(scaleTruncBudget(4000, 0.9), 2000, "0.35×4000=1400 → 下限 2000");
+        assert.equal(scaleTruncBudget(1000, 0.9), 1000, "base<2000 时返回 base 本身，不抬高");
+    });
+
+    it("fill 缺省/非有限 → 原值（缺省路径逐字节不变，向后兼容）", () => {
+        assert.equal(scaleTruncBudget(B, undefined), B);
+        assert.equal(scaleTruncBudget(B, Number.NaN), B);
     });
 });

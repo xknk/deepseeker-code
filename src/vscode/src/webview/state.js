@@ -19,7 +19,7 @@ toolRowByCallId: new Map(), // toolCallId -> key
 currentAssistant: null, // 流式 assistant 行 key
 currentThinking: null, // 流式 thinking 行 key
 busy: false,
-busySince: 0, // busy 翻 true 的时刻（生成中条/工具行已耗时计秒的公共钟）
+runningAgents: 0, // 运行中子 agent 数（subagent.count 事件镜像 core 在飞 Set size；操作条「● N agent」胶囊）
 planMode: false,
 autoMode: false,
 thinkingLevel: "high",
@@ -48,6 +48,8 @@ todos: [],
 roundSeq: 0,
 currentTurn: 0,
 turnHeaderBySeq: new Map(),
+compactProgressKey: null, // 压缩进度瞬态行 key（compact.progress 单行更新；compact.done/final/error 收敛删除）
+subagentProgressKey: null, // 子 agent 进度瞬态行 key（P3-7 subagent.progress 单行更新；done/final/error 收敛删除）
 };
 
 /** row key 发放器（单调递增，整个 webview 生命周期唯一）。 */
