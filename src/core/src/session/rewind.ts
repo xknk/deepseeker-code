@@ -10,13 +10,21 @@
  *  - 压缩态（archivedMessageCount/rollingSummary）取保留区内最后一个 compaction 事件：检查点早于
  *    全部压缩 → 0/''，语义正确（压缩是运行期窗口治理，不是数据删除）；read-modify-write 保 title/校准。
  *  - busy 期间回滚在 host 层拒绝（生成中截断会产生撕裂转录）。
- *  - C2 文件级联动（按轮写集合恢复）待接入：届时在 Checkpoint 上补 writes 字段，回滚前先恢复文件。
+ *  - C2 文件级联动：检查点不存写集合（writes 字段不需要）——undo 索引记录自带 timestamp，按
+ *    `记录.ts > 检查点.ts` 圈定该轮写入（检查点记在 user 消息落盘【前】，该轮全部工具写在其后；
+ *    子代理写入经 undo 索引的主会话归并天然吃到）。每文件取最早一条未回退记录（其备份=首次写前
+ *    状态=检查点时刻态），经 restoreForRewind 走完整 undo 链路（反向备份保手动改动可逆）；
+ *    同文件其余未回退记录随恢复一并标记 restored（其效果已被覆盖，对已消失的变更做 undo 是语义错误）。
+ *    时序红线：先文件恢复确认（modal 清单）→ 执行恢复 → 再截断对话，避免半途状态。
  */
 import fs from "fs/promises";
 import path from "path";
 import { createUUID, assertSafeSessionId } from "@/common/index.ts";
 import { readTranscriptLines, isEventLine, resetAppendSizeWatermark } from "./transcript.ts";
 import { getSessionsDirPath, getTranscriptPath, ensureSessionsDir, readStore, writeStore } from "./store.ts";
+import { readUndoIndex, markRestored } from "@/tool/undo/index.ts";
+import { restoreForRewind } from "@/tool/undo/restore.ts";
+import type { UndoRecord } from "@/tool/undo/type.ts";
 
 /** 检查点（选择器列表项，纯数据）：一次「用户消息发送前」的转录快照边界。 */
 export type Checkpoint = {
@@ -133,4 +141,83 @@ export const rewindToCheckpoint = async (sessionId: string, checkpointId: string
     await writeCheckpoints(sessionId, list.slice(0, idx + 1));
 
     return { removedLines: Math.max(0, lines.length - keepTarget) };
+};
+
+// ———————————— C2 文件级联动 ————————————
+
+/** 单文件回滚计划项（modal 确认清单用）：ok=false = 备份已被清理、无法恢复（对话照常截断，文件保持现状）。 */
+export type RewindFilePlan = {
+    relativePath: string;
+    kind: "file_content" | "directory_tree" | "creation_marker";
+    undoId: string;
+    ok: boolean;
+};
+
+/** 圈定检查点之后的写集合：undo 索引（升序）过滤 `ts > sinceTs && !restored`，按 relativePath 分组，
+ *  最早一条进 earliest（恢复目标），其余进 shadowed（恢复时随 earliest 一并标记 restored）。
+ *  readUndoIndex 内部聚合该会话全部 undo-*.jsonl 并容错损坏行；目录/会话不合法时返回空（无可恢复）。 */
+const collectPostCheckpointRecords = async (
+    sessionId: string,
+    sinceTs: string,
+): Promise<{ earliest: UndoRecord[]; shadowed: UndoRecord[] }> => {
+    const all = await readUndoIndex(sessionId);
+    const post = all.filter((r) => !r.restored && (r.timestamp || "") > sinceTs);
+    const byPath = new Map<string, UndoRecord>();
+    const shadowed: UndoRecord[] = [];
+    for (const r of post) {
+        const prev = byPath.get(r.relativePath);
+        if (!prev) { byPath.set(r.relativePath, r); continue; }
+        if ((r.timestamp || "") < (prev.timestamp || "")) { byPath.set(r.relativePath, r); shadowed.push(prev); }
+        else shadowed.push(r);
+    }
+    const earliest = [...byPath.values()].sort((a, b) => (a.timestamp || "").localeCompare(b.timestamp || ""));
+    return { earliest, shadowed };
+};
+
+/** 预检：回滚到某检查点会波及哪些文件（host.planRewind → modal 确认清单；不落盘不恢复）。 */
+export const collectRewindFiles = async (sessionId: string, sinceTs: string): Promise<RewindFilePlan[]> => {
+    const { earliest } = await collectPostCheckpointRecords(sessionId, sinceTs);
+    const plans: RewindFilePlan[] = [];
+    for (const r of earliest) {
+        // creation_marker 的恢复动作 = 删除新建文件，不依赖备份内容；其余形态需备份仍在（cleanup 可能已回收）
+        let ok = true;
+        if (r.backupKind !== "creation_marker") {
+            try { await fs.access(r.backupPath); } catch { ok = false; }
+        }
+        plans.push({ relativePath: r.relativePath, kind: r.backupKind, undoId: r.undoId, ok });
+    }
+    return plans.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+};
+
+/**
+ * 执行检查点回滚的文件恢复（modal 确认后、对话截断【前】调用——时序红线：先文件、再截断）。
+ * 逐文件走 restoreForRewind 完整链路（反向备份→还原→标记→反向记录）；单文件失败不阻断其余文件
+ * （失败 = 文件留在当前态，无损可重试）。备份缺失的跳过并报告。@returns 每文件一行人类可读结果。
+ */
+export const restoreFilesForRewind = async (sessionId: string, sinceTs: string): Promise<string[]> => {
+    const { earliest, shadowed } = await collectPostCheckpointRecords(sessionId, sinceTs);
+    const results: string[] = [];
+    const shadowDone = new Set<string>();
+    for (const r of earliest) {
+        if (r.backupKind !== "creation_marker") {
+            try { await fs.access(r.backupPath); } catch {
+                results.push(`⚠️ ${r.relativePath}：备份已被清理，无法恢复（文件保持现状）`);
+                continue;
+            }
+        }
+        try {
+            const msg = await restoreForRewind(r, sessionId);
+            results.push(`✅ ${msg}`);
+            // 同文件其后未回退记录的效果已被本次覆盖，一并标记 restored（undo 队列不再含已消失的变更；
+            // earliest 的反向记录仍可 undo_restore，可整体"撤销回滚"回到回滚前文件态）
+            for (const s of shadowed) {
+                if (s.relativePath !== r.relativePath || shadowDone.has(s.undoId)) continue;
+                shadowDone.add(s.undoId);
+                await markRestored(sessionId, s.undoId);
+            }
+        } catch (e) {
+            results.push(`❌ ${r.relativePath}：恢复失败（${e instanceof Error ? e.message : e}），文件保持现状`);
+        }
+    }
+    return results;
 };

@@ -60,21 +60,31 @@ export const restoreLast = async (sessionId: string): Promise<string> => {
 };
 
 /**
+ * 检查点回滚专用单文件恢复（session/rewind.ts C2 调用）：走 doRestore 完整链路
+ * （反向备份 → 还原 → 标记已回退 → 反向记录，用户检查点后的手动改动可经 undo_restore 撤销本恢复），
+ * 仅以 force 跳过目录已存在拒绝与软警告（批量回退场景语义不同，见 doRestore 注释）。
+ */
+export const restoreForRewind = (target: UndoRecord, sessionId: string): Promise<string> =>
+    doRestore(target, sessionId, { force: true });
+
+/**
  * 回退单步：前置检查（目录已存在拒绝）→ 软警告（有更新变更）→ 反向备份 → 分发还原 → 标记已回退 → 追加反向记录。
  * 反向备份在还原之前（备份"回退前的当前态"）；还原抛错则记录不标记、可重试，反向备份成孤儿由清理回收。
  *
  * 注：不做"当前磁盘 hash vs 备份前 hash"的硬脏写拒绝——那会误拒正常的覆盖式回退：备份记录的是
  *   execute 前的原内容，回退后磁盘必然与之不同。改为"软警告 + 反向备份"保证可逆，而非硬拒绝。
+ * @param opts.force 检查点回滚专用（C2，经 restoreForRewind）：跳过目录已存在拒绝（回滚语义=强制回到
+ *   过去，用户已在 modal 确认清单）与软警告（批量场景"有更新变更"是必然，提示无意义）。
  */
-async function doRestore(target: UndoRecord, sessionId: string): Promise<string> {
+async function doRestore(target: UndoRecord, sessionId: string, opts?: { force?: boolean }): Promise<string> {
     // 前置检查：目录回退时目标已存在 → 拒绝（保守，不覆盖用户新建的目录树）
-    if (target.backupKind === 'directory_tree') {
+    if (!opts?.force && target.backupKind === 'directory_tree') {
         const abs = resolveSafePath(target.relativePath);
         let exists = false; try { await fs.access(abs); exists = true; } catch { /* 不存在 */ }
         if (exists) return `❌ [undo 拒绝]：目标路径 [${target.relativePath}] 已存在，拒绝覆盖。请先手动处理（删除或改名）后重试。`;
     }
     // 软警告：该文件在本次备份之后是否还有更新的未回退变更（提示回退顺序，不阻断）
-    const newerWarning = await checkNewerChange(target, sessionId);
+    const newerWarning = opts?.force ? "" : await checkNewerChange(target, sessionId);
 
     const reverse = await ensureReverseBackup(target, sessionId);
     let msg: string;

@@ -674,10 +674,30 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
       })();
       break;
     case "rewindToCheckpoint":
-      // ★ C1：原地截断 + 重放（host 载入截断后历史）；失败（busy/边界失效）以 info 行回显不弹窗
+      // ★ C1+C2：先预检文件波及（C2）——有可恢复文件则 modal 确认清单（对话+文件 / 仅对话 / 取消），
+      //   无则沿 C1 直接回滚；host 内部时序红线：先文件恢复、再截断对话；失败以 info 行回显不弹窗
       void (async () => {
         try {
-          await h.rewindToCheckpoint(String(msg.id ?? ""));
+          const plan = await h.planRewind(String(msg.id ?? ""));
+          const ok = plan.filter((f) => f.ok);
+          const bad = plan.filter((f) => !f.ok);
+          if (ok.length > 0) {
+            const kindText = (k: string) => (k === "creation_marker" ? "删除新建" : k === "directory_tree" ? "恢复目录树" : "恢复内容");
+            const detail = [
+              ok.map((f) => `• ${f.relativePath}（${kindText(f.kind)}）`).join("\n"),
+              bad.length ? `⚠️ 另有 ${bad.length} 个文件备份已清理、无法恢复（保持现状）` : "",
+            ].filter(Boolean).join("\n");
+            const choice = await vscode.window.showWarningMessage(
+              `回滚到发送前：将把 ${ok.length} 个文件一并恢复到该时点。`,
+              { modal: true, detail },
+              "对话 + 文件回滚",
+              "仅回滚对话",
+            );
+            if (choice !== "对话 + 文件回滚" && choice !== "仅回滚对话") return; // 取消/关窗 = 不动
+            await h.rewindToCheckpoint(String(msg.id ?? ""), choice === "对话 + 文件回滚");
+          } else {
+            await h.rewindToCheckpoint(String(msg.id ?? ""), false);
+          }
         } catch (e) {
           deliverTo(tab, { type: "info", text: `⏪ 回滚失败：${e instanceof Error ? e.message : String(e)}` });
         }

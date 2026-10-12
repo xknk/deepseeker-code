@@ -19,7 +19,7 @@ import { getOrCreateSessionId, listSessions, readStore, renameSession as persist
 import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
 import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
-import { recordCheckpoint, listCheckpoints as listCheckpointsCore, rewindToCheckpoint as rewindToCheckpointCore, type Checkpoint } from "@/session/rewind.ts";
+import { recordCheckpoint, listCheckpoints as listCheckpointsCore, rewindToCheckpoint as rewindToCheckpointCore, collectRewindFiles, restoreFilesForRewind, type Checkpoint, type RewindFilePlan } from "@/session/rewind.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionRequest, IdeActionResult } from "@/host/type.ts";
@@ -522,14 +522,29 @@ export class ChatHost {
     return listCheckpointsCore(sid);
   }
 
-  /** C1：回滚到检查点——原地截断 transcript + 压缩态回落 + 重放截断后历史（UI 就地回到发送前）。
-   *  busy 拒绝：生成中截断会产生撕裂转录（runAgent 正按旧消息序追加/读取）。 */
-  async rewindToCheckpoint(checkpointId: string): Promise<void> {
+  /** C2 预检：回滚到某检查点会波及哪些文件（extension 层 modal 确认清单用；不落盘）。 */
+  async planRewind(checkpointId: string): Promise<RewindFilePlan[]> {
+    const sid = this.sessionId;
+    if (!sid) return [];
+    const cp = (await listCheckpointsCore(sid)).find((c) => c.id === checkpointId);
+    if (!cp) return [];
+    return collectRewindFiles(sid, cp.ts);
+  }
+
+  /** C1+C2：回滚到检查点——原地截断 transcript + 压缩态回落 + 重放截断后历史（UI 就地回到发送前）。
+   *  busy 拒绝：生成中截断会产生撕裂转录（runAgent 正按旧消息序追加/读取）。
+   *  restoreFiles=true 时先恢复该时点后的文件改动（modal 已确认），再截断对话——时序红线：先文件、
+   *  再截断，避免"文件已回、对话还在"的半途状态；文件恢复结果明细并入 info 行回显。 */
+  async rewindToCheckpoint(checkpointId: string, restoreFiles = false): Promise<void> {
     if (this.busy) throw new Error("生成中无法回滚，请先停止当前轮");
     const sid = this.sessionId;
     if (!sid) throw new Error("当前无活动会话，无可回滚");
+    const cp = (await listCheckpointsCore(sid)).find((c) => c.id === checkpointId);
+    if (!cp) throw new Error(`检查点不存在：${checkpointId}`);
+    const fileLines = restoreFiles ? await restoreFilesForRewind(sid, cp.ts) : [];
     const r = await rewindToCheckpointCore(sid, checkpointId);
-    this.sink({ type: "info", text: `⏪ 已回滚到发送前（移除其后 ${r.removedLines} 行转录）。改写消息后重发即可。` });
+    const fileNote = fileLines.length ? `\n${fileLines.join("\n")}` : "";
+    this.sink({ type: "info", text: `⏪ 已回滚到发送前（移除其后 ${r.removedLines} 行转录）。改写消息后重发即可。${fileNote}` });
     await this.loadSession(sid);
   }
 
