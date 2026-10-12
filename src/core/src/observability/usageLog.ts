@@ -6,7 +6,7 @@
  *  trace 是短期运维源、transcript run.end 是单会话审计源，本日志是跨会话长期聚合源）。
  *  evals 测「能不能」（合成考卷），使用日志测「日常省不省」（真实负载），二者互补构成测量优先地基。
  *  停用开关：DEEPSEEKER_CODE_USAGE_LOG=0（缺省开）。
- *  读侧约定：selftest- 与 eval- 前缀的受控实验会话不代表真实负载，readUsageRecords 一律剔除（同 cache-by-round 惯例）。
+ *  读侧约定：selftest-、eval- 与 e2e- 前缀的受控实验会话不代表真实负载，readUsageRecords 一律剔除（同 cache-by-round 惯例）。
  */
 import fs from "fs/promises";
 import path from "path";
@@ -64,8 +64,8 @@ export const recordUsageRun = async (rec: Omit<UsageRunRecord, "workspace"> & { 
 }
 
 const USAGE_FILE_RE = /^usage-\d{4}-\d{2}\.jsonl$/;
-/** 受控实验会话前缀：selftest-*（scripts/selftest-*）与 eval-*（evals 任务池），混入会污染「日常省不省」口径 */
-const SYNTHETIC_SESSION_RE = /^(selftest-|eval-)/;
+/** 受控实验会话前缀：selftest-*（scripts/selftest-*）、eval-*（evals 任务池）与 e2e-*（端到端诊断会话），混入会污染「日常省不省」口径 */
+const SYNTHETIC_SESSION_RE = /^(selftest-|eval-|e2e-)/;
 
 /**
  * 读取使用日志全部记录（跨月分片合并，按 ts 升序）。

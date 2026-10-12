@@ -43,10 +43,10 @@ const parseFile = (file: string) => {
 };
 
 walk(TRACE_ROOT);
-// 按会话聚合 + 时间排序，剔除我打的 selftest 会话（受控实验，不代表真实负载）
+// 按会话聚合 + 时间排序，剔除受控实验会话（selftest-*/eval-*/e2e-*，不代表真实负载，同 usageLog 读侧惯例）
 const bySession = new Map<string, Ev[]>();
 for (const e of events) {
-    if (e.session.startsWith("selftest-")) continue;
+    if (/^(selftest-|eval-|e2e-)/.test(e.session)) continue;
     if (!bySession.has(e.session)) bySession.set(e.session, []);
     bySession.get(e.session)!.push(e);
 }
@@ -73,7 +73,7 @@ const stat = (name: string, b: Bucket) => {
     const missed = ((b.prompt - b.hit) / 1000).toFixed(0);
     console.log(`${name.padEnd(10)} 轮数=${String(b.n).padStart(5)}  加权命中=${pct(b.hit / b.prompt).padStart(7)}  中位=${pct(median).padStart(7)}  低命中轮占比=${pct(low / b.n).padStart(6)}  miss绝对量=${missed}K tok`);
 };
-console.log(`共 ${bySession.size} 个真实会话、${events.filter(e => !e.session.startsWith("selftest-")).length} 轮 llm.response\n`);
+console.log(`共 ${bySession.size} 个真实会话、${events.filter(e => !/^(selftest-|eval-|e2e-)/.test(e.session)).length} 轮 llm.response\n`);
 console.log("阶段        样本      加权命中率   中位命中率   低命中轮占比   miss绝对量");
 console.log("-".repeat(78));
 stat("coldStart", buckets.coldStart);

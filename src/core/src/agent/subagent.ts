@@ -57,8 +57,9 @@ const activeSubagents = new Set<string>();
  */
 const failText = (msg: string): string => toolFailure(msg).content;
 
-/** 续跑子系统词补充：父级对子会话历史零记忆（fork 时间线里此前的工具返回是孤儿占位文案），
- *  责成子 agent 先回顾进展再继续，汇报也要先概述（父级全靠汇报对齐）。 */
+/** 续跑首条 user 消息补充：父级对子会话历史零记忆（fork 时间线里此前的工具返回是孤儿占位文案），
+ *  责成子 agent 先回顾进展再继续，汇报也要先概述（父级全靠汇报对齐）。
+ *  放 user 段不进 system：续跑 system 与首跑逐字节一致，首轮可命中首跑写入的历史前缀（缓存友好）。 */
 const RESUME_NOTE = [
     `\n# 【续跑说明】`,
     `你此前的工作历史已完整恢复到本次上下文（磁盘最新状态，可能比你上次记忆更新）。`,
@@ -177,29 +178,37 @@ export const runSubagent = async (
         };
     }
 
-    // ★ 子系统词：声明式 agent 用其 manifest.body；否则用精炼的默认模板（防上下文轰炸）；
-    //   续跑时追加续跑说明（系统词每次重建不入盘，历史消息都在 transcript 里，不冲突）
+    // ★ 子系统词：声明式 agent 用其 manifest.body；否则用精炼的默认模板（防上下文轰炸）。
+    //   ★ 缓存友好（DS 前缀缓存以 message[0] 起逐字节匹配，tools 段不贡献命中）：system 段只留同会话
+    //   恒定内容——task 大纲/角色补充/续跑说明全部挪到首条 user 消息（subTaskPrompt）。此前 task/role 编在
+    //   system 里导致每个子 run 的 sysHash 互不相同，同批并行派生首轮前缀在 system 即分叉、DS 端首轮恒
+    //   0%（实测 20 子 run × ~15k 全价 miss，占当日成本 ~3/4）；挪后同 manifest 的兄弟派生 system 逐字节
+    //   一致可互相命中首轮前缀，续跑（RESUME_NOTE 同步挪出）首轮也能命中首跑写入的历史前缀。
     const subSystem = (manifest
         ? [
             `# 子 Agent 身份：${manifest.name}`,
             manifest.body,
             `\n# 任务上下文`,
             `当前所处的任务执行嵌套深度: Depth ${ctx.depth + 1} / ${MAX_AGENT_DEPTH}`,
-            `你的父级任务大纲参考: ${task.slice(0, 150)}...`,
-            role ? `\n# 本次角色补充: ${role}` : "",
             `\n# 【继承的全局代码规范】`,
             parentSystemPrompt,
         ].filter(Boolean).join("\n")
         : [
             `# 任务上下文`,
-            role ? `【你的专属角色】: ${role}` : "【你的专属角色】: 专注执行特定局部子任务的独立智能体助手",
             `当前所处的任务执行嵌套深度: Depth ${ctx.depth + 1} / ${MAX_AGENT_DEPTH}`,
-            `你的父级任务大纲参考: ${task.slice(0, 150)}...`,
             `\n# 【核心重构铁律】`,
             `你直接共享并操作本地文件系统。当你对文件全量写入或局部修改时，必须确保操作的绝对精准。完成指定子任务后，请使用最终的文本总结向父级 Agent 交付结果。`,
             `\n# 【继承的全局代码规范】`,
             parentSystemPrompt,
-        ].join("\n")) + (resuming ? RESUME_NOTE : "");
+        ].join("\n"));
+
+    // ★ per-spawn 可变注入（角色/任务/续跑说明）并入首条 user 消息，不进 system（缓存友好，见上）
+    const subTaskPrompt = [
+        role ? (manifest ? `# 本次角色补充: ${role}` : `【你的专属角色】: ${role}`)
+            : (manifest ? "" : `【你的专属角色】: 专注执行特定局部子任务的独立智能体助手`),
+        task,
+        ...(resuming ? [RESUME_NOTE] : []),
+    ].filter(Boolean).join("\n\n");
 
     // ★ 工具表：manifest.tools 非空 → 显式 allowlist（替代 deny-list）；否则回退 deny-list（向后兼容）
     //   P1-MCP dispatcher 兼容：manifest 声明 mcp__*（旧逐工具名）、mcp_call 或 mcp_list_tools 时，
@@ -219,8 +228,8 @@ export const runSubagent = async (
     ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'start', name: manifest?.name, depth: ctx.depth + 1 });
     try {
         // 构建并初始化子智能体的独立消息队列
-        const subMessages = await buildContextMessages(subSessionId, { role: "user", content: task }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
-        await appendMessage({ sessionId: subSessionId, role: 'user', content: task });
+        const subMessages = await buildContextMessages(subSessionId, { role: "user", content: subTaskPrompt }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
+        await appendMessage({ sessionId: subSessionId, role: 'user', content: subTaskPrompt });
 
         let subResult = "";
         let hasFinalResult = false;

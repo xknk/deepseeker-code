@@ -113,8 +113,8 @@ if (!fs.existsSync(SESSIONS_ROOT)) {
 }
 walk(SESSIONS_ROOT);
 
-// 过滤受控实验会话（selftest-*，不代表真实负载）
-const real = stats.filter((s) => !s.session.startsWith("selftest-"));
+// 过滤受控实验会话（selftest-*/eval-*/e2e-*，不代表真实负载，同 usageLog 读侧惯例）
+const real = stats.filter((s) => !/^(selftest-|eval-|e2e-)/.test(s.session));
 if (real.length === 0) { console.log("无真实会话样本"); process.exit(0); }
 
 const withReasoning = real.filter((s) => s.reasoningChars > 0);

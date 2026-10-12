@@ -3,7 +3,7 @@
  * @description 子 Agent 续跑端到端（ReplayProvider 驱动 runAgent 真实主循环，零 API 成本）：
  *  A) 新建派生 → final 采集 + transcript 落盘；
  *  B) 同 ID 续跑 → ★核心断言：第二次模型调用的 messages 里恢复出第一轮完整历史
- *     （user 任务 + assistant 结论）且末尾是新指令，系统词注入【续跑说明】；
+ *     （user 任务 + assistant 结论），末尾新指令随【续跑说明】注入（可变注入全走 user 段，system 缓存友好）；
  *  C) fork 时间线续跑 → forkSession(p1) 出的 f1 续跑原时间线子会话，血缘归属放行（本次改动核心验收点）。
  *
  *  断言依据 ReplayProvider.calls：每次 streamChat 的入参快照（模型实际看到了什么）。
@@ -64,9 +64,12 @@ describe("子 Agent 续跑端到端（ReplayProvider）", () => {
         assert.equal(msgs[0]!.role, "system", "[0]=system 布局");
         assert.equal(msgs[1]!.role, "system", "[1]=摘要槽布局");
         assert.doesNotMatch(String(msgs[0]!.content), /续跑说明/, "新建路径不注入续跑说明");
+        assert.doesNotMatch(String(msgs[0]!.content), /执行任务A/, "system 不编任务（缓存友好：per-spawn 内容全走 user 段）");
         const last = msgs[msgs.length - 1]! as any;
         assert.equal(last.role, "user");
-        assert.equal(last.content, "执行任务A", "末尾为本次任务指令");
+        assert.equal(last.content,
+            "【你的专属角色】: 专注执行特定局部子任务的独立智能体助手\n\n执行任务A",
+            "末尾为缺省角色+任务（per-spawn 可变注入并入首条 user 消息）");
     });
 
     it("B. 同 ID 续跑：模型实际看到第一轮历史 + 新指令 + 续跑说明注入", async () => {
@@ -82,9 +85,10 @@ describe("子 Agent 续跑端到端（ReplayProvider）", () => {
         const flat = msgs.map((m: any) => `${m.role}:${typeof m.content === "string" ? m.content : ""}`).join("\n");
         assert.ok(flat.includes("执行任务A"), "第一轮 user 任务恢复在上下文");
         assert.ok(flat.includes("第一轮汇报"), "第一轮 assistant 结论恢复在上下文");
-        assert.match(String(msgs[0]!.content), /【续跑说明】/, "系统词注入续跑回顾提示");
+        assert.doesNotMatch(String(msgs[0]!.content), /【续跑说明】/, "续跑说明不进 system（system 与首跑逐字节一致，首轮可命中历史前缀）");
         const last = msgs[msgs.length - 1]! as any;
-        assert.equal(last.content, "继续完成任务A的剩余部分", "末尾为续跑新指令");
+        assert.match(String(last.content), /继续完成任务A的剩余部分/, "末尾含续跑新指令");
+        assert.match(String(last.content), /【续跑说明】/, "续跑回顾提示随末尾 user 消息注入");
     });
 
     it("C. fork 时间线续跑原子会话：血缘归属放行（f1 ← p1）", async () => {
