@@ -666,6 +666,23 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
       })();
       break;
     }
+    case "listCheckpoints":
+      // ★ C1 回滚面板：枚举当前会话检查点（host 转发 core 侧车读取）
+      void (async () => {
+        const checkpoints = await h.listCheckpoints();
+        deliverTo(tab, { type: "checkpoints", checkpoints });
+      })();
+      break;
+    case "rewindToCheckpoint":
+      // ★ C1：原地截断 + 重放（host 载入截断后历史）；失败（busy/边界失效）以 info 行回显不弹窗
+      void (async () => {
+        try {
+          await h.rewindToCheckpoint(String(msg.id ?? ""));
+        } catch (e) {
+          deliverTo(tab, { type: "info", text: `⏪ 回滚失败：${e instanceof Error ? e.message : String(e)}` });
+        }
+      })();
+      break;
     case "bookmarkAdd": {
       // ★ B3：收藏常用 prompt（globalState 持久）。同文本去重（重复收藏只保留原条，新条插最前）。
       void (async () => {

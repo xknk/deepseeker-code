@@ -16,6 +16,7 @@ import { escapeHtml } from "./markdown.js";
 import { clearMessages, addInfo } from "./rows.js";
 import { syncToolbar, modeRefs } from "./toolbar.js";
 import { toggleModelPicker, closeModelPicker } from "./modals.js";
+import { toggleCheckpointsPanel } from "./panels.js";
 
 // ———— composer 闭包能力桥（buildComposer 挂载后回填） ————
 // runCommand：把命令交给输入框现有路径执行（带参回填输入框 / 无参直发），面板自身不复刻 doSend。
@@ -91,6 +92,11 @@ const buildActionItems = () => [
     hint: "导出当前会话为 Markdown 文件（同 /export）",
     right: { kind: "value", value: "导出 Markdown（同 /export）" },
     action: () => { closeActionPanel(); vscode.postMessage({ type: "exportConversation" }); },
+  },
+  {
+    group: GROUP_CONTEXT, label: "Rewind to checkpoint...",
+    hint: "回滚到任意消息发送前（原地截断，可改写重发；同输入框旁 ⏱ 按钮）",
+    action: () => { closeActionPanel(); toggleCheckpointsPanel(); },
   },
   {
     group: GROUP_MODEL, label: "Switch model...",

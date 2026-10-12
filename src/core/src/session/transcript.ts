@@ -98,6 +98,14 @@ type MessageWithId = OpenAI.Chat.ChatCompletionMessageParam & {
  *   极端场景，且原实现同样无法防御外部改写）。
  */
 const appendSizeCache = new Map<string, number>(); // path → 已知字节长度（写入前大小）
+
+/**
+ * 失效某 transcript 路径的进程内字节水位（外部改写文件后必须调用——rewind 原地截断后）。
+ * 不重置的话：下次 append 的失败回滚会截到【旧的大水位】，在截短后的文件尾留垃圾半行。
+ */
+export const resetAppendSizeWatermark = (p: string): void => {
+    appendSizeCache.delete(p);
+};
 /** @param handle P2-2 合批快路径：调用方已 open 的追加句柄（省逐条 open+close）；缺省走旧路径 fs.appendFile。
  *   重试/截断回滚/水位语义与旧路径完全一致（truncate 按 path 进行，句柄以 O_APPEND 打开互不干扰）。 */
 const appendLineWithRetry = async (p: string, payload: string, handle?: fs.FileHandle | null): Promise<void> => {

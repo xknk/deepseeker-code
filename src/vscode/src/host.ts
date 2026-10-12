@@ -19,6 +19,7 @@ import { getOrCreateSessionId, listSessions, readStore, renameSession as persist
 import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
 import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
+import { recordCheckpoint, listCheckpoints as listCheckpointsCore, rewindToCheckpoint as rewindToCheckpointCore, type Checkpoint } from "@/session/rewind.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionRequest, IdeActionResult } from "@/host/type.ts";
@@ -357,6 +358,8 @@ export class ChatHost {
     if (this.sessionId == null) {
       this.setSessionId(await getOrCreateSessionId(undefined));
     }
+    // ★ C1：bang 输出也以 user 消息落 transcript——同样先记检查点（保证任意 user 落盘点前有边界）
+    await recordCheckpoint(this.sessionId!, cmd);
     this.sink({ type: "row", kind: "user", text: raw, key: `u-${Date.now()}` });
     const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
     const head = r.timedOut ? "⏱ 超时中止" : r.ok ? "✅ 退出码 0" : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : "❌ 已中止";
@@ -394,6 +397,9 @@ export class ChatHost {
     if (this.sessionId == null) {
       this.setSessionId(await getOrCreateSessionId(undefined));
     }
+    // ★ C1 Checkpoints：每轮用户消息发送【前】记检查点（transcript 当前边界 + 将发文本预览）。
+    //   位置在 busy/inbox 分支之后：排队轮不记（回合边界送达时 runAgent 侧本轮已在上一检查点界内）。
+    await recordCheckpoint(this.sessionId!, text || (hasAtt ? "[图片消息]" : ""));
     // user 行回显带缩略图（dataURL），与回放视图同构
     this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}`, attachments: this.attachmentThumbs(attachments) });
     if (this.planMode) {
@@ -507,6 +513,24 @@ export class ChatHost {
     const r = await forkSession(sid, lineId);
     await this.loadSession(r.sessionId);
     this.sink({ type: "info", text: `🌿 已分叉为新会话（源会话不变），继续对话将写入新会话。` });
+  }
+
+  /** C1：枚举当前会话检查点（回滚面板；无活动会话 → 空表）。 */
+  async listCheckpoints(): Promise<Checkpoint[]> {
+    const sid = this.sessionId;
+    if (!sid) return [];
+    return listCheckpointsCore(sid);
+  }
+
+  /** C1：回滚到检查点——原地截断 transcript + 压缩态回落 + 重放截断后历史（UI 就地回到发送前）。
+   *  busy 拒绝：生成中截断会产生撕裂转录（runAgent 正按旧消息序追加/读取）。 */
+  async rewindToCheckpoint(checkpointId: string): Promise<void> {
+    if (this.busy) throw new Error("生成中无法回滚，请先停止当前轮");
+    const sid = this.sessionId;
+    if (!sid) throw new Error("当前无活动会话，无可回滚");
+    const r = await rewindToCheckpointCore(sid, checkpointId);
+    this.sink({ type: "info", text: `⏪ 已回滚到发送前（移除其后 ${r.removedLines} 行转录）。改写消息后重发即可。` });
+    await this.loadSession(sid);
   }
 
   /** 重命名会话：写 state.title（不动 sessionId/文件夹，transcript 路径稳定）。 */

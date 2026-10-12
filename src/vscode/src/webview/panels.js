@@ -295,7 +295,92 @@ function relTime(iso) {
     return new Date(t).toLocaleDateString("zh-CN");
   }
 
+// ———————— 回滚面板（C1 Checkpoints：各轮「发送前」检查点，点击原地截断回滚） ————————
+function buildCheckpointsPanel() {
+if ($("#checkpoints-panel")) return;
+const panel = document.createElement("div");
+panel.id = "checkpoints-panel";
+panel.className = "sessions-panel"; // 复用历史面板浮层样式（同 fork-panel）
+panel.style.display = "none";
+panel.innerHTML = `
+<div class="sessions-search">
+<span class="codicon codicon-history"></span>
+<span style="flex:1;font-size:12px;color:#888;">Checkpoints：回到该消息发送前（之后的内容原地移除）</span>
+<button id="checkpoints-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
+</div>
+<div class="sessions-list" id="checkpoints-list"></div>`;
+document.querySelector("#approval-anchor").before(panel);
+$("#checkpoints-close").addEventListener("click", () => {
+closeCheckpointsPanel();
+const inp = $("#input");
+if (inp) inp.focus();
+});
+}
+
+function toggleCheckpointsPanel() {
+let panel = $("#checkpoints-panel");
+if (!panel) buildCheckpointsPanel();
+panel = $("#checkpoints-panel");
+if (panel && panel.style.display !== "none") {
+closeCheckpointsPanel();
+return;
+}
+openCheckpointsPanel();
+}
+
+function openCheckpointsPanel() {
+vscode.postMessage({ type: "listCheckpoints" });
+let panel = $("#checkpoints-panel");
+if (!panel) buildCheckpointsPanel();
+panel = $("#checkpoints-panel");
+panel.style.display = "";
+renderCheckpointsPanel();
+}
+
+function closeCheckpointsPanel() {
+const p = $("#checkpoints-panel");
+if (p) p.style.display = "none";
+}
+
+function renderCheckpointsPanel() {
+const panel = $("#checkpoints-panel");
+if (!panel || panel.style.display === "none") return;
+const box = $("#checkpoints-list");
+const cps = state.checkpoints || [];
+if (!cps.length) {
+box.innerHTML = `<div class="sessions-empty">当前会话暂无检查点（发送消息后自动记录）</div>`;
+return;
+}
+// CC 形态：条目 = 时钟图标 + 时间 + 副文案 "Before you sent: <摘要>"；列表末尾提示无更新检查点
+const fmtTime = (iso) => {
+const t = Date.parse(iso);
+return Number.isFinite(t) ? new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "";
+};
+const dayNow = new Date().toDateString();
+const html = cps.map((c, i) => {
+const d = Date.parse(c.ts);
+const day = Number.isFinite(d) ? new Date(d).toDateString() : dayNow;
+const time = fmtTime(c.ts) + (day !== dayNow ? ` (${Number.isFinite(d) ? new Date(d).toLocaleDateString("zh-CN") : ""})` : "");
+return `
+<div class="session-row checkpoint-row" data-i="${i}" title="回滚到该消息发送前（之后的内容将移除，可改写后重发）">
+<span class="codicon codicon-clock" style="font-size:13px;color:#888;flex-shrink:0;"></span>
+<span class="checkpoint-time">${escapeHtml(time)}</span>
+<span class="checkpoint-preview">Before you sent: ${escapeHtml(c.preview || "(空消息)")}</span>
+</div>`;
+}).join("") + `<div class="sessions-empty" style="padding:8px 12px;">此检查点之后无新检查点</div>`;
+box.innerHTML = html;
+box.querySelectorAll(".checkpoint-row").forEach((row) => {
+row.addEventListener("click", () => {
+const c = cps[Number(row.dataset.i)];
+if (!c) return;
+closeCheckpointsPanel();
+vscode.postMessage({ type: "rewindToCheckpoint", id: c.id });
+});
+});
+}
+
 export {
   buildSessionsPanel, toggleSessionsPanel, closeSessionsPanel, renderSessionsPanel,
   toggleForkPanel, renderForkPanel,
+  toggleCheckpointsPanel, renderCheckpointsPanel, closeCheckpointsPanel,
 };

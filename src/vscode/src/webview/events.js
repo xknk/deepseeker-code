@@ -15,7 +15,7 @@ import {
 } from "./rows.js";
 import { syncToolbar } from "./toolbar.js";
 import { renderApproval, renderQuestion, renderPlan, openModelPicker } from "./modals.js";
-import { renderSessionsPanel, renderForkPanel } from "./panels.js";
+import { renderSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./panels.js";
 import { updateSlashMenu, updateAtMenu } from "./composer.js";
 
 // ———————— 事件分发（host → webview） ————————
@@ -298,6 +298,11 @@ function onMessage(msg) {
     case "forkAnchors":
       state.forkAnchors = Array.isArray(msg.anchors) ? msg.anchors : [];
       renderForkPanel();
+      break;
+    case "checkpoints":
+      // ★ C1 回滚面板清单（listCheckpoints 回包）
+      state.checkpoints = Array.isArray(msg.checkpoints) ? msg.checkpoints : [];
+      renderCheckpointsPanel();
       break;
     case "sessionReset":
       clearMessages();

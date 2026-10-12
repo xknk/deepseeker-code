@@ -8,7 +8,7 @@
 import { vscode, $, state } from "./state.js";
 import { escapeHtml } from "./markdown.js";
 import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs } from "./rows.js";
-import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
+import { toggleSessionsPanel, toggleForkPanel, toggleCheckpointsPanel } from "./panels.js";
 import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs } from "./toolbar.js";
 import { toggleModelPicker, closeModelPicker } from "./modals.js";
 import { toggleActionPanel, closeActionPanel, bindComposerBridge } from "./actionPanel.js";
@@ -151,6 +151,7 @@ c.innerHTML = `
 <input type="file" id="image-input" accept="image/*" style="display:none" />
 </div>
 <div class="composer-bar-right">
+<button class="icon-btn" id="btn-rewind" title="Checkpoints：回滚到任意消息发送前（原地截断）"><span class="codicon codicon-history"></span></button>
 <button class="mode-toggle" id="btn-mode" title="模式设置">
 <span class="codicon codicon-comment"></span>
 <span class="mode-label">手动</span>
@@ -441,6 +442,7 @@ input.addEventListener("blur", () => setTimeout(() => { menu.style.display = "no
 menu.addEventListener("mousedown", (e) => e.preventDefault());
 
 // 发送/中止一体按钮：空闲 ↑（发送），生成中 ■（中止）
+$("#btn-rewind").addEventListener("click", () => toggleCheckpointsPanel());
 btnSend.addEventListener("click", () => {
 if (state.busy) {
 vscode.postMessage({ type: "abort" });

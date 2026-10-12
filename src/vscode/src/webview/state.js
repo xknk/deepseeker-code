@@ -47,6 +47,7 @@ pendingRefs: [], // ★ B1 @ 引用：待发送文件引用 [{path}]（chip 可 
 fileList: null, // ★ B1：工作区文件候选清单（host findFiles 回包缓存；null=未请求/加载中）
 fileListLoading: false, // 防重复请求标志（fileList 回包置 false）
 bookmarks: [], // ★ B3 书签：常用 prompt [{id,text,createdAt}]（host globalState 持久，变更即推；面板 Bookmarks 组渲染）
+checkpoints: [], // ★ C1 检查点：各轮「发送前」转录边界 [{id,lastLineId,preview,ts}]（listCheckpoints 回包；回滚面板渲染）
 showTodos: false,
 todos: [],
 roundSeq: 0,
