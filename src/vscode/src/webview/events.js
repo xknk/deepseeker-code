@@ -10,12 +10,13 @@ import { vscode, state, nextKey } from "./state.js";
 import {
   appendRow, updateRow, removeRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
+  appendRefChip, clearPendingRefs,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
 import { syncToolbar } from "./toolbar.js";
 import { renderApproval, renderQuestion, renderPlan, openModelPicker } from "./modals.js";
 import { renderSessionsPanel, renderForkPanel } from "./panels.js";
-import { updateSlashMenu } from "./composer.js";
+import { updateSlashMenu, updateAtMenu } from "./composer.js";
 
 // ———————— 事件分发（host → webview） ————————
 function handleEvent(evt) {
@@ -301,6 +302,7 @@ function onMessage(msg) {
     case "sessionReset":
       clearMessages();
       clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
+      clearPendingRefs();     // ★ B1：跨会话清空未发送文件引用，防串会话
       break;
     case "imageSaved": {
       // extension 已把图片存到工作区临时目录：路径只回填到待发附件（submit 随 attachments 上送，
@@ -312,6 +314,36 @@ function onMessage(msg) {
       }
       const pending = (state.pendingImages || []).find((x) => x.name === String(msg.name ?? "") && !x.savedPath);
       if (pending) pending.savedPath = p;
+      break;
+    }
+    case "fileList": {
+      // ★ B1 @ 引用：host findFiles 候选回包缓存，刷新触发中的 @ 菜单
+      state.fileList = Array.isArray(msg.files) ? msg.files.map(String) : [];
+      state.fileListLoading = false;
+      updateAtMenu();
+      break;
+    }
+    case "fileContent": {
+      // ★ B2 附加双形态·小文件支：host 读好的全文注入输入框（原 FileReader 体验，代码点迁到这里）
+      const inp = document.querySelector("#input");
+      const name = String(msg.name ?? "");
+      if (!inp || !name) break;
+      inp.value += `\n\n📎 文件 ${name}：\n\`\`\`\n${String(msg.content ?? "")}\n\`\`\`\n`;
+      inp.dispatchEvent(new Event("input")); // 复用输入监听做 autoGrow/slash/@ 菜单刷新
+      inp.focus();
+      addInfo(`📎 已入库文件：${name}`);
+      break;
+    }
+    case "attachRefs": {
+      // ★ B2 附加双形态·大文件支：>100KB 不灌全文，转引用 chip（submit 时路径清单并入消息，模型 read_file）
+      const paths = Array.isArray(msg.paths) ? msg.paths.map(String).filter(Boolean) : [];
+      for (const p of paths) {
+        if (!(state.pendingRefs || []).some((r) => r.path === p)) {
+          state.pendingRefs = [...(state.pendingRefs || []), { path: p }];
+          appendRefChip(p);
+        }
+      }
+      if (paths.length) addInfo(`📎 大文件已转为引用（模型将按需 read_file）：${paths.join("、")}`);
       break;
     }
     default:

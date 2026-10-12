@@ -579,6 +579,79 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
     case "loadSession":
       void h.loadSession(String(msg.id ?? ""));
       break;
+    case "exportConversation":
+      // ★ 导出会话为 Markdown：host 组装（transcript → core 格式化），这里弹原生保存对话框落盘。
+      //   结果经 info 行回显（sink 通道既有事件，零新 host→webview 消息类型，绕开双通道坑）。
+      void (async () => {
+        try {
+          const data = await h.exportConversation();
+          if (!data) {
+            deliverTo(tab, { type: "info", text: "📄 当前无会话可导出（先发一条消息创建会话）。" });
+            return;
+          }
+          const uri = await vscode.window.showSaveDialog({
+            title: "DeepSeeker-Code：导出会话为 Markdown",
+            defaultUri: vscode.Uri.file(path.join(workspaceRoot ?? os.homedir(), data.fileName)),
+            filters: { "Markdown": ["md"] },
+          });
+          if (!uri) {
+            deliverTo(tab, { type: "info", text: "📄 已取消导出。" });
+            return;
+          }
+          await fs.promises.writeFile(uri.fsPath, data.markdown, "utf-8");
+          deliverTo(tab, { type: "info", text: `📄 会话已导出：${uri.fsPath}` });
+        } catch (e) {
+          void vscode.window.showErrorMessage(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+      })();
+      break;
+    case "attachFile": {
+      // ★ B2 附加文件双形态：host 侧选文件 + stat 分流——≤100KB 全文回灌（fileContent，webview 注入输入框，
+      //   原 FileReader 体验不变）；>100KB 转引用（attachRefs → chip，submit 时路径清单并入消息，模型按需
+      //   read_file）。选择器必须在 host：webview File 对象拿不到绝对路径，引用形态无从谈起。
+      void (async () => {
+        try {
+          const uris = await vscode.window.showOpenDialog({
+            title: "DeepSeeker-Code：附加文件（小文件全文入消息，大文件自动转引用）",
+            canSelectMany: false,
+            canSelectFolders: false,
+            defaultUri: workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined,
+          });
+          const uri = uris?.[0];
+          if (!uri) return; // 用户取消：静默
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.size > 100 * 1024) {
+            deliverTo(tab, { type: "attachRefs", paths: [uri.fsPath] });
+          } else {
+            const content = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf-8");
+            deliverTo(tab, { type: "fileContent", name: path.basename(uri.fsPath), content });
+          }
+        } catch (e) {
+          deliverTo(tab, { type: "info", text: `📎 读取文件失败：${e instanceof Error ? e.message : String(e)}` });
+        }
+      })();
+      break;
+    }
+    case "requestFileList": {
+      // ★ B1 @ 引用候选：findFiles 全仓扫（排除重目录），相对路径统一正斜杠，webview 端做模糊过滤。
+      //   上限 3000 个——模糊搜索够用，避免巨型仓库全量回包拖慢 webview。
+      void (async () => {
+        try {
+          const uris = await vscode.workspace.findFiles(
+            "**/*",
+            "**/{node_modules,.git,dist,out,build,coverage,.next,.nuxt,.venv,venv,__pycache__,target}/**",
+            3000,
+          );
+          const files = uris
+            .map((u) => vscode.workspace.asRelativePath(u).replace(/\\/g, "/"))
+            .filter((p) => p.length < 260);
+          deliverTo(tab, { type: "fileList", files });
+        } catch {
+          deliverTo(tab, { type: "fileList", files: [] });
+        }
+      })();
+      break;
+    }
     case "renameSession":
       void (async () => {
         try { await h.renameSession(String(msg.id ?? ""), String(msg.title ?? "")); }

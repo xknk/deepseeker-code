@@ -43,6 +43,9 @@ customCommands: [], // core 注册的自定义斜杠命令（引擎就绪后经 
 forkAnchors: [], // 当前会话可分叉锚点（各轮 assistant 检查点，host 经 listForkAnchors 回推）
 vision: false, // ★ 多模态：视觉开关（host 经 state.vision 下发）——true=贴图走原生附件直达模型
 pendingImages: [], // ★ 多模态：待发送贴图 [{name,mime,base64,dataUrl}]（仅 vision=true 时积累，随 submit 上送后清空）
+pendingRefs: [], // ★ B1 @ 引用：待发送文件引用 [{path}]（chip 可 × 移除；submit 时以路径清单并入消息，模型按需 read_file）
+fileList: null, // ★ B1：工作区文件候选清单（host findFiles 回包缓存；null=未请求/加载中）
+fileListLoading: false, // 防重复请求标志（fileList 回包置 false）
 showTodos: false,
 todos: [],
 roundSeq: 0,

@@ -436,11 +436,47 @@ function appendImagePreview(dataUrl, name, removable) {
   box.appendChild(chip);
 }
 
-/** 清空待发送贴图（vision 模式）：chip DOM + 待发数组一并重置（新会话/发送成功后调用）。 */
+/** 清空待发送贴图（vision 模式）：chip DOM + 待发数组一并重置（新会话/发送成功后调用）。
+ *  ★ 只清图片 chip：引用 chip（.ref-chip，B1 @ 引用）与贴图同住 #composer-attachments，
+ *    整箱 innerHTML="" 会把引用也抹掉而 pendingRefs 还在——错配。 */
 function clearPendingImages() {
   state.pendingImages = [];
   const box = $("#composer-attachments");
-  if (box) box.innerHTML = "";
+  if (box) box.querySelectorAll(".attach-chip:not(.ref-chip)").forEach((c) => c.remove());
+}
+
+// ★ 文件引用 chip（B1 @ 引用 / B2 大文件自动转引用）：与贴图 chip 同排（#composer-attachments）、
+//   同 × 移除交互；submit 时引用以路径清单并入消息文本（core 不动，模型按需 read_file）。
+function appendRefChip(refPath) {
+  const box = $("#composer-attachments");
+  if (!box) return;
+  const chip = document.createElement("div");
+  chip.className = "attach-chip ref-chip";
+  chip.title = refPath; // 路径可能椭圆截断，悬浮看全名
+  const ic = document.createElement("span");
+  ic.className = "codicon codicon-file";
+  const span = document.createElement("span");
+  span.textContent = refPath;
+  chip.appendChild(ic);
+  chip.appendChild(span);
+  const btn = document.createElement("button");
+  btn.className = "attach-remove";
+  btn.title = "移除引用";
+  btn.innerHTML = '<span class="codicon codicon-close"></span>';
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.pendingRefs = (state.pendingRefs || []).filter((r) => r.path !== refPath);
+    chip.remove();
+  });
+  chip.appendChild(btn);
+  box.appendChild(chip);
+}
+
+/** 清空待发送引用：chip DOM + 待发数组一并重置（新会话/发送成功后调用）。 */
+function clearPendingRefs() {
+  state.pendingRefs = [];
+  const box = $("#composer-attachments");
+  if (box) box.querySelectorAll(".ref-chip").forEach((c) => c.remove());
 }
 
 function clearMessages() {
@@ -529,7 +565,7 @@ export {
   appendRow, updateRow, rebuildRow, removeRow,
   closeStreaming, ensureAssistantRow, closeThinking, ensureThinkingRow,
   scheduleFlush, flush, addInfo,
-  appendImagePreview, clearPendingImages, clearMessages,
+  appendImagePreview, clearPendingImages, appendRefChip, clearPendingRefs, clearMessages,
   renderInitError, renderTodos, buildEmptyState, updateEmptyState,
   setThinkVisible,
 };

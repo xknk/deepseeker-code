@@ -7,10 +7,11 @@
  */
 import { vscode, $, state } from "./state.js";
 import { escapeHtml } from "./markdown.js";
-import { addInfo, clearMessages, clearPendingImages, appendImagePreview } from "./rows.js";
+import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs } from "./rows.js";
 import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
 import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs } from "./toolbar.js";
-import { toggleModelPicker } from "./modals.js";
+import { toggleModelPicker, closeModelPicker } from "./modals.js";
+import { toggleActionPanel, closeActionPanel, bindComposerBridge } from "./actionPanel.js";
 
 // ———————— 本地斜杠命令（与 CLI 对齐） ————————
 export function maybeLocalCommand(text) {
@@ -88,6 +89,10 @@ return true;
 case "clear":
 clearMessages();
 return true;
+case "export":
+// ★ 导出会话为 Markdown：extension 弹原生保存对话框落盘，结果以 info 行回显
+vscode.postMessage({ type: "exportConversation" });
+return true;
 case "new":
 vscode.postMessage({ type: "newSession" });
 return true;
@@ -95,7 +100,7 @@ case "sessions":
 toggleSessionsPanel();
 return true;
 case "help":
-addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
+addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏 · /export 导出\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
 return true;
 case "status":
 addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}${state.projectRoot ? " · 根目录：" + state.projectRoot : ""}`);
@@ -115,6 +120,9 @@ function autoGrow(el) {
 //   闭包内函数 = ReferenceError（潜在 bug，host 推自定义命令必炸）——拆分后经此转发自然修复。
 let updateSlashMenuRef = null;
 export const updateSlashMenu = () => updateSlashMenuRef?.();
+// @ 菜单跨模块出口：fileList 候选回包后刷新触发中的菜单（同 updateSlashMenu 转发模式，防模块环）
+let updateAtMenuRef = null;
+export const updateAtMenu = () => updateAtMenuRef?.();
 
 function buildComposer() {
 const c = $("#composer");
@@ -126,11 +134,10 @@ c.innerHTML = `
 </div>
 <div class="composer-bar">
 <div class="composer-bar-left">
+<button class="icon-btn" id="btn-file" title="附加文件（全文拼入消息；大文件建议让助手 read_file）"><span class="codicon codicon-add"></span></button>
+<button class="slash-btn" id="btn-actions" title="动作面板：上下文 / 模型 / 全部命令（可搜索）"><span class="slash-glyph">/</span></button>
 <span id="agents-pill" class="agents-pill" title="运行中的子 agent 数（subagent.count 实时镜像）"><span class="agents-dot">●</span><span id="agents-pill-label">0 agent</span></span>
 <button class="model-chip" id="btn-model" title="当前模型（点击弹出候选选择器，同 /switch）"><span id="model-chip-label">…</span><span class="codicon codicon-chevron-down"></span></button>
-<button class="icon-btn" id="btn-file" title="上传文件入库（文本，拼入消息）"><span class="codicon codicon-new-file"></span></button>
-<button class="icon-btn" id="btn-image" title="上传图片（识别需配置图像理解 MCP）"><span class="codicon codicon-file-media"></span></button>
-<input type="file" id="file-input" style="display:none" />
 <input type="file" id="image-input" accept="image/*" style="display:none" />
 </div>
 <div class="composer-bar-right">
@@ -171,6 +178,11 @@ c.innerHTML = `
 </div>
 </div>
 <div class="slash-menu" id="slash-menu" style="display:none"></div>
+<div class="slash-menu" id="at-menu" style="display:none"></div>
+<div class="attach-menu" id="attach-menu" style="display:none">
+<div class="attach-item" data-kind="file" title="小文件全文入消息，大文件自动转引用（模型 read_file）"><span class="codicon codicon-new-file"></span><span class="attach-label">附加文件…</span></div>
+<div class="attach-item" data-kind="image" title="图片作为附件随消息直达模型（chip 上的 × 可移除）"><span class="codicon codicon-file-media"></span><span class="attach-label">上传图片…</span></div>
+</div>
 <div class="composer-attachments" id="composer-attachments"></div>
 <span class="mode-badge plan">⏻ plan mode on（只读调研 → 方案审批 → 实现）</span>
 <span class="mode-badge auto">⏻ auto-accept edits on</span>
@@ -178,6 +190,7 @@ c.innerHTML = `
 `;
 const input = $("#input");
 const menu = $("#slash-menu");
+const atMenu = $("#at-menu");
 const btnSend = $("#btn-send");
 modeRefs.btn = $("#btn-mode");
 modeRefs.popover = $("#mode-popover");
@@ -215,6 +228,7 @@ const SLASH = [
 { cmd: "/debug", hint: "排障快照（session/cwd/模型/配置/环境）", arg: false, obs: true },
 { cmd: "/new", hint: "新会话（新页签，当前对话保留）", arg: false },
 { cmd: "/clear", hint: "清空当前屏幕", arg: false },
+{ cmd: "/export", hint: "导出当前会话为 Markdown 文件", arg: false },
 ];
 
 let slashItems = [];
@@ -261,34 +275,126 @@ el.addEventListener("click", () => runSlash(slashItems[Number(el.dataset.i)]));
 }
 updateSlashMenuRef = updateSlashMenu; // 挂载后回填跨模块出口（见文件头说明）
 
+// ———— @ 文件引用菜单（B1）：输入 `@token` 触发工作区文件模糊搜索，选中转引用 chip
+//      （路径清单随 submit 并入消息，core 不动——模型按需 read_file）。候选清单 host findFiles
+//      一次性回包缓存（state.fileList），webview 端子序列模糊过滤。 ————
+let atItems = [];
+let atIdx = 0;
+/** 子序列模糊命中（与动作面板 Filter 同策略；q 为空=全量）。 */
+const fuzzyHit = (q, text) => {
+if (!q) return true;
+let i = 0;
+for (const ch of text) {
+if (ch === q[i]) i++;
+if (i >= q.length) return true;
+}
+return false;
+};
+const renderAtMenu = () => {
+atMenu.innerHTML = atItems.map((p, i) =>
+`<div class="slash-item${i === atIdx ? " selected" : ""}" data-i="${i}"><span class="slash-cmd">@${escapeHtml(p)}</span></div>`
+).join("");
+const selEl = atMenu.querySelector(".slash-item.selected");
+if (selEl) selEl.scrollIntoView({ block: "nearest" });
+atMenu.querySelectorAll(".slash-item").forEach((el) => {
+el.addEventListener("click", () => pickRef(atItems[Number(el.dataset.i)]));
+});
+};
+const updateAtMenu = () => {
+const m = input.value.match(/(^|\s)@([^\s@]*)$/);
+if (!m || input.value.startsWith("/")) { atMenu.style.display = "none"; atItems = []; atIdx = 0; return; }
+if (!state.fileList) {
+// 首次触发才请求候选清单（host findFiles 全仓扫有成本，防每次击键重复发）
+if (!state.fileListLoading) {
+state.fileListLoading = true;
+vscode.postMessage({ type: "requestFileList" });
+}
+atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">正在索引工作区文件…</span></div>`;
+atMenu.style.display = "";
+return;
+}
+const q = m[2].toLowerCase();
+atItems = state.fileList.filter((p) => fuzzyHit(q, p.toLowerCase()))
+.sort((a, b) => a.length - b.length) // 短路径优先（近似相关度，零依赖朴素排序）
+.slice(0, 50);
+atIdx = 0;
+if (!atItems.length) {
+atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">无匹配文件</span></div>`;
+atMenu.style.display = "";
+return;
+}
+renderAtMenu();
+atMenu.style.display = "";
+};
+const pickRef = (p) => {
+input.value = input.value.replace(/(^|\s)@[^\s@]*$/, "$1"); // 摘掉 @token，其余原文不动
+if (!(state.pendingRefs || []).some((r) => r.path === p)) {
+state.pendingRefs = [...(state.pendingRefs || []), { path: p }];
+appendRefChip(p);
+}
+autoGrow(input);
+input.focus();
+updateAtMenu(); // token 已摘 → 菜单自然收起
+};
+atMenu.addEventListener("mousedown", (e) => e.preventDefault()); // 菜单内 mousedown 不夺焦点（同 slash 菜单）
+updateAtMenuRef = updateAtMenu; // 挂载后回填跨模块出口（fileList 回包刷新用）
+
 const doSend = () => {
 const text = input.value;
 const hasPending = (state.pendingImages || []).length > 0;
-if (!text.trim() && !hasPending) return;
+const refs = state.pendingRefs || [];
+if (!text.trim() && !hasPending) return; // 引用不解锁空消息（只有引用没有正文对模型无意义）
 if (maybeLocalCommand(text)) {
 input.value = "";
 autoGrow(input);
 updateSlashMenu();
 return;
 }
+// ★ B1 @ 引用：待发引用以路径清单并入消息文本（core 不动，模型按需 read_file），随后清空 chip
+let outText = text;
+if (refs.length) {
+outText += "\n\n📎 引用文件（请按需用 read_file 读取）：\n" + refs.map((r) => "- " + r.path).join("\n");
+}
 // ★ 多模态：待发贴图随 submit 上送（vision 开启时才有积累），随后清空 chip 与暂存
 if (hasPending) {
 vscode.postMessage({
 type: "submit",
-text,
+text: outText,
 attachments: state.pendingImages.map((p) => ({ name: p.name, mime: p.mime, base64: p.base64, ...(p.savedPath ? { path: p.savedPath } : {}) })),
 });
 clearPendingImages();
 } else {
-vscode.postMessage({ type: "submit", text });
+vscode.postMessage({ type: "submit", text: outText });
 }
+if (refs.length) clearPendingRefs();
 input.value = "";
 autoGrow(input);
 input.focus();
 updateSlashMenu();
 };
-// ★ 全键盘驱动：↑↓ 移动选择命令，Enter 执行选中项；无菜单时 Enter 发送
+// ★ 全键盘驱动：@ 菜单开着时键盘归它（↑↓ 选择 / Enter·Tab 选中 / Esc 关）；否则归 slash 菜单；
+//   两菜单都关时 Enter 发送
 input.addEventListener("keydown", (e) => {
+if (atMenu.style.display !== "none" && atItems.length) {
+if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+e.preventDefault();
+atIdx = e.key === "ArrowUp"
+? (atIdx <= 0 ? atItems.length - 1 : atIdx - 1)
+: (atIdx + 1) % atItems.length;
+renderAtMenu();
+return;
+}
+if (e.key === "Enter" || e.key === "Tab") {
+e.preventDefault();
+pickRef(atItems[atIdx] || atItems[0]);
+return;
+}
+if (e.key === "Escape") {
+e.preventDefault();
+atMenu.style.display = "none";
+return;
+}
+}
 if (e.key === "ArrowUp" || e.key === "ArrowDown") {
 if (menu.style.display !== "none" && slashItems.length) {
 e.preventDefault();
@@ -316,9 +422,10 @@ return;
 doSend();
 }
 });
-input.addEventListener("input", () => { autoGrow(input); updateSlashMenu(); });
-input.addEventListener("focus", () => updateSlashMenu());
-input.addEventListener("blur", () => setTimeout(() => { menu.style.display = "none"; }, 150));
+input.addEventListener("input", () => { autoGrow(input); updateSlashMenu(); updateAtMenu(); });
+// 主输入框聚焦时收起动作面板（两入口互斥：输 / 走 slash 菜单路径，面板以搜索框为焦点）
+input.addEventListener("focus", () => { closeActionPanel(); updateSlashMenu(); updateAtMenu(); });
+input.addEventListener("blur", () => setTimeout(() => { menu.style.display = "none"; atMenu.style.display = "none"; }, 150));
 // ★ 菜单内 mousedown 不夺焦点（防拖滚动条/点条目时 blur 收起菜单）；click 仍正常触发
 menu.addEventListener("mousedown", (e) => e.preventDefault());
 
@@ -330,34 +437,46 @@ vscode.postMessage({ type: "abort" });
 doSend();
 }
 });
-// ★ 文件入库（文本）：webview FileReader 直接读文本拼入输入框——零核心链路改动。
-//   大文件（>100KB）拒绝全量入库，引导改用 read_file（避免上下文爆炸）。
+// ★ 附加文件（B2 双形态）：选择器迁 host 侧 showOpenDialog——webview File 对象拿不到绝对路径，
+//   而引用形态（大文件自动转引用 chip）必须有可 read_file 的路径。host stat 按大小分流：
+//   ≤100KB 回全文（fileContent 注入输入框，原体验不变）；>100KB 回引用路径（attachRefs → chip）。
+// ★ "+" 按钮二级菜单（对标 CC + 弹小菜单）：菜单收编两个上传入口（附加文件 / 上传图片），
+//   底栏不再放独立图片按钮（bar 形态对齐 CC：+ / 模型胶囊）。菜单与面板同 shell absolute 悬浮机制。
 const btnFile = $("#btn-file");
-const btnImage = $("#btn-image");
 // 模型胶囊：toggle 语义——未开弹选择器（host 回环带最新候选），已开就地关闭
 $("#btn-model").addEventListener("click", () => toggleModelPicker());
-const fileInput = $("#file-input");
 const imageInput = $("#image-input");
-btnFile.addEventListener("click", () => fileInput.click());
-btnImage.addEventListener("click", () => {
+const attachMenu = $("#attach-menu");
+const closeAttachMenu = () => { if (attachMenu) attachMenu.style.display = "none"; };
+const toggleAttachMenu = () => {
+if (!attachMenu) return;
+const willOpen = attachMenu.style.display === "none";
+closeActionPanel();
+closeModelPicker();
+if (modeRefs.popover) modeRefs.popover.style.display = "none";
+attachMenu.style.display = willOpen ? "" : "none";
+};
+btnFile.addEventListener("click", (e) => {
+e.stopPropagation(); // 防文档委托双触发（下方 document 外点关闭的同 id 判断是双保险）
+toggleAttachMenu();
+});
+attachMenu.addEventListener("click", (e) => {
+const item = e.target.closest(".attach-item");
+if (!item) return;
+closeAttachMenu();
+if (item.dataset.kind === "image") {
 addInfo("🖼 图片将随消息直达模型（chip 上的 × 可移除待发送的图）；若模型不支持图片会自动降级为文本处理。");
 imageInput.click();
+} else {
+vscode.postMessage({ type: "attachFile" });
+}
 });
-fileInput.addEventListener("change", () => {
-const f = fileInput.files && fileInput.files[0];
-fileInput.value = "";
-if (!f) return;
-if (f.size > 100 * 1024) { addInfo(`📎 文件 ${f.name} 较大（>100KB），已忽略入库。建议直接在对话里让助手用 read_file 读取：${f.name}`); return; }
-const reader = new FileReader();
-reader.onload = () => {
-const content = String(reader.result ?? "");
-input.value += `\n\n📎 文件 ${f.name}：\n\`\`\`\n${content}\n\`\`\`\n`;
-autoGrow(input);
-input.focus();
-addInfo(`📎 已入库文件：${f.name}`);
-};
-reader.onerror = () => addInfo(`📎 读取文件失败：${f.name}`);
-reader.readAsText(f);
+// 点外部关闭（同 actionPanel 委托形态；+ 按钮与菜单内点击不关——按钮侧 stopPropagation 双保险）
+document.addEventListener("click", (e) => {
+if (!attachMenu || attachMenu.style.display === "none") return;
+if (attachMenu.contains(e.target)) return;
+if (e.target.closest?.("#btn-file")) return;
+attachMenu.style.display = "none";
 });
 // ★ 贴图统一入口（file picker 与 Ctrl+V 粘贴共用 ingestImageFile）——零配置多模态：
 //   不再按 state.vision 分叉：图片进 pendingImages 待发（chip 带 × 可移除）随 submit 上送（base64 直达，
@@ -434,6 +553,17 @@ vscode.postMessage({ type: "setThinking", level: state.thinkingLevel });
 addInfo(`思考等级：${state.thinkingLevel}`);
 syncToolbar();
 }
+});
+// —— 统一动作面板："/" 按钮（toggle）+ 闭包能力桥（命令执行/文件选择沿用本闭包现有路径，
+//    面板模块零复制 doSend/file-input 逻辑；详见 actionPanel.js 文件头） ——
+$("#btn-actions").addEventListener("click", (e) => {
+e.stopPropagation(); // 防 document 外点关闭委托把 toggle 吃成开+关
+toggleActionPanel();
+});
+bindComposerBridge({
+runCommand: runSlash,
+getCommands: allSlashItems,
+openFilePicker: () => vscode.postMessage({ type: "attachFile" }),
 });
 updateModeToggle();
 }

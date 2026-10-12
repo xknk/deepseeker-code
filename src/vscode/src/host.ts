@@ -15,8 +15,9 @@ import { msgText, imageUrlsOf } from "@/session/contentParts.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
-import { getOrCreateSessionId, listSessions, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
+import { getOrCreateSessionId, listSessions, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
 import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
+import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
@@ -520,6 +521,22 @@ export class ChatHost {
       this.setSessionId(null);
       this.callbacks.onSessionReset();
     }
+  }
+
+  /** 导出当前会话为 Markdown（extension 弹 showSaveDialog 落盘；格式化在 core session/exportMarkdown）。
+   *  无活动会话返回 null（webview 提示先发消息建会话）；title 读 state.json（缺失不阻塞）。 */
+  async exportConversation(): Promise<{ fileName: string; markdown: string } | null> {
+    const sid = this.sessionId;
+    if (!sid) return null;
+    const [lines, store] = await Promise.all([
+      readTranscriptLines(sid),
+      readStore(sid).catch(() => ({}) as Record<string, unknown>), // 元信息缺失不阻塞导出
+    ]);
+    const title = typeof store.title === "string" ? store.title : undefined;
+    return {
+      fileName: suggestExportFileName(sid, title),
+      markdown: conversationToMarkdown(lines, { sessionId: sid, title }),
+    };
   }
 
   // —— 决策回传（panel → host） ——

@@ -417,5 +417,5 @@ function closeAllModals() {
 }
 
 export {
-  renderApproval, renderQuestion, openModelPicker, renderPlan, closeAllModals,
+  renderApproval, renderQuestion, openModelPicker, closeModelPicker, renderPlan, closeAllModals,
 };
