@@ -46,6 +46,7 @@ pendingImages: [], // ★ 多模态：待发送贴图 [{name,mime,base64,dataUrl
 pendingRefs: [], // ★ B1 @ 引用：待发送文件引用 [{path}]（chip 可 × 移除；submit 时以路径清单并入消息，模型按需 read_file）
 fileList: null, // ★ B1：工作区文件候选清单（host findFiles 回包缓存；null=未请求/加载中）
 fileListLoading: false, // 防重复请求标志（fileList 回包置 false）
+bookmarks: [], // ★ B3 书签：常用 prompt [{id,text,createdAt}]（host globalState 持久，变更即推；面板 Bookmarks 组渲染）
 showTodos: false,
 todos: [],
 roundSeq: 0,

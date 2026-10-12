@@ -2051,6 +2051,28 @@ body {
   text-align: center;
 }
 
+/* B3 书签行右槽删除钮：平时淡显、hover 行实显，悬停变红；点击已 stopPropagation 不触发行 action */
+.action-remove {
+  flex-shrink: 0;
+  max-width: none;
+  cursor: pointer;
+  color: var(--fg-faint);
+  padding: 0 2px;
+}
+
+.action-item:hover .action-remove,
+.action-item.selected .action-remove {
+  color: var(--fg-dim);
+}
+
+.action-remove:hover {
+  color: var(--vscode-errorForeground, #f66);
+}
+
+.action-remove .codicon {
+  font-size: 12px;
+}
+
 /* "+" 按钮二级菜单（对标 CC 上传小菜单）：shell 下 absolute 悬浮、锚左缘在输入框上方（+ 按钮在左端） */
 .attach-menu {
   position: absolute;

@@ -346,6 +346,14 @@ function onMessage(msg) {
       if (paths.length) addInfo(`📎 大文件已转为引用（模型将按需 read_file）：${paths.join("、")}`);
       break;
     }
+    case "bookmarks": {
+      // ★ B3 书签：host globalState 清单回推（ready/add/remove 后）。面板每次打开现取 state，
+      //   打开中的删除走本地重建，无需在此触达 UI。
+      state.bookmarks = Array.isArray(msg.bookmarks)
+        ? msg.bookmarks.filter((b) => b && typeof b.text === "string" && typeof b.id === "string")
+        : [];
+      break;
+    }
     default:
       break;
   }

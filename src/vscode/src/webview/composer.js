@@ -93,6 +93,16 @@ case "export":
 // ★ 导出会话为 Markdown：extension 弹原生保存对话框落盘，结果以 info 行回显
 vscode.postMessage({ type: "exportConversation" });
 return true;
+case "bookmark":
+// ★ B3 书签：/bookmark <文本> 收藏（host globalState 持久，跨项目通用）；裸命令给用法
+if (arg) {
+vscode.postMessage({ type: "bookmarkAdd", text: arg });
+input.value = "";
+autoGrow(input);
+} else {
+addInfo("用法：/bookmark <要收藏的 prompt 文本>\n收藏后经动作面板 Bookmarks 组一键插入输入框（行右槽 × 删除）；输入框写了内容也可直接点面板 Bookmark current input 收藏。");
+}
+return true;
 case "new":
 vscode.postMessage({ type: "newSession" });
 return true;
@@ -229,6 +239,7 @@ const SLASH = [
 { cmd: "/new", hint: "新会话（新页签，当前对话保留）", arg: false },
 { cmd: "/clear", hint: "清空当前屏幕", arg: false },
 { cmd: "/export", hint: "导出当前会话为 Markdown 文件", arg: false },
+{ cmd: "/bookmark", hint: "收藏常用 prompt（/bookmark <文本>），面板 Bookmarks 一键插入", arg: true },
 ];
 
 let slashItems = [];
@@ -564,6 +575,13 @@ bindComposerBridge({
 runCommand: runSlash,
 getCommands: allSlashItems,
 openFilePicker: () => vscode.postMessage({ type: "attachFile" }),
+// B3 书签：读输入框现文（Bookmark current input）/ 插入书签文本到输入框（Bookmarks 组点击）
+getInputText: () => input.value,
+insertText: (t) => {
+input.value = input.value ? input.value + "\n\n" + t : t;
+autoGrow(input);
+input.focus();
+},
 });
 updateModeToggle();
 }

@@ -13,24 +13,28 @@
  */
 import { vscode, $, state } from "./state.js";
 import { escapeHtml } from "./markdown.js";
-import { clearMessages } from "./rows.js";
+import { clearMessages, addInfo } from "./rows.js";
 import { syncToolbar, modeRefs } from "./toolbar.js";
 import { toggleModelPicker, closeModelPicker } from "./modals.js";
 
 // ———— composer 闭包能力桥（buildComposer 挂载后回填） ————
 // runCommand：把命令交给输入框现有路径执行（带参回填输入框 / 无参直发），面板自身不复刻 doSend。
 // getCommands：实时取「SLASH + core 自定义命令」合并表（自定义命令引擎就绪晚于首开面板也能吃到）。
-// openFilePicker：触发隐藏 file-input（Attach file 全文灌注，与既有文件按钮同路）。
-const bridge = { runCommand: null, getCommands: null, openFilePicker: null };
+// openFilePicker：触发附加文件（host showOpenDialog，大小自动分流）。
+// getInputText/insertText：B3 书签读写输入框现文（Bookmark current input / Bookmarks 一键插入）。
+const bridge = { runCommand: null, getCommands: null, openFilePicker: null, getInputText: null, insertText: null };
 export const bindComposerBridge = (b) => {
   bridge.runCommand = b.runCommand;
   bridge.getCommands = b.getCommands;
   bridge.openFilePicker = b.openFilePicker;
+  bridge.getInputText = b.getInputText;
+  bridge.insertText = b.insertText;
 };
 
 // ———— 面板项定义：{ group, label, right?, action }（hint 仅参与模糊过滤，不上行——CC 同款素净） ————
 const GROUP_CONTEXT = "Context";
 const GROUP_MODEL = "Model";
+const GROUP_BOOKMARKS = "Bookmarks";
 const GROUP_COMMANDS = "Commands";
 
 /** Effort 档位（与模式面板 think-switch 同一取值域）；行点击轮换、点阵点击定位。 */
@@ -45,13 +49,36 @@ const setThinking = (level) => {
 };
 const cycleThinking = () => setThinking(THINK_LEVELS[(THINK_LEVELS.indexOf(state.thinkingLevel) + 1) % THINK_LEVELS.length] || "high");
 
-/** Context / Model 两组动作项（Model 组的 right 是实时值，每次打开/重绘时现取）。 */
+/** B3 书签组：host globalState 清单（state.bookmarks，ready/add/remove 后推）。行点击插入输入框、
+ *  右槽 × 删除；label 取首行截断（全文在 hint 参与模糊过滤）。 */
+const bookmarkItems = () => (state.bookmarks || []).map((b) => ({
+  group: GROUP_BOOKMARKS,
+  label: String(b.text || "").split("\n")[0].slice(0, 60) || "（空书签）",
+  hint: String(b.text || ""),
+  right: { kind: "remove", id: String(b.id ?? "") },
+  action: () => { closeActionPanel(true); bridge.insertText?.(String(b.text || "")); },
+}));
+
+/** Context / Model / Bookmarks 三组动作项（Model 组的 right 是实时值，每次打开/重绘时现取）。 */
 const buildActionItems = () => [
   {
     group: GROUP_CONTEXT, label: "Attach file...",
     hint: "选文件：≤100KB 全文入消息，大文件自动转引用（模型 read_file）",
     right: { kind: "value", value: "附加文件（大小自动分流）" },
     action: () => { closeActionPanel(); bridge.openFilePicker?.(); },
+  },
+  {
+    group: GROUP_CONTEXT, label: "Bookmark current input...",
+    hint: "把输入框当前内容收藏为书签（常用 prompt 复用；也可 /bookmark <文本>）",
+    action: () => {
+      closeActionPanel();
+      const t = (bridge.getInputText?.() || "").trim();
+      if (!t) {
+        addInfo("🔖 输入框为空——先写好要收藏的 prompt 再收藏，或用 /bookmark <文本> 直接收藏。");
+        return;
+      }
+      vscode.postMessage({ type: "bookmarkAdd", text: t });
+    },
   },
   {
     group: GROUP_CONTEXT, label: "Clear conversation",
@@ -77,6 +104,7 @@ const buildActionItems = () => [
     right: { kind: "slider", levels: THINK_LEVELS, value: state.thinkingLevel },
     action: () => cycleThinking(),
   },
+  ...bookmarkItems(),
 ];
 
 /** Commands 组：合并表 → 面板项（命令项沿用回填/发送逻辑，零额外分支；描述右对齐淡色）。 */
@@ -180,7 +208,8 @@ export const closeActionPanel = (refocus = false) => {
   }
 };
 
-/** 右槽控件 HTML：value = 淡色值文本；slider = CC 同款点阵滑块（当前档放大亮显，点圆点直接定位）。 */
+/** 右槽控件 HTML：value = 淡色值文本；slider = CC 同款点阵滑块（当前档放大亮显，点圆点直接定位）；
+ *  remove = 删除钮（B3 书签行右槽 ×）。 */
 const renderRight = (it) => {
   if (!it.right) return "";
   if (it.right.kind === "slider") {
@@ -188,6 +217,9 @@ const renderRight = (it) => {
       .map((lv) => `<span class="effort-dot${lv === it.right.value ? " on" : ""}" data-level="${lv}" title="${lv}"></span>`)
       .join("");
     return `<span class="action-right effort-dots">${dots}</span>`;
+  }
+  if (it.right.kind === "remove") {
+    return `<span class="action-right action-remove" data-remove="${escapeHtml(it.right.id)}" title="删除书签"><span class="codicon codicon-close"></span></span>`;
   }
   return `<span class="action-right">${escapeHtml(String(it.right.value ?? ""))}</span>`;
 };
@@ -229,6 +261,17 @@ function renderActionPanel() {
     dot.addEventListener("click", (e) => {
       e.stopPropagation();
       withSuppress(() => setThinking(dot.dataset.level));
+    });
+  });
+  // B3 书签删除钮：本地先删（面板保持打开、行即时消失），host globalState 同步 + 广播回推
+  list.querySelectorAll(".action-remove").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = el.dataset.remove || "";
+      vscode.postMessage({ type: "bookmarkRemove", id });
+      state.bookmarks = (state.bookmarks || []).filter((b) => String(b.id ?? "") !== id);
+      items = [...buildActionItems(), ...buildCommandItems()];
+      renderActionPanel();
     });
   });
 }

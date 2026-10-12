@@ -450,6 +450,18 @@ const handleUploadImage = async (tab: ChatTab, msg: Record<string, unknown>): Pr
   }
 };
 
+// ———— B3 书签：globalState 持久（常用 prompt 跨项目通用），变更即推各存活页签 ————
+type Bookmark = { id: string; text: string; createdAt: number };
+const BOOKMARKS_KEY = "deepseeker-code.bookmarks";
+const readBookmarks = (): Bookmark[] => {
+  const v = context0?.globalState.get<Bookmark[]>(BOOKMARKS_KEY);
+  return Array.isArray(v) ? v.filter((b) => !!b && typeof b.text === "string") : [];
+};
+const pushBookmarks = (tab?: ChatTab) => {
+  if (tab) { deliverTo(tab, { type: "bookmarks", bookmarks: readBookmarks() }); return; }
+  for (const t of tabs) deliverTo(t, { type: "bookmarks", bookmarks: readBookmarks() });
+};
+
 const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
   const type = msg?.type as string;
   const h = tab.host;
@@ -463,6 +475,8 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         for (const m of h.collectPendingUI()) deliverTo(tab, m);
         // 自定义斜杠命令目录（引擎后台加载晚于面板打开时由此补推；engineSettled 后 listCommands 已就绪）
         deliverTo(tab, { type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
+        // B3 书签清单（globalState 同步读，无延迟）
+        pushBookmarks(tab);
       })();
       break;
     case "localObs": {
@@ -649,6 +663,30 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         } catch {
           deliverTo(tab, { type: "fileList", files: [] });
         }
+      })();
+      break;
+    }
+    case "bookmarkAdd": {
+      // ★ B3：收藏常用 prompt（globalState 持久）。同文本去重（重复收藏只保留原条，新条插最前）。
+      void (async () => {
+        const text = String(msg.text ?? "").trim();
+        if (!text) return;
+        const list = readBookmarks();
+        if (!list.some((b) => b.text === text)) {
+          list.unshift({ id: `bm-${Date.now()}`, text, createdAt: Date.now() });
+          await context0?.globalState.update(BOOKMARKS_KEY, list);
+        }
+        pushBookmarks();
+        deliverTo(tab, { type: "info", text: `🔖 已收藏（共 ${readBookmarks().length} 条）——动作面板 Bookmarks 组一键插入输入框。` });
+      })();
+      break;
+    }
+    case "bookmarkRemove": {
+      void (async () => {
+        const id = String(msg.id ?? "");
+        if (!id) return;
+        await context0?.globalState.update(BOOKMARKS_KEY, readBookmarks().filter((b) => b.id !== id));
+        pushBookmarks();
       })();
       break;
     }
