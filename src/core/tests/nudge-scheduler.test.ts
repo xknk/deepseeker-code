@@ -23,6 +23,7 @@ const FENCE = {
     NUDGE: "⟦DSC:NUDGE⟧",
     REPEAT: "⟦DSC:REPEAT_RETRIEVAL⟧",
     TODO_INCOMPLETE: "⟦DSC:TODO_INCOMPLETE⟧",
+    BUDGET: "⟦DSC:BUDGET⟧",
 } as const;
 
 const readCall = (path: string) => ({ function: { name: "read_file", arguments: JSON.stringify({ path }) } });
@@ -278,6 +279,37 @@ describe("P1-2 上下文用量注入（惰性闭包）", () => {
         const s2 = createNudgeScheduler({ getContextUsage: () => null });
         s2.noteToolCall(1, [readCall("b.ts"), readCall("b.ts"), readCall("b.ts")]);
         assert.ok(!s2.pickNudge(2)!.content.includes("估算"), "null 快照 → REPEAT 文案不变");
+    });
+});
+
+describe("预算 soft 提醒（成本信任链第二环 E2）", () => {
+    it("spent>=budget → 触顶发一次 soft（文案带金额与百分比），每 run 至多一次", () => {
+        let calls = 0;
+        const s = createNudgeScheduler({ getBudgetStatus: () => { calls++; return { spent: 1.0, budget: 0.8 }; } });
+        const m = s.pickNudge(2)!;
+        assert.ok(m.content.startsWith(FENCE.BUDGET), `应带预算 fence：${m.content}`);
+        assert.ok(m.content.includes("¥1.000") && m.content.includes("¥0.800"), `应带金额：${m.content}`);
+        assert.ok(m.content.includes("125%"), `应带百分比：${m.content}`);
+        assert.equal(s.pickNudge(3), null, "budgetSoftSent 后同 run 不再发");
+        assert.ok(calls > 0, "触顶轮闭包被调用");
+    });
+
+    it("未触顶不发；闭包返回 null / 未注入 → 行为不变", () => {
+        assert.equal(createNudgeScheduler({ getBudgetStatus: () => ({ spent: 0.5, budget: 0.8 }) }).pickNudge(2), null);
+        assert.equal(createNudgeScheduler({ getBudgetStatus: () => null }).pickNudge(2), null, "null 快照不触发");
+        assert.equal(createNudgeScheduler().pickNudge(1), null, "未注入闭包 → 与 E2 之前行为一致");
+    });
+
+    it("优先级：todo 核对 > 预算 soft > REPEAT（经济熔断低于正确性兜底、高于效率提醒）", () => {
+        const s = createNudgeScheduler({ getBudgetStatus: () => ({ spent: 1.0, budget: 0.8 }) });
+        s.noteToolCall(1, [
+            todoCall([{ content: "未竟之事", status: "pending" }]),
+            readCall("a.ts"), readCall("a.ts"), readCall("a.ts"),
+        ]);
+        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE), "todo 先消费");
+        assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.BUDGET), "预算 soft 居中");
+        assert.ok(s.pickNudge(4)!.content.startsWith(FENCE.REPEAT), "REPEAT 顺延消费");
     });
 });
 

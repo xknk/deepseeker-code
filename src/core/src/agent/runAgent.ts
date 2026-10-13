@@ -73,6 +73,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
+    // ★ 预算硬截断标记（成本信任链第二环 E2）：true 时 final 提示 /budget 可调，结算单行同步标注
+    let budgetTruncated = false;
     // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
     //  主机制：周期性 ephemeral nudge（NUDGE 周期自评 / PHANTOM 空 content / EARLY_FINAL 早收尾）由模型自决
     //         "收尾给答案"还是"继续推进"（对标 CC：不在低轮数硬停，靠模型自收敛 + 用户中止）。
@@ -87,15 +89,23 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         // ★ 多模态：user content 可能是 parts 数组，取纯文本视图（兼容贴图轮的 PLAN_FIRST 判定）
         return msgText(m?.content);
     })();
+    // ★ 预算累计器（成本信任链第二环 E1）：本 run 经济花费真值 = 自身各轮 usage 折算 + 子 run 经 reportCost
+    //   回灌的花费。与 costYuanAcc（receipt/usageLog 落盘口径=run 自身）刻意分账——子 run 花费若并入落盘
+    //   costYuan，读侧按 depth 拆分时会同笔钱计两次；预算是控制面，落盘是计量面，各记各的。
+    let budgetSpentYuan = 0;
     // ★ P1-2：给 nudge 调度器传上下文用量闭包（惰性——闭包仅在调度器真正要发 NUDGE/REPEAT nudge 的轮内
     //   被调用，pickNudge 每轮都调、不能每轮全量扫描 estimateTokens）。口径与 ensureFitsWindow 的 estReal
     //   同公式（estimateTokens × calibRatio + toolsTokens），nudge 文案里标「估算」；calibRatio 是跨轮 EMA，
     //   闭包捕获绑定、首次调用在主循环内（晚于下方声明），无 TDZ 问题。
+    // ★ 预算状态闭包（E2）：仅主 run 且已设预算时武装；spent 为 O(1) 读数。soft 文案投递见 agentNudges。
     const nudges = createNudgeScheduler({
         firstPrompt,
         planMode: !!options.planMode,
         noEarlyFinal: !!options.noEarlyFinal,
         getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
+        getBudgetStatus: depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
+            ? () => ({ spent: budgetSpentYuan, budget: options.budgetYuan! })
+            : undefined,
     });
     // ★ P3-8 run 级 read_file 读取追踪（path → mtime + 次数）：本 run 内重复读同一文件时结果头标
     //   「第 N 次读取 · 内容未变更/已变更」，让模型自决是否还需重读。每 run 一个 Map、逐轮传同一引用；
@@ -141,7 +151,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             cached_tokens: (usageSum?.cached_tokens ?? 0) + (u.cached_tokens ?? 0),
         };
         const cost = calcCostYuan(effectiveModel, { promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens, cachedTokens: u.cached_tokens });
-        if (cost == null) costKnown = false; else costYuanAcc += cost;
+        if (cost == null) costKnown = false;
+        else {
+            costYuanAcc += cost;
+            budgetSpentYuan += cost; // 预算累计器同轮入账（落盘/预算分账，见上方声明处注释）
+        }
     };
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
@@ -177,6 +191,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
 
+            }
+            // ★ 预算硬截断（成本信任链第二环 E2）：soft 提醒（nudge 管线）后仍超 120% → 轮边界干净截断。
+            //   stopReason 复用 'limit'（usageLog 已有枚举）；仅主 run（子 run 花费经 reportCost 计入父累计器，
+            //   由父统一执行）。soft 与 hard 间隔一整轮：触顶轮先收到 soft 文案，下一轮边界仍超 120% 才截——
+            //   极端场景（soft 槽位被更高优 pending 占用而花费一轮穿顶）直接截断也是预算语义内的正确行为。
+            if (depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
+                && budgetSpentYuan >= options.budgetYuan * 1.2) {
+                stopReason = 'limit';
+                budgetTruncated = true;
+                yield { type: 'final', text: (lastContent || "") + `\n（💰 预算截断：本 run 已花费 ¥${budgetSpentYuan.toFixed(3)} / 预算 ¥${options.budgetYuan.toFixed(3)}。/budget 调整预算后回复"继续"即可接续。）` };
+                return;
             }
             // ★ inbox steering：回合边界认领运行中排队的补充输入。位于防失控上限/中止检查之后、round.start 之前——
             //   认领即 push + 落盘并广播（本轮推理随即消费）；撞上收尾出口（final/limit/aborted）则不认领，
@@ -340,6 +365,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   进上下文 → 下一轮立刻压缩」被釜底抽薪；口径与 ensureFitsWindow/nudge 闭包同公式。
                 contextTokensEst: Math.round(estimateTokens(message) * calibRatio + toolsTokens),
                 readTracker, // ★ P3-8：run 级读取追踪（同一引用透传，跨轮累计）
+                // ★ 子 run 成本回灌（成本信任链第二环 E1）：runSubagent 经 toolCtx.reportCost 拿到闭包，
+                //   子 run 结束时把总花费记进本 run 预算累计器——父预算自动继承约束（子花费计入父 spent）。
+                reportCost: (yuan: number) => { if (Number.isFinite(yuan) && yuan > 0) budgetSpentYuan += yuan; },
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
@@ -404,6 +432,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
+        // ★ 子 run 成本回灌（成本信任链第二环 E1）：本 runAgent 为子 run 时（options.costSink 已注入），
+        //   收尾把自身总花费报给父累计器——父下一轮边界预算检查即包含本子 run 花费。旁路，绝不击垮收尾。
+        try {
+            if (options.costSink && costKnown && costYuanAcc > 0) options.costSink(Math.round(costYuanAcc * 1e6) / 1e6);
+        } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
         //   事件行先例），经 onUIEvent 直发；旁路 UI 绝不击垮收尾链路。
@@ -419,6 +452,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     cacheHitRate: prompt > 0 ? (usageSum.cached_tokens ?? 0) / prompt : 0,
                     costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
                     durationMs: Math.round(performance.now() - startTime),
+                    budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
                 });
             }
         } catch { /* 结算单是旁路 UI，失败不影响收尾 */ }

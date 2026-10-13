@@ -125,6 +125,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const lastRunCostRef = useRef<number | undefined>(undefined);
     /** 本会话累计花费（元；receipt 逐 run 累加，statusline session_cost_yuan 用；会话切换时重置）。 */
     const sessionCostRef = useRef<number | undefined>(undefined);
+    /** 本主 run 花费预算上限（元；/budget 设置，成本信任链第二环 E1。undefined=不限，跨会话保留同 planMode）。 */
+    const budgetYuanRef = useRef<number | undefined>(undefined);
     /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
     const compactProgressIdRef = useRef<number | null>(null);
     /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
@@ -355,7 +357,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 const costText = typeof cost === "number" ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "meta",
-                    text: `💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}`,
+                    text: `💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
                 }]);
                 lastRunCostRef.current = typeof cost === "number" ? cost : undefined;
                 sessionCostRef.current = typeof cost === "number" ? (sessionCostRef.current ?? 0) + cost : sessionCostRef.current;
@@ -549,6 +551,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             thinkingLevel: thinkingLevelRef.current,
             locale: getLocale(),
             outputStyle: outputStyleRef.current,
+            budgetYuan: budgetYuanRef.current, // ★ 预算制运行（成本信任链第二环 E1）：/budget 设置，超限 soft nudge + 120% 硬截断
         };
         try {
             await handleUnifiedChat(
@@ -814,6 +817,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** 结算单 getters（statusline D3）：undefined 自动省略键，旧 statusline 命令零破坏。 */
     const getLastRunCostYuan = useCallback((): number | undefined => lastRunCostRef.current, []);
     const getSessionCostYuan = useCallback((): number | undefined => sessionCostRef.current, []);
+    /** 预算设置（成本信任链第二环 E1，/budget）：undefined=不限。 */
+    const setBudgetYuan = useCallback((v: number | undefined) => { budgetYuanRef.current = v; }, []);
+    const getBudgetYuan = useCallback((): number | undefined => budgetYuanRef.current, []);
 
     return {
         // 状态
@@ -824,7 +830,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
-        getLastRunCostYuan, getSessionCostYuan,
+        getLastRunCostYuan, getSessionCostYuan, setBudgetYuan, getBudgetYuan,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };

@@ -57,6 +57,9 @@ export interface HostOptions {
     locale?: Locale;
     /** 输出风格名（CLI /output-style 用，P2-16）：runAgent 据此注入对应风格 persona。未设/未命中=不注入。 */
     outputStyle?: string;
+    /** 本主 run 花费预算上限（元，成本信任链第二环 E1，/budget 设置）：超限 soft nudge 一次、
+     *  soft 后仍超 120% 轮边界硬截断。未设=不限预算，行为零变化。 */
+    budgetYuan?: number;
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
 }
@@ -205,6 +208,7 @@ export const handleUnifiedChat = async (
             thinkingLevel: opts?.thinkingLevel,
             locale: opts?.locale,
             outputStyle: opts?.outputStyle,
+            budgetYuan: opts?.budgetYuan, // ★ 预算制运行（成本信任链第二环 E1）：主 run 传入，子 run 经 costSink 回灌
         }
 
         // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）

@@ -73,6 +73,7 @@ addInfo(`当前界面语言：${state.locale === "zh" ? "中文" : "English"}\n�
 return true;
 case "output-style":
 case "usage":
+case "budget":
 case "context":
 case "permissions":
 case "mcp":
@@ -110,7 +111,7 @@ case "sessions":
 toggleSessionsPanel();
 return true;
 case "help":
-addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏 · /export 导出\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
+addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /budget 预算 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏 · /export 导出\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
 return true;
 case "status":
 addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}${state.projectRoot ? " · 根目录：" + state.projectRoot : ""}`);
@@ -231,6 +232,7 @@ const SLASH = [
 { cmd: "/sessions", hint: "选择并载入历史会话（续接对话）", arg: false },
 { cmd: "/fork", hint: "从当前会话的某轮回复处分叉出新会话", arg: false },
 { cmd: "/usage", hint: "查看 token 用量（主/子 agent、缓存命中、近 7 天使用日志）", arg: false, obs: true },
+{ cmd: "/budget", hint: "预算制运行：/budget 0.5 设置每 run 上限 · /budget off 关闭 · /budget 查看", arg: true, obs: true },
 { cmd: "/context", hint: "查看上下文窗口治理（阈值、填充率、已归档）", arg: false, obs: true },
 { cmd: "/permissions", hint: "查看已加载的权限规则（allow/ask/deny）", arg: false, obs: true },
 { cmd: "/mcp", hint: "查看已连接的 MCP server 与工具数", arg: false, obs: true },

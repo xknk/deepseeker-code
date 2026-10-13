@@ -508,6 +508,20 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
                 text = `输出风格已切换：${a}`;
               } else text = `未知风格：${arg}\n${listText}`;
             }
+          } else if (cmd === "budget") {
+            // 预算制运行（成本信任链第二环 E1）：/budget 0.5 设置每主 run 上限 · /budget off 关闭 · /budget 查看
+            if (!arg) {
+              const b = h.currentBudgetYuan;
+              const last = h.lastRunCost;
+              text = `💰 预算：${b != null ? `¥${b}/run` : "未设置（/budget 0.5 设置每个 run 的花费上限）"}${last != null ? ` · 上个 run 已花 ¥${last.toFixed(3)}` : " · 尚无完成 run"}`;
+            } else if (arg.toLowerCase() === "off" || arg === "0") {
+              h.setBudgetYuan(undefined);
+              text = "💰 预算已关闭（不限花费）。";
+            } else {
+              const n = Number(arg);
+              if (!Number.isFinite(n) || n <= 0) text = "用法：/budget 0.5（元/run）· /budget off · /budget 查看";
+              else { h.setBudgetYuan(n); text = `💰 预算已设置：每 run ¥${n}（超限先提醒收敛，仍超 120% 将截断本 run）。`; }
+            }
           } else if (cmd === "trust") {
             const trusted = await readTrustedDirsFn();
             if (!arg) {

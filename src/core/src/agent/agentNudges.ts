@@ -51,6 +51,17 @@ const REPEAT_NUDGE_MAX = 3;          // 整个 run 最多推 3 次重复检索 n
 const TODO_INCOMPLETE_FENCE = "⟦DSC:TODO_INCOMPLETE⟧";
 const TODO_INCOMPLETE_MAX = 1;       // 整个 run 最多推 1 次（与 EARLY_FINAL 同级死循环保险）
 
+// —— 预算 soft 提醒（BUDGET，成本信任链第二环 E2）——
+//   主 run 花费触顶时的经济熔断提醒（硬截断在 runAgent 轮边界，此处只管文案投递）。
+//   惰性闭包取花费快照（O(1) 读数，照 getContextUsage 同构）；每 run 至多一次——反复念经不省钱，
+//   收敛责任交给 runAgent 的 120% 硬截断兜底。
+const BUDGET_FENCE = "⟦DSC:BUDGET⟧";
+/** 预算 soft 文案（方案原文）：提醒收敛，不硬停——给模型一段体面收尾的余地。 */
+const BUDGET_SOFT_TEXT = (spent: number, budget: number): string => {
+    const pct = budget > 0 ? Math.round((spent / budget) * 100) : 100;
+    return `已花费 ¥${spent.toFixed(3)} / 预算 ¥${budget.toFixed(3)}（${pct}%）：请收敛收尾，不再展开新探索；若确需继续，用一段说明剩余工作后即止。`;
+};
+
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
 const EARLY_FINAL_TEXT = (round: number): string =>
@@ -130,6 +141,9 @@ export const createNudgeScheduler = (opts: {
     /** P1-2 上下文用量快照闭包（惰性）：estimateTokens(message) 是全量扫描，而 pickNudge 每轮都调，
      *  故闭包只在真正要返回 NUDGE / REPEAT_RETRIEVAL nudge 的分支内调用，其余轮零调用。 */
     getContextUsage?: () => ContextUsage | null;
+    /** 预算状态闭包（成本信任链第二环 E2，照 getContextUsage 同构）：spent>=budget 时 pickNudge 在
+     *  todo 之后、repeatRetrieval 之前的槽位发一次 soft 提醒。未设预算/子 agent → 调用方传 null。 */
+    getBudgetStatus?: () => { spent: number; budget: number } | null;
 } = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
@@ -163,6 +177,8 @@ export const createNudgeScheduler = (opts: {
     let lastTodos: Array<{ content: string; status: string }> = []; // 模型最后一次 todo_write 的清单快照
     let todoNudges = 0;                              // 本 run 已注入的 todo nudge 次数（受 TODO_INCOMPLETE_MAX 约束）
     let todoPending: NudgeMsg | null = null;
+    // —— 预算 soft 提醒状态（per-run，成本信任链第二环）——
+    let budgetSoftSent = false;                      // 本 run 是否已发过预算 soft（每 run 至多一次）
 
     return {
         pickNudge(round) {
@@ -177,6 +193,16 @@ export const createNudgeScheduler = (opts: {
             if (phantomPending) { const m = phantomPending; phantomPending = null; return m; }
             if (earlyFinalPending) { const m = earlyFinalPending; earlyFinalPending = null; return m; }
             if (todoPending) { const m = todoPending; todoPending = null; return m; }
+            // ★ 预算 soft（成本信任链第二环 E2）：优先级插在 todo 之后、repeatRetrieval 之前——
+            //   经济熔断低于正确性兜底（空回复/早收尾/工具消化/清单核对），高于效率提醒（重复检索/周期自评）。
+            //   状态快照为 O(1) 读数，每轮探测无惰性负担；触顶即发、每 run 一次，120% 硬截断由 runAgent 兜底。
+            if (!budgetSoftSent) {
+                const st = opts.getBudgetStatus?.() ?? null;
+                if (st && st.budget > 0 && st.spent >= st.budget) {
+                    budgetSoftSent = true;
+                    return { role: 'system', content: `${BUDGET_FENCE}\n${BUDGET_SOFT_TEXT(st.spent, st.budget)}` };
+                }
+            }
             // 重复检索 nudge：工具轮 noteToolCall 命中阈值时设入，下一轮推理前消费。优先级低于收尾守护
             //   （空回复/早收尾/工具消化属正确性兜底，先于效率类 nudge），高于周期 NUDGE。
             //   消费时附带上下文用量（P1-2）：重复读大文件正是撑爆窗口的典型路径，此处提醒最对症。

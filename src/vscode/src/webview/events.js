@@ -196,7 +196,7 @@ switch (evt.type) {
         const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
-        addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}`);
+        addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${evt.budgetTruncated ? " · 预算截断" : ""}`);
         state.lastRunCostYuan = cost ?? undefined;
         state.sessionCostYuan = cost != null ? (state.sessionCostYuan || 0) + cost : state.sessionCostYuan;
         break;

@@ -127,6 +127,9 @@ export interface ToolContext {
      *  「第 N 次读取（本 run）· 内容自上次读取未变更/已变更」，让模型自决是否还需要重读。
      *  ★ 刻意不做结果缓存/截断——压缩后旧读取可能已出上下文，硬缓存会饿死模型（只做信息标注）。 */
     readTracker?: Map<string, { mtimeMs: number; count: number }>;
+    /** 子 run 成本回灌父累计器（成本信任链第二环 E1）：runSubagent 经此把子 runAgent 总花费报给父，
+     *  父在轮边界预算检查时天然包含子 run 花费（父预算自动继承约束）。runAgent 构造 toolCtx 时注入。 */
+    reportCost?: (yuan: number) => void;
 }
 
 

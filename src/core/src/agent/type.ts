@@ -81,6 +81,14 @@ export interface RunAgentOptions {
     locale?: Locale,
     /** 输出风格名（运行时覆盖，P2-16）：runAgent 据此向 system prompt 注入对应风格的 persona 文本。未设/未命中=不注入。 */
     outputStyle?: string,
+    /** 本主 run 花费预算上限（元，成本信任链第二环 E1）：超限先经 nudge 管线发 soft 提醒（一次），
+     *  soft 后仍超 120% → 轮边界硬截断（stopReason='limit'，final 提示 /budget 可调）。undefined=未设预算，行为零变化。
+     *  仅主 run 生效（depth=0）；子 run 花费经 costSink 计入父累计器，由父统一执行熔断。 */
+    budgetYuan?: number,
+    /** 子 run 成本回灌父级（成本信任链第二环 E1）：本 runAgent 结束时把自身总花费（元）报给父累计器。
+     *  仅 runSubagent 经 ToolContext.reportCost 注入；主 run 不设。注意：只进父的预算累计器，
+     *  不进父的 receipt/usageLog costYuan（后者按 run 自身 usage 落盘、读侧按 depth 拆分，避免双重计量）。 */
+    costSink?: (yuan: number) => void,
 }
 
 /**

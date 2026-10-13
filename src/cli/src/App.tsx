@@ -214,6 +214,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "sessions": return S.cmdSessions;
                 case "fork": return S.cmdFork;
                 case "usage": return S.cmdUsage;
+                case "budget": return S.cmdBudget;
                 case "context": return S.cmdContext;
                 case "permissions": return S.cmdPermissions;
                 case "mcp": return S.cmdMcp;
@@ -350,6 +351,22 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 const on = !state.getPlanMode();
                 state.setPlanMode(on);
                 state.pushInfo(`计划模式：${on ? "开（下次提问先只读调研并产出方案，审批后实现）" : "关"}`);
+                return true;
+            }
+            case "/budget": {
+                // 预算制运行（成本信任链第二环 E1）：/budget 0.5 设置每主 run 上限 · /budget off 关闭 · /budget 查看
+                const v = arg.trim().toLowerCase();
+                if (!v) {
+                    const b = state.getBudgetYuan();
+                    const last = state.getLastRunCostYuan();
+                    state.pushInfo(`💰 预算：${b != null ? `¥${b}/run` : "未设置（/budget 0.5 设置每个 run 的花费上限）"}${last != null ? ` · 上个 run 已花 ¥${last.toFixed(3)}` : " · 尚无完成 run"}`);
+                    return true;
+                }
+                if (v === "off" || v === "0") { state.setBudgetYuan(undefined); state.pushInfo("💰 预算已关闭（不限花费）。"); return true; }
+                const n = Number(v);
+                if (!Number.isFinite(n) || n <= 0) { state.pushInfo("用法：/budget 0.5（元/run）· /budget off · /budget 查看"); return true; }
+                state.setBudgetYuan(n);
+                state.pushInfo(`💰 预算已设置：每 run ¥${n}（超限先提醒收敛，仍超 120% 将截断本 run）。`);
                 return true;
             }
             case "/auto": {

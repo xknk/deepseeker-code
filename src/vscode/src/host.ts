@@ -137,6 +137,10 @@ export class ChatHost {
     !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high";
   private locale: "zh" | "en" = "zh";
   private outputStyle: string | undefined = undefined;
+  /** 本主 run 花费预算上限（元，成本信任链第二环 E1，/budget 设置）。undefined=不限。 */
+  private budgetYuan: number | undefined = undefined;
+  /** 最近一次完成 run 的花费（元，run.receipt 经 sink 记账，/budget 查看用；无价 run 为 undefined）。 */
+  private lastRunCostYuan: number | undefined = undefined;
 
   private currentAc: AbortController | null = null;
   private busy = false;
@@ -198,6 +202,9 @@ export class ChatHost {
       this.enterPlanReason = (evt.reason as string) ?? "";
     } else if (type === "approval_request") {
       this.lastApprovalEvt = { ...evt };
+    } else if (type === "run.receipt") {
+      // ★ 结算单记账（成本信任链第二环）：最近完成 run 的花费供 /budget 查看「上个 run 已花」
+      this.lastRunCostYuan = typeof evt.costYuan === "number" ? evt.costYuan : undefined;
     } else if (type === "inbox.claimed") {
       // ★ inbox steering：排队文本已在 submit 时渲染过 user 行，此处仅转成 info 提示送达
       //   （勿重复渲染文本；webview 无此事件 case，转换后转发保持零新协议感知）。
@@ -291,6 +298,7 @@ export class ChatHost {
       thinkingLevel: this.thinkingLevel,
       locale: this.locale,
       outputStyle: this.outputStyle,
+      budgetYuan: this.budgetYuan, // ★ 预算制运行（成本信任链第二环 E1）：超限 soft nudge + 120% 硬截断
     };
     try {
       await handleUnifiedChat(
@@ -639,6 +647,16 @@ export class ChatHost {
   }
   get currentOutputStyle(): string | undefined {
     return this.outputStyle;
+  }
+  /** 预算（/budget 命令用，成本信任链第二环 E1）：undefined=不限。 */
+  setBudgetYuan(v: number | undefined): void {
+    this.budgetYuan = v;
+  }
+  get currentBudgetYuan(): number | undefined {
+    return this.budgetYuan;
+  }
+  get lastRunCost(): number | undefined {
+    return this.lastRunCostYuan;
   }
 
   private setBusy(b: boolean): void {

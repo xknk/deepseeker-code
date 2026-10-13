@@ -251,6 +251,7 @@ export const runSubagent = async (
             permissionMode: ctx.permissionMode, // ★ P1-6 透传：子 agent 工作区文件编辑也走 auto 分类器
             noEarlyFinal: true, // ★ 子 agent final 是交付父级的汇报，EARLY_FINAL 误推一轮纯浪费；父可经续跑纠错
             model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
+            costSink: ctx.reportCost, // ★ 子 run 成本回灌父累计器（成本信任链第二环 E1）：父预算自动继承约束
         };
 
         // ★ P1-8 SubagentStart：子 agent 实际启动（观察事件；声明式名/深度/任务供 hook 记录/计量）

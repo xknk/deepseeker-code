@@ -82,6 +82,8 @@ interface StringDict {
     cmdSessions: string;
     /** P2-15 可观测性命令 */
     cmdUsage: string;
+    /** 成本信任链·预算制运行 */
+    cmdBudget: string;
     cmdContext: string;
     cmdPermissions: string;
     cmdMcp: string;
@@ -211,6 +213,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdExit: "退出 CLI",
         cmdSessions: "选择并载入历史会话（续接对话）",
         cmdUsage: "查看本会话 token 用量（主/子 agent、缓存命中）",
+        cmdBudget: "预算制运行：/budget 0.5 设置每 run 上限 · /budget off 关闭 · /budget 查看",
         cmdContext: "查看上下文窗口治理（阈值、填充率、已归档）",
         cmdPermissions: "查看已加载的权限规则（allow/ask/deny）",
         cmdMcp: "查看已连接的 MCP server 与工具数",
@@ -360,6 +363,7 @@ const STRINGS: Record<Locale, StringDict> = {
         cmdExit: "Quit the CLI",
         cmdSessions: "Pick a past session to resume",
         cmdUsage: "Show this session's token usage (main/sub agent, cache hit)",
+        cmdBudget: "Budget mode: /budget 0.5 set per-run cap · /budget off disable · /budget view",
         cmdContext: "Show context window governance (threshold, fill, archived)",
         cmdPermissions: "Show loaded permission rules (allow/ask/deny)",
         cmdMcp: "Show connected MCP servers and tool counts",
@@ -446,4 +450,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "usage", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "usage", "budget", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
