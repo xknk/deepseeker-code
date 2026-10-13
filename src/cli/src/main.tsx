@@ -119,6 +119,16 @@ const main = async (): Promise<void> => {
         process.exit(0);
     }
 
+    // ★ 挂机批处理（成本信任链第四环 F1）：batch 子命令在 key 校验【前】派发——add/list/clean 是
+    //   纯文件操作（无交互、不触 LLM，无 key 也能投递/查看/清理队列）；run 在下方信任闸门+引擎
+    //   就绪后接续。输出走 batchAdmin 的 process.stdout.write——上方 console 静默只劫持 console.*。
+    const { parseBatchArgv } = await import("./batchAdmin.ts");
+    const batchArgv = parseBatchArgv(process.argv.slice(2));
+    if (batchArgv && batchArgv.sub !== "run") {
+        await import("./batchAdmin.ts").then((m) => m.handleBatchAdmin(batchArgv));
+        process.exit(0);
+    }
+
     // ★ 模型密钥前置校验（核心 OpenAI client 经 DEEP_SEEK_API_KEY 配置）。
     //    必须在动态 import 核心/Agent 之前——否则 createModel 加载期即抛错。
     if (!process.env.DEEP_SEEK_API_KEY) {
@@ -171,6 +181,20 @@ const main = async (): Promise<void> => {
         import("./App.tsx"),
         import("@/config/index.ts"),
     ]);
+
+    // ★ batch run（挂机执行器，成本信任链第四环 F2）：引擎【前台】await 注入完成（无交互 UI 闸门可借，
+    //   首个任务前 MCP/skills/agents 工具必须已在表），然后串行跑队列；每任务 worktree 产物保留、
+    //   报告落 done/。finally dispose 引擎（MCP 子进程 / 后台任务）；运行锁防并发 runner。
+    if (batchArgv?.sub === "run") {
+        const dispose = await initEngine(agentTools, { includeProject });
+        const { runBatchQueue } = await import("./batchRunner.ts");
+        try {
+            await runBatchQueue({ waitWindow: batchArgv.waitWindow });
+        } finally {
+            dispose();
+        }
+        process.exit(0);
+    }
 
     // ★ 引擎后台初始化（不 await）：MCP spawn+握手通常最慢（秒级），此前 await 后才清屏渲染，
     //   用户盯着 PowerShell 残留画面干等——启动顿挫主因。改 UI 先行：立即清屏+横幅+渲染可交互界面，

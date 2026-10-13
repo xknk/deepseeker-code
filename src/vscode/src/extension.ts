@@ -987,6 +987,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           : "DeepSeeker-Code：该目录不在信任列表。",
       );
     }),
+    vscode.commands.registerCommand("deepseekerCode.viewBatchQueue", async () => {
+      // 挂机批处理队列只读展示（成本信任链第四环 F1 第一版：投递/执行/清理走 CLI `deepseeker-code batch`）。
+      // 直读三态目录、不走 core queue：扩展宿主 process.cwd() ≠ 项目根（batchQueueRoot 的 cwd 基准失配），
+      // env 重定向也是进程级全局——只读文件层直读最稳，且天然跟随当前项目根。
+      if (!workspaceRoot) {
+        void vscode.window.showErrorMessage("DeepSeeker-Code：当前没有打开的工作区文件夹。");
+        return;
+      }
+      const root = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), ".deepseeker-code", "batch");
+      const listTickets = async (state: string): Promise<string[]> => {
+        try {
+          return (await vscode.workspace.fs.readDirectory(vscode.Uri.joinPath(root, state)))
+            .map(([n]) => n)
+            .filter((n) => n.endsWith(".md") && !n.endsWith(".report.md"))
+            .sort();
+        } catch {
+          return []; // 目录不存在 = 该状态无任务
+        }
+      };
+      const [pending, running, done] = await Promise.all([listTickets("pending"), listTickets("running"), listTickets("done")]);
+      if (pending.length + running.length + done.length === 0) {
+        void vscode.window.showInformationMessage(
+          "DeepSeeker-Code：挂机队列为空。投递走 CLI：deepseeker-code batch add <工单.md>（格式见 batch help）。",
+        );
+        return;
+      }
+      type Item = vscode.QuickPickItem & { report?: vscode.Uri };
+      const items: Item[] = [
+        ...running.map((n) => ({ label: `$(sync~spin) ${n.replace(/\.md$/, "")}`, description: "运行中" })),
+        ...pending.map((n) => ({ label: `$(clock) ${n.replace(/\.md$/, "")}`, description: "待跑" })),
+        ...done.map((n) => ({
+          label: `$(check) ${n.replace(/\.md$/, "")}`,
+          description: "已完成——回车看报告",
+          report: vscode.Uri.joinPath(root, "done", `${n.replace(/\.md$/, "")}.report.md`),
+        })),
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: "挂机批处理队列（投递/清理走 CLI：batch add / batch clean）",
+        title: "DeepSeeker-Code：挂机队列",
+      });
+      if (!picked?.report) return;
+      try {
+        await vscode.window.showTextDocument(picked.report, { preview: true });
+      } catch {
+        void vscode.window.showWarningMessage("DeepSeeker-Code：报告缺失（任务可能刚收尾或已被 batch clean）。");
+      }
+    }),
   );
 
   // —— 7. 项目级配置加载：本地单人工具，默认信任并加载当前工作区的项目级配置（.deepseeker-code/），不再弹窗确认。

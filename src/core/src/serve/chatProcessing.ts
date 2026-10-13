@@ -60,6 +60,9 @@ export interface HostOptions {
     /** 本主 run 花费预算上限（元，成本信任链第二环 E1，/budget 设置）：超限 soft nudge 一次、
      *  soft 后仍超 120% 轮边界硬截断。未设=不限预算，行为零变化。 */
     budgetYuan?: number;
+    /** 工具 schema 覆盖（成本信任链第四环 F2 挂机批处理：按工单裁剪高危工具——缺省禁 run_command/delete_path
+     *  同 SUBAGENT_DENYLIST，frontmatter tools 显式解锁）。未传 = 全量 agentTools，行为零变化。 */
+    toolSchemas?: any[];
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
 }
@@ -187,7 +190,7 @@ export const handleUnifiedChat = async (
         const options: RunAgentOptions = {
             sessionId,
             cwd: process.cwd(),
-            toolSchemas: agentTools,
+            toolSchemas: opts?.toolSchemas ?? agentTools, // 宿主可按需裁剪（挂机批处理）；缺省全量，行为不变
             abortSignal,                        // ← 透传中止信号
             modelWindow: appConfig.MAX_HISTORY_TOKENS,
             keepRecentUnits: appConfig.KEEP_RECENT_UNITS,

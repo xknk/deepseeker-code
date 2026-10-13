@@ -387,6 +387,9 @@ export const getMostRecentSessionId = async (): Promise<string | null> => {
         if (!entry.isDirectory()) continue;
         const sessionId = entry.name;
         if (!isSafeSessionId(sessionId)) continue; // 纵深防御：跳过非法文件夹名
+        // 挂机批处理会话（batch-*，成本信任链第四环）不参与 --continue：挂机一夜后早上一开 -c
+        // 续进的应是人的对话，不是批任务（同 usageLog 剔除受控会话前缀的惯例，但 batch 是真实消费）
+        if (sessionId.startsWith("batch-")) continue;
         const state: any = await readJSONFile<any>(getStatePath(sessionId));
         let updatedAt: string | undefined = state?.updatedAt;
         if (!updatedAt) {
