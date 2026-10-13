@@ -28,7 +28,21 @@ function scrollToBottom(instant = false) {
   } else {
     el.scrollTop = el.scrollHeight;
   }
+  syncStuckRows();
 }
+
+// ★ 提问块钉顶渐隐（stuck 类）：sticky 是纯视觉偏移，CSS 无从知晓「已钉住」——滚动时按 rect.top
+//   打标，钉住后块底出现渐变过渡（.stuck::after），内容滑过时溶入底色而非被生硬切边（CC 同款观感）。
+//   只读 rect 不写 scrollTop，与贴底跟随互不干扰；scrollToBottom（回放落底/跟随跳底）也刷新一遍，
+//   防重建行后类状态滞留。stuck 判定含自然位恰在顶部的瞬间——视觉等价，无需区分。
+const syncStuckRows = () => {
+  const el = messagesEl();
+  if (!el) return;
+  for (const r of el.querySelectorAll(".row-user")) {
+    r.classList.toggle("stuck", r.getBoundingClientRect().top <= 1);
+  }
+};
+messagesEl().addEventListener("scroll", () => requestAnimationFrame(syncStuckRows), { passive: true });
 
 // ★ 贴底跟随原语（先测后改）：stickNow 必须在 DOM 变更【前】测，stickTo 在变更【后】落（一律 instant）。
 //   旧实现「先插行后 nearBottom()」：单次插入 ≥100px（多行气泡+轮头/整块代码段）时距底距离被新行自身

@@ -394,8 +394,20 @@ body {
   top: 0;
   z-index: 5; /* 消息流内无其他 z-index（弹层 30+ 全在 composer 侧），压住滚动内容即可 */
   background: var(--vscode-sideBar-background, #252526);
-  /* 同色阴影向下延伸 6px：钉住时盖住 .row 的 5px 下边距缝隙，内容从块底滑过不穿帮；自然流里与底同色不可见 */
-  box-shadow: 0 6px 0 0 var(--vscode-sideBar-background, #252526);
+}
+
+/* ★ 钉住态渐隐（反馈：首版生硬切边，滑过的内容在块底被拦腰切断，CC 是溶入底色）：
+   rows.js 滚动时给已钉住的行打 .stuck，此处才渲染块底渐变——自然流里绝不渲染，
+   否则渐变顶部的实底段会吃掉下一条回答的开头。 */
+.row-user.stuck::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 26px;
+  background: linear-gradient(to bottom, var(--vscode-sideBar-background, #252526), transparent);
+  pointer-events: none;
 }
 
 .user-block {
