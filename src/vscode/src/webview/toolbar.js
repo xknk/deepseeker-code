@@ -49,11 +49,12 @@ btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
 // CC 风格思考动画（对标「✳ Creating...」）：busy 期间常驻消息流末行（内容区里，非输入框上方）——
 // 工具执行 / API 等待等「无动静」间隙也有可见生命感；空闲 hidden。元素归属 rows.js（末行锚点）
 setThinkVisible(state.busy);
-// 子 agent 运行计数胶囊（对标 CC「● N agent」）：常驻显示，>0 亮绿点；随 subagent.count 事件经 syncToolbar 刷新
+// 子 agent 运行计数胶囊（对标 CC「● N agent」）：只在运行时显示（空闲隐藏防 composer-bar 拥挤），>0 亮绿点
 const pill = $("#agents-pill");
 if (pill) {
 const n = state.runningAgents || 0;
 pill.classList.toggle("live", n > 0);
+pill.style.display = n > 0 ? "" : "none";
 const pillLbl = $("#agents-pill-label");
 if (pillLbl) pillLbl.textContent = `${n} agent${n > 1 ? "s" : ""}`;
 }
@@ -184,7 +185,7 @@ export function flashCompactRing() {
   ringFlashTimer = setTimeout(() => ring.classList.remove("flash"), 2400);
 }
 
-/** cost-pill：本会话累计花费 + 最近 run 缓存命中率；无价模型只显命中率不显钱（null 语义，绝不编数）。 */
+/** cost-pill：只显会话累计花费（瘦身防挤——命中率挪进悬停；无价模型 fallback 显命中率，null 语义绝不编数）。 */
 export function syncCostPill() {
   const pill = $("#cost-pill");
   if (!pill) return;
@@ -192,9 +193,13 @@ export function syncCostPill() {
   const hit = state.lastRunCacheHitRate;
   if (cost == null && hit == null) { pill.style.display = "none"; return; }
   pill.style.display = "";
-  const parts = [];
-  if (typeof cost === "number") parts.push(`¥${cost.toFixed(cost < 0.005 ? 4 : 3)}`);
-  if (typeof hit === "number") parts.push(`命中 ${Math.round(hit * 100)}%`);
   const label = $("#cost-pill-label");
-  if (label) label.textContent = parts.join(" · ");
+  if (typeof cost === "number") {
+    if (label) label.textContent = `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}`;
+    pill.title = `本会话累计花费（点击看上下文详情，同 /context）${typeof hit === "number" ? ` · 最近 run 缓存命中 ${Math.round(hit * 100)}%` : ""}`;
+  } else {
+    // 无价模型：只显命中率不显钱（H2 红线），命中数字不上标签桌面
+    if (label) label.textContent = typeof hit === "number" ? `命中 ${Math.round(hit * 100)}%` : "";
+    pill.title = "本会话缓存命中率（模型无价格表，不显花费）· 点击看上下文详情";
+  }
 }
