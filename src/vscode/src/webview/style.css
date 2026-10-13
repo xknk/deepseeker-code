@@ -385,6 +385,17 @@ body {
 /* 用户消息：CC 同款圆角边框输入块（反馈：`> ` 素排与回复难区分，块感不明显）——盒子即「这是你说的」 */
 .row-user {
   display: block;
+  /* ★ 粘性置顶（反馈：长回答把提问顶出视野，回头找不到自己问过啥）：读任一轮回复时其提问块
+     钉在可视区顶部。sticky 滑行空间=父容器（#messages 整列），下一条用户行滚上来自然把前一条
+     顶出去——任意时刻钉着的总是「当前读到这轮回答」的提问。纯视觉偏移不改布局，
+     scrollHeight 与贴底跟随（nearBottom 先测后改）均不受影响。
+     body 全局透明、消息区实际透出 sideBar 底色，钉住遮挡必须用同色不透明底，否则常态即见色差。 */
+  position: sticky;
+  top: 0;
+  z-index: 5; /* 消息流内无其他 z-index（弹层 30+ 全在 composer 侧），压住滚动内容即可 */
+  background: var(--vscode-sideBar-background, #252526);
+  /* 同色阴影向下延伸 6px：钉住时盖住 .row 的 5px 下边距缝隙，内容从块底滑过不穿帮；自然流里与底同色不可见 */
+  box-shadow: 0 6px 0 0 var(--vscode-sideBar-background, #252526);
 }
 
 .user-block {
@@ -405,6 +416,9 @@ body {
   border-radius: 10px;
   background: rgba(128, 128, 128, 0.07);
   padding: 7px 12px;
+  /* ★ 钉顶配套：超长输入（贴日志）封顶、块内自滚，粘性块不占满整屏；↺ 徽标挂在 .user-block 上不受此裁剪 */
+  max-height: 50vh;
+  overflow-y: auto;
 }
 
 /* ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形；行带检查点 id 才渲染（rows.js）。
