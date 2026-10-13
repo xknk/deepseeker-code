@@ -33,6 +33,10 @@ export interface StatusLineContext {
     workspace: { current_dir: string; project_dir: string };
     /** 引擎版本（best-effort，取不到则省略该键）。 */
     version?: string;
+    /** 最近一次 run 结算花费（元；成本信任链 D3。undefined=尚无数据/无价模型，JSON.stringify 自动省略该键）。 */
+    last_run_cost_yuan?: number;
+    /** 本会话累计花费（元；run.receipt 逐 run 累加，会话切换清零。undefined 同上）。 */
+    session_cost_yuan?: number;
 }
 
 const STATUSLINE_TIMEOUT_MS = 3000;

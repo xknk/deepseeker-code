@@ -12,6 +12,7 @@ import { listHooks } from "@/hooks/registry.ts";
 import { listMcpClients } from "@/tool/mcp/loader.ts";
 import { getTraceStorePath } from "@/observability/store.ts";
 import { readUsageRecords, summarizeUsage, topTools } from "@/observability/usageLog.ts";
+import { calcCostYuan, priceFor } from "@/config/prices.ts";
 import { getRollingState } from "@/session/store.ts";
 import { MODEL_NAME, AUX_MODEL_NAME } from "@/llm/createModel.ts";
 
@@ -76,7 +77,10 @@ export const inspectUsage = async (sessionId: string): Promise<string> => {
             lines.push(`    ${String(r.ts).slice(5, 16).replace("T", " ")}  ${r.rounds}轮  ${fmtK(r.totalTokens ?? 0)} tok  ${STOP_LABEL[r.stopReason] ?? r.stopReason}  ${tools}`);
         }
     }
-    const week = summarizeUsage(await readUsageRecords(7));
+    // 近 7 天聚合（保留记录列表供成本逐条折算——成本信任链 D3：优先读落盘 costYuan，旧记录按现价现算兜底；
+    // 无价记录不进钱的和（null 语义，绝不编数））
+    const weekRecords = await readUsageRecords(7);
+    const week = summarizeUsage(weekRecords);
     if (week.runs > 0) {
         const weekHit = week.promptTokens > 0 ? ((week.cachedTokens / week.promptTokens) * 100).toFixed(1) : "0.0";
         const weekAbort = week.mainRuns > 0 ? Math.round((week.stopReasons.aborted / week.mainRuns) * 100) : 0;
@@ -86,6 +90,24 @@ export const inspectUsage = async (sessionId: string): Promise<string> => {
             `  ▎近 7 天（使用日志 · 全项目）：${week.mainRuns} runs · ${week.mainRounds} 轮（均 ${weekAvg} 轮/run）· 中止 ${weekAbort}% · ${fmtK(week.totalTokens)} tok（缓存命中 ${weekHit}%）`,
             `    常用工具: ${tools || "（无）"}`,
         );
+        const bySession = new Map<string, number>();
+        let weekCost = 0, weekSaved = 0, pricedRuns = 0;
+        for (const r of weekRecords) {
+            const c = r.costYuan ?? calcCostYuan(r.model, r);
+            if (c == null) continue;
+            pricedRuns++;
+            weekCost += c;
+            bySession.set(r.sessionId, (bySession.get(r.sessionId) ?? 0) + c);
+            const p = priceFor(r.model);
+            if (p) weekSaved += ((r.cachedTokens ?? 0) * (p.input - p.cacheHit)) / 1e6; // 命中部分按未命中价本要多付的差价
+        }
+        if (pricedRuns > 0) {
+            const tops = [...bySession.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+                .map(([sid, c]) => `${sid.slice(0, 8)} ¥${c.toFixed(3)}`).join(" · ");
+            const unpaid = week.runs - pricedRuns;
+            lines.push(`    近 7 天花费 ¥${weekCost.toFixed(3)}（缓存命中已省 ¥${weekSaved.toFixed(3)}）${unpaid > 0 ? ` · ${unpaid} 条无价记录未计` : ""}`);
+            if (tops) lines.push(`    费用 top 会话: ${tops}`);
+        }
     }
     lines.push(`  提示：并行 workflow 会放大子 agent 用量；缓存命中率越高，输入成本越低。`);
     return lines.join("\n");

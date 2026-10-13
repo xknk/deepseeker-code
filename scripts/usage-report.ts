@@ -5,22 +5,14 @@
  * 数据源：<dataDir>/usage/usage-YYYY-MM.jsonl（recordUsageRun 每 run 一行，纯本地）；
  *        selftest- 与 eval- 前缀的受控实验会话已在 readUsageRecords 读侧剔除。
  * 运行：npx tsx --tsconfig src/core/tsconfig.json scripts/usage-report.ts [--days 30]
- * 成本口径：PRICE_TABLE 单价常量表（与 task.eval.ts 同源同纪律：换价两处同步改）；近似口径看相对变化勿当账单。
+ * 成本口径（成本信任链 D1 起单一来源）：src/core/src/config/prices.ts（官网价，2026-10-13 核实，元/百万 tokens）；
+ * 优先读落盘 costYuan（D2 起随 run 落盘，run 当时单价），旧记录按现价现算；无价模型不计入钱的和（看 token）。
  */
 import { readUsageRecords, summarizeUsage, topTools, type UsageRunRecord } from "@/observability/usageLog.ts";
+import { calcCostYuan } from "@/config/prices.ts";
 
-// —— 折算成本（美分）：与 src/core/tests/evals/task.eval.ts PRICE_TABLE 保持同价，换价两处同步改 ——
-const PRICE_TABLE: Record<string, { miss: number; hit: number; output: number }> = {
-    'deepseek-chat': { miss: 0.28, hit: 0.028, output: 0.42 },
-    'deepseek-flash': { miss: 0.28, hit: 0.028, output: 0.42 }, // 占位：暂按 chat 档，官网出价后校准
-};
-const DEFAULT_PRICE = PRICE_TABLE['deepseek-chat']!;
-/** 单 run 折算成本（美分）：(prompt−cached)×miss + cached×hit + completion×output */
-const costCents = (r: UsageRunRecord): number => {
-    const p = PRICE_TABLE[r.model] ?? DEFAULT_PRICE;
-    const miss = Math.max(0, (r.promptTokens ?? 0) - (r.cachedTokens ?? 0));
-    return ((miss * p.miss + (r.cachedTokens ?? 0) * p.hit + (r.completionTokens ?? 0) * p.output) / 1e6) * 100;
-};
+/** 单 run 折算成本（元）：落盘 costYuan 优先，旧记录现算兜底；无价模型 → null 不进和 */
+const costOf = (r: UsageRunRecord): number | null => r.costYuan ?? calcCostYuan(r.model, r);
 
 const fmt = (n: number): string => n.toLocaleString("en-US");
 const padL = (s: string, w: number): string => s.padStart(w);
@@ -49,18 +41,23 @@ for (const r of records) {
     arr.push(r);
     byDay.set(day, arr);
 }
-console.log("日期          runs  中止%   轮数(均/run)   prompt      cached     输出       ≈成本¢  常用工具(top3)");
+console.log("日期          runs  中止%   轮数(均/run)   prompt      cached     输出       ≈成本¥  常用工具(top3)");
 let sumCost = 0;
+let unpriced = 0;
 for (const [day, rs] of [...byDay.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const s = summarizeUsage(rs);
-    const cost = rs.reduce((sum, r) => sum + costCents(r), 0);
+    let cost = 0;
+    for (const r of rs) {
+        const c = costOf(r);
+        if (c == null) unpriced++; else cost += c;
+    }
     sumCost += cost;
     const abortPct = s.mainRuns ? Math.round((s.stopReasons.aborted / s.mainRuns) * 100) : 0;
     const avg = s.mainRuns ? (s.mainRounds / s.mainRuns).toFixed(1) : "0";
     const tools = topTools(s.tools, 3).map(([n, c]) => `${n}×${c}`).join(" ");
     console.log(
         `${day}  ${padL(String(s.mainRuns), 4)}  ${padL(`${abortPct}%`, 4)}  ` +
-        `${padL(String(s.mainRounds), 4)} (${padL(avg, 4)})  ${padL(fmt(s.promptTokens), 10)}  ${padL(fmt(s.cachedTokens), 10)}  ${padL(fmt(s.completionTokens), 8)}  ${padL(cost.toFixed(1), 6)}  ${tools}`,
+        `${padL(String(s.mainRounds), 4)} (${padL(avg, 4)})  ${padL(fmt(s.promptTokens), 10)}  ${padL(fmt(s.cachedTokens), 10)}  ${padL(fmt(s.completionTokens), 8)}  ${padL(cost.toFixed(3), 7)}  ${tools}`,
     );
 }
 console.log("-".repeat(118));
@@ -68,9 +65,9 @@ const totalCost = sumCost;
 const hitRate = total.promptTokens ? ((total.cachedTokens / total.promptTokens) * 100).toFixed(1) : "0.0";
 console.log(
     `${padR("总计", 10)}  ${padL(String(total.mainRuns), 4)}  ${padL(`${total.mainRuns ? Math.round((total.stopReasons.aborted / total.mainRuns) * 100) : 0}%`, 4)}  ` +
-    `${padL(String(total.mainRounds), 4)} (${padL((total.mainRounds / Math.max(1, total.mainRuns)).toFixed(1), 4)})  ${padL(fmt(total.promptTokens), 10)}  ${padL(fmt(total.cachedTokens), 10)}  ${padL(fmt(total.completionTokens), 8)}  ${padL(totalCost.toFixed(1), 6)}`
+    `${padL(String(total.mainRounds), 4)} (${padL((total.mainRounds / Math.max(1, total.mainRuns)).toFixed(1), 4)})  ${padL(fmt(total.promptTokens), 10)}  ${padL(fmt(total.cachedTokens), 10)}  ${padL(fmt(total.completionTokens), 8)}  ${padL(totalCost.toFixed(3), 7)}`
 );
-console.log(`缓存命中合计：${hitRate}%（cached/prompt）；成本为近似口径（PRICE_TABLE 占价值，看相对变化勿当账单）。`);
+console.log(`缓存命中合计：${hitRate}%（cached/prompt）；成本为官网价折算（prices.ts，可对账）${unpriced > 0 ? `；${unpriced} 条无价模型记录未计入` : ""}。`);
 
 // ==================== 轮数分布（主 run）：碎步任务 prevalence 的一把尺 ====================
 const mainRuns = records.filter(r => r.depth === 0);

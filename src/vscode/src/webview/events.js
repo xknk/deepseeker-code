@@ -184,6 +184,23 @@ switch (evt.type) {
         }
         break;
       }
+      case "run.receipt": {
+        // ★ 任务结算单（成本信任链第一环）：run 收尾 info 行（对标 CLI 淡色行）；
+        //   花费顺手入 state（本会话累计供后续 cost-pill / H2 预留）。无价模型只显 token（null 语义，绝不编数）。
+        closeStreaming();
+        const rounds = Number(evt.rounds) || 0;
+        const hitPct = Math.round((Number(evt.cacheHitRate) || 0) * 100);
+        const durMs = Number(evt.durationMs) || 0;
+        const durText = durMs >= 60000 ? `${Math.floor(durMs / 60000)}m${Math.round((durMs % 60000) / 1000)}s` : `${(durMs / 1000).toFixed(1)}s`;
+        const cost = typeof evt.costYuan === "number" ? evt.costYuan : null;
+        const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
+        const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
+        const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
+        addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}`);
+        state.lastRunCostYuan = cost ?? undefined;
+        state.sessionCostYuan = cost != null ? (state.sessionCostYuan || 0) + cost : state.sessionCostYuan;
+        break;
+      }
       case "task.exit": {
         // ★ 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色 info、失败醒目 system、停止中性
         closeStreaming();
@@ -308,6 +325,8 @@ function onMessage(msg) {
       clearMessages();
       clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
       clearPendingRefs();     // ★ B1：跨会话清空未发送文件引用，防串会话
+      state.lastRunCostYuan = undefined; // ★ 结算单累计随会话清零（跨会话花费看 /usage，不串账）
+      state.sessionCostYuan = undefined;
       break;
     case "imageSaved": {
       // extension 已把图片存到工作区临时目录：路径只回填到待发附件（submit 随 attachments 上送，

@@ -121,6 +121,10 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     );
     /** 最近一次压缩的归档摘要（compact.done 随事件下发的 ⟦DSC:ARCHIVE-NOTES⟧ 段；运行时态，/archive 查看）。 */
     const archivedSummaryRef = useRef("");
+    /** 最近一次 run 结算花费（元；run.receipt 随事件缓存，statusline last_run_cost_yuan 用；undefined=无价模型/尚无数据）。 */
+    const lastRunCostRef = useRef<number | undefined>(undefined);
+    /** 本会话累计花费（元；receipt 逐 run 累加，statusline session_cost_yuan 用；会话切换时重置）。 */
+    const sessionCostRef = useRef<number | undefined>(undefined);
     /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
     const compactProgressIdRef = useRef<number | null>(null);
     /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
@@ -333,6 +337,28 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                     trigger: (obj.trigger as "auto" | "manual") ?? "auto",
                     hasSummary: !!(obj.summary as string),
                 }]);
+                break;
+            }
+            case "run.receipt": {
+                // 任务结算单（成本信任链第一环）：run 收尾淡色一行（风格贴 compact/task.exit 行），
+                // 累计本会话花费供 statusline（D3）。无价模型只显 token（null 语义，绝不编数）。
+                flush();
+                const rounds = (obj.rounds as number) ?? 0;
+                const promptT = (obj.promptTokens as number) ?? 0;
+                const completionT = (obj.completionTokens as number) ?? 0;
+                const hitPct = Math.round(((obj.cacheHitRate as number) ?? 0) * 100);
+                const durMs = (obj.durationMs as number) ?? 0;
+                const durText = durMs >= 60000 ? `${Math.floor(durMs / 60000)}m${Math.round((durMs % 60000) / 1000)}s` : `${(durMs / 1000).toFixed(1)}s`;
+                const cost = obj.costYuan as number | null | undefined;
+                const tokTotal = promptT + completionT;
+                const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
+                const costText = typeof cost === "number" ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
+                setRows((prev) => [...prev, {
+                    id: newRowId(), kind: "meta",
+                    text: `💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}`,
+                }]);
+                lastRunCostRef.current = typeof cost === "number" ? cost : undefined;
+                sessionCostRef.current = typeof cost === "number" ? (sessionCostRef.current ?? 0) + cost : sessionCostRef.current;
                 break;
             }
             case "task.exit": {
@@ -695,6 +721,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** 载入指定会话：切换 sessionId + 清屏 + 回放转录，后续 submit 即续接此会话。 */
     const loadSession = useCallback(async (id: string) => {
         sessionIdRef.current = id;
+        lastRunCostRef.current = undefined; // 会话切换：结算单累计随之清零（跨会话花费看 /usage，不串账）
+        sessionCostRef.current = undefined;
         clearRows();
         try {
             const lines = await readTranscriptLines(id);
@@ -720,6 +748,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
      *  下轮 getOrCreateSessionId(initialSessionId) 会粘回旧会话）+ 清屏；旧会话文件不动，/sessions 可找回。 */
     const newSession = useCallback(async () => {
         sessionIdRef.current = await getOrCreateSessionId(undefined);
+        lastRunCostRef.current = undefined; // 同 loadSession：结算单累计随会话清零
+        sessionCostRef.current = undefined;
         clearRows();
         pushInfo(S.sessionNew(truncateMiddle(sessionIdRef.current, 12)));
     }, [clearRows, pushInfo]);
@@ -781,6 +811,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const setOutputStyle = useCallback((name: string | undefined) => { outputStyleRef.current = name; }, []);
     const getOutputStyle = useCallback((): string | undefined => outputStyleRef.current, []);
     const getArchivedSummary = useCallback((): string => archivedSummaryRef.current, []);
+    /** 结算单 getters（statusline D3）：undefined 自动省略键，旧 statusline 命令零破坏。 */
+    const getLastRunCostYuan = useCallback((): number | undefined => lastRunCostRef.current, []);
+    const getSessionCostYuan = useCallback((): number | undefined => sessionCostRef.current, []);
 
     return {
         // 状态
@@ -791,6 +824,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
+        getLastRunCostYuan, getSessionCostYuan,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };

@@ -30,6 +30,7 @@ import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
 import { createNudgeScheduler } from "./agentNudges.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
+import { calcCostYuan } from "@/config/prices.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
 
 // ============ 主流程 ============
@@ -126,6 +127,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // 本 run 用量累计（run.end 永久计量；trace 侧 3 天自动清理，transcript 永久留存互补）
     // （runId 已上移至函数头部：埋点包装层注入 metadata.runId 与事件行同源）
     let usageSum: UsageSnapshot | undefined;
+    // ★ 成本累计（成本信任链第一环 D2）：每轮真实 usage × 当时单价 O(1) 旁路累加（估算口径红线：绝不用 estimateTokens）。
+    //   无价模型任一轮 → costKnown=false，收尾不发钱数（null 语义，绝不编数）；精度 6 位小数防浮点噪音。
+    const effectiveModel = options.model?.trim() || MODEL_NAME;
+    let costYuanAcc = 0;
+    let costKnown = true;
     const addUsage = (u?: UsageSnapshot) => {
         if (!u) return;
         usageSum = {
@@ -134,6 +140,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             total_tokens: (usageSum?.total_tokens ?? 0) + (u.total_tokens ?? 0),
             cached_tokens: (usageSum?.cached_tokens ?? 0) + (u.cached_tokens ?? 0),
         };
+        const cost = calcCostYuan(effectiveModel, { promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens, cachedTokens: u.cached_tokens });
+        if (cost == null) costKnown = false; else costYuanAcc += cost;
     };
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
@@ -392,9 +400,28 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 completionTokens: usageSum?.completion_tokens,
                 totalTokens: usageSum?.total_tokens,
                 cachedTokens: usageSum?.cached_tokens,
+                costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : undefined,
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
+        // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
+        //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
+        //   事件行先例），经 onUIEvent 直发；旁路 UI 绝不击垮收尾链路。
+        try {
+            if (depth === 0 && options.onUIEvent && usageSum) {
+                const prompt = usageSum.prompt_tokens ?? 0;
+                options.onUIEvent({
+                    type: 'run.receipt',
+                    rounds: round,
+                    promptTokens: prompt,
+                    completionTokens: usageSum.completion_tokens ?? 0,
+                    cachedTokens: usageSum.cached_tokens ?? 0,
+                    cacheHitRate: prompt > 0 ? (usageSum.cached_tokens ?? 0) / prompt : 0,
+                    costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
+                    durationMs: Math.round(performance.now() - startTime),
+                });
+            }
+        } catch { /* 结算单是旁路 UI，失败不影响收尾 */ }
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
         try {

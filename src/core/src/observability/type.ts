@@ -106,6 +106,10 @@ export type UIEvent =
      *  （整轮压缩白做 + 上下文原样超限）。批压缩启动前发 {done:0,total:N}，各批完成时按完成序递增；
      *  完成后由 compact.done 行收敛替换（前端删瞬态进度行）。门禁与 compact.done 一致：仅主 agent 且有出口。 */
     | { type: 'compact.progress'; done: number; total: number }
+    /** 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费（对标 CC /cost 的每 run 实时行版）。
+     *  只用 usage 真实回传数字按当时单价折算（官网价可对账）；无价模型 costYuan=null（前端只显 token 不显钱）。
+     *  门禁照 compact.done：仅主 agent（depth 0）且有 onUIEvent 出口；未产生推理的空 run（无 usageSum）不发零单。 */
+    | { type: 'run.receipt'; rounds: number; promptTokens: number; completionTokens: number; cachedTokens: number; cacheHitRate: number; costYuan: number | null; durationMs: number }
     /** 后台任务退出主动通知（对标 CC「Background command X failed」）：进程退出（含被杀）即发，
      *  不再依赖模型轮询 get_background_output。ok=exited 且 exitCode===0；killed=用户中止/手动停止。 */
     | { type: 'task.exit'; taskId: string; command: string; status: 'exited' | 'killed'; exitCode: number | null; ok: boolean }
