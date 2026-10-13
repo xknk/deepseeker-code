@@ -1,6 +1,7 @@
 /* vscode/src/webview/style.css — DeepSeeker-Code 聊天面板
  * 设计原则：地狱级克制 · Claude Code 终端美学 · 命令驱动
- *  - 全局背景透明，直接透出 var(--vscode-sideBar-background)
+ *  - body 自绘 var(--vscode-sideBar-background)（曾为透明透出宿主底色；钉顶块遮挡需要
+ *    「遮挡色=面板底色」恒成立，自绘同源变量由构造保证，主题/停靠位置不同也不出色差）
  *  - 零自定义彩色，边框统一 --vscode-input-border / --vscode-panel-border
  *  - 全局等宽字体 var(--vscode-editor-font-family), monospace
  *  - 输入区：一体化圆角盒子（状态摘要 + 输入行 + 斜杠命令菜单），无任何图形控件
@@ -39,8 +40,10 @@ body {
 }
 
 body {
-  /* ★ 全局透明：透出 VS Code 侧边栏背景 */
-  background: transparent;
+  /* ★ 不透明自绘底色（反馈：钉住块垫色与面板真实底色不一致，显出色差补丁）——webview 透明体
+     透出的是宿主画在面板后面的底色，随主题/停靠位置变，外部猜不准；自绘后「钉住遮挡色=面板底色」
+     由构造保证（同一个变量），任何主题都不会出补丁。 */
+  background: var(--vscode-sideBar-background, #252526);
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: var(--vscode-font-size, 12.5px);
@@ -415,6 +418,20 @@ body {
   height: 26px;
   background: linear-gradient(to bottom, var(--vscode-sideBar-background, #252526), transparent);
   pointer-events: none;
+}
+
+/* ★ 钉住态通栏（反馈：两侧各留 14px 边距特别丑，对标 CC 通栏钉住卡）：stuck 时左右负 margin
+   恰好抵消 #messages 的侧 padding，卡片贴到面板两缘；自然流不加（未钉住时通栏块反而突兀）。
+   ::after 渐变用 left/right:0 自动随行通栏。 */
+.row-user.stuck {
+  margin-left: -14px;
+  margin-right: -14px;
+}
+
+/* ↺ 徽标悬垂块角 9px，通栏后已到面板边缘，悬垂部分会被 overflow-x: hidden 裁成半圆——内收到块内 */
+.row-user.stuck .msg-undo {
+  top: 2px;
+  right: 2px;
 }
 
 .user-block {
