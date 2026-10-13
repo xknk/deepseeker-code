@@ -35,6 +35,8 @@ if (row.status === "running") row.startedAt = row.startedAt || Date.now();
 if (evt.kind === "thinking") row.expanded = false;
 // ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
 if (Array.isArray(evt.attachments)) row.attachments = evt.attachments;
+// ★ 逐消息撤回：host 贴的检查点 id（有 = 该行 hover 显 ↺；排队轮无检查点不显）
+if (evt.cpId) row.cpId = String(evt.cpId);
 appendRow(row);
 } else {
 if (evt.key) updateRow(evt.key, evt.patch || {});
@@ -246,6 +248,16 @@ switch (evt.type) {
         const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
         const trigger = evt.trigger === "manual" ? "手动" : "自动";
+        // ★ H1：水位环即时回落——快照按本次释放量同口径减量（不另造第二套估算），下轮 context.usage 校准回真值
+        if (state.contextUsage && freed > 0) {
+          const used = Math.max(0, state.contextUsage.usedTokens - freed);
+          state.contextUsage = {
+            ...state.contextUsage,
+            usedTokens: used,
+            fillRate: state.contextUsage.windowTokens > 0 ? used / state.contextUsage.windowTokens : 0,
+          };
+          syncContextRing();
+        }
         appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens · 下条消息将重建缓存`, summary: String(evt.summary ?? "") });
         break;
       }
@@ -272,6 +284,8 @@ function onMessage(msg) {
       if (msg.kind === "thinking") row.expanded = false;
       // ★ 多模态：用户行的贴图缩略图字段透传
       if (Array.isArray(msg.attachments)) row.attachments = msg.attachments;
+      // ★ 逐消息撤回：检查点 id 同透传（回放行与实时行同构）
+      if (msg.cpId) row.cpId = String(msg.cpId);
       appendRow(row);
       break;
     }

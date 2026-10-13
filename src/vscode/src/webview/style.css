@@ -189,6 +189,7 @@ body {
   flex-shrink: 0;
   margin-bottom: 2px; /* 与 bar 内胶囊/按钮同款光学对齐 */
   transform: rotate(-90deg); /* 弧起点定在 12 点方向 */
+  cursor: pointer; /* 点击 = 手动压缩（/compact 同路） */
 }
 
 .ctx-ring .ctx-ring-bg,
@@ -403,6 +404,40 @@ body {
   background: none;
   border: none;
   padding: 0;
+}
+
+/* ★ 逐消息撤回（对标 CC 消息级 ↺）：hover 用户行右上角显 ↺ 按钮；行带检查点 id 才渲染（rows.js）。 */
+.row-user {
+  position: relative;
+}
+
+.msg-undo {
+  position: absolute;
+  right: 0;
+  top: -3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0; /* 静默：不 hovering 不显形，零视觉噪音 */
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.row-user:hover .msg-undo {
+  opacity: 1;
+}
+
+.msg-undo:hover {
+  color: var(--fg);
+  background: rgba(128, 128, 128, 0.15);
 }
 
 /* 助手消息：CLI 同款 `● ` 前缀 */
@@ -1610,7 +1645,7 @@ body {
 .composer-bar-right {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px; /* 图标间距放宽（反馈：太挤）——细部件之间留呼吸位，胶囊/按钮自身内边距不变 */
 }
 
 .composer-prompt {

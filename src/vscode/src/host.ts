@@ -16,10 +16,11 @@ import { pushSessionInbox } from "@/agent/inbox.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { getOrCreateSessionId, listSessions, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
-import { readMessages, readTranscriptLines } from "@/session/transcript.ts";
+import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
 import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
-import { recordCheckpoint, listCheckpoints as listCheckpointsCore, rewindToCheckpoint as rewindToCheckpointCore, collectRewindFiles, restoreFilesForRewind, type Checkpoint, type RewindFilePlan } from "@/session/rewind.ts";
+import { recordCheckpoint, listCheckpoints as listCheckpointsCore, rewindToCheckpoint as rewindToCheckpointCore, collectRewindFiles, restoreFilesForRewind, checkpointIdByUserLine, type Checkpoint, type RewindFilePlan } from "@/session/rewind.ts";
+import { compactSessionNow } from "@/agent/truncate.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionRequest, IdeActionResult } from "@/host/type.ts";
@@ -73,8 +74,9 @@ const tryParseArgs = (raw: unknown): unknown => {
 /**
  * 轻量历史回放：把 transcript messages 转成 UI 行事件（type:"row" / type:"rowUpdate"）。
  * 与 cli/src/replay.ts 的 buildReplayRows 语义一致，但直接以事件流形式送出。
+ * cpByLine（行 id → 检查点 id，checkpointIdByUserLine 产物）：user 行贴 cpId，供逐消息 ↺ 撤回。
  */
-function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<string, unknown>) => void): void {
+function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<string, unknown>) => void, cpByLine?: Map<string, string>): void {
   const pending = new Map<string, string>(); // toolCallId -> row key
   let seq = 0;
   const nextKey = () => `replay-${++seq}`;
@@ -85,7 +87,10 @@ function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<str
       const text = msgText(m.content);
       const urls = imageUrlsOf(m.content);
       const attachments = urls.map((url, i) => ({ name: urls.length > 1 ? `图片${i + 1}` : "图片", dataUrl: url }));
-      if (text.trim() || attachments.length) sink({ type: "row", kind: "user", text, attachments, key: nextKey() });
+      if (text.trim() || attachments.length) {
+        const cpId = cpByLine?.get(String(m.id ?? ""));
+        sink({ type: "row", kind: "user", text, attachments, key: nextKey(), ...(cpId ? { cpId } : {}) });
+      }
     } else if (role === "assistant") {
       if (typeof m.reasoning_content === "string" && m.reasoning_content.trim()) {
         sink({ type: "row", kind: "thinking", text: m.reasoning_content, expanded: false, key: nextKey() });
@@ -366,9 +371,10 @@ export class ChatHost {
     if (this.sessionId == null) {
       this.setSessionId(await getOrCreateSessionId(undefined));
     }
-    // ★ C1：bang 输出也以 user 消息落 transcript——同样先记检查点（保证任意 user 落盘点前有边界）
-    await recordCheckpoint(this.sessionId!, cmd);
-    this.sink({ type: "row", kind: "user", text: raw, key: `u-${Date.now()}` });
+    // ★ C1：bang 输出也以 user 消息落 transcript——同样先记检查点（保证任意 user 落盘点前有边界）；
+    //   cpId 贴行：该行 ↺ 撤回按钮直达此边界（逐消息撤回，对标 CC）
+    const bangCpId = await recordCheckpoint(this.sessionId!, cmd);
+    this.sink({ type: "row", kind: "user", text: raw, key: `u-${Date.now()}`, ...(bangCpId ? { cpId: bangCpId } : {}) });
     const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
     const head = r.timedOut ? "⏱ 超时中止" : r.ok ? "✅ 退出码 0" : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : "❌ 已中止";
     this.sink({ type: "info", text: `${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || "(无输出)"}` });
@@ -407,9 +413,10 @@ export class ChatHost {
     }
     // ★ C1 Checkpoints：每轮用户消息发送【前】记检查点（transcript 当前边界 + 将发文本预览）。
     //   位置在 busy/inbox 分支之后：排队轮不记（回合边界送达时 runAgent 侧本轮已在上一检查点界内）。
-    await recordCheckpoint(this.sessionId!, text || (hasAtt ? "[图片消息]" : ""));
+    //   cpId 贴行：该行 ↺ 撤回按钮直达此边界（逐消息撤回，对标 CC 的消息级 rewind）。
+    const cpId = await recordCheckpoint(this.sessionId!, text || (hasAtt ? "[图片消息]" : ""));
     // user 行回显带缩略图（dataURL），与回放视图同构
-    this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}`, attachments: this.attachmentThumbs(attachments) });
+    this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}`, attachments: this.attachmentThumbs(attachments), ...(cpId ? { cpId } : {}) });
     if (this.planMode) {
       // 计划模式轮走只读调研管线（提示词由 host 拼装），附件无载体——如实告知，建议实现阶段再贴图
       if (hasAtt) this.sink({ type: "info", text: "🖼 计划模式暂不支持随调研轮贴图：图片未进入本轮上下文（退出计划模式后可直接发送）。" });
@@ -460,13 +467,17 @@ export class ChatHost {
     this.callbacks.onSessionReset();
   }
 
-  /** 载入历史会话续接：切换 id + 回放 transcript。 */
+  /** 载入历史会话续接：切换 id + 回放 transcript（user 行贴检查点 id，逐消息 ↺ 撤回用）。 */
   async loadSession(id: string): Promise<void> {
     this.setSessionId(id);
     this.callbacks.onSessionReset();
     try {
-      const msgs = (await readMessages(id)) as unknown as Array<Record<string, unknown>>;
-      emitReplay(msgs, this.callbacks.sink);
+      // 单次读盘同时喂回放与检查点配对（checkpointIdByUserLine 纯函数；同一 transcript 不读两遍）
+      const lines = await readTranscriptLines(id);
+      const cps = await listCheckpointsCore(id);
+      const cpByLine = checkpointIdByUserLine(lines, cps);
+      const msgs = lines.filter((l) => !isEventLine(l)) as unknown as Array<Record<string, unknown>>;
+      emitReplay(msgs, this.callbacks.sink, cpByLine);
     } catch {
       /* 无历史或读取失败 → 空回放，不阻塞 */
     }
@@ -554,6 +565,29 @@ export class ChatHost {
     const fileNote = fileLines.length ? `\n${fileLines.join("\n")}` : "";
     this.sink({ type: "info", text: `⏪ 已回滚到发送前（移除其后 ${r.removedLines} 行转录）。改写消息后重发即可。${fileNote}` });
     await this.loadSession(sid);
+  }
+
+  /** 手动压缩（成本信任链第三环 H1：水位环点击 / /compact，对齐 CC「Click to compact now」）。
+   *  busy 拒绝（压缩与生成共写 transcript/state）；compact.progress/compact.done 经 sink 直达 webview
+   *  （进度行→压缩行照常，水位环由 compact.done 消费处按释放量自调）；无压缩事实（空会话/本就健康）
+   *  时 info 行如实回显，绝不假装压过。 */
+  async compactNow(): Promise<void> {
+    if (this.busy) {
+      this.sink({ type: "info", text: "⏳ 生成中无法手动压缩，请先停止当前轮。" });
+      return;
+    }
+    const sid = this.sessionId;
+    if (!sid) {
+      this.sink({ type: "info", text: "当前无活动会话，无需压缩。" });
+      return;
+    }
+    try {
+      const r = await compactSessionNow({ sessionId: sid, onUIEvent: (evt: any) => this.sink(evt) });
+      if (r.empty) this.sink({ type: "info", text: "当前没有可压缩的历史消息。" });
+      else if (!r.compacted) this.sink({ type: "info", text: "✅ 上下文本就健康（免费折叠旧工具结果后已回到阈值内），无需摘要压缩。" });
+    } catch (e) {
+      this.sink({ type: "info", text: `⚠️ 手动压缩失败：${e instanceof Error ? e.message : String(e)}` });
+    }
   }
 
   /** 重命名会话：写 state.title（不动 sessionId/文件夹，transcript 路径稳定）。 */

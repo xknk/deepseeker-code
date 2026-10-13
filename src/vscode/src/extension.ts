@@ -717,6 +717,10 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         }
       })();
       break;
+    case "compactNow":
+      // ★ H1 手动压缩（成本信任链第三环）：水位环点击 / /compact——host 内部拒绝 busy、经 sink 回显
+      void h.compactNow();
+      break;
     case "bookmarkAdd": {
       // ★ B3：收藏常用 prompt（globalState 持久）。同文本去重（重复收藏只保留原条，新条插最前）。
       void (async () => {

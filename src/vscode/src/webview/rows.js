@@ -57,6 +57,24 @@ function buildRowEl(row) {
         }
         wrap.appendChild(box);
       }
+      // ★ 逐消息撤回（对标 CC 消息级 ↺）：行带检查点 id 时 hover 右上显 ↺——点击回滚到该消息发送前
+      //   （host 侧对话+文件 modal 照常弹），原文回填输入框可改写重发；排队轮无检查点不显。
+      if (row.cpId) {
+        const undo = document.createElement("button");
+        undo.className = "msg-undo";
+        undo.title = "撤回：回滚到此消息发送前（对话与文件可选），内容回填输入框可改写重发";
+        undo.innerHTML = '<span class="codicon codicon-discard"></span>';
+        undo.addEventListener("click", () => {
+          const inp = document.querySelector("#input");
+          if (inp && row.text) {
+            inp.value = row.text;
+            inp.dispatchEvent(new Event("input")); // 复用输入监听做 autoGrow/slash 菜单刷新
+            inp.focus();
+          }
+          vscode.postMessage({ type: "rewindToCheckpoint", id: row.cpId });
+        });
+        wrap.appendChild(undo);
+      }
       break;
     }
     case "assistant": {

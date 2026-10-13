@@ -128,6 +128,11 @@ export interface ensureOptions  {
      *  （前端消息流插「已压缩」淡色行，多批压缩期间先显示瞬态进度行防误中止）。
      *  未注入（headless / 子 agent 过滤在 emit 处）则跳过，零影响。 */
     onUIEvent?: (evt: UIEvent) => void,
+    /** 手动压缩（compactSessionNow）：健康会话也至少跑一遍压缩循环——入口阈值与免费衰减早退均跳过
+     *  （显式指令优先于自动治理的「不超不压」，对齐 CC /compact「压了才走」语义）。自动路径不传，零变化。 */
+    forceCompact?: boolean,
+    /** compact.done 的 trigger 标记（自动治理缺省 'auto'；手动压缩传 'manual'，前端压缩行据此显示「手动」）。 */
+    compactTrigger?: 'auto' | 'manual',
 }
 
 /**

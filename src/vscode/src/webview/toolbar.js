@@ -170,7 +170,7 @@ export function syncContextRing() {
   ring.classList.toggle("warn", fill >= 0.7 && fill < 0.9);
   ring.classList.toggle("hot", fill >= 0.9);
   ring.title = `上下文水位（估算口径）：${Math.round(cu.usedTokens).toLocaleString()} / ${Math.round(cu.windowTokens).toLocaleString()} tok（${Math.round(fill * 100)}%）`
-    + `${state.compactCount ? ` · 已压缩 ${state.compactCount} 次` : ""} · 详情 /context`;
+    + `${state.compactCount ? ` · 已压缩 ${state.compactCount} 次` : ""} · 点击立即压缩 · 详情 /context`;
 }
 
 /** 压缩发生：环上闪一次 + 环心短暂显示「×N」（N=会话级压缩计数）。环未显示（尚无水位数据）则只更新计数。 */

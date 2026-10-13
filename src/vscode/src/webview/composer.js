@@ -87,6 +87,10 @@ case "fork":
 toggleForkPanel();
 vscode.postMessage({ type: "listForkAnchors" });
 return true;
+case "compact":
+// ★ H1 手动压缩（水位环点击同一条路）：host compactNow——busy 拒绝、进度/压缩行走 sink 照常
+vscode.postMessage({ type: "compactNow" });
+return true;
 case "clear":
 clearMessages();
 return true;
@@ -237,6 +241,7 @@ const SLASH = [
 { cmd: "/sessions", hint: "选择并载入历史会话（续接对话）", arg: false },
 { cmd: "/fork", hint: "从当前会话的某轮回复处分叉出新会话", arg: false },
 { cmd: "/usage", hint: "查看 token 用量（主/子 agent、缓存命中、近 7 天使用日志）", arg: false, obs: true },
+{ cmd: "/compact", hint: "立即压缩当前会话上下文（同水位环点击）", arg: false },
 { cmd: "/budget", hint: "预算制运行：/budget 0.5 设置每 run 上限 · /budget off 关闭 · /budget 查看", arg: true, obs: true },
 { cmd: "/context", hint: "查看上下文窗口治理（阈值、填充率、已归档）", arg: false, obs: true },
 { cmd: "/permissions", hint: "查看已加载的权限规则（allow/ask/deny）", arg: false, obs: true },
@@ -465,6 +470,8 @@ doSend();
 const btnFile = $("#btn-file");
 // 模型胶囊：toggle 语义——未开弹选择器（host 回环带最新候选），已开就地关闭
 $("#btn-model").addEventListener("click", () => toggleModelPicker());
+// ★ H1 手动压缩入口（对齐 CC「Click to compact now」）：点水位环立即压缩当前会话
+$("#ctx-ring").addEventListener("click", () => vscode.postMessage({ type: "compactNow" }));
 const imageInput = $("#image-input");
 const attachMenu = $("#attach-menu");
 const closeAttachMenu = () => { if (attachMenu) attachMenu.style.display = "none"; };

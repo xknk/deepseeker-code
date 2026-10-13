@@ -16,7 +16,9 @@ import { appConfig } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import { msgText, degradeImagesForAux, collapseToText } from "@/session/contentParts.ts";
-import { decayOldToolResults } from "@/session/content.ts";
+import { decayOldToolResults, buildContextMessages } from "@/session/content.ts";
+import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
+import { activeProvider } from "@/llm/model.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
@@ -673,7 +675,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         ? event.lastCachedTokens / event.lastRealPromptTokens : null;
     const cacheFactor = hitRate == null ? 1.0 : Math.min(1.1, Math.max(0.9, 0.9 + hitRate * 0.2));
     const effectiveRatio = Math.min(event.compactRatio * cacheFactor, 0.82);
-    if (estReal(event.messageArr) <= event.modelWindow * effectiveRatio) return;
+    if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) return;
     // ★ 压缩前免费衰减（2026-09-15）：超阈值先试零 LLM 成本的旧工具结果折叠（与跨 run 重建同款
     //   decayOldToolResults：保留最近 KEEP_RECENT_UNITS 个对话单元全文，更早单元的超长 tool content
     //   截头+折叠提示、老图占位）。旧 tool 结论早已被后续 assistant 消化，折叠信息损失有界；降回
@@ -687,7 +689,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         event.messageArr.length = 0;
         event.messageArr.push(...decayedArr);
     }
-    if (estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
+    if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
         console.log(`📉 [窗口治理] 免费衰减（旧工具结果折叠）后回到阈值内（${Math.round(preDecaySize)} → ${Math.round(estReal(event.messageArr))} token），跳过 LLM 压缩`);
         return;
     }
@@ -701,9 +703,12 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     const preCompactSize = Math.round(lastSize); // 压缩前快照（compact.done 的 tokensBefore；lastSize 循环内会滚动更新）
     const startTime = performance.now();
     let round = 0
+    // ★ 手动压缩：至少强制跑一遍压缩循环（健康会话 lastSize 本就低于阈值，普通条件一轮都不进 = 点了没反应）
+    let forcedPass = event.forceCompact === true;
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
     //   唯一的 continue 分支（keep--）不修改 messageArr，故 lastSize 始终与实际 token 量一致。省一次全量扫描/轮。
-    while (lastSize > event.modelWindow * effectiveRatio) {
+    while (forcedPass || lastSize > event.modelWindow * effectiveRatio) {
+        forcedPass = false;
         if (event.signal?.aborted) {
             return
         }; // 是否停止
@@ -845,7 +850,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 tokensBefore: preCompactSize,
                 tokensAfter: afterSize,
                 durationMs: Math.round(performance.now() - startTime),
-                trigger: 'auto',
+                trigger: event.compactTrigger ?? 'auto',
                 summary,
             });
         }
@@ -860,4 +865,48 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         throw new Error(`上下文超出模型窗口上限（校准约 ${Math.round(finalTokens)} / ${event.modelWindow} token，兜底 ${hardLimitRatio}×window），即使全量压缩仍无法容纳。任务过大，请拆分任务、减小单次读取量，或增大 modelWindow。`);
     }
 }
+
+/**
+ * 手动压缩（成本信任链第三环 H1：水位环点击立即压缩；CLI /compact 同源可复用）：
+ * 复用 ensureFitsWindow 全套机器（免费衰减 → PreCompact → 批量摘要 → persistCompaction 落盘），
+ * 仅三处不同——① forceCompact：健康会话也至少压一遍（显式指令优先于自动治理的「不超不压」）；
+ * ② compactTrigger:'manual'：compact.done 标记手动，前端压缩行显示「手动」；
+ * ③ 不附加新消息（buildContextMessages 传 null）。系统提示词仅参与内存态 token 估算、不落盘
+ * （压缩持久化事实只有 rollingSummary + archivedMessageCount），故用裸 buildSystemPrompt 即可。
+ * compact.progress / compact.done 经 onUIEvent 原样下发（webview 进度行/压缩行/水位环照常消费）。
+ * @returns compacted=true=确有压缩（compact.done 已发）；empty=true=无活动消息可压（仅 system+摘要槽）。
+ * @throws 压缩熔断（连败 3 次）等——与 ensureFitsWindow 同源抛出，调用方 catch 后 info 行回显。
+ */
+export const compactSessionNow = async (opts: {
+    sessionId: string;
+    onUIEvent?: (evt: UIEvent) => void;
+    signal?: AbortSignal;
+    events?: RunAgentEvents;
+}): Promise<{ compacted: boolean; empty: boolean }> => {
+    const sysPrompt = buildSystemPrompt(activeProvider);
+    const msgs = await buildContextMessages(opts.sessionId, null, sysPrompt);
+    if (msgs.length <= 2) return { compacted: false, empty: true }; // 仅 system+摘要槽，无活动消息
+    let compacted = false;
+    const wrappedUI = (evt: UIEvent): void => {
+        if (evt.type === 'compact.done') compacted = true;
+        opts.onUIEvent?.(evt);
+    };
+    // 校准系数用持久化 EMA（与 runAgent 启动同源），无历史回落 1.4；不入请求故 schema 常数不参与判定
+    const store = await getRollingState(opts.sessionId);
+    await ensureFitsWindow({
+        sessionId: opts.sessionId,
+        depth: 0,
+        messageArr: msgs,
+        modelWindow: appConfig.MAX_HISTORY_TOKENS,
+        keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
+        compactRatio: appConfig.COMPACT_RATIO, // 兜底硬限照常派生；「必压」语义由 forceCompact 承担
+        correctionRatio: store.calibRatio ?? 1.4,
+        forceCompact: true,
+        compactTrigger: 'manual',
+        events: opts.events ?? (async () => {}),
+        onUIEvent: wrappedUI,
+        signal: opts.signal,
+    });
+    return { compacted, empty: false };
+};
 

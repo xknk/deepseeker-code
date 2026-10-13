@@ -20,7 +20,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { createUUID, assertSafeSessionId } from "@/common/index.ts";
-import { readTranscriptLines, isEventLine, resetAppendSizeWatermark } from "./transcript.ts";
+import { readTranscriptLines, isEventLine, resetAppendSizeWatermark, type TranscriptLine } from "./transcript.ts";
 import { getSessionsDirPath, getTranscriptPath, ensureSessionsDir, readStore, writeStore } from "./store.ts";
 import { readUndoIndex, markRestored } from "@/tool/undo/index.ts";
 import { restoreForRewind } from "@/tool/undo/restore.ts";
@@ -57,26 +57,49 @@ const writeCheckpoints = async (sessionId: string, list: Checkpoint[]): Promise<
 
 /**
  * 记录检查点：host 在用户消息落盘【前】调用（每轮一次）。preview = 将发送文本首行截断。
- * 失败只 warn 不抛（检查点是锦上添花，绝不阻断发送）。
+ * @returns 本次生效的检查点 id（新建或同边界去重命中的既有条目）；失败返回 null
+ * （检查点是锦上添花，绝不阻断发送——宿主把 id 贴到 user 行供逐消息撤回按钮用）。
  */
-export const recordCheckpoint = async (sessionId: string, preview: string): Promise<void> => {
+export const recordCheckpoint = async (sessionId: string, preview: string): Promise<string | null> => {
     try {
         const lines = await readTranscriptLines(sessionId);
         const rawLast = lines.length ? String((lines[lines.length - 1] as any)?.id ?? "") : "";
         const lastLineId = rawLast || null;
         const list = await readCheckpoints(sessionId);
         const last = list[list.length - 1];
-        if (last && last.lastLineId === lastLineId) return; // 同边界连续去重
-        list.push({
+        if (last && last.lastLineId === lastLineId) return last.id; // 同边界连续去重
+        const cp: Checkpoint = {
             id: `cp-${createUUID()}`,
             lastLineId,
             preview: preview.split("\n")[0].slice(0, 120),
             ts: new Date().toISOString(),
-        });
+        };
+        list.push(cp);
         await writeCheckpoints(sessionId, list);
+        return cp.id;
     } catch (e) {
         console.warn(`⚠️ [rewind] 检查点记录失败（不影响本轮发送）:`, e instanceof Error ? e.message : e);
+        return null;
     }
+};
+
+/**
+ * 每条 user 消息行 → 检查点 id 映射（行 id → cpId；纯函数零 IO）。
+ * 检查点记在 user 消息落盘【前】，其 lastLineId 即该消息的前一转录行 id——按此精确配对；
+ * 首条消息的检查点 lastLineId=null ↔ 空边界（键 ""）。排队轮（inbox steering）不记检查点，
+ * 对应行无映射（宿主侧该 user 行不显撤回按钮）。回放贴 cpId 用：逐消息 ↺ 撤回（对标 CC）。
+ */
+export const checkpointIdByUserLine = (lines: TranscriptLine[], checkpoints: Checkpoint[]): Map<string, string> => {
+    const byBoundary = new Map<string, string>();
+    for (const c of checkpoints) if (!byBoundary.has(c.lastLineId ?? "")) byBoundary.set(c.lastLineId ?? "", c.id);
+    const out = new Map<string, string>();
+    for (let i = 0; i < lines.length; i++) {
+        const l: any = lines[i];
+        if (isEventLine(l) || l?.role !== "user") continue;
+        const cpId = byBoundary.get(i > 0 ? String(lines[i - 1]?.id ?? "") : "");
+        if (cpId && typeof l.id === "string") out.set(l.id, cpId);
+    }
+    return out;
 };
 
 /** 枚举检查点（保序：旧 → 新；面板按此序展示，末尾提示「此检查点之后无新检查点」）。 */

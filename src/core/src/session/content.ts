@@ -81,8 +81,9 @@ const enforceVisionGate = (msgs: Msg[], modelId?: string): Msg[] => isVisionEnab
  * - modelId：本轮生效模型名（chatProcessing 传宿主 /model 覆盖、subagent 传 manifest.model，
  *   缺省回退全局 MODEL_NAME）——vision 重建闸门与实际发请求的模型（opts.model ?? MODEL_NAME）同源。
  * 必须在 appendMessage(本次user) 之前调用，否则本次 user 被重复读入。
+ * currentUserMsg 传 null = 不附加本轮消息（手动压缩 compactSessionNow 用：只压既有历史）。
  */
-export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg, systemPrompt: string, modelId?: string) => {
+export const buildContextMessages = async (sessionId: string, currentUserMsg: Msg | null, systemPrompt: string, modelId?: string) => {
     await ensureVisionCacheLoaded();   // vision 判定（enforceVisionGate）前关掉能力缓存启动竞态窗口
     const lines = await readTranscriptLines(sessionId);
     const store = await getRollingState(sessionId);
@@ -109,7 +110,7 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     const archivedMessageCount = recovery.compaction.archivedMessageCount // reconcile 裁决后仍以 state 为准（slice 执行闸门）
     const messageAll = all.slice(archivedMessageCount)
     if (messageAll.length === 0) {
-        result.push(currentUserMsg)
+        if (currentUserMsg) result.push(currentUserMsg)
         return enforceVisionGate(result, modelId)
     }
     // ★ 先 slice 后 repair（顺序不可换）：孤儿占位行会插入消息流，若先修后切会移位归档计数基准。
@@ -117,6 +118,6 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
     //   repair 后再入 decayOldToolResults 衰减（assistant 文本/方案不衰减，仅旧 tool content 截断）。
     const repair = repairOrphanToolCalls(messageAll, recovery.interruption.kind === 'crashed')
     result.push(...decayOldToolResults(repair.msgs))
-    result.push(currentUserMsg);
+    if (currentUserMsg) result.push(currentUserMsg);
     return enforceVisionGate(result, modelId);
 }
