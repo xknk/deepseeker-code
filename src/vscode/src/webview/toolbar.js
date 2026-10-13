@@ -154,16 +154,20 @@ document.addEventListener("click", (e) => {
 // ★ H2 cost-pill 已撤（2026-10-13）：花费在消息流结算单行已可见，底栏不再显钱；风格上裸 SVG 环与
 //   codicon 图标混排违和。健康态环与图标同灰同重，仅告警（橙/红）才上色。
 const RING_CIRC = 2 * Math.PI * 7; // 水位环弧长基数（r=7，与 composer 模板里 viewBox 一致）
+// 显示临界点：水位 <50% 不显环（对标 CC 低水位才出现——上下文充裕时无事可提醒，不占底栏位）；
+// 出现后 70% 转橙 / 90% 转红。手动压缩后释放量大时会自动落回临界点以下 → 环自动消失（天然「解除警报」）。
+const RING_SHOW_AT = 0.5;
 let ringFlashTimer = null;
 
-/** 水位环：弧长=填充率；健康(<70%)与图标同灰不抢眼，橙(70~90%)/红(>90%)才上色；无快照时隐藏。 */
+/** 水位环：填充≥50% 才显示；健康(<70%)与图标同灰不抢眼，橙(70~90%)/红(>90%)才上色。 */
 export function syncContextRing() {
   const ring = $("#ctx-ring");
   if (!ring) return;
   const cu = state.contextUsage;
   if (!cu || !(cu.windowTokens > 0)) { ring.style.display = "none"; return; }
-  ring.style.display = "";
   const fill = Math.max(0, Math.min(1, Number(cu.fillRate) || 0));
+  if (fill < RING_SHOW_AT) { ring.style.display = "none"; return; }
+  ring.style.display = "";
   const arc = ring.querySelector(".ctx-ring-arc");
   if (arc) arc.style.strokeDasharray = `${fill * RING_CIRC} ${RING_CIRC}`;
   ring.classList.toggle("ok", fill < 0.7);
