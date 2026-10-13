@@ -13,7 +13,7 @@ import {
   appendRefChip, clearPendingRefs,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
-import { syncToolbar } from "./toolbar.js";
+import { syncToolbar, syncContextRing, flashCompactRing, syncCostPill } from "./toolbar.js";
 import { renderApproval, renderQuestion, renderPlan, openModelPicker } from "./modals.js";
 import { renderSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./panels.js";
 import { updateSlashMenu, updateAtMenu } from "./composer.js";
@@ -122,6 +122,17 @@ switch (evt.type) {
         renderTodos();
         break;
       }
+      case "context.usage": {
+        // ★ H1 上下文水位（成本信任链第三环）：镜像快照刷水位环（绿/橙/红分级在 syncContextRing 内）。
+        //   生成中照常更新（不依赖 busy 态）；纯旁路事件，不进消息流。
+        state.contextUsage = {
+          usedTokens: Number(evt.usedTokens) || 0,
+          windowTokens: Number(evt.windowTokens) || 0,
+          fillRate: Number(evt.fillRate) || 0,
+        };
+        syncContextRing();
+        break;
+      }
       case "tool.denied": {
         flush();
         addInfo(`🚫 ${String(evt.toolName ?? "")} 被拒绝`);
@@ -199,6 +210,9 @@ switch (evt.type) {
         addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${evt.budgetTruncated ? " · 预算截断" : ""}`);
         state.lastRunCostYuan = cost ?? undefined;
         state.sessionCostYuan = cost != null ? (state.sessionCostYuan || 0) + cost : state.sessionCostYuan;
+        // ★ H2 cost-pill（成本信任链第三环）：命中率入 state 刷胶囊（无价模型只显命中率不显钱）
+        state.lastRunCacheHitRate = typeof evt.cacheHitRate === "number" ? evt.cacheHitRate : undefined;
+        syncCostPill();
         break;
       }
       case "task.exit": {
@@ -228,9 +242,12 @@ switch (evt.type) {
       }
       case "compact.done": {
         // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 压缩完成且确有释放时，消息流插淡色斜体一行；
-        //   附 re-cache 提示；归档摘要随行存储，点击行可展开（Show more）
+        //   附 re-cache 提示；归档摘要随行存储，点击行可展开（Show more）。
+        //   H1：会话级压缩计数在此累加（spec：计数器在消费处累加）+ 水位环闪一次、环心显「×N」。
         closeStreaming();
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 进度瞬态行收敛替换
+        state.compactCount += 1;
+        flashCompactRing();
         const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
         const trigger = evt.trigger === "manual" ? "手动" : "自动";
@@ -327,6 +344,12 @@ function onMessage(msg) {
       clearPendingRefs();     // ★ B1：跨会话清空未发送文件引用，防串会话
       state.lastRunCostYuan = undefined; // ★ 结算单累计随会话清零（跨会话花费看 /usage，不串账）
       state.sessionCostYuan = undefined;
+      // ★ HUD 态同属会话：水位/压缩计数/命中率清零，环与胶囊随之隐藏
+      state.contextUsage = null;
+      state.compactCount = 0;
+      state.lastRunCacheHitRate = undefined;
+      syncContextRing();
+      syncCostPill();
       break;
     case "imageSaved": {
       // extension 已把图片存到工作区临时目录：路径只回填到待发附件（submit 随 attachments 上送，

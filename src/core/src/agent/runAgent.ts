@@ -93,6 +93,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //   回灌的花费。与 costYuanAcc（receipt/usageLog 落盘口径=run 自身）刻意分账——子 run 花费若并入落盘
     //   costYuan，读侧按 depth 拆分时会同笔钱计两次；预算是控制面，落盘是计量面，各记各的。
     let budgetSpentYuan = 0;
+    // ★ 本 run 压缩计数（成本信任链第三环 H1，context.usage.compactCount 用）：经 ensureFitsWindow 的
+    //   onUIEvent 旁路数 compact.done（不改 truncate 本体）；会话级累计由前端在 compact.done 消费处自加。
+    let runCompactCount = 0;
     // ★ P1-2：给 nudge 调度器传上下文用量闭包（惰性——闭包仅在调度器真正要发 NUDGE/REPEAT nudge 的轮内
     //   被调用，pickNudge 每轮都调、不能每轮全量扫描 estimateTokens）。口径与 ensureFitsWindow 的 estReal
     //   同公式（estimateTokens × calibRatio + toolsTokens），nudge 文案里标「估算」；calibRatio 是跨轮 EMA，
@@ -113,6 +116,20 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const readTracker = new Map<string, { mtimeMs: number; count: number }>();
     const userDecisionSource = depth > 0 ? 'spawn_agent' : 'user'
     const llmDecisionSource = depth > 0 ? 'llm_spawn_agent' : 'llm'
+    // ★ 上下文水位透出（成本信任链第三环 H1）：每轮 round.end 发一次（门禁仅主 agent 且有出口）。
+    //   口径与 nudge 的 getContextUsage 同公式（estimateTokens×calibRatio+toolsTokens）——勿在此再发明
+    //   第二套估算；fillRate 除数防御 0。零改动 message 数组，纯旁路 UIEvent（前缀缓存纪律）。
+    const emitContextUsage = (): void => {
+        if (depth !== 0 || !options.onUIEvent) return;
+        const usedTokens = Math.round(estimateTokens(message) * calibRatio + toolsTokens);
+        options.onUIEvent({
+            type: 'context.usage',
+            usedTokens,
+            windowTokens: modelWindow,
+            fillRate: modelWindow > 0 ? usedTokens / modelWindow : 0,
+            compactCount: runCompactCount,
+        });
+    };
 
     const startTime = performance.now();
     // ★ 估算校准 + 缓存感知压缩状态（跨轮维护）：
@@ -231,7 +248,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         lastRealPromptTokens,
                         lastCachedTokens,
                         toolsTokens,
-                        onUIEvent: options.onUIEvent,
+                        // ★ H1：旁路数 compact.done 供 context.usage.compactCount（透传不拦截）
+                        onUIEvent: (evt) => { if (evt.type === 'compact.done') runCompactCount++; options.onUIEvent?.(evt); },
                     }
 
                 );
@@ -313,6 +331,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ 事件日志化：本轮 assistant 已落盘、无工具调用（无待 flush 项）→ round 完整闭合。
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
                 await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                emitContextUsage();
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
@@ -385,6 +404,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // ★ 事件日志化：本轮 assistant + 全部 tool 结果已完整 flush → round 闭合（两条正常路径都写：
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+            emitContextUsage();
         }
     } catch (toolErr) {
         // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all

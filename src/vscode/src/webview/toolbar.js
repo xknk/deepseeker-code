@@ -146,3 +146,55 @@ document.addEventListener("click", (e) => {
       }
     }
   });
+
+// ———————— 成本信任链第三环 HUD（H1 上下文水位环 + H2 cost-pill） ————————
+// 数据源：context.usage（runAgent 每轮 round.end 旁路 UIEvent）/ compact.done（压缩计数在消费处累加）
+// / run.receipt（花费+命中率累计）。全为展示层旁路，零依赖 busy 态（生成中照常更新）。
+const RING_CIRC = 2 * Math.PI * 7; // 水位环弧长基数（r=7，与 composer 模板里 viewBox 一致）
+let ringFlashTimer = null;
+
+/** 水位环：弧长=填充率，颜色分级 绿(<70%)/橙(70~90%)/红(>90%)；无快照时隐藏（0% 不meaningless显示）。 */
+export function syncContextRing() {
+  const ring = $("#ctx-ring");
+  if (!ring) return;
+  const cu = state.contextUsage;
+  if (!cu || !(cu.windowTokens > 0)) { ring.style.display = "none"; return; }
+  ring.style.display = "";
+  const fill = Math.max(0, Math.min(1, Number(cu.fillRate) || 0));
+  const arc = ring.querySelector(".ctx-ring-arc");
+  if (arc) arc.style.strokeDasharray = `${fill * RING_CIRC} ${RING_CIRC}`;
+  ring.classList.toggle("ok", fill < 0.7);
+  ring.classList.toggle("warn", fill >= 0.7 && fill < 0.9);
+  ring.classList.toggle("hot", fill >= 0.9);
+  ring.title = `上下文水位（估算口径）：${Math.round(cu.usedTokens).toLocaleString()} / ${Math.round(cu.windowTokens).toLocaleString()} tok（${Math.round(fill * 100)}%）`
+    + `${state.compactCount ? ` · 已压缩 ${state.compactCount} 次` : ""} · 详情 /context`;
+}
+
+/** 压缩发生：环上闪一次 + 环心短暂显示「×N」（N=会话级压缩计数）。环未显示（尚无水位数据）则只更新计数。 */
+export function flashCompactRing() {
+  const ring = $("#ctx-ring");
+  if (!ring) return;
+  const countEl = ring.querySelector(".ctx-ring-count");
+  if (countEl) countEl.textContent = `×${state.compactCount}`;
+  if (ring.style.display === "none") return;
+  ring.classList.remove("flash");
+  void ring.getBoundingClientRect(); // 强制 reflow 重启 CSS 动画
+  ring.classList.add("flash");
+  if (ringFlashTimer) clearTimeout(ringFlashTimer);
+  ringFlashTimer = setTimeout(() => ring.classList.remove("flash"), 2400);
+}
+
+/** cost-pill：本会话累计花费 + 最近 run 缓存命中率；无价模型只显命中率不显钱（null 语义，绝不编数）。 */
+export function syncCostPill() {
+  const pill = $("#cost-pill");
+  if (!pill) return;
+  const cost = state.sessionCostYuan;
+  const hit = state.lastRunCacheHitRate;
+  if (cost == null && hit == null) { pill.style.display = "none"; return; }
+  pill.style.display = "";
+  const parts = [];
+  if (typeof cost === "number") parts.push(`¥${cost.toFixed(cost < 0.005 ? 4 : 3)}`);
+  if (typeof hit === "number") parts.push(`命中 ${Math.round(hit * 100)}%`);
+  const label = $("#cost-pill-label");
+  if (label) label.textContent = parts.join(" · ");
+}

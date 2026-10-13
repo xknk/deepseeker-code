@@ -37,6 +37,11 @@ export interface StatusLineContext {
     last_run_cost_yuan?: number;
     /** 本会话累计花费（元；run.receipt 逐 run 累加，会话切换清零。undefined 同上）。 */
     session_cost_yuan?: number;
+    /** 最近一次 run 缓存命中率（0~1；成本信任链 H3。undefined=尚无 run，自动省略该键）。 */
+    last_run_cache_hit_rate?: number;
+    /** 上下文水位快照（成本信任链 H3；context.usage 事件最后值。undefined=尚无数据，自动省略该键）。
+     *  usedTokens 为估算口径（与压缩判定同公式，非 API 真实值）。 */
+    context?: { used_tokens: number; window_tokens: number; fill_rate: number };
 }
 
 const STATUSLINE_TIMEOUT_MS = 3000;

@@ -14,6 +14,9 @@ import { getTraceStorePath } from "@/observability/store.ts";
 import { readUsageRecords, summarizeUsage, topTools } from "@/observability/usageLog.ts";
 import { calcCostYuan, priceFor } from "@/config/prices.ts";
 import { getRollingState } from "@/session/store.ts";
+import { getToolOutputSidecarDir } from "@/session/sidecar.ts";
+import { parseSummarySlot } from "@/agent/truncate.ts";
+import { getRecallHitCount } from "@/tool/registry/recall.ts";
 import { MODEL_NAME, AUX_MODEL_NAME } from "@/llm/createModel.ts";
 
 const CWD = process.cwd();
@@ -113,7 +116,7 @@ export const inspectUsage = async (sessionId: string): Promise<string> => {
     return lines.join("\n");
 };
 
-/** /context：当前上下文窗口治理参数 + 最近一轮 prompt token + 已归档条数。 */
+/** /context：当前上下文窗口治理参数 + 最近一轮 prompt token + 已归档条数 + 归档资产三键（H3）。 */
 export const inspectContext = async (sessionId: string): Promise<string> => {
     const trace = await readTrace(sessionId);
     // 最近一次带 usage 的响应 = 最近上下文规模
@@ -123,7 +126,19 @@ export const inspectContext = async (sessionId: string): Promise<string> => {
         if (typeof u === "number") { lastPrompt = u; break; }
     }
     let archived = 0;
-    try { archived = (await getRollingState(sessionId)).archivedMessageCount ?? 0; } catch { /* ignore */ }
+    let archivedEntities = 0;
+    try {
+        const rolling = await getRollingState(sessionId);
+        archived = rolling.archivedMessageCount ?? 0;
+        // H3 归档实体数：摘要槽 ⟦DSC:ARCHIVE-INDEX⟧ 段的确定性解析（parseSummarySlot 与写入侧同源，勿在此重写解析）
+        archivedEntities = parseSummarySlot(rolling.rollingSummary ?? "").index.length;
+    } catch { /* ignore */ }
+    // H3 侧车存档条数：tool-outputs 目录 .txt 计数（目录不存在=0，不报错）
+    let sidecarCount = 0;
+    try {
+        sidecarCount = (await fs.promises.readdir(getToolOutputSidecarDir(sessionId)))
+            .filter((f) => f.endsWith(".txt")).length;
+    } catch { /* ignore */ }
     const window = appConfig.MAX_HISTORY_TOKENS;
     const ratio = appConfig.COMPACT_RATIO;
     const threshold = Math.round(window * ratio);
@@ -133,6 +148,9 @@ export const inspectContext = async (sessionId: string): Promise<string> => {
         `  窗口上限: ${fmt(window)}  | 压缩阈值: ${fmt(threshold)}（${ratio}×）  | 保留最近: ${appConfig.KEEP_RECENT_UNITS} 对话单元`,
         `  最近 prompt: ${lastPrompt ? fmt(lastPrompt) : "（尚无）"}${fillRate ? `（占窗口 ${fillRate}%）` : ""}`,
         `  已归档(压缩)消息条数: ${archived}`,
+        `  本会话已归档实体: ${archivedEntities} 个（摘要槽索引）`,
+        `  召回命中: ${getRecallHitCount(sessionId)} 次（recall 工具，本次进程内计数）`,
+        `  侧车存档: ${sidecarCount} 条（超长工具结果原文，recall with_full 取回）`,
         `  超过阈值即触发滚动压缩；fillRate 接近 ${Math.round(ratio * 100)}% 时即将压缩。`,
     ].join("\n");
 };

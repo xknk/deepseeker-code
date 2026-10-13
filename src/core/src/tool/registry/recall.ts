@@ -74,6 +74,12 @@ const snippetAround = (text: string, re: RegExp, maxChars: number): string => {
     return `${headMark}${slice}${tailMark}`;
 };
 
+// ★ 会话级召回命中计数（成本信任链第三环 H3，/context「召回命中 M 次」用）：最小侵入模块级计数——
+//   只记 query 检索命中（blocks>0）的调用次数，with_full 取档不计（那是读存档不是召回）。
+//   进程内存活即可（/context 展示口径标注「本次进程内」），不做持久化（加存储换零决策价值）。
+const recallHitCounts = new Map<string, number>();
+export const getRecallHitCount = (sessionId: string): number => recallHitCounts.get(sessionId) ?? 0;
+
 /** 会话历史召回工具集（recall，详见上方 @file 说明）。 */
 export const recallTools: CustomTool[] = [
     {
@@ -179,6 +185,7 @@ export const recallTools: CustomTool[] = [
                             "· 多关键词用 is_regex=true 以 | 合并扩大匹配",
                             "· 记得归档区在摘要槽之前的更早轮次——用更早阶段出现过的词"].join('\n');
                     }
+                    recallHitCounts.set(ctx.sessionId, (recallHitCounts.get(ctx.sessionId) ?? 0) + 1); // H3 /context 召回命中计数
                     return [`[recall] 本会话全量转录命中 ${blocks.length} 条（按时间旧→新，含已归档消息）：`, '', blocks.join('\n\n'), '',
                         '提示：⚠️ 标注的文件必须重新 read_file 验证后才能据以修改；本工具结果仅作历史线索，不替代当前文件状态。'].join('\n');
                 } catch (e) {

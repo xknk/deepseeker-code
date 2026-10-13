@@ -217,6 +217,26 @@ settings.json 完整示例（代码真正消费的字段）：
 }
 ```
 
+状态栏脚本示例（费用 + 缓存命中率 + 上下文水位拼一行，可复制即用）——stdin 收到的 JSON 含
+`last_run_cost_yuan` / `session_cost_yuan` / `last_run_cache_hit_rate` / `context.fill_rate`
+（成本信任链字段，尚无数据时自动省略该键）：
+
+```bash
+#!/usr/bin/env bash
+# ~/.deepseeker-code/statusline.sh — 深度适配版：💰 会话 ¥x.xx · 命中 71% · 水位 42%
+read -r ctx
+node -e '
+const c = JSON.parse(process.argv[1]);
+const p = [];
+if (typeof c.session_cost_yuan === "number") p.push(`💰 ¥${c.session_cost_yuan.toFixed(3)}`);
+if (typeof c.last_run_cache_hit_rate === "number") p.push(`命中 ${Math.round(c.last_run_cache_hit_rate * 100)}%`);
+if (c.context) p.push(`水位 ${Math.round(c.context.fill_rate * 100)}%`);
+console.log(p.join(" · "));
+' "$ctx"
+```
+
+> 水位为估算口径（与自动压缩判定同公式）；钱的数字来自 usage 真实回传按官方价折算，无价模型不显钱。
+
 MCP 配置（`mcp.json`，独立文件）：
 
 ```jsonc

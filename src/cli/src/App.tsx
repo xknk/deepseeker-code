@@ -156,13 +156,15 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 workspace: { current_dir: CWD, project_dir: CWD },
                 last_run_cost_yuan: state.getLastRunCostYuan(), // 结算单（成本信任链 D3）：undefined 自动省略键
                 session_cost_yuan: state.getSessionCostYuan(),
+                last_run_cache_hit_rate: state.getLastRunCacheHitRate(), // H3：undefined 自动省略键
+                context: state.getLastContextUsage(), // H3 水位：undefined 自动省略键
             };
             const text = await runStatusLine(cfg, ctx);
             if (text) setStatusLineText(text); // 仅非空更新；出错/超时返回 "" → 保留上次好值
         } finally {
             statusLineRunRef.current = false;
         }
-    }, [modelDisplay, state.busy, state.aborting, state.getPlanMode, state.getAutoMode, state.getOutputStyle, state.sessionIdRef, state.getLastRunCostYuan, state.getSessionCostYuan]);
+    }, [modelDisplay, state.busy, state.aborting, state.getPlanMode, state.getAutoMode, state.getOutputStyle, state.sessionIdRef, state.getLastRunCostYuan, state.getSessionCostYuan, state.getLastRunCacheHitRate, state.getLastContextUsage]);
     const refreshStatusLineRef = useRef(refreshStatusLine);
     refreshStatusLineRef.current = refreshStatusLine;
     // 挂载时加载配置并首刷

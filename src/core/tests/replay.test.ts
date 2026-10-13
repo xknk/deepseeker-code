@@ -390,3 +390,27 @@ describe("runAgent harness 回归（PHANTOM / EARLY_FINAL / TOOL_DIGEST / repeat
         assert.equal(replayRun.events.filter((e: any) => e.type === 'text.delta').length > 0, true);
     });
 });
+
+// ============ 4) context.usage 水位事件（成本信任链第三环 H1） ============
+
+describe("context.usage 水位事件（H1）", () => {
+    it("每轮 round.end 发一次（depth=0），usedTokens>0、fillRate∈(0,1]、compactCount 从 0 起", async () => {
+        const { ret } = await withReplay({
+            turns: [{ kind: 'reply', content: '已完成：这是最终答案，无需工具。' }],
+        }, async () => {
+            const [message, opts] = makeAgentArgs('直接给出答案就好', 'hr-ctxusage-1');
+            const ui: any[] = [];
+            const events: any[] = [];
+            for await (const ev of runAgent(message, { ...opts, onUIEvent: (e: any) => ui.push(e) })) events.push(ev);
+            return { events, ui };
+        });
+        const ctx = ret.ui.filter((e: any) => e.type === 'context.usage');
+        assert.equal(ctx.length, 1, '单轮 run 恰发一次（round.end 时点）');
+        assert.equal(ctx[0].windowTokens, 250000, 'windowTokens = options.modelWindow');
+        assert.ok(ctx[0].usedTokens > 0, 'usedTokens 应 > 0（估算口径）');
+        assert.ok(ctx[0].fillRate > 0 && ctx[0].fillRate <= 1, 'fillRate ∈ (0,1]');
+        assert.equal(ctx[0].compactCount, 0, '未压缩 run 计数为 0');
+        const finals = ret.events.filter((e: any) => e.type === 'final');
+        assert.equal(finals.length, 1, 'run 正常收尾');
+    });
+});

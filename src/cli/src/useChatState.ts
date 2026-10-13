@@ -127,6 +127,10 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const sessionCostRef = useRef<number | undefined>(undefined);
     /** 本主 run 花费预算上限（元；/budget 设置，成本信任链第二环 E1。undefined=不限，跨会话保留同 planMode）。 */
     const budgetYuanRef = useRef<number | undefined>(undefined);
+    /** 最近一次 run 缓存命中率（0~1；receipt 随事件缓存，statusline last_run_cache_hit_rate 用，成本信任链 H3）。 */
+    const lastRunCacheHitRef = useRef<number | undefined>(undefined);
+    /** 最近一次上下文水位快照（context.usage 事件最后值，statusline context 键用，成本信任链 H3）。 */
+    const contextUsageRef = useRef<{ used_tokens: number; window_tokens: number; fill_rate: number } | undefined>(undefined);
     /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
     const compactProgressIdRef = useRef<number | null>(null);
     /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
@@ -361,6 +365,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 }]);
                 lastRunCostRef.current = typeof cost === "number" ? cost : undefined;
                 sessionCostRef.current = typeof cost === "number" ? (sessionCostRef.current ?? 0) + cost : sessionCostRef.current;
+                lastRunCacheHitRef.current = typeof obj.cacheHitRate === "number" ? (obj.cacheHitRate as number) : undefined;
+                break;
+            }
+            case "context.usage": {
+                // 上下文水位（成本信任链第三环 H1）：CLI 无水位环，只缓存最后快照供 statusline context 键（H3）。
+                const used = (obj.usedTokens as number) ?? 0;
+                const win = (obj.windowTokens as number) ?? 0;
+                if (win > 0) contextUsageRef.current = { used_tokens: used, window_tokens: win, fill_rate: used / win };
                 break;
             }
             case "task.exit": {
@@ -726,6 +738,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         sessionIdRef.current = id;
         lastRunCostRef.current = undefined; // 会话切换：结算单累计随之清零（跨会话花费看 /usage，不串账）
         sessionCostRef.current = undefined;
+        lastRunCacheHitRef.current = undefined; // H3：命中率/水位快照同属会话态，随切换清零
+        contextUsageRef.current = undefined;
         clearRows();
         try {
             const lines = await readTranscriptLines(id);
@@ -753,6 +767,8 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         sessionIdRef.current = await getOrCreateSessionId(undefined);
         lastRunCostRef.current = undefined; // 同 loadSession：结算单累计随会话清零
         sessionCostRef.current = undefined;
+        lastRunCacheHitRef.current = undefined;
+        contextUsageRef.current = undefined;
         clearRows();
         pushInfo(S.sessionNew(truncateMiddle(sessionIdRef.current, 12)));
     }, [clearRows, pushInfo]);
@@ -817,6 +833,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** 结算单 getters（statusline D3）：undefined 自动省略键，旧 statusline 命令零破坏。 */
     const getLastRunCostYuan = useCallback((): number | undefined => lastRunCostRef.current, []);
     const getSessionCostYuan = useCallback((): number | undefined => sessionCostRef.current, []);
+    /** H3 statusline：最近 run 缓存命中率 / 上下文水位快照（undefined=尚无数据，JSON 自动省略键）。 */
+    const getLastRunCacheHitRate = useCallback((): number | undefined => lastRunCacheHitRef.current, []);
+    const getLastContextUsage = useCallback((): { used_tokens: number; window_tokens: number; fill_rate: number } | undefined => contextUsageRef.current, []);
     /** 预算设置（成本信任链第二环 E1，/budget）：undefined=不限。 */
     const setBudgetYuan = useCallback((v: number | undefined) => { budgetYuanRef.current = v; }, []);
     const getBudgetYuan = useCallback((): number | undefined => budgetYuanRef.current, []);
@@ -830,7 +849,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         askApproval, resolveApproval, resolveQuestion, setPlan, resolvePlan,
         toggleShowThinking, clearRows, setModelOverride, setPlanMode, getPlanMode, setAutoMode, getAutoMode,
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
-        getLastRunCostYuan, getSessionCostYuan, setBudgetYuan, getBudgetYuan,
+        getLastRunCostYuan, getSessionCostYuan, setBudgetYuan, getBudgetYuan, getLastRunCacheHitRate, getLastContextUsage,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
         openModelPicker, resolveModel,
     };

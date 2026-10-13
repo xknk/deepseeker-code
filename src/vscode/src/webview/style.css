@@ -181,6 +181,78 @@ body {
   color: var(--diff-add);
 }
 
+/* ———————— 成本信任链第三环 HUD ————————
+   H1 上下文水位环：composer-bar 左侧 SVG 圆环，弧长=上下文填充率（估算口径）；
+   颜色分级 ok=绿(<70%) / warn=橙(70~90%) / hot=红(>90%)；压缩时 .flash 环心显「×N」并脉冲一次。 */
+.ctx-ring {
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  transform: rotate(-90deg); /* 弧起点定在 12 点方向 */
+}
+
+.ctx-ring .ctx-ring-bg,
+.ctx-ring .ctx-ring-arc {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.ctx-ring .ctx-ring-bg {
+  stroke: rgba(128, 128, 128, 0.18);
+}
+
+.ctx-ring .ctx-ring-arc {
+  stroke: var(--vscode-charts-green, #4ec9b0);
+  transition: stroke-dasharray 0.4s ease, stroke 0.3s;
+}
+
+.ctx-ring.warn .ctx-ring-arc { stroke: var(--vscode-charts-orange, #d18616); }
+.ctx-ring.hot .ctx-ring-arc { stroke: var(--vscode-charts-red, #f14c4c); }
+
+/* 压缩闪显：环心计数 + 弧线脉冲（2.4s 后由 JS 摘除 .flash） */
+.ctx-ring .ctx-ring-count {
+  fill: var(--fg-faint);
+  font-size: 7.5px;
+  font-family: var(--vscode-editor-font-family, Consolas, monospace);
+  opacity: 0;
+  transform: rotate(90deg); /* 抵消父级旋转，保持数字正向 */
+  transform-origin: 9px 9px;
+}
+
+.ctx-ring.flash .ctx-ring-count { opacity: 1; }
+
+.ctx-ring.flash .ctx-ring-arc { animation: ctx-ring-pulse 0.9s ease-out 1; }
+
+@keyframes ctx-ring-pulse {
+  0% { stroke-width: 2.5; }
+  35% { stroke-width: 4.2; }
+  100% { stroke-width: 2.5; }
+}
+
+/* H2 cost-pill：本会话累计花费 + 最近 run 缓存命中率；点击弹 /context 详情。形态对齐 .agents-pill。 */
+.cost-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 2px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--fg-faint);
+  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.cost-pill:hover {
+  color: var(--fg-dim);
+  background: rgba(128, 128, 128, 0.15);
+}
+
 .actions {
   display: flex;
   gap: 1px;

@@ -21,7 +21,7 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 const { SIDECAR_ARCHIVED_MARK, sidecarArchivedNote, safeSidecarId, getToolOutputSidecarPath, writeSidecarArchive, SIDECAR_SESSION_CAP_BYTES }
     = await import("@/session/sidecar.ts");
 const { truncateToolResult } = await import("@/agent/truncate.ts");
-const { recallTools } = await import("@/tool/registry/recall.ts");
+const { recallTools, getRecallHitCount } = await import("@/tool/registry/recall.ts");
 const { appendMessage, appendEvent } = await import("@/session/transcript.ts");
 
 const recall = recallTools.find((t: any) => t.function.name === "recall")!;
@@ -162,5 +162,28 @@ describe("recall run_id 过滤（legacy 会话兜底，2026-09-16）", () => {
         assert.ok(inRun1.includes("命中 1 条"), `run1 前缀应命中：${String(inRun1).slice(0, 200)}`);
         const crossRun = await execRecall({ query: "ETIMEDOUT", run_id: "run-bbb" }, id);
         assert.ok(crossRun.includes("未命中"), "run2 前缀不应命中 run1 的内容");
+    });
+});
+
+describe("recall 命中计数（成本信任链第三环 H3，/context「召回命中 M 次」数据源）", () => {
+    it("只计 query 检索命中；未命中 / with_full 取档不计；按会话分桶", async () => {
+        const id = "test-recall-hits";
+        await appendMessage({ sessionId: id, role: "user", content: "构建日志出现 FATAL-ERR-XYZ 需要排查" } as any);
+        assert.equal(getRecallHitCount(id), 0, "起始为 0");
+        assert.equal(getRecallHitCount("从未检索的会话"), 0, "未知会话回 0 不报错");
+
+        await execRecall({ query: "FATAL-ERR-XYZ" }, id); // 命中 +1
+        assert.equal(getRecallHitCount(id), 1, "命中 1 次");
+
+        await execRecall({ query: "不存在的词-QQQ" }, id); // 未命中不计
+        assert.equal(getRecallHitCount(id), 1, "未命中不计数");
+
+        await writeSidecarArchive(id, "call_h1", "ARCHIVED-CONTENT-XYZ");
+        await execRecall({ with_full: "call_h1" }, id); // 取档不计（读存档非召回）
+        assert.equal(getRecallHitCount(id), 1, "with_full 取档不计数");
+
+        await execRecall({ query: "FATAL-ERR-XYZ" }, id); // 再次命中 +1
+        assert.equal(getRecallHitCount(id), 2, "累计 2 次");
+        assert.equal(getRecallHitCount("另一个会话"), 0, "按会话分桶，不串账");
     });
 });

@@ -119,4 +119,9 @@ export type UIEvent =
     | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number }
     /** P3-7 子 agent 中间叙述透出：~1s 节流取最后完整行（纯 UX，防长任务静默被当卡死）。
      *  done=true 表示该子 agent 已结束 → 前端清瞬态行；并发多子 agent 时单行槽 last-writer-wins（可接受）。 */
-    | { type: 'subagent.progress'; text: string; done?: boolean };
+    | { type: 'subagent.progress'; text: string; done?: boolean }
+    /** 上下文水位（成本信任链第三环 H1）：每轮 round.end 发（门禁仅主 agent depth=0）。
+     *  usedTokens 为估算口径（estimateTokens×calibRatio+toolsTokens，与 ensureFitsWindow/nudge 同公式，非 API 真实值）；
+     *  compactCount=本 run 内已发生压缩次数（前端另有会话级累计，见 events.js compact.done 消费处）。
+     *  前端据 fillRate 渲染水位环（绿<70% / 橙 70~90% / 红>90%）；数据不依赖 busy 态，生成中照常更新。 */
+    | { type: 'context.usage'; usedTokens: number; windowTokens: number; fillRate: number; compactCount: number };
