@@ -315,10 +315,13 @@ body {
      都会产生一条「滑过去是空白」的横向滚动条。消息流永不整体左右滚——长内容由内部
      pre / 表格自滚动（各自 overflow-x:auto），行内长 token 靠折行兜底。 */
   overflow-x: hidden;
-  padding: 12px 14px 14px;
   /* ★ 不设 scroll-behavior: smooth：它只作用于程序化滚动，平滑动画期间 scrollTop 滞后会让
      nearBottom() 量到虚高距离，贴底跟随门禁被误关（用户滚轮/拖拽本就不受它影响，留之有害无益）。 */
   position: relative;
+  /* ★ 顶部内边距必须为 0（反馈：钉顶提问块上方有一条内容穿行的缝，特别丑）：sticky top:0 的
+     约束矩形=滚动容器的 padding 内缘，padding-top>0 时块永远钉不到真顶。顶部留白交给行自身
+     margin（滚到顶时首行 5px，视觉可忽略）；sticky 的钉贴语义要求零顶距，无 compromise。 */
+  padding: 0 14px 14px;
 }
 
 /* ———————— 空状态页（消息流为空时居中引导） ———————— */
@@ -385,6 +388,10 @@ body {
 /* 用户消息：CC 同款圆角边框输入块（反馈：`> ` 素排与回复难区分，块感不明显）——盒子即「这是你说的」 */
 .row-user {
   display: block;
+  /* ★ 上边距必须为 0：钉顶时 .row 的 5px margin-top 会留在块上方露出一条内容缝（margin 不被
+     sticky 折叠进钉贴位）。自然流间距不受影响——与上一行 .row 的 margin-bottom 5px 塌陷合并，
+     视觉间距不变。 */
+  margin-top: 0;
   /* ★ 粘性置顶（反馈：长回答把提问顶出视野，回头找不到自己问过啥）：读任一轮回复时其提问块
      钉在可视区顶部。sticky 滑行空间=父容器（#messages 整列），下一条用户行滚上来自然把前一条
      顶出去——任意时刻钉着的总是「当前读到这轮回答」的提问。纯视觉偏移不改布局，
