@@ -607,6 +607,10 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
     case "loadSession":
       void h.loadSession(String(msg.id ?? ""));
       break;
+    case "viewBatchQueue":
+      // 挂机队列只读入口（动作面板 Batch queue... 项）：转发到既有命令（三态 QuickPick + 报告打开）。
+      void vscode.commands.executeCommand("deepseekerCode.viewBatchQueue");
+      break;
     case "exportConversation":
       // ★ 导出会话为 Markdown：host 组装（transcript → core 格式化），这里弹原生保存对话框落盘。
       //   结果经 info 行回显（sink 通道既有事件，零新 host→webview 消息类型，绕开双通道坑）。

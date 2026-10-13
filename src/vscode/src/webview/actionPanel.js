@@ -99,6 +99,11 @@ const buildActionItems = () => [
     action: () => { closeActionPanel(); toggleCheckpointsPanel(); },
   },
   {
+    group: GROUP_CONTEXT, label: "Batch queue...",
+    hint: "挂机批处理队列：看 pending/running/done 与报告（投递/执行/清理走 CLI batch 命令）",
+    action: () => { closeActionPanel(); vscode.postMessage({ type: "viewBatchQueue" }); },
+  },
+  {
     group: GROUP_MODEL, label: "Switch model...",
     hint: "弹出候选选择器（同 /switch）",
     right: { kind: "value", value: state.model || "默认" },
