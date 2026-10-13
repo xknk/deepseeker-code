@@ -13,7 +13,7 @@ import {
   appendRefChip, clearPendingRefs,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
-import { syncToolbar, syncContextRing, flashCompactRing, syncCostPill } from "./toolbar.js";
+import { syncToolbar, syncContextRing, flashCompactRing } from "./toolbar.js";
 import { renderApproval, renderQuestion, renderPlan, openModelPicker } from "./modals.js";
 import { renderSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./panels.js";
 import { updateSlashMenu, updateAtMenu } from "./composer.js";
@@ -196,8 +196,8 @@ switch (evt.type) {
         break;
       }
       case "run.receipt": {
-        // ★ 任务结算单（成本信任链第一环）：run 收尾 info 行（对标 CLI 淡色行）；
-        //   花费顺手入 state（本会话累计供后续 cost-pill / H2 预留）。无价模型只显 token（null 语义，绝不编数）。
+        // ★ 任务结算单（成本信任链第一环）：run 收尾 info 行（对标 CLI 淡色行）——
+        //   花费只在此行可见（底栏不显钱：cost-pill 已撤，2026-10-13）。无价模型只显 token（null 语义，绝不编数）。
         closeStreaming();
         const rounds = Number(evt.rounds) || 0;
         const hitPct = Math.round((Number(evt.cacheHitRate) || 0) * 100);
@@ -208,11 +208,6 @@ switch (evt.type) {
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
         addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${evt.budgetTruncated ? " · 预算截断" : ""}`);
-        state.lastRunCostYuan = cost ?? undefined;
-        state.sessionCostYuan = cost != null ? (state.sessionCostYuan || 0) + cost : state.sessionCostYuan;
-        // ★ H2 cost-pill（成本信任链第三环）：命中率入 state 刷胶囊（无价模型只显命中率不显钱）
-        state.lastRunCacheHitRate = typeof evt.cacheHitRate === "number" ? evt.cacheHitRate : undefined;
-        syncCostPill();
         break;
       }
       case "task.exit": {
@@ -342,14 +337,10 @@ function onMessage(msg) {
       clearMessages();
       clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
       clearPendingRefs();     // ★ B1：跨会话清空未发送文件引用，防串会话
-      state.lastRunCostYuan = undefined; // ★ 结算单累计随会话清零（跨会话花费看 /usage，不串账）
-      state.sessionCostYuan = undefined;
-      // ★ HUD 态同属会话：水位/压缩计数/命中率清零，环与胶囊随之隐藏
+      // ★ HUD 态同属会话：水位/压缩计数清零，环随之隐藏
       state.contextUsage = null;
       state.compactCount = 0;
-      state.lastRunCacheHitRate = undefined;
       syncContextRing();
-      syncCostPill();
       break;
     case "imageSaved": {
       // extension 已把图片存到工作区临时目录：路径只回填到待发附件（submit 随 attachments 上送，

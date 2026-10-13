@@ -55,10 +55,9 @@ currentTurn: 0,
 turnHeaderBySeq: new Map(),
 compactProgressKey: null, // 压缩进度瞬态行 key（compact.progress 单行更新；compact.done/final/error 收敛删除）
 subagentProgressKey: null, // 子 agent 进度瞬态行 key（P3-7 subagent.progress 单行更新；done/final/error 收敛删除）
-// ★ 成本信任链第三环 HUD（H1/H2）：
+// ★ 成本信任链第三环 HUD（H1 水位环）：
 contextUsage: null, // 最近 context.usage 快照 {usedTokens,windowTokens,fillRate}（水位环数据源；null=尚无，环隐藏）
 compactCount: 0, // 会话级压缩次数（compact.done 消费处累加；环心「已压缩 N 次」闪显 + tooltip）
-lastRunCacheHitRate: undefined, // 最近 run 缓存命中率（receipt 下发；cost-pill 命中率段）
 };
 
 /** row key 发放器（单调递增，整个 webview 生命周期唯一）。 */

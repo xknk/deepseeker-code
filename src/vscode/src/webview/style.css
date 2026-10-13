@@ -182,18 +182,19 @@ body {
 }
 
 /* ———————— 成本信任链第三环 HUD ————————
-   H1 上下文水位环：composer-bar 左侧 SVG 圆环，弧长=上下文填充率（估算口径）；
-   颜色分级 ok=绿(<70%) / warn=橙(70~90%) / hot=红(>90%)；压缩时 .flash 环心显「×N」并脉冲一次。 */
+   H1 上下文水位环：composer-bar 左侧 SVG 圆环，弧长=上下文填充率（估算口径）。
+   ★ 风格对齐 codicon 图标（2026-10-13 违和反馈）：健康(<70%)用图标同款静默灰 + 2px 细描边，
+   仅告警才上色 warn=橙(70~90%) / hot=红(>90%)；压缩时 .flash 环心显「×N」并脉冲一次。 */
 .ctx-ring {
   flex-shrink: 0;
-  margin-bottom: 2px;
+  margin-bottom: 2px; /* 与 bar 内胶囊/按钮同款光学对齐 */
   transform: rotate(-90deg); /* 弧起点定在 12 点方向 */
 }
 
 .ctx-ring .ctx-ring-bg,
 .ctx-ring .ctx-ring-arc {
   fill: none;
-  stroke-width: 2.5;
+  stroke-width: 2;
   stroke-linecap: round;
 }
 
@@ -202,7 +203,7 @@ body {
 }
 
 .ctx-ring .ctx-ring-arc {
-  stroke: var(--vscode-charts-green, #4ec9b0);
+  stroke: var(--fg-faint); /* 健康=图标同灰，不抢眼 */
   transition: stroke-dasharray 0.4s ease, stroke 0.3s;
 }
 
@@ -224,33 +225,9 @@ body {
 .ctx-ring.flash .ctx-ring-arc { animation: ctx-ring-pulse 0.9s ease-out 1; }
 
 @keyframes ctx-ring-pulse {
-  0% { stroke-width: 2.5; }
-  35% { stroke-width: 4.2; }
-  100% { stroke-width: 2.5; }
-}
-
-/* H2 cost-pill：本会话累计花费 + 最近 run 缓存命中率；点击弹 /context 详情。形态对齐 .agents-pill。 */
-.cost-pill {
-  display: inline-flex;
-  align-items: center;
-  margin-bottom: 2px;
-  padding: 3px 8px;
-  border: none;
-  border-radius: 999px;
-  background: rgba(128, 128, 128, 0.08);
-  color: var(--fg-faint);
-  font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
-  font-size: 10.5px;
-  line-height: 1;
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.cost-pill:hover {
-  color: var(--fg-dim);
-  background: rgba(128, 128, 128, 0.15);
+  0% { stroke-width: 2; }
+  35% { stroke-width: 3.4; }
+  100% { stroke-width: 2; }
 }
 
 .actions {

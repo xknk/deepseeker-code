@@ -152,7 +152,6 @@ c.innerHTML = `
   <circle class="ctx-ring-arc" cx="9" cy="9" r="7"></circle>
   <text class="ctx-ring-count" x="9" y="9" text-anchor="middle" dominant-baseline="central"></text>
 </svg>
-<button id="cost-pill" class="cost-pill" style="display:none" title="本会话累计花费与缓存命中（点击看上下文详情，同 /context）"><span id="cost-pill-label"></span></button>
 <span id="agents-pill" class="agents-pill" title="运行中的子 agent 数（subagent.count 实时镜像）"><span class="agents-dot">●</span><span id="agents-pill-label">0 agent</span></span>
 <button class="model-chip" id="btn-model" title="当前模型（点击弹出候选选择器，同 /switch）"><span id="model-chip-label">…</span><span class="codicon codicon-chevron-down"></span></button>
 <input type="file" id="image-input" accept="image/*" style="display:none" />
@@ -466,8 +465,6 @@ doSend();
 const btnFile = $("#btn-file");
 // 模型胶囊：toggle 语义——未开弹选择器（host 回环带最新候选），已开就地关闭
 $("#btn-model").addEventListener("click", () => toggleModelPicker());
-// ★ H2 cost-pill（成本信任链第三环）：点击弹 /context 同源详情（数据在宿主进程采集，走 localObs 往返 info 行回显）
-$("#cost-pill")?.addEventListener("click", () => vscode.postMessage({ type: "localObs", cmd: "context" }));
 const imageInput = $("#image-input");
 const attachMenu = $("#attach-menu");
 const closeAttachMenu = () => { if (attachMenu) attachMenu.style.display = "none"; };
