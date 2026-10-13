@@ -316,7 +316,8 @@ body {
      pre / 表格自滚动（各自 overflow-x:auto），行内长 token 靠折行兜底。 */
   overflow-x: hidden;
   padding: 12px 14px 14px;
-  scroll-behavior: smooth;
+  /* ★ 不设 scroll-behavior: smooth：它只作用于程序化滚动，平滑动画期间 scrollTop 滞后会让
+     nearBottom() 量到虚高距离，贴底跟随门禁被误关（用户滚轮/拖拽本就不受它影响，留之有害无益）。 */
   position: relative;
 }
 
@@ -388,7 +389,7 @@ body {
 
 .user-block {
   position: relative; /* ↺ 徽标定位基准 */
-  display: inline-block;
+  display: block; /* 平铺整行宽（反馈：贴内容宽度右半空一大片，CC 的盒子是通栏的） */
   max-width: 100%;
 }
 

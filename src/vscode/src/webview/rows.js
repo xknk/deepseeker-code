@@ -254,6 +254,7 @@ function beginUserTurn(text) {
 function toggleTurn(seq) {
   const header = state.turnHeaderBySeq.get(seq);
   if (!header) return;
+  const stick = stickNow(); // ★ 先测后改：展开会成批显行，改完再测会被新增高度关死门禁
   header.collapsed = !header.collapsed;
   rebuildRow(header);
   const hide = header.collapsed;
@@ -264,7 +265,7 @@ function toggleTurn(seq) {
       if (el) el.style.display = hide ? "none" : "";
     }
   }
-  if (!hide && nearBottom()) scrollToBottom();
+  if (!hide) stickTo(stick);
 }
 
 // ———————— CC 风格思考动画行（对标「✳ Creating...」）————————
@@ -286,12 +287,17 @@ const ensureThinkRow = () => {
 function setThinkVisible(on) {
   const el = ensureThinkRow();
   if (!!on === !el.hidden) return;
+  const stick = stickNow(); // ★ 先测后改：显示思考行也增高
   el.hidden = !on;
-  if (on && !state.replaying && nearBottom()) scrollToBottom(); // 用户贴底时才跟随落底，不抢滚动位置
+  if (on) stickTo(stick); // 用户贴底时才跟随落底，不抢滚动位置
 }
 
 function appendRow(row) {
-  // ★ user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口
+  // ★ 先测后改（贴底跟随的门禁必须在变更前测：插行后距底距离被新行自身撑高，后测会把
+  //   「正在跟随」误判成「已离开」而自锁，流式期间永不自愈只能手动滚）。
+  //   user 行 = 用户主动发言：发送即视为「要跟随最新内容」（对标 CC 发送即落底），不受视口位置影响。
+  const stick = row.kind === "user" ? !state.replaying : stickNow();
+  // user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口
   if (row.kind === "user") beginUserTurn(row.text);
   if (row.turn == null) row.turn = state.currentTurn;
   state.order.push(row.key);
@@ -303,16 +309,17 @@ function appendRow(row) {
     wrap.style.display = "none";
   }
   messagesEl().insertBefore(wrap, thinkRowEl?.isConnected ? thinkRowEl : null); // 思考行存在则插它前面（恒为末行）
-  if (!state.replaying && nearBottom()) scrollToBottom(); // 回放中不逐条跟随，replayDone 统一落底
+  stickTo(stick); // 回放中不逐条跟随（stickNow/stick 均含回放抑制），replayDone 统一落底
   updateEmptyState();
 }
 
 function updateRow(key, patch) {
   const row = state.rowMap.get(key);
   if (!row) return;
+  const stick = stickNow(); // ★ 先测后改：rebuildRow 整行替换
   Object.assign(row, patch);
   rebuildRow(row);
-  if (!state.replaying && nearBottom()) scrollToBottom();
+  stickTo(stick);
 }
 
 /** 整行删除（state 与 DOM 同步清理）：压缩进度瞬态行收敛删除等瞬态行生命周期用。 */
@@ -403,6 +410,9 @@ function scheduleFlush() {
 }
 
 function flush() {
+  // ★ 整帧增量一次度量（先测后改）：流式里单帧可能长出一大块（整段代码/表格），改完再测会被
+  //   本帧新增高度关死门禁、后续增量全被跳过；变更前测一次，末尾统一瞬时落底。
+  const stick = stickNow();
   const t = textBuf;
   textBuf = "";
   const th = thinkBuf;
@@ -414,10 +424,7 @@ function flush() {
     if (row) {
       row.text += t;
       const el = messagesEl().querySelector(`[data-key="${CSS.escape(row.key)}"] .assistant-body`);
-      if (el) {
-        el.innerHTML = mdToHtml(row.text) + '<span class="cursor">▊</span>';
-        if (nearBottom()) scrollToBottom();
-      }
+      if (el) el.innerHTML = mdToHtml(row.text) + '<span class="cursor">▊</span>';
     }
   }
   if (th && state.currentThinking != null) {
@@ -425,9 +432,9 @@ function flush() {
     if (row) {
       row.text += th;
       rebuildRow(row);
-      if (nearBottom()) scrollToBottom();
     }
   }
+  stickTo(stick);
   if (pp && pp.key) updateRow(pp.key, { progress: pp.msg });
 }
 
