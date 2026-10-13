@@ -381,54 +381,51 @@ body {
   }
 }
 
-/* 用户消息：CLI 同款 `> ` 提示符回显，无气泡 */
+/* 用户消息：CC 同款圆角边框输入块（反馈：`> ` 素排与回复难区分，块感不明显）——盒子即「这是你说的」 */
 .row-user {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  display: block;
 }
 
-.row-user::before {
-  content: "> ";
-  color: var(--fg-dim);
-  font-weight: 700;
-  flex-shrink: 0;
+.user-block {
+  position: relative; /* ↺ 徽标定位基准 */
+  display: inline-block;
+  max-width: 100%;
 }
 
 .row-user .user-bubble {
+  display: block;
   color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
-  /* ★ flex item 可收缩：break-word 不影响 min-content 计算，无此限制时超长 token 会撑破消息流 */
+  /* ★ 可收缩：break-word 不影响 min-content 计算，无此限制时超长 token 会撑破消息流 */
   min-width: 0;
-  background: none;
-  border: none;
-  padding: 0;
+  max-width: 100%;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 10px;
+  background: rgba(128, 128, 128, 0.07);
+  padding: 7px 12px;
 }
 
-/* ★ 逐消息撤回（对标 CC 消息级 ↺）：hover 用户行右上角显 ↺ 按钮；行带检查点 id 才渲染（rows.js）。 */
-.row-user {
-  position: relative;
-}
-
+/* ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形；行带检查点 id 才渲染（rows.js）。
+   实底圆徽标盖住块角下的内容，保证压线也清晰可读。 */
 .msg-undo {
   position: absolute;
-  right: 0;
-  top: -3px;
+  top: -9px;
+  right: -9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   padding: 0;
-  border: none;
+  border: 1px solid rgba(128, 128, 128, 0.35);
   border-radius: 50%;
-  background: transparent;
-  color: var(--fg-faint);
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--fg-dim);
   font-size: 13px;
   cursor: pointer;
-  opacity: 0; /* 静默：不 hovering 不显形，零视觉噪音 */
-  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  opacity: 0; /* 静默不显形，hover 行才出现（零视觉噪音） */
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
 .row-user:hover .msg-undo {
@@ -437,7 +434,7 @@ body {
 
 .msg-undo:hover {
   color: var(--fg);
-  background: rgba(128, 128, 128, 0.15);
+  border-color: var(--fg-dim);
 }
 
 /* 助手消息：CLI 同款 `● ` 前缀 */

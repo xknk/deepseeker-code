@@ -30,6 +30,13 @@ function scrollToBottom(instant = false) {
   }
 }
 
+// ★ 贴底跟随原语（先测后改）：stickNow 必须在 DOM 变更【前】测，stickTo 在变更【后】落（一律 instant）。
+//   旧实现「先插行后 nearBottom()」：单次插入 ≥100px（多行气泡+轮头/整块代码段）时距底距离被新行自身
+//   撑过阈值 → 门禁自锁，流式后续增量全被跳过且永不自愈，只能手动滚；再叠加 smooth 动画期间
+//   scrollTop 滞后，小增量也误判。先测后改 + 瞬时落底两刀全断。
+const stickNow = () => !state.replaying && nearBottom();
+const stickTo = (stick) => { if (stick) scrollToBottom(true); };
+
 // 长 assistant 文本（实现方案/计划等）可折叠——实时与历史回放一致，不依赖后端标记
 const isLongAssistant = (t) => { const s = t || ""; return s.split("\n").length > 5 || s.length > 300; };
 const firstLine = (t) => truncate((String(t || "").split("\n").map((x) => x.trim()).find(Boolean)) || "(内容)", 60);
@@ -41,7 +48,10 @@ function buildRowEl(row) {
 
   switch (row.kind) {
     case "user": {
-      wrap.innerHTML = `<div class="user-bubble">${escapeHtml(row.text)}</div>`;
+      // ★ CC 同款输入块：圆角边框盒子（撤掉 CLI `> ` 前缀——盒子本身就是「这是你说的」的视觉标识）；
+      //   纯图片行不渲染空盒子。.user-block 是 ↺ 徽标的定位基准。
+      const bubble = row.text ? `<div class="user-bubble">${escapeHtml(row.text)}</div>` : "";
+      wrap.innerHTML = `<div class="user-block">${bubble}</div>`;
       // ★ 多模态：随行缩略图（实时回显与历史回放同构；dataURL 直出，CSP img-src data: 已放行）
       const atts = Array.isArray(row.attachments) ? row.attachments : [];
       if (atts.length) {
@@ -57,8 +67,8 @@ function buildRowEl(row) {
         }
         wrap.appendChild(box);
       }
-      // ★ 逐消息撤回（对标 CC 消息级 ↺）：行带检查点 id 时 hover 右上显 ↺——点击回滚到该消息发送前
-      //   （host 侧对话+文件 modal 照常弹），原文回填输入框可改写重发；排队轮无检查点不显。
+      // ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形——点击回滚到此消息
+      //   发送前（host 侧对话+文件 modal 照常弹），原文回填输入框可改写重发；无检查点的行不渲染。
       if (row.cpId) {
         const undo = document.createElement("button");
         undo.className = "msg-undo";
@@ -73,7 +83,7 @@ function buildRowEl(row) {
           }
           vscode.postMessage({ type: "rewindToCheckpoint", id: row.cpId });
         });
-        wrap.appendChild(undo);
+        wrap.querySelector(".user-block")?.appendChild(undo);
       }
       break;
     }
