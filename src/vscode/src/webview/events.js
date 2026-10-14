@@ -26,6 +26,11 @@ if (evt.type === "row" || evt.type === "rowUpdate") {
 if (evt.type === "row") {
 // ★ 轮次折叠头由 appendRow 统一在 user 行入栈时插入（覆盖实时 / 回放 / 所有 row 入口），此处不再单独插分割线
 const row = { key: evt.key || nextKey(), kind: evt.kind, text: evt.text ?? "" };
+// ★ 用户行时间戳（对标 CC 卡片右上角时间）：host 透传 transcript 的 ts（回放=真实历史时刻）；
+//   实时行缺 ts 就地盖章（=发送时刻）。老会话消息行可能没存过 ts——回放行宁缺勿假，
+//   不拿加载时间冒充历史时间。
+if (evt.ts) row.ts = String(evt.ts);
+else if (evt.kind === "user" && !state.replaying) row.ts = new Date().toISOString();
 if (evt.kind === "tool") {
 row.toolName = String(evt.toolName ?? "");
 row.args = evt.args;

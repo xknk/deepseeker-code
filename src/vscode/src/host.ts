@@ -89,7 +89,7 @@ function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<str
       const attachments = urls.map((url, i) => ({ name: urls.length > 1 ? `图片${i + 1}` : "图片", dataUrl: url }));
       if (text.trim() || attachments.length) {
         const cpId = cpByLine?.get(String(m.id ?? ""));
-        sink({ type: "row", kind: "user", text, attachments, key: nextKey(), ...(cpId ? { cpId } : {}) });
+        sink({ type: "row", kind: "user", text, attachments, key: nextKey(), ...(m.ts ? { ts: String(m.ts) } : {}), ...(cpId ? { cpId } : {}) });
       }
     } else if (role === "assistant") {
       if (typeof m.reasoning_content === "string" && m.reasoning_content.trim()) {

@@ -31,18 +31,28 @@ function scrollToBottom(instant = false) {
   syncStuckRows();
 }
 
-// ★ 提问块钉顶渐隐（stuck 类）：sticky 是纯视觉偏移，CSS 无从知晓「已钉住」——滚动时按 rect.top
-//   打标，钉住后块底出现渐变过渡（.stuck::after），内容滑过时溶入底色而非被生硬切边（CC 同款观感）。
-//   只读 rect 不写 scrollTop，与贴底跟随互不干扰；scrollToBottom（回放落底/跟随跳底）也刷新一遍，
-//   防重建行后类状态滞留。stuck 判定含自然位恰在顶部的瞬间——视觉等价，无需区分。
+// ★ 提问块钉顶渐隐（stuck 类）：sticky 是纯视觉偏移，CSS 无从知晓「已钉住」——滚动时打标，
+//   钉住后块底出现渐变过渡（.stuck::after）、通栏负 margin、气泡蜕壳，内容滑过时溶入底色而非
+//   被生硬切边（CC 同款观感）。只读 rect 不写 scrollTop，与贴底跟随互不干扰；scrollToBottom
+//   （回放落底/跟随跳底）也刷新一遍，防重建行后类状态滞留。
 const syncStuckRows = () => {
   const el = messagesEl();
   if (!el) return;
+  // ★ 判定基准=滚动容器 #messages 自身顶边，绝非视口 0（历史 bug：旧判定 rect.top<=1 是视口坐标，
+  //   而 #toolbar 恒在 #messages 上方（~35px），真钉住的行 top≈35 恒不≤1——.stuck 自 1.0.86 引入
+  //   起从未打上过，渐变/通栏/蜕壳全部从未渲染，连续四版「没生效」反馈同根因）。
+  //   sticky 钉住时行顶边恰好=容器顶边（padding-top 已为 0），+1 容亚像素误差。
+  const base = el.getBoundingClientRect().top;
   for (const r of el.querySelectorAll(".row-user")) {
-    r.classList.toggle("stuck", r.getBoundingClientRect().top <= 1);
+    r.classList.toggle("stuck", r.getBoundingClientRect().top <= base + 1);
   }
 };
 messagesEl().addEventListener("scroll", () => requestAnimationFrame(syncStuckRows), { passive: true });
+// ★ 兜底重刷：rebuildRow（整行 replaceWith）/turn 折叠/回放重建都会把 .stuck 连带抹掉，
+//   且 DOM 变更不触发 scroll 事件——只靠滚动打标的话，重建后钉住块退回「生硬切边+侧边距」
+//   老观感直到下次滚动。监听 childList 兜底（本函数只切 class，不产生 childList 变更，无回环），
+//   rAF 合并同帧成批变更，一帧至多一次布局读。
+new MutationObserver(() => requestAnimationFrame(syncStuckRows)).observe(messagesEl(), { childList: true, subtree: true });
 
 // ★ 贴底跟随原语（先测后改）：stickNow 必须在 DOM 变更【前】测，stickTo 在变更【后】落（一律 instant）。
 //   旧实现「先插行后 nearBottom()」：单次插入 ≥100px（多行气泡+轮头/整块代码段）时距底距离被新行自身
@@ -54,6 +64,14 @@ const stickTo = (stick) => { if (stick) scrollToBottom(true); };
 // 长 assistant 文本（实现方案/计划等）可折叠——实时与历史回放一致，不依赖后端标记
 const isLongAssistant = (t) => { const s = t || ""; return s.split("\n").length > 5 || s.length > 300; };
 const firstLine = (t) => truncate((String(t || "").split("\n").map((x) => x.trim()).find(Boolean)) || "(内容)", 60);
+// ★ 用户行时间戳格式化（transcript ts 为 ISO 字符串）：本地时区 HH:MM，非法值返回空串（不渲染）
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+// ★ 用户行展开判定（对标 CC Show more）：钉住态 2 行即截断——判定必须与钳高对齐（>2 行就给入口），
+//   沿用 isLongAssistant 的 5 行/300 字门槛会漏掉「被截断却不给入口」的 3~4 行消息（实测踩坑）
+const isLongUser = (t) => { const s = t || ""; return s.split("\n").length > 2 || s.length > 300; };
 
 function buildRowEl(row) {
   const wrap = document.createElement("div");
@@ -64,8 +82,33 @@ function buildRowEl(row) {
     case "user": {
       // ★ CC 同款输入块：圆角边框盒子（撤掉 CLI `> ` 前缀——盒子本身就是「这是你说的」的视觉标识）；
       //   纯图片行不渲染空盒子。.user-block 是 ↺ 徽标的定位基准。
+      // ★ 时间戳（对标 CC 卡片右上角 9:25 AM）：卡片上方右侧淡显 HH:MM，随卡片一起钉住；缺 ts 不渲染。
+      const t = row.ts ? fmtTime(row.ts) : "";
+      const time = t ? `<span class="user-time">${t}</span>` : "";
       const bubble = row.text ? `<div class="user-bubble">${escapeHtml(row.text)}</div>` : "";
-      wrap.innerHTML = `<div class="user-block">${bubble}</div>`;
+      // has-time 类是 ↺ 徽标的换位开关：CSS 靠它把徽标从「越行顶 -9px」收到时间线右端（钉住态行顶=
+      // 滚动容器顶，负偏移部分被 overflow 裁掉——徽标「看不见」的根因），比 :has() 兼容面更稳
+      wrap.innerHTML = `<div class="user-block${t ? " has-time" : ""}">${time}${bubble}</div>`;
+      // ★ 超过 2 行的提问（isLongUser，与钉住态钳高对齐）点击气泡 → 全屏浮层读全文；
+      //   更短的提问不挂——点击只用于选词复制。选中文本时放过（与 assistant-content 同款守卫）。
+      //   卡片右下角附「展开」pill（对标 CC Show more）：滚动条隐藏后，截断末行+pill 是「还有更多」的可见凭证。
+      const bubbleEl = wrap.querySelector(".user-bubble");
+      if (bubbleEl && isLongUser(row.text)) {
+        bubbleEl.classList.add("expandable");
+        const openFull = () => {
+          if (window.getSelection()?.toString()) return;
+          openDiffOverlay("● 提问原文", `<div class="plan-overlay-content" style="white-space:pre-wrap">${escapeHtml(row.text)}</div>`);
+        };
+        bubbleEl.addEventListener("click", openFull);
+        const more = document.createElement("span");
+        more.className = "user-more";
+        more.textContent = "展开";
+        more.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openFull();
+        });
+        wrap.querySelector(".user-block")?.appendChild(more);
+      }
       // ★ 多模态：随行缩略图（实时回显与历史回放同构；dataURL 直出，CSP img-src data: 已放行）
       const atts = Array.isArray(row.attachments) ? row.attachments : [];
       if (atts.length) {

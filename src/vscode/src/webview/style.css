@@ -415,29 +415,81 @@ body {
   top: 100%;
   left: 0;
   right: 0;
-  height: 26px;
+  height: 34px;
+  /* 降级线：不支持 color-mix 的宿主退回单段线性渐变（下条声明整体无效时它兜底） */
   background: linear-gradient(to bottom, var(--vscode-sideBar-background, #252526), transparent);
+  /* ★ 非线性缓出（反馈：纯线性 alpha 视觉上仍偏「硬切断」）：多段停靠点先快后慢，
+     钻入块底的内容呈「渐隐溶入」而非直线淡出；color-mix 只动 alpha 不动色相，
+     与块底色恒同源（同一个变量），任何主题不出色差。0% 处必须全实底——
+     它压住块自身的硬底边，这条渐变的职责就是让切边不可见。 */
+  background: linear-gradient(
+    to bottom,
+    var(--vscode-sideBar-background, #252526) 0%,
+    color-mix(in srgb, var(--vscode-sideBar-background, #252526) 62%, transparent) 40%,
+    color-mix(in srgb, var(--vscode-sideBar-background, #252526) 22%, transparent) 75%,
+    transparent 100%
+  );
   pointer-events: none;
 }
 
-/* ★ 钉住态通栏（反馈：两侧各留 14px 边距特别丑，对标 CC 通栏钉住卡）：stuck 时左右负 margin
-   恰好抵消 #messages 的侧 padding，卡片贴到面板两缘；自然流不加（未钉住时通栏块反而突兀）。
-   ::after 渐变用 left/right:0 自动随行通栏。 */
-.row-user.stuck {
-  margin-left: -14px;
-  margin-right: -14px;
+/* ★ 钉住态钳高（对标 CC 钉住卡：只露 2 行，第二行截断）：钉住的职责是「提醒你问过什么」而非
+   复读全文——气泡外观保持自然流原样（描边/圆角/底色，CC 同款卡片，不蜕壳不通栏），高度钳到
+   ~2 行，超出带内自滚（滚动条已藏），全文走「展开」pill / 点击卡片浮层。自然流维持
+   min(50vh,320px) 不变；两侧限高不同，钉住瞬间卡片收缩一次，webview 是 Chromium，
+   滚动锚定（overflow-anchor）自动补偿位移。 */
+.row-user.stuck .user-bubble {
+  max-height: min(12vh, 48px);
 }
 
-/* ↺ 徽标悬垂块角 9px，通栏后已到面板边缘，悬垂部分会被 overflow-x: hidden 裁成半圆——内收到块内 */
-.row-user.stuck .msg-undo {
-  top: 2px;
-  right: 2px;
+/* ★ 超长提问点击全文阅读：气泡被 320px 封顶后行内自滚，点气泡弹全屏浮层看全文（复用 assistant
+   长文浮层，零新 UI）；类由 rows.js 按文本长度判定挂上，短提问不给手型不响应点击（误触面为零） */
+.row-user .user-bubble.expandable {
+  cursor: pointer;
 }
 
 .user-block {
   position: relative; /* ↺ 徽标定位基准 */
   display: block; /* 平铺整行宽（反馈：贴内容宽度右半空一大片，CC 的盒子是通栏的） */
   max-width: 100%;
+}
+
+/* ★ 用户行时间戳（对标 CC 卡片右上角 9:25 AM）：卡片上方右侧淡显 HH:MM，随卡片一起钉住；
+   行内普通流元素，不影响 sticky 钉贴语义；老会话行缺 ts 不渲染（宁缺勿假）。
+   padding-right 给 ↺ 徽标留位（徽标悬在卡片右上角 -9px 出头，与时间同高——CC 同款排布） */
+.user-time {
+  display: block;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  margin-bottom: 1px;
+  padding-right: 26px;
+}
+
+/* ★ 「展开」pill（对标 CC Show more）：钳高截断时钉在卡片右下角的显式入口，实底压住下方文字；
+   与 ↺ 徽标同为 hover 行显形（用户定版：静态面只留卡片与截断末行，两图标悬浮才出） */
+.row-user .user-more {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.row-user:hover .user-more {
+  opacity: 1;
+}
+
+.row-user .user-more:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
 }
 
 .row-user .user-bubble {
@@ -452,9 +504,20 @@ body {
   border-radius: 10px;
   background: rgba(128, 128, 128, 0.07);
   padding: 7px 12px;
-  /* ★ 钉顶配套：超长输入（贴日志）封顶、块内自滚，粘性块不占满整屏；↺ 徽标挂在 .user-block 上不受此裁剪 */
-  max-height: 50vh;
+  /* ★ 钉顶配套：超长输入（贴日志）封顶、块内自滚——50vh 半屏太霸道（钉住时吃掉半个面板），
+     压到 320px（小面板自动取半屏兜底）；自然流与钉住态同限（几何不随 stuck 跳变）；
+     ↺ 徽标挂在 .user-block 上不受此裁剪；全屏看全文走 .expandable 点击浮层 */
+  max-height: min(50vh, 320px);
   overflow-y: auto;
+  /* ★ 滚动条隐藏（反馈：钳高后 Windows 原生滚动条特别丑，CC 无滚动条、靠末行截断示意）：
+     overflow 保持 auto——wheel/触控板在气泡内仍可滚，只藏滚动条本身；
+     「还有更多」由截断的末行 + .user-more 展开 pill 表达 */
+  scrollbar-width: none;
+}
+
+.row-user .user-bubble::-webkit-scrollbar {
+  display: none;
+  width: 0;
 }
 
 /* ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形；行带检查点 id 才渲染（rows.js）。
@@ -475,12 +538,26 @@ body {
   color: var(--fg-dim);
   font-size: 13px;
   cursor: pointer;
-  opacity: 0; /* 静默不显形，hover 行才出现（零视觉噪音） */
+  opacity: 0; /* hover 行显形（用户定版：与「展开」pill 同为悬浮出）；此前「看不见」实为钉住态越顶被裁，非显形策略问题 */
   transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
 .row-user:hover .msg-undo {
   opacity: 1;
+}
+
+/* ★ 徽标换位：有时间戳的行收到时间线右端（.user-time 的 26px 右留白就是给它留的），位置对标 CC
+   （↺ 紧挨时间戳，top 2px 与时间文字基线对齐）。关键约束：钉住态行顶=滚动容器顶，原 -9px 悬垂被
+   overflow 裁成弧线残影——徽标「看不见」的根因，top 必须 ≥0。无时间行钉住态同样内收防裁
+   （自然流保留悬垂角标原味）。 */
+.row-user .user-block.has-time .msg-undo {
+  top: 2px;
+  right: 0;
+}
+
+.row-user.stuck .msg-undo {
+  top: 2px;
+  right: 2px;
 }
 
 .msg-undo:hover {
