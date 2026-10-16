@@ -9,6 +9,9 @@
 import fs from "fs/promises";
 import path from "path";
 import { snapshotQueue, enqueueTicketFile, cleanDone, reportPath } from "@/batch/queue.ts";
+import { batchT } from "./batchStrings.ts";
+import { getLocale, setLocale } from "./strings.ts";
+import { readLocale } from "./prefs.ts";
 
 /** batch 子命令解析结果（argv[0] !== "batch" 时 parseBatchArgv 返回 null）。 */
 export type BatchArgv =
@@ -38,64 +41,49 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
     return { sub: "help" };
 };
 
-const USAGE = `deepseeker-code batch —— 挂机批处理（成本信任链第四环）
-
-用法：deepseeker-code batch <子命令>
-  add <工单.md> [...]              投递任务（可一次多个文件）
-  list                             查看 pending / running / done 三态队列
-  run [--wait-window HH:MM-HH:MM]  执行队列（串行，逐任务出报告；--wait-window 到点再开跑）
-  clean                            清空 done/（已读过的报告与工单存档）
-
-工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
-  ---
-  title: 修复日期解析 bug
-  accept: npm test
-  budget-yuan: 0.5      # 可选：本任务花费上限（元）
-  timeout-min: 30       # 可选：agent 阶段超时（分钟，缺省 30）
-  tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path）
-  ---
-  任务描述正文（Markdown）…
-
-产物：<项目>/.deepseeker-code/batch/done/<id>.report.md（状态/结算单/验收输出/diff 摘要）；
-改动收割在独立 git worktree（临时分支）上，保留待人工 merge 或丢弃。`;
-
 /** 执行队列管理命令（add/list/clean/help；run 由 batchRunner 在引擎就绪后处理）。 */
 export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
+    // ★ 语言自举：main 在 locale 初始化【前】派发本模块（无 key 早退路径），此处从 prefs 补读
+    //   （未设置过则保持缺省 zh；headless 不弹首次询问）。
+    const saved = await readLocale();
+    if (saved) setLocale(saved);
+    const T = batchT(getLocale());
+
     if (b.sub === "help") {
-        emit(USAGE);
+        emit(T.usage);
         return;
     }
     if (b.sub === "add") {
         if (b.files.length === 0) {
-            emit("用法：deepseeker-code batch add <工单.md> [...]（缺验收命令的工单会被拒绝）\n详情：deepseeker-code batch help");
+            emit(T.adminAddUsage);
             return;
         }
         for (const f of b.files) {
             const abs = path.resolve(f);
-            const r = await enqueueTicketFile(abs).catch((e: any) => ({ ok: false as const, error: `读文件失败：${e?.message ?? e}` }));
-            if (r.ok) emit(`📥 已入队 [${r.id}] ${r.title}`);
-            else emit(`🚫 拒绝 ${path.basename(abs)}：${r.error}`);
+            const r = await enqueueTicketFile(abs, getLocale()).catch((e: any) => ({ ok: false as const, error: T.readFileFail(e?.message ?? e) }));
+            if (r.ok) emit(T.enqueued(r.id, r.title));
+            else emit(T.addRejected(path.basename(abs), r.error));
         }
-        emit("\n跑批：deepseeker-code batch run");
+        emit(T.nextStepRun);
         return;
     }
     if (b.sub === "list") {
         const q = await snapshotQueue();
         if (q.pending.length + q.running.length + q.done.length === 0) {
-            emit("队列空。投递：deepseeker-code batch add <工单.md>（格式见 batch help）");
+            emit(T.adminQueueEmpty);
             return;
         }
-        if (q.running.length > 0) emit(`▶ 运行中：`);
+        if (q.running.length > 0) emit(T.listRunningHead);
         for (const f of q.running) emit(`  ${f.replace(/\.md$/, "")}`);
-        if (q.pending.length > 0) emit(`⏳ 待跑 ${q.pending.length}：`);
+        if (q.pending.length > 0) emit(T.listPendingHead(q.pending.length));
         for (const f of q.pending) emit(`  ${f.replace(/\.md$/, "")}`);
-        if (q.done.length > 0) emit(`✔ 已完成 ${q.done.length}：`);
+        if (q.done.length > 0) emit(T.listDoneHead(q.done.length));
         for (const id of q.done) emit(`  ${id}  ${await describeDone(id)}`);
         return;
     }
     if (b.sub === "clean") {
         const n = await cleanDone();
-        emit(`🧹 已清空 done/（${n} 个任务存档）。pending/running 不受影响。`);
+        emit(T.cleaned(n));
         return;
     }
 };
@@ -106,7 +94,7 @@ const describeDone = async (id: string): Promise<string> => {
     try {
         text = await fs.readFile(reportPath(id), "utf-8");
     } catch {
-        return "（报告缺失）";
+        return batchT(getLocale()).reportMissing;
     }
     const fm = (key: string): string => {
         const m = new RegExp(`^${key}:\\s*(.+)$`, "m").exec(text);

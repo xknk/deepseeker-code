@@ -30,6 +30,8 @@ import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
 import { acquireRunLock, releaseRunLock, takeNextTicket, finishTicket } from "@/batch/queue.ts";
+import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
+import { getLocale } from "./strings.ts";
 
 // ============ 白名单与缺省禁用（审批自动应答器的判定表） ============
 
@@ -48,21 +50,14 @@ const emit = (s: string = ""): void => {
 };
 const ts = (): string => new Date().toLocaleTimeString("zh-CN", { hour12: false });
 
-/** 任务终态。timeout/error 不跑验收（改动不完整，跑了也是噪声）；其余必跑验收定 passed/accept-failed。 */
-type TaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "rejected";
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-    passed: "✅ 通过验收",
-    "accept-failed": "❌ 验收未过",
-    timeout: "⏱️ 超时截断",
-    error: "💥 agent 异常",
-    rejected: "🚫 工单被拒",
-};
+/** 任务终态（状态标签词表在 batchStrings.statusLabel）。timeout/error 不跑验收（改动不完整，跑了也是噪声）；其余必跑验收定 passed/accept-failed。 */
+type TaskStatus = BatchTaskStatus;
 
 // ============ 验收命令执行（不经模型，runner 直接 exec） ============
 
 /** shell 执行验收命令：复用 run_command 的 shell 形态（Win 优先 Git Bash / POSIX sh）与 GBK 兜底解码。 */
 const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: number | null; output: string; timedOut: boolean }> => {
+    const T = batchT(getLocale());
     const isWin = process.platform === "win32";
     return new Promise((resolve) => {
         let child: ReturnType<typeof spawn>;
@@ -74,7 +69,7 @@ const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: numbe
                 env: scrubCommandEnv(), // 剔除 agent 自身凭证（同 run_command 红线）
             });
         } catch (e: any) {
-            resolve({ code: null, output: `启动失败：${e?.message ?? e}`, timedOut: false });
+            resolve({ code: null, output: T.spawnFail(e?.message ?? e), timedOut: false });
             return;
         }
         const chunks: Buffer[] = [];
@@ -87,14 +82,14 @@ const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: numbe
         }, ACCEPT_TIMEOUT_MIN * 60_000);
         child.on("error", (e: any) => {
             clearTimeout(killer);
-            resolve({ code: null, output: `执行失败：${e?.message ?? e}`, timedOut });
+            resolve({ code: null, output: T.execFail(e?.message ?? e), timedOut });
         });
         child.on("close", (code) => {
             clearTimeout(killer);
             const text = decodeProcessOutput(Buffer.concat(chunks)).trim();
             const lines = text.split("\n");
-            const tail = lines.length > ACCEPT_TAIL_LINES ? `（前 ${lines.length - ACCEPT_TAIL_LINES} 行已省略）\n${lines.slice(-ACCEPT_TAIL_LINES).join("\n")}` : text;
-            resolve({ code, output: tail || "（无输出）", timedOut });
+            const tail = lines.length > ACCEPT_TAIL_LINES ? `${T.tailOmitted(lines.length - ACCEPT_TAIL_LINES)}\n${lines.slice(-ACCEPT_TAIL_LINES).join("\n")}` : text;
+            resolve({ code, output: tail || T.noOutput, timedOut });
         });
     });
 };
@@ -132,19 +127,7 @@ const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
     return c;
 };
 
-const fmtCost = (c: SessionCost): string => {
-    const money = c.costYuan !== null ? `¥${c.costYuan.toFixed(4)}` : "（无价模型，不计钱）";
-    const hit = c.promptTokens > 0 ? Math.round((c.cachedTokens / c.promptTokens) * 100) : 0;
-    const mins = Math.round(c.durationMs / 6000) / 10;
-    return `${c.rounds} 轮 · ${money} · 缓存命中 ${hit}% · ${mins}min${c.partialPrice ? "（部分记录无价，钱为部分和）" : ""}${c.subRuns > 0 ? ` · 子 run ${c.subRuns} 个已计入` : ""}`;
-};
-
 // ============ 报告生成 ============
-
-const fmtReceiptLine = (receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined): string => {
-    if (!receipt) return "（无结算单——run 未到收尾即被截断，花费以上方 usageLog 聚合为准）";
-    return `${receipt.rounds} 轮 · ${receipt.costYuan !== null ? `¥${receipt.costYuan.toFixed(4)}` : "无价"} · 缓存命中 ${Math.round(receipt.cacheHitRate * 100)}% · ${(receipt.durationMs / 1000).toFixed(0)}s`;
-};
 
 const buildReport = (args: {
     id: string; ticket: BatchTicket; status: TaskStatus; budgetTruncated: boolean;
@@ -154,7 +137,8 @@ const buildReport = (args: {
     errorMessage?: string;
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
-    const budgetNote = budgetTruncated ? "（⚠️ 预算截断后收尾）" : "";
+    const T = batchT(getLocale());
+    const budgetNote = budgetTruncated ? T.budgetTruncNote : "";
     return `---
 id: ${id}
 title: ${ticket.title}
@@ -163,38 +147,38 @@ cost-yuan: ${cost.costYuan !== null ? cost.costYuan.toFixed(4) : "null"}
 rounds: ${cost.rounds}
 budget-truncated: ${budgetTruncated}
 session: batch-${id}
-worktree: ${wt?.path ?? "（未创建）"}
-branch: ${wt?.branch ?? "（未创建）"}
+worktree: ${wt?.path ?? T.notCreated}
+branch: ${wt?.branch ?? T.notCreated}
 ---
 
-# 挂机任务报告：${ticket.title}
+${T.reportTitle(ticket.title)}
 
-- 状态：${STATUS_LABEL[status]}${budgetNote}
-- 结算单：${fmtCost(cost)}
-- 本轮 receipt：${fmtReceiptLine(receipt)}
-${args.errorMessage ? `- 异常：${args.errorMessage}\n` : ""}
-## 任务
+${T.statusEntry(`${T.statusLabel(status)}${budgetNote}`)}
+${T.costEntry(T.costSummary(cost))}
+${T.receiptEntry(receipt ? T.receiptLine(receipt) : T.noReceipt)}
+${args.errorMessage ? T.errorEntry(args.errorMessage) : ""}
+${T.taskH}
 
 ${ticket.body}
 
-## 模型收尾汇报
+${T.finalH}
 
-${finalText.trim() || "（无输出——run 在产出正文前被截断/异常）"}
+${finalText.trim() || T.noFinal}
 
-## 验收
+${T.acceptH}
 ${accept
-        ? `\n命令：\`${accept.cmd}\` → exit ${accept.code}${accept.timedOut ? "（⏱️ 验收超时被杀）" : ""}\n\n输出尾部：\n\n\`\`\`\n${accept.output}\n\`\`\`\n`
-        : "\n（未执行验收——改动不完整，跑了也是噪声）"}
+        ? `\n${T.acceptCmdLine(accept.cmd, accept.code)}${accept.timedOut ? T.acceptTimeoutSuffix : ""}\n\n${T.acceptTail}\n\n\`\`\`\n${accept.output}\n\`\`\`\n`
+        : T.noAccept}
 
-## 被拒工具调用（fail-closed 记录）
+${T.deniedH}
 
 ${deniedTools.length === 0
-        ? "无。"
+        ? T.deniedNone
         : deniedTools.map((d) => `- **${d.tool}** — ${d.detail}`).join("\n")}
 
-## Diff 摘要（worktree 相对基座，未提交，待人工处置）
+${T.diffH}
 
-改动在独立 worktree（分支 \`${wt?.branch ?? "?"}\`，路径 ${wt?.path ?? "?"}）。处置：检查满意 → 在 worktree 内 commit 并合回主仓；丢弃 → 删除该 worktree 目录 + \`git worktree prune\` + \`git branch -D <分支>\`。
+${T.diffNote(wt?.branch ?? "?", wt?.path ?? "?")}
 
 \`\`\`\`\`diff
 ${diff}
@@ -205,20 +189,21 @@ ${diff}
 // ============ 单任务执行 ============
 
 const runOneTask = async (task: { id: string; path: string }): Promise<{ status: TaskStatus; cost: SessionCost; budgetTruncated: boolean }> => {
+    const T = batchT(getLocale());
     const source = await fs.promises.readFile(task.path, "utf-8");
-    const parsed = parseBatchTicket(source);
+    const parsed = parseBatchTicket(source, getLocale());
     if (!parsed.ok) {
         // 工单格式问题：不入 worktree 直接出报告（running/ 里工单收尾回 done/）
         const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, partialPrice: false, durationMs: 0 };
-        await finishTicket(task.id, `---\nid: ${task.id}\ntitle: ${task.id}\nstatus: rejected\n---\n\n# 挂机任务被拒\n\n${parsed.error}`);
-        emit(`🚫 [${task.id}] 工单被拒：${parsed.error}`);
+        await finishTicket(task.id, `---\nid: ${task.id}\ntitle: ${task.id}\nstatus: rejected\n---\n\n${T.rejectedTitle}\n\n${parsed.error}`);
+        emit(T.ticketRejected(task.id, parsed.error));
         return { status: "rejected", cost, budgetTruncated: false };
     }
     const t = parsed.ticket;
     const sessionId = `batch-${task.id}`;
     const timeoutMin = t.timeoutMin ?? 30;
     emit(`▶ [${task.id}] ${t.title}`);
-    emit(`   预算 ${t.budgetYuan !== undefined ? `¥${t.budgetYuan}` : "不限"} · 超时 ${timeoutMin}min · 验收 \`${t.accept}\``);
+    emit(T.taskMeta(t.budgetYuan, timeoutMin, t.accept));
 
     // 工具表裁剪：缺省禁高危（对模型不可见），工单 tools: 显式解锁
     const unlocked = new Set(t.tools ?? []);
@@ -237,11 +222,11 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     try {
         wt = await createWorktree(sessionId, task.id);
     } catch (e: any) {
-        const msg = `创建 worktree 失败（需要主工作区是 git 仓库）：${e?.message ?? e}`;
+        const msg = T.wtCreateFail(e?.message ?? e);
         const cost = await collectSessionCost(sessionId);
         await finishTicket(task.id, buildReport({
             id: task.id, ticket: t, status: "error", budgetTruncated: false, cost, receipt: undefined,
-            finalText: "", accept: null, deniedTools: [], diff: "（无）", wt: null, errorMessage: msg,
+            finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt: null, errorMessage: msg,
         }));
         emit(`💥 [${task.id}] ${msg}`);
         return { status: "error", cost, budgetTruncated: false };
@@ -249,7 +234,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     setSessionWorktree(sessionId, wt);
 
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(new Error(`任务超时（${timeoutMin} 分钟）`)), timeoutMin * 60_000);
+    const timer = setTimeout(() => ac.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
     let receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
     // ★ final 全文自采：handleUnifiedChat 的契约是「正文已流式推过 delta 时 final.text 置空」（交互场景防
     //   重复显示），挂机报告要全文——累积 text.delta，final.text 仅作「首字符前终结」路径的兜底。
@@ -263,7 +248,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                 if (evt?.type === "text.delta") finalText += evt.text;
                 else if (evt?.type === "text.reset") finalText = ""; // 流式 stall 重试：同轮从零重生成，丢弃已累积
                 else if (evt?.type === "final") finalText = evt.text || finalText;
-                else if (evt?.type === "round.start") emit(`   [${ts()}] 轮 ${evt.round}`);
+                else if (evt?.type === "round.start") emit(T.roundLine(ts(), evt.round));
             },
             ac.signal,
             {
@@ -294,15 +279,15 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     let accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null = null;
     if (agentError) {
         status = "error";
-        emit(`💥 [${task.id}] agent 异常：${agentError}`);
+        emit(T.agentErrorLine(task.id, agentError));
     } else if (timedOut) {
         status = "timeout";
-        emit(`⏱️ [${task.id}] 超时（${timeoutMin}min），截断收尾（验收不跑）`);
+        emit(T.timeoutLine(task.id, timeoutMin));
     } else {
         const r = await runAcceptCommand(t.accept, wt.path);
         accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut };
         status = r.code === 0 && !r.timedOut ? "passed" : "accept-failed";
-        emit(`${status === "passed" ? "✅" : "❌"} [${task.id}] 验收 exit ${r.code}${r.timedOut ? "（超时被杀）" : ""}`);
+        emit(T.acceptLine(status === "passed", task.id, r.code) + (r.timedOut ? T.acceptKilledSuffix : ""));
     }
 
     // 善后：杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）→ 收割 diff → 报告
@@ -313,8 +298,8 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         id: task.id, ticket: t, status, budgetTruncated, cost, receipt, finalText,
         accept, deniedTools, diff, wt, errorMessage: agentError,
     }));
-    emit(`   ${STATUS_LABEL[status]} · ${fmtCost(cost)}`);
-    emit(`   产物：${wt.path}（分支 ${wt.branch}，保留待人工处置）`);
+    emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);
+    emit(T.artifactLine(wt.path, wt.branch));
     return { status, cost, budgetTruncated };
 };
 
@@ -339,14 +324,15 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** 睡到窗口起点：已过起点但在窗口内 → 立即开跑；已过终点 → 等明天起点。分段睡（防 setTimeout 2^31 溢出）。 */
 const waitUntilWindow = async (w: { startMin: number; endMin: number }): Promise<void> => {
+    const T = batchT(getLocale());
     const now = nowMinutes();
     let waitMin = 0;
     if (now >= w.startMin && now < w.endMin) {
-        emit(`⏰ 当前 ${Math.floor(now / 60)}:${String(now % 60).padStart(2, "0")} 已在窗口内，立即开跑。`);
+        emit(T.inWindowNow(`${Math.floor(now / 60)}:${String(now % 60).padStart(2, "0")}`));
         return;
     }
     waitMin = now < w.startMin ? w.startMin - now : 24 * 60 - now + w.startMin;
-    emit(`⏰ --wait-window：${Math.floor(waitMin / 60)} 小时 ${waitMin % 60} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`);
+    emit(T.waitWindowWait(Math.floor(waitMin / 60), waitMin % 60));
     while (waitMin > 0) {
         const chunkMin = Math.min(waitMin, 30);
         await sleep(chunkMin * 60_000);
@@ -360,15 +346,16 @@ const waitUntilWindow = async (w: { startMin: number; endMin: number }): Promise
  * 执行挂机队列（engine 已就绪后由 main 派发）。全程持锁（并发=0）；崩溃残留 running/ 工单自动重排队。
  */
 export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<void> => {
+    const T = batchT(getLocale());
     const window = parseWaitWindow(opts?.waitWindow);
     if (opts?.waitWindow && !window) {
-        emit(`❌ --wait-window 格式非法："${opts.waitWindow}"（应为 HH:MM-HH:MM，如 23:30-06:30）`);
+        emit(T.waitWindowInvalid(opts.waitWindow));
         process.exitCode = 2;
         return;
     }
     if (window) await waitUntilWindow(window);
 
-    const lock = await acquireRunLock();
+    const lock = await acquireRunLock(getLocale());
     if (!lock.ok) {
         emit(`🚫 ${lock.error}`);
         process.exitCode = 1;
@@ -388,7 +375,7 @@ export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<voi
             total++;
             const r = await runOneTask(task);
             if (r.status === "passed") passed++;
-            else failedIds.push(`[${task.id}] ${STATUS_LABEL[r.status]}`);
+            else failedIds.push(`[${task.id}] ${T.statusLabel(r.status)}`);
             if (r.cost.costYuan !== null) {
                 costSum += r.cost.costYuan;
                 costTasks++;
@@ -399,13 +386,13 @@ export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<voi
     }
 
     if (total === 0) {
-        emit("队列空：pending/ 无任务。投递：deepseeker-code batch add <工单.md>");
+        emit(T.runnerQueueEmpty);
         return;
     }
     emit("");
     emit("━".repeat(56));
-    emit(`🌙 挂机结束：${total} 任务 · ${passed} 过 · ${total - passed} 未过（耗时 ${Math.round((Date.now() - startedAt) / 6000) / 10}min）`);
-    emit(`💰 总花费：${costTasks > 0 ? `¥${costSum.toFixed(4)}（${costTasks} 个任务计价）` : "全部无价模型，未计钱"}`);
-    if (failedIds.length > 0) emit(`⚠️ 未过清单：\n  ${failedIds.join("\n  ")}`);
-    emit("报告与改动：.deepseeker-code/batch/done/（worktree 均保留待人工处置）");
+    emit(T.summaryDone(total, passed, `${Math.round((Date.now() - startedAt) / 6000) / 10}`));
+    emit(costTasks > 0 ? T.summaryCost(costSum.toFixed(4), costTasks) : T.summaryCostFree);
+    if (failedIds.length > 0) emit(`${T.failedHead}\n  ${failedIds.join("\n  ")}`);
+    emit(T.artifactsDir);
 };

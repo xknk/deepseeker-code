@@ -35,6 +35,33 @@ export interface BatchTicket {
 
 export type ParsedTicket = { ok: true; ticket: BatchTicket } | { ok: false; error: string };
 
+/** 工单校验错误的输出语言（错误文案直接进 CLI 控制台与被拒报告；缺省 zh 向后兼容）。 */
+export type BatchLocale = "zh" | "en";
+
+const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
+    zh: {
+        noFrontmatter: "缺少 frontmatter（--- 包裹的头部块）。工单格式见 batch add 帮助。",
+        noAccept: "frontmatter 缺 accept（验收命令）。挂机任务必须带可执行验收，缺验收拒绝入队。",
+        badBudget: (v: string) => `budget-yuan 非法（"${v}"）：须为正数（元）。`,
+        badTimeout: (v: string) => `timeout-min 非法（"${v}"）：须为正整数（分钟）。`,
+        badTools: 'tools 为空：要么删掉该行（用缺省禁用清单），要么列工具名（逗号分隔）。',
+        emptyBody: "任务正文为空：frontmatter 之后应写任务描述。",
+        untitled: "(未命名任务)",
+        readFail: (e: string) => `读工单失败：${e}`,
+    },
+    en: {
+        noFrontmatter: "Missing frontmatter (a --- delimited header block). See `batch add` help for the ticket format.",
+        noAccept: "Frontmatter is missing `accept` (acceptance command). Batch tasks must carry an executable acceptance check — rejected without one.",
+        badBudget: (v: string) => `Invalid budget-yuan ("${v}"): must be a positive number (yuan).`,
+        badTimeout: (v: string) => `Invalid timeout-min ("${v}"): must be a positive integer (minutes).`,
+        badTools: "Empty tools: either remove the line (use the default denylist) or list tool names (comma-separated).",
+        emptyBody: "Empty task body: write the task description after the frontmatter.",
+        untitled: "(untitled task)",
+        readFail: (e: string) => `Failed to read ticket: ${e}`,
+    },
+};
+const ticketMsg = (locale: BatchLocale, key: string): any => (TICKET_MSG[locale] ?? TICKET_MSG.zh)[key] ?? TICKET_MSG.zh[key] ?? key;
+
 /** 生成工单 id：本地时间 YYYYMMDD-HHmmss + 4 位随机后缀（同秒多投不撞名，文件名排序即 FIFO）。 */
 export const generateBatchId = (now = new Date()): string => {
     const p = (n: number, w = 2): string => String(n).padStart(w, "0");
@@ -60,9 +87,9 @@ const parsePositiveNumber = (raw: string): number | null => {
  * 解析并校验工单源文本。只信任「结构合法」的工单：缺 accept / 数字字段非法 → 拒绝（fail-closed）。
  * frontmatter 用行式 key: value 解析（不引 YAML 依赖；字段集固定、无嵌套，行式足够）。
  */
-export const parseBatchTicket = (source: string): ParsedTicket => {
+export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): ParsedTicket => {
     const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(source);
-    if (!m) return { ok: false, error: "缺少 frontmatter（--- 包裹的头部块）。工单格式见 batch add 帮助。" };
+    if (!m) return { ok: false, error: ticketMsg(locale, "noFrontmatter") };
     const [, fmRaw, bodyRaw] = m;
 
     const fm: Record<string, string> = {};
@@ -73,37 +100,37 @@ export const parseBatchTicket = (source: string): ParsedTicket => {
     }
 
     const accept = (fm["accept"] ?? "").trim();
-    if (!accept) return { ok: false, error: "frontmatter 缺 accept（验收命令）。挂机任务必须带可执行验收，缺验收拒绝入队。" };
+    if (!accept) return { ok: false, error: ticketMsg(locale, "noAccept") };
 
     let budgetYuan: number | undefined;
     if (fm["budget-yuan"] !== undefined) {
         const n = parsePositiveNumber(fm["budget-yuan"]);
-        if (n === null) return { ok: false, error: `budget-yuan 非法（"${fm["budget-yuan"]}"）：须为正数（元）。` };
+        if (n === null) return { ok: false, error: ticketMsg(locale, "badBudget")(fm["budget-yuan"]) };
         budgetYuan = n;
     }
     let timeoutMin: number | undefined;
     if (fm["timeout-min"] !== undefined) {
         const n = parsePositiveNumber(fm["timeout-min"]);
-        if (n === null) return { ok: false, error: `timeout-min 非法（"${fm["timeout-min"]}"）：须为正整数（分钟）。` };
+        if (n === null) return { ok: false, error: ticketMsg(locale, "badTimeout")(fm["timeout-min"]) };
         timeoutMin = n;
     }
     const tools = fm["tools"] !== undefined ? parseToolsValue(fm["tools"]) : undefined;
-    if (tools && tools.length === 0) return { ok: false, error: 'tools 为空：要么删掉该行（用缺省禁用清单），要么列工具名（逗号分隔）。' };
+    if (tools && tools.length === 0) return { ok: false, error: ticketMsg(locale, "badTools") };
 
     const body = bodyRaw.trim();
-    if (!body) return { ok: false, error: "任务正文为空：frontmatter 之后应写任务描述。" };
+    if (!body) return { ok: false, error: ticketMsg(locale, "emptyBody") };
 
-    const title = (fm["title"] ?? "").trim() || body.split(/\r?\n/).find((l) => l.trim())?.slice(0, 40) || "(未命名任务)";
+    const title = (fm["title"] ?? "").trim() || body.split(/\r?\n/).find((l) => l.trim())?.slice(0, 40) || ticketMsg(locale, "untitled");
     return { ok: true, ticket: { title, accept, budgetYuan, timeoutMin, tools: tools && tools.length > 0 ? tools : undefined, body } };
 };
 
 /** 便捷读取：读文件并解析（入队用）。 */
-export const readBatchTicket = async (filePath: string): Promise<ParsedTicket> => {
+export const readBatchTicket = async (filePath: string, locale: BatchLocale = "zh"): Promise<ParsedTicket> => {
     let source: string;
     try {
         source = await fs.readFile(filePath, "utf-8");
     } catch (e: any) {
-        return { ok: false, error: `读工单失败：${e?.message ?? e}` };
+        return { ok: false, error: ticketMsg(locale, "readFail")(e?.message ?? e) };
     }
-    return parseBatchTicket(source);
+    return parseBatchTicket(source, locale);
 };

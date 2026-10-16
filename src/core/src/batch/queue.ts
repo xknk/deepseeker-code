@@ -11,7 +11,19 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { generateBatchId, readBatchTicket } from "./ticket.ts";
+import { generateBatchId, readBatchTicket, type BatchLocale } from "./ticket.ts";
+
+/** 锁错误文案（直接进 runner 控制台；缺省 zh 向后兼容）。 */
+const LOCK_MSG: Record<BatchLocale, Record<string, any>> = {
+    zh: {
+        createFail: (e: string) => `锁创建失败：${e}`,
+        held: (pid: number) => `已有 batch runner 在运行（pid ${pid}）。挂机模式串行，勿并发跑两个 runner。`,
+    },
+    en: {
+        createFail: (e: string) => `Failed to create the lock file: ${e}`,
+        held: (pid: number) => `Another batch runner is already running (pid ${pid}). Batch mode is serial — don't run two runners at once.`,
+    },
+};
 
 export type BatchState = "pending" | "running" | "done";
 
@@ -54,8 +66,8 @@ export const readReport = async (id: string): Promise<string | null> => {
  * 入队：读源文件 → 解析校验（缺 accept 等在此拒绝）→ 生成 id → 写 pending/。
  * @returns 入队结果（失败带原因文案，调用方直接打印）。
  */
-export const enqueueTicketFile = async (srcPath: string): Promise<{ ok: true; id: string; title: string } | { ok: false; error: string }> => {
-    const parsed = await readBatchTicket(srcPath);
+export const enqueueTicketFile = async (srcPath: string, locale: BatchLocale = "zh"): Promise<{ ok: true; id: string; title: string } | { ok: false; error: string }> => {
+    const parsed = await readBatchTicket(srcPath, locale);
     if (!parsed.ok) return parsed;
     // 源文件原样搬运（校验在读取时已做；保留原文避免二次序列化走样）
     const source = await fs.readFile(srcPath, "utf-8");
@@ -132,18 +144,18 @@ const pidAlive = (pid: number): boolean => {
  * 尝试持有运行锁（O_EXCL 原子创建）。已有锁时：持有者 pid 已死 → 接管（崩溃残留）；活着 → 拒绝。
  * @returns 持锁成功 true；失败带原因。
  */
-export const acquireRunLock = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+export const acquireRunLock = async (locale: BatchLocale = "zh"): Promise<{ ok: true } | { ok: false; error: string }> => {
     await fs.mkdir(batchQueueRoot(), { recursive: true });
     const payload = `${process.pid} ${new Date().toISOString()}`;
     try {
         await fs.writeFile(lockPath(), payload, { flag: "wx" }); // wx = O_EXCL：已存在即抛 EEXIST
         return { ok: true };
     } catch (e: any) {
-        if (e?.code !== "EEXIST") return { ok: false, error: `锁创建失败：${e?.message ?? e}` };
+        if (e?.code !== "EEXIST") return { ok: false, error: LOCK_MSG[locale].createFail(e?.message ?? e) };
         const raw = await fs.readFile(lockPath(), "utf-8").catch(() => "");
         const ownerPid = parseInt(raw.split(" ")[0], 10);
         if (Number.isFinite(ownerPid) && pidAlive(ownerPid)) {
-            return { ok: false, error: `已有 batch runner 在运行（pid ${ownerPid}）。挂机模式串行，勿并发跑两个 runner。` };
+            return { ok: false, error: LOCK_MSG[locale].held(ownerPid) };
         }
         await fs.writeFile(lockPath(), payload).catch(() => { }); // 持有者已死：接管
         return { ok: true };
