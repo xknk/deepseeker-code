@@ -312,47 +312,47 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 state.pushInfo(S.statusText(modelDisplay, state.getThinkingLevel(), state.getPlanMode(), getLocale(), CWD));
                 return true;
             case "/usage":
-                state.pushInfo(await inspectUsage(state.sessionIdRef.current ?? ""));
+                state.pushInfo(await inspectUsage(state.sessionIdRef.current ?? "", getLocale()));
                 return true;
             case "/context":
-                state.pushInfo(await inspectContext(state.sessionIdRef.current ?? ""));
+                state.pushInfo(await inspectContext(state.sessionIdRef.current ?? "", getLocale()));
                 return true;
             case "/permissions":
-                state.pushInfo(inspectPermissions());
+                state.pushInfo(inspectPermissions(getLocale()));
                 return true;
             case "/mcp":
-                state.pushInfo(await inspectMcp());
+                state.pushInfo(await inspectMcp(getLocale()));
                 return true;
             case "/hooks":
-                state.pushInfo(inspectHooks());
+                state.pushInfo(inspectHooks(getLocale()));
                 return true;
             case "/trust": {
                 const trusted = await readTrustedDirs();
                 if (!arg) {
-                    if (trusted.length === 0) { state.pushInfo("已信任目录：（无）。首次进入某目录时会询问是否信任。"); return true; }
+                    if (trusted.length === 0) { state.pushInfo(S.trustEmpty); return true; }
                     const list = trusted.map((d, i) => `  [${i}] ${d}`).join("\n");
-                    state.pushInfo(`已信任目录（撤销用 /trust <序号 或 路径>）：\n${list}\n\n撤销后需重启 CLI 生效（项目级配置仅在启动时加载）。`);
+                    state.pushInfo(S.trustList(list));
                     return true;
                 }
                 const idx = Number(arg);
                 const target = Number.isInteger(idx) && idx >= 0 && idx < trusted.length ? trusted[idx] : arg;
                 const removed = await untrustDir(target);
-                state.pushInfo(removed ? `已撤销信任：${target}\n（重启 CLI 后生效——项目级配置仅在启动时加载）` : `未找到该信任目录：${target}`);
+                state.pushInfo(removed ? S.trustRemoved(target) : S.trustNotFound(target));
                 return true;
             }
             case "/debug":
-                state.pushInfo(inspectDebug(state.sessionIdRef.current ?? ""));
+                state.pushInfo(inspectDebug(state.sessionIdRef.current ?? "", getLocale()));
                 return true;
             case "/archive": {
                 // 最近一次压缩的归档摘要（compact.done 随事件下发；运行时态，重启后为空）
                 const s = state.getArchivedSummary();
-                state.pushInfo(s ? `📜 最近一次压缩的归档摘要：\n${s}` : "本会话启动以来尚未发生过压缩（摘要仅保留运行时最近一次）。");
+                state.pushInfo(s ? S.archiveSummary(s) : S.archiveNone);
                 return true;
             }
             case "/plan": {
                 const on = !state.getPlanMode();
                 state.setPlanMode(on);
-                state.pushInfo(`计划模式：${on ? "开（下次提问先只读调研并产出方案，审批后实现）" : "关"}`);
+                state.pushInfo(S.planModeSet(on));
                 return true;
             }
             case "/budget": {
@@ -361,20 +361,20 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 if (!v) {
                     const b = state.getBudgetYuan();
                     const last = state.getLastRunCostYuan();
-                    state.pushInfo(`💰 预算：${b != null ? `¥${b}/run` : "未设置（/budget 0.5 设置每个 run 的花费上限）"}${last != null ? ` · 上个 run 已花 ¥${last.toFixed(3)}` : " · 尚无完成 run"}`);
+                    state.pushInfo(S.budgetView(b, last));
                     return true;
                 }
-                if (v === "off" || v === "0") { state.setBudgetYuan(undefined); state.pushInfo("💰 预算已关闭（不限花费）。"); return true; }
+                if (v === "off" || v === "0") { state.setBudgetYuan(undefined); state.pushInfo(S.budgetOff); return true; }
                 const n = Number(v);
-                if (!Number.isFinite(n) || n <= 0) { state.pushInfo("用法：/budget 0.5（元/run）· /budget off · /budget 查看"); return true; }
+                if (!Number.isFinite(n) || n <= 0) { state.pushInfo(S.budgetUsage); return true; }
                 state.setBudgetYuan(n);
-                state.pushInfo(`💰 预算已设置：每 run ¥${n}（超限先提醒收敛，仍超 120% 将截断本 run）。`);
+                state.pushInfo(S.budgetSet(n));
                 return true;
             }
             case "/auto": {
                 const on = !state.getAutoMode();
                 state.setAutoMode(on);
-                state.pushInfo(`自动模式：${on ? "开（工作区内文件编辑由分类器自动放行，高危转人工）" : "关"}`);
+                state.pushInfo(S.autoModeSet(on));
                 return true;
             }
             case "/model":
@@ -394,15 +394,15 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             case "/thinking": {
                 const lvl = arg.toLowerCase();
                 if (arg && lvl !== "off" && lvl !== "high" && lvl !== "max") {
-                    state.pushInfo(`无效等级：${arg}（可选：off 关闭 / high 常规 / max 深度）`);
+                    state.pushInfo(S.thinkingInvalid(arg));
                     return true;
                 }
                 if (!arg) {
-                    state.pushInfo(`当前思考等级：${state.getThinkingLevel()}（off 关闭 / high 常规 / max 深度）`);
+                    state.pushInfo(S.thinkingCurrent(state.getThinkingLevel()));
                     return true;
                 }
                 state.setThinkingLevel(lvl as ThinkingLevel);
-                state.pushInfo(`思考等级：${lvl}${lvl === "off" ? "（关闭，简单任务更快更省）" : lvl === "max" ? "（深度，复杂任务）" : "（常规）"}`);
+                state.pushInfo(S.thinkingSet(lvl));
                 return true;
             }
             case "/lang": {
@@ -452,7 +452,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     /** 引擎就绪闸门：后台 initEngine 未完成时提示并等待（MCP 工具/自定义命令随后可用）。 */
     const ensureEngine = async (): Promise<void> => {
         if (engineReadyFlag) return;
-        state.pushInfo("⏳ 引擎加载中（MCP/skills/commands）…");
+        state.pushInfo(S.engineLoading);
         await engineReady;
     };
 
@@ -464,7 +464,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         if (await runLocalSlash(text)) return;
         const name = text.slice(1).split(/\s+/)[0] ?? "";
         if (listCommands().some((c) => c.name === name)) { await state.submit(text); return; }
-        state.pushInfo(`未知命令：/${name || "(空)"}（输入 / 查看可用命令）`);
+        state.pushInfo(S.unknownCmd(name));
     };
 
     const onSubmit = async () => {

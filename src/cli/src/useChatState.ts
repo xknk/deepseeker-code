@@ -492,7 +492,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             }
             case "vision.downgraded":
                 // ★ 零配置多模态自学习：当前模型不支持图片，本轮已自动折叠为文本重试（能力已记住）
-                pushInfo(`🖼 模型 ${String(obj.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
+                pushInfo(S.visionDowngraded(String(obj.model ?? "")));
                 break;
             default:
                 break;
@@ -668,7 +668,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 } else {
                     const enterReason = takeEnterPlanRequest();
                     if (enterReason != null) {
-                        pushInfo(`📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`);
+                        pushInfo(S.planEnterSwitched(enterReason));
                         planModeRef.current = true;
                         const kept = await runPlanStage(sid, ENTER_PLAN_RESEARCH_PROMPT);
                         // ★ 仅「已接受执行」恢复原模式；拒绝（继续规划）则保持计划模式开启，
@@ -687,14 +687,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
      *  首轮即可用（不依赖引擎闸门——不走 MCP/commands，只需 sessionId 落盘）。 */
     const runBangCommand = useCallback(async (raw: string) => {
         const cmd = raw.replace(/^!/, "").trim();
-        if (!cmd) { pushInfo("用法：!<shell 命令>（如 !git status）；输出会带入下轮对话上下文。"); return; }
+        if (!cmd) { pushInfo(S.bangUsage); return; }
         pushUser(raw);
         if (sessionIdRef.current == null) {
             sessionIdRef.current = await getOrCreateSessionId(initialSessionId ?? undefined);
         }
         const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
-        const head = r.timedOut ? `⏱ 超时中止` : r.ok ? `✅ 退出码 0` : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : `❌ 已中止`;
-        pushInfo(`${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || "(无输出)"}`);
+        const head = S.bangHead(r.timedOut, r.ok, r.exitCode ?? null);
+        pushInfo(`${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || S.bangNoOutput}`);
         await recordBashEntry(sessionIdRef.current, formatBashEntry(cmd, r));
     }, [initialSessionId, pushUser, pushInfo]);
 

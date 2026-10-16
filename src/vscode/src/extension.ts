@@ -27,12 +27,12 @@ let engineDispose: (() => void) | null = null;
 const envT = makeT(envLocale);
 
 // —— core 观测/命令目录访问器（activate 第 4 步动态 import 后赋值；webview 的 /usage 等本地命令用） ——
-let inspectUsage: (sessionId: string) => Promise<string> = async () => envT("engineNotLoaded");
-let inspectContext: (sessionId: string) => Promise<string> = async () => envT("engineNotLoaded");
-let inspectPermissions: () => string = () => envT("engineNotLoaded");
-let inspectMcp: () => Promise<string> = async () => envT("engineNotLoaded");
-let inspectHooks: () => string = () => envT("engineNotLoaded");
-let inspectDebug: (sessionId: string) => string = () => envT("engineNotLoaded");
+let inspectUsage: (sessionId: string, locale?: "zh" | "en") => Promise<string> = async () => envT("engineNotLoaded");
+let inspectContext: (sessionId: string, locale?: "zh" | "en") => Promise<string> = async () => envT("engineNotLoaded");
+let inspectPermissions: (locale?: "zh" | "en") => string = () => envT("engineNotLoaded");
+let inspectMcp: (locale?: "zh" | "en") => Promise<string> = async () => envT("engineNotLoaded");
+let inspectHooks: (locale?: "zh" | "en") => string = () => envT("engineNotLoaded");
+let inspectDebug: (sessionId: string, locale?: "zh" | "en") => string = () => envT("engineNotLoaded");
 let listCommandsForWebview: () => Array<{ name: string; description: string }> = () => [];
 let listOutputStylesForWebview: () => Array<{ name: string; description: string }> = () => [];
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
@@ -506,12 +506,12 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         const sid = h.activeSessionId ?? "";
         let text = "";
         try {
-          if (cmd === "usage") text = await inspectUsage(sid);
-          else if (cmd === "context") text = await inspectContext(sid);
-          else if (cmd === "permissions") text = inspectPermissions();
-          else if (cmd === "mcp") text = await inspectMcp();
-          else if (cmd === "hooks") text = inspectHooks();
-          else if (cmd === "debug") text = inspectDebug(sid);
+          if (cmd === "usage") text = await inspectUsage(sid, h.currentLocale);
+          else if (cmd === "context") text = await inspectContext(sid, h.currentLocale);
+          else if (cmd === "permissions") text = inspectPermissions(h.currentLocale);
+          else if (cmd === "mcp") text = await inspectMcp(h.currentLocale);
+          else if (cmd === "hooks") text = inspectHooks(h.currentLocale);
+          else if (cmd === "debug") text = inspectDebug(sid, h.currentLocale);
           else if (cmd === "output-style") {
             const styles = listOutputStylesForWebview();
             const listText = styles.map((s) => `  · ${s.name} — ${s.description}`).join("\n");

@@ -129,6 +129,30 @@ interface StringDict {
     askTrust: (cwd: string) => string;
     optTrust: string;
     optExit: string;
+    /** 本地命令回显（/trust /archive /plan /budget /auto /thinking 与未识别命令） */
+    trustEmpty: string;
+    trustList: (list: string) => string;
+    trustRemoved: (target: string) => string;
+    trustNotFound: (target: string) => string;
+    archiveSummary: (s: string) => string;
+    archiveNone: string;
+    planModeSet: (on: boolean) => string;
+    budgetView: (budget: number | undefined, last: number | undefined) => string;
+    budgetOff: string;
+    budgetUsage: string;
+    budgetSet: (n: number) => string;
+    autoModeSet: (on: boolean) => string;
+    thinkingInvalid: (arg: string) => string;
+    thinkingCurrent: (level: string) => string;
+    thinkingSet: (lvl: string) => string;
+    engineLoading: string;
+    unknownCmd: (name: string) => string;
+    /** `!` 直跑 shell（bang）与事件提示 */
+    bangUsage: string;
+    bangHead: (timedOut: boolean, ok: boolean, exitCode: number | null) => string;
+    bangNoOutput: string;
+    visionDowngraded: (model: string) => string;
+    planEnterSwitched: (reason: string) => string;
     helpText: (model: string, thinking: string, locale: string) => string;
     statusText: (model: string, thinking: string, planOn: boolean, locale: string, cwd: string) => string;
 }
@@ -263,6 +287,28 @@ const STRINGS: Record<Locale, StringDict> = {
         askTrust: (cwd) => `安全检查：这是你信任的项目吗？\n${cwd}\n\nDeepSeeker-Code 将在此目录读取、编辑和执行文件。`,
         optTrust: "信任此目录",
         optExit: "退出",
+        trustEmpty: "已信任目录：（无）。首次进入某目录时会询问是否信任。",
+        trustList: (list) => `已信任目录（撤销用 /trust <序号 或 路径>）：\n${list}\n\n撤销后需重启 CLI 生效（项目级配置仅在启动时加载）。`,
+        trustRemoved: (target) => `已撤销信任：${target}\n（重启 CLI 后生效——项目级配置仅在启动时加载）`,
+        trustNotFound: (target) => `未找到该信任目录：${target}`,
+        archiveSummary: (s) => `📜 最近一次压缩的归档摘要：\n${s}`,
+        archiveNone: "本会话启动以来尚未发生过压缩（摘要仅保留运行时最近一次）。",
+        planModeSet: (on) => `计划模式：${on ? "开（下次提问先只读调研并产出方案，审批后实现）" : "关"}`,
+        budgetView: (budget, last) => `💰 预算：${budget != null ? `¥${budget}/run` : "未设置（/budget 0.5 设置每个 run 的花费上限）"}${last != null ? ` · 上个 run 已花 ¥${last.toFixed(3)}` : " · 尚无完成 run"}`,
+        budgetOff: "💰 预算已关闭（不限花费）。",
+        budgetUsage: "用法：/budget 0.5（元/run）· /budget off · /budget 查看",
+        budgetSet: (n) => `💰 预算已设置：每 run ¥${n}（超限先提醒收敛，仍超 120% 将截断本 run）。`,
+        autoModeSet: (on) => `自动模式：${on ? "开（工作区内文件编辑由分类器自动放行，高危转人工）" : "关"}`,
+        thinkingInvalid: (arg) => `无效等级：${arg}（可选：off 关闭 / high 常规 / max 深度）`,
+        thinkingCurrent: (level) => `当前思考等级：${level}（off 关闭 / high 常规 / max 深度）`,
+        thinkingSet: (lvl) => `思考等级：${lvl}${lvl === "off" ? "（关闭，简单任务更快更省）" : lvl === "max" ? "（深度，复杂任务）" : "（常规）"}`,
+        engineLoading: "⏳ 引擎加载中（MCP/skills/commands）…",
+        unknownCmd: (name) => `未知命令：/${name || "(空)"}（输入 / 查看可用命令）`,
+        bangUsage: "用法：!<shell 命令>（如 !git status）；输出会带入下轮对话上下文。",
+        bangHead: (timedOut, ok, exitCode) => timedOut ? "⏱ 超时中止" : ok ? "✅ 退出码 0" : exitCode != null ? `❌ 退出码 ${exitCode}` : "❌ 已中止",
+        bangNoOutput: "(无输出)",
+        visionDowngraded: (model) => `🖼 模型 ${model} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`,
+        planEnterSwitched: (reason) => `📋 模型请求进入计划模式${reason ? `：${reason}` : ""}，已切换…`,
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — 切换计划模式（只读调研 → 方案审批 → 实现）",
@@ -413,6 +459,28 @@ const STRINGS: Record<Locale, StringDict> = {
         askTrust: (cwd) => `Quick safety check: is this a project you trust?\n${cwd}\n\nDeepSeeker-Code will read, edit, and execute files here.`,
         optTrust: "Yes, I trust this folder",
         optExit: "No, exit",
+        trustEmpty: "Trusted dirs: (none). You'll be asked on first entry to a directory.",
+        trustList: (list) => `Trusted dirs (revoke with /trust <index or path>):\n${list}\n\nRevocation takes effect after a CLI restart (project config loads at startup only).`,
+        trustRemoved: (target) => `Trust revoked: ${target}\n(takes effect after a CLI restart — project config loads at startup only)`,
+        trustNotFound: (target) => `No such trusted dir: ${target}`,
+        archiveSummary: (s) => `📜 Latest compaction summary:\n${s}`,
+        archiveNone: "No compaction has happened since this session started (only the latest runtime summary is kept).",
+        planModeSet: (on) => `Plan mode: ${on ? "on (next question starts read-only research, plan review, then implementation)" : "off"}`,
+        budgetView: (budget, last) => `💰 Budget: ${budget != null ? `¥${budget}/run` : "not set (/budget 0.5 to cap per-run cost)"}${last != null ? ` · last run cost ¥${last.toFixed(3)}` : " · no completed run yet"}`,
+        budgetOff: "💰 Budget disabled (no cap).",
+        budgetUsage: "Usage: /budget 0.5 (¥/run) · /budget off · /budget to view",
+        budgetSet: (n) => `💰 Budget set: ¥${n} per run (soft nudge on breach, hard truncation at 120%).`,
+        autoModeSet: (on) => `Auto mode: ${on ? "on (in-workspace file edits auto-approved by classifier, risky ops to human)" : "off"}`,
+        thinkingInvalid: (arg) => `Invalid level: ${arg} (choose: off / high / max)`,
+        thinkingCurrent: (level) => `Current thinking level: ${level} (off / high / max)`,
+        thinkingSet: (lvl) => `Thinking level: ${lvl}${lvl === "off" ? " (off — faster and cheaper for simple tasks)" : lvl === "max" ? " (deep, for complex tasks)" : " (standard)"}`,
+        engineLoading: "⏳ Loading engine (MCP/skills/commands)…",
+        unknownCmd: (name) => `Unknown command: /${name || "(empty)"} (type / to list commands)`,
+        bangUsage: "Usage: !<shell command> (e.g. !git status); output joins the next turn's context.",
+        bangHead: (timedOut, ok, exitCode) => timedOut ? "⏱ timed out" : ok ? "✅ exit code 0" : exitCode != null ? `❌ exit code ${exitCode}` : "❌ aborted",
+        bangNoOutput: "(no output)",
+        visionDowngraded: (model) => `🖼 Model ${model} doesn't support images; downgraded to text this turn (remembered — future messages send as text)`,
+        planEnterSwitched: (reason) => `📋 Model requested plan mode${reason ? `: ${reason}` : ""}; switched…`,
         helpText: (model, thinking, locale) => [
             "/help · /status · /clear · /exit",
             "/plan  — Toggle plan mode (read-only research → review → implement)",
