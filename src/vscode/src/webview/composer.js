@@ -6,6 +6,7 @@
  *  模式胶囊按钮与配置面板的 DOM 挂载（交互逻辑在 toolbar.js，经 modeRefs 回填引用）。
  */
 import { vscode, $, state } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
 import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs } from "./rows.js";
 import { toggleSessionsPanel, toggleForkPanel, toggleCheckpointsPanel } from "./panels.js";
@@ -23,14 +24,14 @@ switch (cmd) {
 case "plan": {
 state.planMode = !state.planMode;
 vscode.postMessage({ type: "setPlanMode", on: state.planMode });
-addInfo(`计划模式：${state.planMode ? "开" : "关"}`);
+addInfo(S.cpPlanMode(state.planMode));
 syncToolbar();
 return true;
 }
 case "auto": {
 state.autoMode = !state.autoMode;
 vscode.postMessage({ type: "setAutoMode", on: state.autoMode });
-addInfo(`自动模式：${state.autoMode ? "开" : "关"}`);
+addInfo(S.cpAutoMode(state.autoMode));
 syncToolbar();
 return true;
 }
@@ -38,10 +39,10 @@ case "model":
 if (arg) {
 state.model = arg;
 vscode.postMessage({ type: "setModel", model: arg });
-addInfo(`模型：${arg}（下次回复生效，重载窗口后保持）`);
+addInfo(S.cpModelSet(arg));
 syncToolbar();
 } else {
-addInfo(`当前模型：${state.model || "默认（DEEP_SEEK_MODEL）"}\n用法：/model <模型id> 直输切换，或 /switch 弹出候选选择器`);
+addInfo(S.cpModelView(state.model));
 }
 return true;
 case "switch":
@@ -55,20 +56,23 @@ case "thinking":
 if (["off", "high", "max"].includes(arg)) {
 state.thinkingLevel = arg;
 vscode.postMessage({ type: "setThinking", level: arg });
-addInfo(`思考等级：${arg}`);
+addInfo(S.cpThinkingSet(arg));
 syncToolbar();
 } else {
-addInfo(`当前思考等级：${state.thinkingLevel}\n用法：/thinking off|high|max`);
+addInfo(S.cpThinkingView(state.thinkingLevel));
 }
 return true;
 case "lang":
 if (arg === "zh" || arg === "en") {
 state.locale = arg;
 vscode.postMessage({ type: "setLocale", locale: arg });
-addInfo(`界面语言：${arg === "zh" ? "中文" : "English"}（AI 回复语言默认跟随每轮提问自动判断；纯代码/无文字轮次以此语言为准）`);
+// ★ 语言切换即时重建静态 DOM 文案（工具栏/输入区/浮层锚点重建 + 草稿与 chip 恢复，
+//   见 app.js ds-locale 监听）；addInfo 在重建前打出（新语言提示行）。
+window.dispatchEvent(new CustomEvent("ds-locale"));
+addInfo(S.cpLangSet(arg));
 syncToolbar();
 } else if (!arg) {
-addInfo(`当前界面语言：${state.locale === "zh" ? "中文" : "English"}\n用法：/lang zh|en`);
+addInfo(S.cpLangView(state.locale));
 }
 return true;
 case "output-style":
@@ -105,7 +109,7 @@ vscode.postMessage({ type: "bookmarkAdd", text: arg });
 input.value = "";
 autoGrow(input);
 } else {
-addInfo("用法：/bookmark <要收藏的 prompt 文本>\n收藏后经动作面板 Bookmarks 组一键插入输入框（行右槽 × 删除）；输入框写了内容也可直接点面板 Bookmark current input 收藏。");
+addInfo(S.cpBookmarkUsage);
 }
 return true;
 case "new":
@@ -115,10 +119,10 @@ case "sessions":
 toggleSessionsPanel();
 return true;
 case "help":
-addInfo("/help 帮助 · /status 状态 · /plan 计划 · /auto 自动 · /model 模型 · /thinking 思考 · /lang 语言 · /output-style 风格 · /sessions 历史 · /fork 分叉 · /usage 用量 · /budget 预算 · /context 上下文 · /permissions 权限 · /mcp · /hooks · /trust 信任 · /debug 排障 · /new 新会话 · /clear 清屏 · /export 导出\n输入 / 查看全部命令（含自定义命令），↑↓ 选择、Enter 执行");
+addInfo(S.cpHelp);
 return true;
 case "status":
-addInfo(`计划模式：${state.planMode ? "开" : "关"} · 自动模式：${state.autoMode ? "开" : "关"} · 思考：${state.thinkingLevel} · 语言：${state.locale}${state.model ? " · 模型：" + state.model : ""}${state.projectRoot ? " · 根目录：" + state.projectRoot : ""}`);
+addInfo(S.cpStatus({ planMode: state.planMode, autoMode: state.autoMode, thinkingLevel: state.thinkingLevel, locale: state.locale, model: state.model, projectRoot: state.projectRoot }));
 return true;
 default:
 return false; // 非本地命令 → 交给 agent（自定义 slash 命令）
@@ -139,34 +143,44 @@ export const updateSlashMenu = () => updateSlashMenuRef?.();
 let updateAtMenuRef = null;
 export const updateAtMenu = () => updateAtMenuRef?.();
 
+// ★ 附加菜单外点关闭（模块级注册一次，getElementById 现取菜单）：原实现在 buildComposer 闭包内
+//   document.addEventListener，/lang 等触发的 composer 重建会重复累积监听（旧闭包引用失联节点）。
+document.addEventListener("click", (e) => {
+const attachMenu = document.getElementById("attach-menu");
+if (!attachMenu || attachMenu.style.display === "none") return;
+if (attachMenu.contains(e.target)) return;
+if (e.target.closest?.("#btn-file")) return;
+attachMenu.style.display = "none";
+});
+
 function buildComposer() {
 const c = $("#composer");
 c.innerHTML = `
 <div class="composer-shell">
 <div class="composer-line">
 <span class="composer-prompt">❯</span>
-<textarea id="input" rows="1" placeholder="输入消息，/ 查看命令" spellcheck="false"></textarea>
+<textarea id="input" rows="1" placeholder="${S.cpPlaceholder}" spellcheck="false"></textarea>
 </div>
 <div class="composer-bar">
 <div class="composer-bar-left">
-<button class="icon-btn" id="btn-file" title="附加文件（全文拼入消息；大文件建议让助手 read_file）"><span class="codicon codicon-add"></span></button>
-<button class="slash-btn" id="btn-actions" title="动作面板：上下文 / 模型 / 全部命令（可搜索）"><span class="slash-glyph">/</span></button>
+<button class="icon-btn" id="btn-file" title="${S.cpFileTitle}"><span class="codicon codicon-add"></span></button>
+<button class="slash-btn" id="btn-actions" title="${S.cpActionsTitle}"><span class="slash-glyph">/</span></button>
 <svg id="ctx-ring" class="ctx-ring" viewBox="0 0 18 18" width="16" height="16" style="display:none" title="">
   <circle class="ctx-ring-bg" cx="9" cy="9" r="7"></circle>
   <circle class="ctx-ring-arc" cx="9" cy="9" r="7"></circle>
   <text class="ctx-ring-count" x="9" y="9" text-anchor="middle" dominant-baseline="central"></text>
 </svg>
-<span id="agents-pill" class="agents-pill" title="运行中的子 agent 数（subagent.count 实时镜像）"><span class="agents-dot">●</span><span id="agents-pill-label">0 agent</span></span>
-<button class="model-chip" id="btn-model" title="当前模型（点击弹出候选选择器，同 /switch）"><span id="model-chip-label">…</span><span class="codicon codicon-chevron-down"></span></button>
+<span id="agents-pill" class="agents-pill" title="${S.cpAgentsTitle}"><span class="agents-dot">●</span><span id="agents-pill-label">0 agent</span></span>
+<button class="model-chip" id="btn-model" title="${S.cpModelChipTitle}"><span id="model-chip-label">…</span><span class="codicon codicon-chevron-down"></span></button>
 <input type="file" id="image-input" accept="image/*" style="display:none" />
 </div>
 <div class="composer-bar-right">
-<button class="icon-btn" id="btn-rewind" title="Checkpoints：回滚到任意消息发送前（原地截断）"><span class="codicon codicon-history"></span></button>
-<button class="mode-toggle" id="btn-mode" title="模式设置">
+<button class="icon-btn" id="btn-rewind" title="${S.cpRewindTitle}"><span class="codicon codicon-history"></span></button>
+<button class="mode-toggle" id="btn-mode" title="${S.cpModeTitle}">
 <span class="codicon codicon-comment"></span>
-<span class="mode-label">手动</span>
+<span class="mode-label">${S.tbModeLabel("manual")}</span>
 </button>
-<button class="composer-send-btn" id="btn-send" title="发送 (Enter)">↑</button>
+<button class="composer-send-btn" id="btn-send" title="${S.tbSend}">↑</button>
 </div>
 </div>
 <div class="mode-popover" id="mode-popover" style="display:none">
@@ -174,23 +188,23 @@ c.innerHTML = `
 <div class="mode-title">Modes</div>
 <div class="mode-option" data-mode="manual">
 <span class="codicon codicon-comment"></span>
-<div class="mode-opt-text"><div class="mode-opt-name">手动</div><div class="mode-opt-desc">每次工具执行前均需你确认</div></div>
+<div class="mode-opt-text"><div class="mode-opt-name">${S.cpModeManual}</div><div class="mode-opt-desc">${S.cpModeManualDesc}</div></div>
 <span class="mode-check codicon codicon-check"></span>
 </div>
 <div class="mode-option" data-mode="auto">
 <span class="codicon codicon-sync"></span>
-<div class="mode-opt-text"><div class="mode-opt-name">自动</div><div class="mode-opt-desc">自动执行编辑与工具调用</div></div>
+<div class="mode-opt-text"><div class="mode-opt-name">${S.cpModeAuto}</div><div class="mode-opt-desc">${S.cpModeAutoDesc}</div></div>
 <span class="mode-check codicon codicon-check"></span>
 </div>
 <div class="mode-option" data-mode="plan">
 <span class="codicon codicon-list-tree"></span>
-<div class="mode-opt-text"><div class="mode-opt-name">计划</div><div class="mode-opt-desc">先产出方案，审批后再实施</div></div>
+<div class="mode-opt-text"><div class="mode-opt-name">${S.cpModePlan}</div><div class="mode-opt-desc">${S.cpModePlanDesc}</div></div>
 <span class="mode-check codicon codicon-check"></span>
 </div>
 </div>
 <div class="mode-divider"></div>
 <div class="mode-think">
-<span class="think-label">思考 · Effort</span>
+<span class="think-label">${S.cpThinkLabel}</span>
 <div class="think-switch" id="think-switch">
 <span class="think-opt" data-level="off">off</span>
 <span class="think-opt" data-level="high">high</span>
@@ -201,11 +215,11 @@ c.innerHTML = `
 <div class="slash-menu" id="slash-menu" style="display:none"></div>
 <div class="slash-menu" id="at-menu" style="display:none"></div>
 <div class="attach-menu" id="attach-menu" style="display:none">
-<div class="attach-item" data-kind="file" title="小文件全文入消息，大文件自动转引用（模型 read_file）"><span class="codicon codicon-new-file"></span><span class="attach-label">附加文件…</span></div>
-<div class="attach-item" data-kind="image" title="图片作为附件随消息直达模型（chip 上的 × 可移除）"><span class="codicon codicon-file-media"></span><span class="attach-label">上传图片…</span></div>
+<div class="attach-item" data-kind="file" title="${S.cpAttachFileTitle}"><span class="codicon codicon-new-file"></span><span class="attach-label">${S.cpAttachFile}</span></div>
+<div class="attach-item" data-kind="image" title="${S.cpAttachImgTitle}"><span class="codicon codicon-file-media"></span><span class="attach-label">${S.cpAttachImg}</span></div>
 </div>
 <div class="composer-attachments" id="composer-attachments"></div>
-<span class="mode-badge plan">⏻ plan mode on（只读调研 → 方案审批 → 实现）</span>
+<span class="mode-badge plan">${S.cpBadgePlan}</span>
 <span class="mode-badge auto">⏻ auto-accept edits on</span>
 </div>
 `;
@@ -228,31 +242,33 @@ for (const floatId of ["approval-anchor", "sessions-panel", "fork-panel"]) {
 // ★ 与 CLI 的 LOCAL_COMMAND_NAMES 对齐（去掉无意义的 /exit）；obs=true 的命令数据在扩展宿主
 //   进程采集（trace/registry/store），经 localObs 消息往返后以 info 行回显。
 //   引擎加载完成后再合并 core 注册的自定义命令（state.customCommands，/ 菜单常驻可见）。
+// ★ 双语：表里只存 hintKey（strings.js 键名），hint 在 allSlashItems 渲染时经 S 解析——
+//   模块加载期不快照文案，/lang 切换后下一次菜单渲染即新语言。
 const SLASH = [
-{ cmd: "/help", hint: "查看帮助与快捷键", arg: false },
-{ cmd: "/status", hint: "查看当前模型/会话/模式", arg: false },
-{ cmd: "/plan", hint: "切换计划模式（只读调研→审批→实现）", arg: false },
-{ cmd: "/auto", hint: "切换自动模式（编辑分类器放行，高危转人工）", arg: false },
-{ cmd: "/model", hint: "切换模型（直输）：/model <模型id>", arg: true },
-{ cmd: "/switch", hint: "切换模型：弹出候选选择器", arg: false },
-{ cmd: "/thinking", hint: "切换思考等级：/thinking <off|high|max>", arg: true },
-{ cmd: "/lang", hint: "切换界面语言：/lang <zh|en>", arg: true },
-{ cmd: "/output-style", hint: "切换输出风格：/output-style <name|off>", arg: true, obs: true },
-{ cmd: "/sessions", hint: "选择并载入历史会话（续接对话）", arg: false },
-{ cmd: "/fork", hint: "从当前会话的某轮回复处分叉出新会话", arg: false },
-{ cmd: "/usage", hint: "查看 token 用量（主/子 agent、缓存命中、近 7 天使用日志）", arg: false, obs: true },
-{ cmd: "/compact", hint: "立即压缩当前会话上下文（同水位环点击）", arg: false },
-{ cmd: "/budget", hint: "预算制运行：/budget 0.5 设置每 run 上限 · /budget off 关闭 · /budget 查看", arg: true, obs: true },
-{ cmd: "/context", hint: "查看上下文窗口治理（阈值、填充率、已归档）", arg: false, obs: true },
-{ cmd: "/permissions", hint: "查看已加载的权限规则（allow/ask/deny）", arg: false, obs: true },
-{ cmd: "/mcp", hint: "查看已连接的 MCP server 与工具数", arg: false, obs: true },
-{ cmd: "/hooks", hint: "查看已注册的 hook 规则", arg: false, obs: true },
-{ cmd: "/trust", hint: "管理已信任目录（列出 / 撤销）", arg: true, obs: true },
-{ cmd: "/debug", hint: "排障快照（session/cwd/模型/配置/环境）", arg: false, obs: true },
-{ cmd: "/new", hint: "新会话（新页签，当前对话保留）", arg: false },
-{ cmd: "/clear", hint: "清空当前屏幕", arg: false },
-{ cmd: "/export", hint: "导出当前会话为 Markdown 文件", arg: false },
-{ cmd: "/bookmark", hint: "收藏常用 prompt（/bookmark <文本>），面板 Bookmarks 一键插入", arg: true },
+{ cmd: "/help", hintKey: "slHelp", arg: false },
+{ cmd: "/status", hintKey: "slStatus", arg: false },
+{ cmd: "/plan", hintKey: "slPlan", arg: false },
+{ cmd: "/auto", hintKey: "slAuto", arg: false },
+{ cmd: "/model", hintKey: "slModel", arg: true },
+{ cmd: "/switch", hintKey: "slSwitch", arg: false },
+{ cmd: "/thinking", hintKey: "slThinking", arg: true },
+{ cmd: "/lang", hintKey: "slLang", arg: true },
+{ cmd: "/output-style", hintKey: "slOutputStyle", arg: true, obs: true },
+{ cmd: "/sessions", hintKey: "slSessions", arg: false },
+{ cmd: "/fork", hintKey: "slFork", arg: false },
+{ cmd: "/usage", hintKey: "slUsage", arg: false, obs: true },
+{ cmd: "/compact", hintKey: "slCompact", arg: false },
+{ cmd: "/budget", hintKey: "slBudget", arg: true, obs: true },
+{ cmd: "/context", hintKey: "slContext", arg: false, obs: true },
+{ cmd: "/permissions", hintKey: "slPermissions", arg: false, obs: true },
+{ cmd: "/mcp", hintKey: "slMcp", arg: false, obs: true },
+{ cmd: "/hooks", hintKey: "slHooks", arg: false, obs: true },
+{ cmd: "/trust", hintKey: "slTrust", arg: true, obs: true },
+{ cmd: "/debug", hintKey: "slDebug", arg: false, obs: true },
+{ cmd: "/new", hintKey: "slNew", arg: false },
+{ cmd: "/clear", hintKey: "slClear", arg: false },
+{ cmd: "/export", hintKey: "slExport", arg: false },
+{ cmd: "/bookmark", hintKey: "slBookmark", arg: true },
 ];
 
 let slashItems = [];
@@ -270,13 +286,14 @@ doSend();
 updateSlashMenu();
 }
 
-/** 合并本地命令表 + core 注册的自定义命令（引擎就绪后经 "commands" 消息送达；本地同名优先）。 */
+/** 合并本地命令表 + core 注册的自定义命令（引擎就绪后经 "commands" 消息送达；本地同名优先）。
+ *  hint 此刻经 S 解析（调用即渲染：/ 菜单 updateSlashMenu、动作面板 buildCommandItems——均每次打开现取）。 */
 function allSlashItems() {
 const seen = new Set(SLASH.map((s) => s.cmd));
 const extra = (state.customCommands || [])
 .filter((c) => c && c.name && !seen.has("/" + c.name))
-.map((c) => ({ cmd: "/" + c.name, hint: c.description || "自定义命令", arg: false, custom: true }));
-return SLASH.concat(extra);
+.map((c) => ({ cmd: "/" + c.name, hint: c.description || S.slCustom, arg: false, custom: true }));
+return SLASH.map((s) => ({ ...s, hint: S[s.hintKey] })).concat(extra);
 }
 
 function updateSlashMenu() {
@@ -333,7 +350,7 @@ if (!state.fileListLoading) {
 state.fileListLoading = true;
 vscode.postMessage({ type: "requestFileList" });
 }
-atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">正在索引工作区文件…</span></div>`;
+atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">${S.cpIndexing}</span></div>`;
 atMenu.style.display = "";
 return;
 }
@@ -343,7 +360,7 @@ atItems = state.fileList.filter((p) => fuzzyHit(q, p.toLowerCase()))
 .slice(0, 50);
 atIdx = 0;
 if (!atItems.length) {
-atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">无匹配文件</span></div>`;
+atMenu.innerHTML = `<div class="slash-item"><span class="slash-hint">${S.cpNoFileMatch}</span></div>`;
 atMenu.style.display = "";
 return;
 }
@@ -377,7 +394,7 @@ return;
 // ★ B1 @ 引用：待发引用以路径清单并入消息文本（core 不动，模型按需 read_file），随后清空 chip
 let outText = text;
 if (refs.length) {
-outText += "\n\n📎 引用文件（请按需用 read_file 读取）：\n" + refs.map((r) => "- " + r.path).join("\n");
+outText += "\n\n" + S.cpRefsHeader + "\n" + refs.map((r) => "- " + r.path).join("\n");
 }
 // ★ 多模态：待发贴图随 submit 上送（vision 开启时才有积累），随后清空 chip 与暂存
 if (hasPending) {
@@ -492,19 +509,15 @@ const item = e.target.closest(".attach-item");
 if (!item) return;
 closeAttachMenu();
 if (item.dataset.kind === "image") {
-addInfo("🖼 图片将随消息直达模型（chip 上的 × 可移除待发送的图）；若模型不支持图片会自动降级为文本处理。");
+addInfo(S.cpImgInfo);
 imageInput.click();
 } else {
 vscode.postMessage({ type: "attachFile" });
 }
 });
 // 点外部关闭（同 actionPanel 委托形态；+ 按钮与菜单内点击不关——按钮侧 stopPropagation 双保险）
-document.addEventListener("click", (e) => {
-if (!attachMenu || attachMenu.style.display === "none") return;
-if (attachMenu.contains(e.target)) return;
-if (e.target.closest?.("#btn-file")) return;
-attachMenu.style.display = "none";
-});
+// ★ 挪到模块级 dsAttachOutsideClick（getElementById 现取菜单）——原实现闭包捕获 attachMenu，
+//   /lang 触发的 buildComposer 重建会再注册一份 document 监听（旧引用失联且累积泄漏）。
 // ★ 贴图统一入口（file picker 与 Ctrl+V 粘贴共用 ingestImageFile）——零配置多模态：
 //   不再按 state.vision 分叉：图片进 pendingImages 待发（chip 带 × 可移除）随 submit 上送（base64 直达，
 //   乐观发送，core 侧按端点实测自学习判定能力）；同时无条件 uploadImage 落工作区 tmp 拿存档路径——
@@ -512,7 +525,7 @@ attachMenu.style.display = "none";
 //   路径线索随 wire 尾注给模型（图像识别 MCP 中转读图）。
 const ingestImageFile = (f) => {
 if (!f) return;
-if (f.size > 8 * 1024 * 1024) { addInfo(`🖼 图片 ${f.name} 过大（>8MB），已忽略`); return; }
+if (f.size > 8 * 1024 * 1024) { addInfo(S.cpImgTooLarge(f.name)); return; }
 const reader = new FileReader();
 reader.onload = () => {
 const dataUrl = String(reader.result ?? "");
@@ -522,9 +535,9 @@ const mime = f.type || "image/png";
 state.pendingImages.push({ name: f.name, mime, base64, dataUrl });
 appendImagePreview(dataUrl, f.name, true);
 vscode.postMessage({ type: "uploadImage", name: f.name, mime, base64 });
-addInfo(`🖼 已添加待发送图片：${f.name}`);
+addInfo(S.cpImgAdded(f.name));
 };
-reader.onerror = () => addInfo(`🖼 读取图片失败：${f.name}`);
+reader.onerror = () => addInfo(S.cpImgReadFail(f.name));
 reader.readAsDataURL(f);
 };
 imageInput.addEventListener("change", () => {
@@ -569,7 +582,7 @@ state.planMode = planOn;
 state.autoMode = autoOn;
 vscode.postMessage({ type: "setPlanMode", on: planOn });
 vscode.postMessage({ type: "setAutoMode", on: autoOn });
-addInfo(`模式：${m === "plan" ? "计划" : m === "auto" ? "自动" : "手动"}`);
+addInfo(S.cpModeSwitched(m));
 syncToolbar();
 return;
 }
@@ -577,7 +590,7 @@ const th = e.target.closest(".think-opt");
 if (th) {
 state.thinkingLevel = th.dataset.level;
 vscode.postMessage({ type: "setThinking", level: state.thinkingLevel });
-addInfo(`思考等级：${state.thinkingLevel}`);
+addInfo(S.cpThinkingSet(state.thinkingLevel));
 syncToolbar();
 }
 });

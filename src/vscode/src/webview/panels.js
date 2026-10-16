@@ -5,6 +5,7 @@
  *  分叉面板复用同款浮层样式，列当前会话各轮检查点。
  */
 import { vscode, $, state } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
 
 // ———————— 历史会话面板（终端风格：搜索 + 单行列表） ————————
@@ -24,7 +25,7 @@ panel.innerHTML = `
 <div class="sessions-search">
 <span class="codicon codicon-search"></span>
 <input id="sessions-filter" type="text" placeholder="Search sessions..." spellcheck="false"/>
-<button id="sessions-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
+<button id="sessions-close" class="icon-btn" title="${S.pnClose}"><span class="codicon codicon-close"></span></button>
 </div>
 <div class="sessions-list" id="sessions-list"></div>`;
 document.querySelector("#approval-anchor").before(panel);
@@ -88,8 +89,8 @@ panel.style.display = "none";
 panel.innerHTML = `
 <div class="sessions-search">
 <span class="codicon codicon-gist-fork"></span>
-<span style="flex:1;font-size:12px;color:#888;">选择分叉点：保留该轮及之前的历史，之后重新走向</span>
-<button id="fork-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
+<span style="flex:1;font-size:12px;color:#888;">${S.pnForkHint}</span>
+<button id="fork-close" class="icon-btn" title="${S.pnClose}"><span class="codicon codicon-close"></span></button>
 </div>
 <div class="sessions-list" id="fork-list"></div>`;
 document.querySelector("#approval-anchor").before(panel);
@@ -131,14 +132,14 @@ if (!panel || panel.style.display === "none") return;
 const box = $("#fork-list");
 const anchors = state.forkAnchors || [];
 if (!anchors.length) {
-box.innerHTML = `<div class="sessions-empty">当前会话暂无可分叉的检查点</div>`;
+box.innerHTML = `<div class="sessions-empty">${S.pnForkEmpty}</div>`;
 return;
 }
 box.innerHTML = anchors
 .map(
 (a, i) => `
-<div class="session-row fork-row" data-i="${i}" title="从该轮分叉出新会话（原会话不变）">
-<span class="session-title">#${a.roundNo} ${escapeHtml(a.userPreview || "(无提问)")}</span>
+<div class="session-row fork-row" data-i="${i}" title="${S.pnForkRow}">
+<span class="session-title">#${a.roundNo} ${escapeHtml(a.userPreview || S.pnNoQuestion)}</span>
 <span class="session-meta">→ ${escapeHtml(a.assistantPreview || "")}</span>
 </div>`
 )
@@ -171,7 +172,7 @@ const q = sessionsFilter;
 const filtered = q ? list.filter((s) => String(s.title || s.preview || "").toLowerCase().includes(q)) : list;
 const box = $("#sessions-list");
 if (!filtered.length) {
-box.innerHTML = `<div class="sessions-empty">${q ? "无匹配会话" : "暂无历史会话"}</div>`;
+box.innerHTML = `<div class="sessions-empty">${q ? S.pnNoMatch : S.pnEmpty}</div>`;
 return;
 }
 box.innerHTML = filtered.map((s, i) => renderSessionRow(s, i)).join("");
@@ -180,29 +181,29 @@ bindSessionRows(filtered);
 
 /** 单行渲染：普通态 / 重命名编辑态 / 删除确认态三选一。 */
 function renderSessionRow(s, i) {
-const title = s.title || s.preview || "(空会话)";
+const title = s.title || s.preview || S.pnUntitled;
 if (editingSessionId === s.sessionId) {
 return `<div class="session-row editing" data-i="${i}">
 <input class="session-rename-input" data-i="${i}" value="${escapeHtml(s.title || s.preview || "")}" spellcheck="false"/>
-<span class="session-meta">Enter 确认 · Esc 取消</span>
+<span class="session-meta">${S.pnRenameHint}</span>
 </div>`;
 }
 if (confirmingDeleteId === s.sessionId) {
 return `<div class="session-row confirming" data-i="${i}">
-<span class="session-title">🗑️ 确认删除「${escapeHtml(title)}」？</span>
+<span class="session-title">${S.pnConfirmDelete(escapeHtml(title))}</span>
 <span class="session-tools">
-<button class="session-del-ok" data-i="${i}">确认删除</button>
-<button class="session-del-cancel" data-i="${i}">取消</button>
+<button class="session-del-ok" data-i="${i}">${S.pnDelOk}</button>
+<button class="session-del-cancel" data-i="${i}">${S.pnCancel}</button>
 </span>
 </div>`;
 }
 return `<div class="session-row" data-i="${i}">
 <span class="session-title">${escapeHtml(title)}</span>
 <span class="session-tools">
-<span class="codicon codicon-edit session-rename" data-i="${i}" title="重命名"></span>
-<span class="codicon codicon-trash session-delete" data-i="${i}" title="删除"></span>
+<span class="codicon codicon-edit session-rename" data-i="${i}" title="${S.pnRename}"></span>
+<span class="codicon codicon-trash session-delete" data-i="${i}" title="${S.pnDelete}"></span>
 </span>
-<span class="session-meta">${escapeHtml(relTime(s.updatedAt))} · ${s.messageCount} 条</span>
+<span class="session-meta">${escapeHtml(relTime(s.updatedAt))} · ${S.pnMsgCount(s.messageCount)}</span>
 </div>`;
 }
 
@@ -285,14 +286,14 @@ function relTime(iso) {
     const t = Date.parse(iso);
     if (!t) return "";
     const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
-    if (s < 60) return "刚刚";
+    if (s < 60) return S.relNow;
     const m = Math.floor(s / 60);
-    if (m < 60) return `${m} 分钟前`;
+    if (m < 60) return S.relMin(m);
     const h = Math.floor(m / 60);
-    if (h < 24) return `${h} 小时前`;
+    if (h < 24) return S.relHour(h);
     const d = Math.floor(h / 24);
-    if (d < 30) return `${d} 天前`;
-    return new Date(t).toLocaleDateString("zh-CN");
+    if (d < 30) return S.relDay(d);
+    return new Date(t).toLocaleDateString(S.dateLocale);
   }
 
 // ———————— 回滚面板（C1 Checkpoints：各轮「发送前」检查点，点击原地截断回滚） ————————
@@ -305,8 +306,8 @@ panel.style.display = "none";
 panel.innerHTML = `
 <div class="sessions-search">
 <span class="codicon codicon-history"></span>
-<span style="flex:1;font-size:12px;color:#888;">Checkpoints：回到该消息发送前（之后的内容原地移除）</span>
-<button id="checkpoints-close" class="icon-btn" title="关闭"><span class="codicon codicon-close"></span></button>
+<span style="flex:1;font-size:12px;color:#888;">${S.pnCpHint}</span>
+<button id="checkpoints-close" class="icon-btn" title="${S.pnClose}"><span class="codicon codicon-close"></span></button>
 </div>
 <div class="sessions-list" id="checkpoints-list"></div>`;
 document.querySelector("#approval-anchor").before(panel);
@@ -348,26 +349,26 @@ if (!panel || panel.style.display === "none") return;
 const box = $("#checkpoints-list");
 const cps = state.checkpoints || [];
 if (!cps.length) {
-box.innerHTML = `<div class="sessions-empty">当前会话暂无检查点（发送消息后自动记录）</div>`;
+box.innerHTML = `<div class="sessions-empty">${S.pnCpEmpty}</div>`;
 return;
 }
 // CC 形态：条目 = 时钟图标 + 时间 + 副文案 "Before you sent: <摘要>"；列表末尾提示无更新检查点
 const fmtTime = (iso) => {
 const t = Date.parse(iso);
-return Number.isFinite(t) ? new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "";
+return Number.isFinite(t) ? new Date(t).toLocaleTimeString(S.dateLocale, { hour: "2-digit", minute: "2-digit" }) : "";
 };
 const dayNow = new Date().toDateString();
 const html = cps.map((c, i) => {
 const d = Date.parse(c.ts);
 const day = Number.isFinite(d) ? new Date(d).toDateString() : dayNow;
-const time = fmtTime(c.ts) + (day !== dayNow ? ` (${Number.isFinite(d) ? new Date(d).toLocaleDateString("zh-CN") : ""})` : "");
+const time = fmtTime(c.ts) + (day !== dayNow ? ` (${Number.isFinite(d) ? new Date(d).toLocaleDateString(S.dateLocale) : ""})` : "");
 return `
-<div class="session-row checkpoint-row" data-i="${i}" title="回滚到该消息发送前（之后的内容将移除，可改写后重发）">
+<div class="session-row checkpoint-row" data-i="${i}" title="${S.pnCpRowTitle}">
 <span class="codicon codicon-clock" style="font-size:13px;color:#888;flex-shrink:0;"></span>
 <span class="checkpoint-time">${escapeHtml(time)}</span>
-<span class="checkpoint-preview">Before you sent: ${escapeHtml(c.preview || "(空消息)")}</span>
+<span class="checkpoint-preview">Before you sent: ${escapeHtml(c.preview || S.pnCpEmptyMsg)}</span>
 </div>`;
-}).join("") + `<div class="sessions-empty" style="padding:8px 12px;">此检查点之后无新检查点</div>`;
+}).join("") + `<div class="sessions-empty" style="padding:8px 12px;">${S.pnCpEnd}</div>`;
 box.innerHTML = html;
 box.querySelectorAll(".checkpoint-row").forEach((row) => {
 row.addEventListener("click", () => {
@@ -381,6 +382,6 @@ vscode.postMessage({ type: "rewindToCheckpoint", id: c.id });
 
 export {
   buildSessionsPanel, toggleSessionsPanel, closeSessionsPanel, renderSessionsPanel,
-  toggleForkPanel, renderForkPanel,
-  toggleCheckpointsPanel, renderCheckpointsPanel, closeCheckpointsPanel,
+  buildForkPanel, toggleForkPanel, renderForkPanel, closeForkPanel,
+  buildCheckpointsPanel, toggleCheckpointsPanel, renderCheckpointsPanel, closeCheckpointsPanel,
 };

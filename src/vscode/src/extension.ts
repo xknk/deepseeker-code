@@ -17,18 +17,22 @@ import { randomUUID } from "crypto";
 // 否则模块加载期按「插件安装目录」cwd 初始化（createModel 等），导致读取/执行错目录。
 import type { ChatHost, ChatHostCallbacks } from "./host";
 import { createIdeActionHandler } from "./ideBridge";
+import { makeT, setVscodeLanguage, envLocale } from "./i18n";
 import { isVisionEnabled } from "@/session/contentParts.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 
 let engineDispose: (() => void) | null = null;
 
+/** 无 tab 语境文案（activate 期/命令面板/全局通知）：按 VS Code 显示语言（activate 首步注入）。 */
+const envT = makeT(envLocale);
+
 // —— core 观测/命令目录访问器（activate 第 4 步动态 import 后赋值；webview 的 /usage 等本地命令用） ——
-let inspectUsage: (sessionId: string) => Promise<string> = async () => "（引擎尚未加载）";
-let inspectContext: (sessionId: string) => Promise<string> = async () => "（引擎尚未加载）";
-let inspectPermissions: () => string = () => "（引擎尚未加载）";
-let inspectMcp: () => Promise<string> = async () => "（引擎尚未加载）";
-let inspectHooks: () => string = () => "（引擎尚未加载）";
-let inspectDebug: (sessionId: string) => string = () => "（引擎尚未加载）";
+let inspectUsage: (sessionId: string) => Promise<string> = async () => envT("engineNotLoaded");
+let inspectContext: (sessionId: string) => Promise<string> = async () => envT("engineNotLoaded");
+let inspectPermissions: () => string = () => envT("engineNotLoaded");
+let inspectMcp: () => Promise<string> = async () => envT("engineNotLoaded");
+let inspectHooks: () => string = () => envT("engineNotLoaded");
+let inspectDebug: (sessionId: string) => string = () => envT("engineNotLoaded");
 let listCommandsForWebview: () => Array<{ name: string; description: string }> = () => [];
 let listOutputStylesForWebview: () => Array<{ name: string; description: string }> = () => [];
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
@@ -52,7 +56,7 @@ const syncBusyStatusBar = (): void => {
   const anyBusy = tabs.some((t) => !t.disposed && t.host.isBusy);
   if (anyBusy) {
     busyStatusBar.text = "$(sync~spin) DeepSeeker-Code";
-    busyStatusBar.tooltip = "DeepSeeker-Code 正在执行…（点击打开聊天面板）";
+    busyStatusBar.tooltip = envT("busyTooltip");
     busyStatusBar.show();
   } else {
     busyStatusBar.hide();
@@ -130,7 +134,7 @@ const applyProjectRoot = (root: string): boolean => {
     process.chdir(root);
   } catch (e) {
     void vscode.window.showErrorMessage(
-      `DeepSeeker-Code：无法切换到项目目录（${root}）：${e instanceof Error ? e.message : String(e)}`,
+      envT("rootSwitchFail")(root, e instanceof Error ? e.message : String(e)),
     );
     return false; // chdir 失败：保留旧根，不动 env，避免沙箱根与 cwd 错位
   }
@@ -199,6 +203,8 @@ const postState = (tab: ChatTab): void => {
       busy: tab.host.isBusy,
       planMode: tab.host.currentPlanMode,
       autoMode: tab.host.currentAutoMode,
+      // ★ UI 语言随快照下发：webview 首载/语言切换后比对派发 ds-locale 重建静态文案
+      locale: tab.host.currentLocale,
       // ★ 下发「生效模型」而非裸覆盖值：currentModel 为 ""（未覆盖、走 core 默认）时兜底全局默认，
       //   webview 才能显示「当前：…」与 ● 标记、预选光标落在真实生效模型上（否则空串匹配不到任何候选）。
       model: tab.host.currentModel || modelName,
@@ -248,7 +254,7 @@ function getNonce(): string {
   return text;
 }
 
-function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, locale: "zh" | "en"): string {
   const nonce = getNonce();
   const distUri = vscode.Uri.joinPath(extensionUri, "dist");
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(distUri, "style.css"));
@@ -264,7 +270,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   ].join("; ");
 
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${locale === "en" ? "en" : "zh-CN"}">
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
@@ -293,7 +299,8 @@ const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
   onBusy: () => postState(tab),
   onQuestion: (req) => deliverTo(tab, { type: "question", req }),
   // ★ IDE 桥：ide_* 三工具的 vscode 动作（open/diagnostics/task）在本文件集中委托 ideBridge 执行
-  onIdeAction: createIdeActionHandler(),
+  //   （locale getter 惰性取本 Tab host——回调创建早于 host 赋值，事件期取值已就绪）
+  onIdeAction: createIdeActionHandler(() => tab.host.currentLocale),
   onPlan: (plan) => deliverTo(tab, { type: "plan", plan }),
   onSessionReset: () => deliverTo(tab, { type: "sessionReset" }),
   // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：仅活动页签写——多 Tab 各自续接
@@ -306,10 +313,19 @@ const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
   // ★ 引擎就绪闸门：后台 initEngine 未完成时提示一句再等（MCP 工具/自定义命令注入后才跑 agent）。
   waitEngineReady: async () => {
     if (engineSettled) return;
-    deliverTo(tab, { type: "info", text: "⏳ 引擎加载中（MCP/skills/commands）…完成后自动继续。" });
+    deliverTo(tab, { type: "info", text: makeT(() => tab.host.currentLocale)("engineLoading") });
     await waitEngine();
   },
 });
+
+/** 页签默认 UI 语言：/lang 持久化（workspaceState）> 设置项 deepseekerCode.locale > VS Code 显示语言。 */
+const resolveDefaultLocale = (): "zh" | "en" => {
+  const saved = workspaceState?.get<string>("deepseekerCode.locale");
+  if (saved === "en" || saved === "zh") return saved;
+  const cfg = vscode.workspace.getConfiguration("deepseekerCode").get<string>("locale");
+  if (cfg === "en" || cfg === "zh") return cfg;
+  return envLocale();
+};
 
 /**
  * 新建聊天页签（独立 ChatHost，空白会话）。
@@ -319,6 +335,7 @@ const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): C
   const openBeside = vscode.workspace
     .getConfiguration("deepseekerCode")
     .get<boolean>("openBeside", true);
+  const defaultLocale = resolveDefaultLocale(); // renderHtml 的 <html lang> 与 host 初始语言同源
   const target =
     col ??
     tabs[0]?.panel.viewColumn ??
@@ -334,11 +351,11 @@ const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): C
     },
   );
   const tab: ChatTab = { panel, host: null as unknown as ChatHost, disposed: false };
-  if (!newChatHost) throw new Error("DeepSeeker-Code：会话宿主尚未加载（activate 未完成，不应到达）");
+  if (!newChatHost) throw new Error(envT("hostNotLoaded"));
   tab.host = newChatHost(makeCallbacks(tab));
   // ★ 顶部页卡图标（dist/icon.svg）：与工具栏品牌一致的 sparkle
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "dist", "icon.svg");
-  panel.webview.html = renderHtml(panel.webview, context.extensionUri);
+  panel.webview.html = renderHtml(panel.webview, context.extensionUri, defaultLocale);
   panel.webview.onDidReceiveMessage((msg) => handleMessage(tab, msg as Record<string, unknown>));
   panel.onDidChangeViewState(() => {
     if (panel.active) activeTab = tab; // 用户点页签切换：openChat/持久化收口跟着走
@@ -372,8 +389,7 @@ const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): C
       });
   }
   // 页签默认值：语言/模型（每个 Tab 的 host 各自应用同一份持久化偏好）
-  const localeCfg = vscode.workspace.getConfiguration("deepseekerCode").get<string>("locale");
-  if (localeCfg === "en" || localeCfg === "zh") tab.host.setLocale(localeCfg);
+  tab.host.setLocale(defaultLocale);
   const savedModel = workspaceState?.get<string>("deepseekerCode.model");
   if (savedModel) tab.host.setModel(savedModel);
   return tab;
@@ -402,7 +418,7 @@ const startNewSession = async (context: vscode.ExtensionContext, tab: ChatTab): 
   cleanImageTmp(); // 清理上一会话的图片上传临时文件
   if (isTabDirty(tab)) {
     createTab(context, tab.panel.viewColumn ?? undefined); // 新页签（聚焦），旧 Tab 现场不动
-    deliverTo(tab, { type: "info", text: "🆕 新会话已在新的编辑器页签打开；当前对话保留在本页，可切回继续。" });
+    deliverTo(tab, { type: "info", text: makeT(() => tab.host.currentLocale)("newSessionNewTab") });
     return;
   }
   await tab.host.newSession();
@@ -465,6 +481,8 @@ const pushBookmarks = (tab?: ChatTab) => {
 const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
   const type = msg?.type as string;
   const h = tab.host;
+  // 本 Tab 文案查表：getter 惰性读 host 当前语言（/lang 后续消息即时跟随）
+  const t = makeT(() => h.currentLocale);
   switch (type) {
     case "ready":
       // 前端就绪（panel 首次加载/webview 重载）：状态快照 → 重放活动会话历史 → 重广播挂起交互。
@@ -497,46 +515,44 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
           else if (cmd === "output-style") {
             const styles = listOutputStylesForWebview();
             const listText = styles.map((s) => `  · ${s.name} — ${s.description}`).join("\n");
-            if (!arg) text = `当前输出风格：${h.currentOutputStyle ?? "默认"}\n${listText || "（未安装任何风格）"}\n切换：/output-style <name>，恢复默认：/output-style off`;
+            if (!arg) text = `${t("styleCurrent")(h.currentOutputStyle ?? t("styleDefault"))}\n${listText || t("styleListEmpty")}\n${t("styleUsage")}`;
             else {
               const a = arg.toLowerCase();
               if (a === "off" || a === "none" || a === "default") {
                 h.setOutputStyle(undefined);
-                text = "已恢复默认输出风格。";
+                text = t("styleOff");
               } else if (styles.some((s) => s.name === a)) {
                 h.setOutputStyle(a);
-                text = `输出风格已切换：${a}`;
-              } else text = `未知风格：${arg}\n${listText}`;
+                text = t("styleSwitched")(a);
+              } else text = `${t("styleUnknown")(arg)}\n${listText}`;
             }
           } else if (cmd === "budget") {
             // 预算制运行（成本信任链第二环 E1）：/budget 0.5 设置每主 run 上限 · /budget off 关闭 · /budget 查看
             if (!arg) {
-              const b = h.currentBudgetYuan;
-              const last = h.lastRunCost;
-              text = `💰 预算：${b != null ? `¥${b}/run` : "未设置（/budget 0.5 设置每个 run 的花费上限）"}${last != null ? ` · 上个 run 已花 ¥${last.toFixed(3)}` : " · 尚无完成 run"}`;
+              text = t("budgetView")(h.currentBudgetYuan ?? null, h.lastRunCost ?? null);
             } else if (arg.toLowerCase() === "off" || arg === "0") {
               h.setBudgetYuan(undefined);
-              text = "💰 预算已关闭（不限花费）。";
+              text = t("budgetOff");
             } else {
               const n = Number(arg);
-              if (!Number.isFinite(n) || n <= 0) text = "用法：/budget 0.5（元/run）· /budget off · /budget 查看";
-              else { h.setBudgetYuan(n); text = `💰 预算已设置：每 run ¥${n}（超限先提醒收敛，仍超 120% 将截断本 run）。`; }
+              if (!Number.isFinite(n) || n <= 0) text = t("budgetUsage");
+              else { h.setBudgetYuan(n); text = t("budgetSet")(n); }
             }
           } else if (cmd === "trust") {
             const trusted = await readTrustedDirsFn();
             if (!arg) {
               text = trusted.length === 0
-                ? "已信任目录：（无）。"
-                : `已信任目录（撤销用 /trust <序号 或 路径>）：\n${trusted.map((d, i) => `  [${i}] ${d}`).join("\n")}\n\n撤销后需重载窗口生效（项目级配置仅在激活时加载）。`;
+                ? t("trustListEmpty")
+                : t("trustList")(trusted.map((d, i) => `  [${i}] ${d}`).join("\n"));
             } else {
               const idx = Number(arg);
               const target = Number.isInteger(idx) && idx >= 0 && idx < trusted.length ? trusted[idx] : arg;
               const removed = await untrustDirFn(target);
-              text = removed ? `已撤销信任：${target}\n（重载窗口后生效——项目级配置仅在激活时加载）` : `未找到该信任目录：${target}`;
+              text = removed ? t("trustRemoved")(target) : t("trustMiss")(target);
             }
-          } else text = `未知观测命令：${cmd}`;
+          } else text = t("obsUnknown")(cmd);
         } catch (e) {
-          text = `读取失败：${e instanceof Error ? e.message : String(e)}`;
+          text = t("obsFail")(e instanceof Error ? e.message : String(e));
         }
         deliverTo(tab, { type: "info", text });
       })();
@@ -600,7 +616,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         try {
           await h.forkFrom(String(msg.lineId ?? ""));
         } catch (e) {
-          void vscode.window.showErrorMessage(`分叉失败：${e instanceof Error ? e.message : String(e)}`);
+          void vscode.window.showErrorMessage(t("forkFail")(e instanceof Error ? e.message : String(e)));
         }
       })();
       break;
@@ -618,22 +634,22 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         try {
           const data = await h.exportConversation();
           if (!data) {
-            deliverTo(tab, { type: "info", text: "📄 当前无会话可导出（先发一条消息创建会话）。" });
+            deliverTo(tab, { type: "info", text: t("exportNone") });
             return;
           }
           const uri = await vscode.window.showSaveDialog({
-            title: "DeepSeeker-Code：导出会话为 Markdown",
+            title: t("exportDialogTitle"),
             defaultUri: vscode.Uri.file(path.join(workspaceRoot ?? os.homedir(), data.fileName)),
             filters: { "Markdown": ["md"] },
           });
           if (!uri) {
-            deliverTo(tab, { type: "info", text: "📄 已取消导出。" });
+            deliverTo(tab, { type: "info", text: t("exportCancelled") });
             return;
           }
           await fs.promises.writeFile(uri.fsPath, data.markdown, "utf-8");
-          deliverTo(tab, { type: "info", text: `📄 会话已导出：${uri.fsPath}` });
+          deliverTo(tab, { type: "info", text: t("exportDone")(uri.fsPath) });
         } catch (e) {
-          void vscode.window.showErrorMessage(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+          void vscode.window.showErrorMessage(t("exportFail")(e instanceof Error ? e.message : String(e)));
         }
       })();
       break;
@@ -644,7 +660,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
       void (async () => {
         try {
           const uris = await vscode.window.showOpenDialog({
-            title: "DeepSeeker-Code：附加文件（小文件全文入消息，大文件自动转引用）",
+            title: t("attachDialogTitle"),
             canSelectMany: false,
             canSelectFolders: false,
             defaultUri: workspaceRoot ? vscode.Uri.file(workspaceRoot) : undefined,
@@ -659,7 +675,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
             deliverTo(tab, { type: "fileContent", name: path.basename(uri.fsPath), content });
           }
         } catch (e) {
-          deliverTo(tab, { type: "info", text: `📎 读取文件失败：${e instanceof Error ? e.message : String(e)}` });
+          deliverTo(tab, { type: "info", text: t("attachReadFail")(e instanceof Error ? e.message : String(e)) });
         }
       })();
       break;
@@ -700,24 +716,25 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
           const ok = plan.filter((f) => f.ok);
           const bad = plan.filter((f) => !f.ok);
           if (ok.length > 0) {
-            const kindText = (k: string) => (k === "creation_marker" ? "删除新建" : k === "directory_tree" ? "恢复目录树" : "恢复内容");
             const detail = [
-              ok.map((f) => `• ${f.relativePath}（${kindText(f.kind)}）`).join("\n"),
-              bad.length ? `⚠️ 另有 ${bad.length} 个文件备份已清理、无法恢复（保持现状）` : "",
+              ok.map((f) => `• ${f.relativePath}（${t("rewindKindText")(f.kind)}）`).join("\n"),
+              bad.length ? t("rewindMissingBackup")(bad.length) : "",
             ].filter(Boolean).join("\n");
+            const bothBtn = t("rewindBoth");
+            const chatOnlyBtn = t("rewindChatOnly");
             const choice = await vscode.window.showWarningMessage(
-              `回滚到发送前：将把 ${ok.length} 个文件一并恢复到该时点。`,
+              t("rewindTitle")(ok.length),
               { modal: true, detail },
-              "对话 + 文件回滚",
-              "仅回滚对话",
+              bothBtn,
+              chatOnlyBtn,
             );
-            if (choice !== "对话 + 文件回滚" && choice !== "仅回滚对话") return; // 取消/关窗 = 不动
-            await h.rewindToCheckpoint(String(msg.id ?? ""), choice === "对话 + 文件回滚");
+            if (choice !== bothBtn && choice !== chatOnlyBtn) return; // 取消/关窗 = 不动
+            await h.rewindToCheckpoint(String(msg.id ?? ""), choice === bothBtn);
           } else {
             await h.rewindToCheckpoint(String(msg.id ?? ""), false);
           }
         } catch (e) {
-          deliverTo(tab, { type: "info", text: `⏪ 回滚失败：${e instanceof Error ? e.message : String(e)}` });
+          deliverTo(tab, { type: "info", text: t("rewindFail")(e instanceof Error ? e.message : String(e)) });
         }
       })();
       break;
@@ -736,7 +753,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
           await context0?.globalState.update(BOOKMARKS_KEY, list);
         }
         pushBookmarks();
-        deliverTo(tab, { type: "info", text: `🔖 已收藏（共 ${readBookmarks().length} 条）——动作面板 Bookmarks 组一键插入输入框。` });
+        deliverTo(tab, { type: "info", text: t("bookmarkSaved")(readBookmarks().length) });
       })();
       break;
     }
@@ -752,14 +769,14 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
     case "renameSession":
       void (async () => {
         try { await h.renameSession(String(msg.id ?? ""), String(msg.title ?? "")); }
-        catch (e) { void vscode.window.showErrorMessage(`重命名失败：${e instanceof Error ? e.message : String(e)}`); }
+        catch (e) { void vscode.window.showErrorMessage(t("renameFail")(e instanceof Error ? e.message : String(e))); }
         finally { sendSessions(tab); }
       })();
       break;
     case "deleteSession":
       void (async () => {
         try { await h.deleteSession(String(msg.id ?? "")); }
-        catch (e) { void vscode.window.showErrorMessage(`删除失败：${e instanceof Error ? e.message : String(e)}`); }
+        catch (e) { void vscode.window.showErrorMessage(t("deleteFail")(e instanceof Error ? e.message : String(e))); }
         finally { sendSessions(tab); }
       })();
       break;
@@ -785,9 +802,14 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
     case "setThinking":
       h.setThinkingLevel(msg.level as never);
       break;
-    case "setLocale":
-      h.setLocale(msg.locale === "en" ? "en" : "zh");
+    case "setLocale": {
+      // /lang 选择持久化（workspaceState，优先级最高）：重开页签/重载窗口不丢（与模型选择同模式）
+      const l = msg.locale === "en" ? "en" : "zh";
+      h.setLocale(l);
+      void workspaceState?.update("deepseekerCode.locale", l);
+      postState(tab); // 快照下发 locale：webview 比对后派发 ds-locale 重建静态文案
       break;
+    }
     case "uploadImage":
       void handleUploadImage(tab, msg);
       break;
@@ -797,9 +819,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
       void (async () => {
         const snap = h.getDiffSnapshot(String(msg.toolCallId ?? ""));
         if (!snap) {
-          void vscode.window.showInformationMessage(
-            "DeepSeeker-Code：该修改的「修改前」快照不可用（历史会话回放 / 窗口重载后失效），请查看聊天内的对比视图。",
-          );
+          void vscode.window.showInformationMessage(t("diffNoSnapshot"));
           return;
         }
         const safeKey = randomUUID();
@@ -814,7 +834,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
           "vscode.diff",
           oldUri,
           vscode.Uri.file(snap.path),
-          `${name} · 修改前 → 修改后`,
+          t("diffTitle")(name),
           { preview: true, preserveFocus: true },
         );
       })();
@@ -829,6 +849,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context0 = context;
+  setVscodeLanguage(vscode.env.language); // 宿主侧文案（命令面板/通知）按 VS Code 显示语言
   // —— 1. 工作区校验 + 主根解析（持久化优先，否则按活动编辑器/folder[0] 解析）——
   //  ★ chdir 在此完成（先于 core import）：applyProjectRoot 失败即中止激活。
   //  ★ 主根持久化（workspaceState）：Reload Window 后 activeTextEditor 常为空、会回退 folder[0]，
@@ -838,7 +859,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const initialRoot = persistedRoot && folderPaths.has(persistedRoot) ? persistedRoot : resolveProjectRoot();
   if (!initialRoot) {
     workspaceRoot = null;
-    void vscode.window.showErrorMessage("DeepSeeker-Code：请先打开一个项目文件夹（工作区）再使用。");
+    void vscode.window.showErrorMessage(envT("noWorkspace"));
     return;
   }
   if (!applyProjectRoot(initialRoot)) return;
@@ -848,8 +869,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // —— 2. API Key 校验 + 注入（★ 必须在 step 4 动态 import core 之前——core 加载期即把 env 拍成定值）——
   const cfg = vscode.workspace.getConfiguration("deepseekerCode");
   const apiKey = (cfg.get<string>("apiKey") || process.env.DEEP_SEEK_API_KEY || "").trim();
-  initError = apiKey ? null
-    : "未配置 DeepSeek API Key：请在设置中填写 deepseekerCode.apiKey（或环境变量 DEEP_SEEK_API_KEY），保存后重载窗口。";
+  initError = apiKey ? null : envT("initErrorNoKey");
   if (apiKey) process.env.DEEP_SEEK_API_KEY = apiKey; // ★ 修原 bug：仅在真值时写，避免空串覆盖 env
 
   // —— 3. 注入其余配置（VSCode 设置项 → env；优先级：设置项 > 环境变量 > core 默认）——
@@ -933,20 +953,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("deepseekerCode.selectProjectRoot", async () => {
       const folders = vscode.workspace.workspaceFolders ?? [];
       if (folders.length === 0) {
-        void vscode.window.showErrorMessage("DeepSeeker-Code：当前没有打开的工作区文件夹。");
+        void vscode.window.showErrorMessage(envT("noWorkspaceShort"));
         return;
       }
       const items = folders.map((f) => ({ label: f.name, description: f.uri.fsPath, picked: f.uri.fsPath === workspaceRoot }));
       const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: "选择 DeepSeeker-Code agent 工作的项目根目录",
-        title: "DeepSeeker-Code：选择项目根",
+        placeHolder: envT("pickRootPlaceholder"),
+        title: envT("pickRootTitle"),
       });
       if (!picked) return;
       if (applyProjectRoot(picked.description!)) {
         void context.workspaceState.update("deepseekerCode.activeProjectRoot", picked.description);
         const t = revealTab(context);
         postState(t);
-        void vscode.window.showInformationMessage(`DeepSeeker-Code：主根已切换为 ${picked.label}`);
+        void vscode.window.showInformationMessage(envT("rootSwitched")(picked.label));
       }
     }),
     vscode.commands.registerCommand("deepseekerCode.listSessions", () => {
@@ -975,20 +995,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("deepseekerCode.manageTrust", async () => {
       const trusted = await readTrustedDirs();
       if (trusted.length === 0) {
-        void vscode.window.showInformationMessage("DeepSeeker-Code：暂无已信任目录。");
+        void vscode.window.showInformationMessage(envT("trustNone"));
         return;
       }
       const items = trusted.map((d) => ({ label: d }));
       const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: "选择要撤销信任的目录（按 Esc 取消）",
-        title: "DeepSeeker-Code：管理信任目录",
+        placeHolder: envT("trustPickPlaceholder"),
+        title: envT("trustPickTitle"),
       });
       if (!picked) return;
       const removed = await untrustDir(picked.label);
       void vscode.window.showInformationMessage(
-        removed
-          ? `DeepSeeker-Code：已撤销信任 ${picked.label}（重载窗口后生效）`
-          : "DeepSeeker-Code：该目录不在信任列表。",
+        removed ? envT("trustRevoked")(picked.label) : envT("trustNotFound"),
       );
     }),
     vscode.commands.registerCommand("deepseekerCode.viewBatchQueue", async () => {
@@ -996,7 +1014,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // 直读三态目录、不走 core queue：扩展宿主 process.cwd() ≠ 项目根（batchQueueRoot 的 cwd 基准失配），
       // env 重定向也是进程级全局——只读文件层直读最稳，且天然跟随当前项目根。
       if (!workspaceRoot) {
-        void vscode.window.showErrorMessage("DeepSeeker-Code：当前没有打开的工作区文件夹。");
+        void vscode.window.showErrorMessage(envT("noWorkspaceShort"));
         return;
       }
       const root = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), ".deepseeker-code", "batch");
@@ -1012,30 +1030,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       };
       const [pending, running, done] = await Promise.all([listTickets("pending"), listTickets("running"), listTickets("done")]);
       if (pending.length + running.length + done.length === 0) {
-        void vscode.window.showInformationMessage(
-          "DeepSeeker-Code：挂机队列为空。投递走 CLI：deepseeker-code batch add <工单.md>（格式见 batch help）。",
-        );
+        void vscode.window.showInformationMessage(envT("batchEmpty"));
         return;
       }
       type Item = vscode.QuickPickItem & { report?: vscode.Uri };
       const items: Item[] = [
-        ...running.map((n) => ({ label: `$(sync~spin) ${n.replace(/\.md$/, "")}`, description: "运行中" })),
-        ...pending.map((n) => ({ label: `$(clock) ${n.replace(/\.md$/, "")}`, description: "待跑" })),
+        ...running.map((n) => ({ label: `$(sync~spin) ${n.replace(/\.md$/, "")}`, description: envT("batchRunning") })),
+        ...pending.map((n) => ({ label: `$(clock) ${n.replace(/\.md$/, "")}`, description: envT("batchPending") })),
         ...done.map((n) => ({
           label: `$(check) ${n.replace(/\.md$/, "")}`,
-          description: "已完成——回车看报告",
+          description: envT("batchDone"),
           report: vscode.Uri.joinPath(root, "done", `${n.replace(/\.md$/, "")}.report.md`),
         })),
       ];
       const picked = await vscode.window.showQuickPick(items, {
-        placeHolder: "挂机批处理队列（投递/清理走 CLI：batch add / batch clean）",
-        title: "DeepSeeker-Code：挂机队列",
+        placeHolder: envT("batchPlaceholder"),
+        title: envT("batchTitle"),
       });
       if (!picked?.report) return;
       try {
         await vscode.window.showTextDocument(picked.report, { preview: true });
       } catch {
-        void vscode.window.showWarningMessage("DeepSeeker-Code：报告缺失（任务可能刚收尾或已被 batch clean）。");
+        void vscode.window.showWarningMessage(envT("batchReportMissing"));
       }
     }),
   );
@@ -1065,7 +1081,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("❌ DeepSeeker-Code 引擎初始化失败：" + msg);
-      void vscode.window.showErrorMessage(`DeepSeeker-Code 引擎初始化失败（面板仍可用，但 MCP/skills 等工具缺失）：${msg}`);
+      void vscode.window.showErrorMessage(envT("engineInitFail")(msg));
     } finally {
       engineSettled = true;
       resolveEngine();

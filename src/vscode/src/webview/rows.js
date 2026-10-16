@@ -6,6 +6,7 @@
  *  流式缓冲（textBuf/thinkBuf/progressBuf）与消费它们的 flush 同模块——缓冲生命周期不跨模块泄漏。
  */
 import { vscode, $, state, nextKey } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml, mdToHtml, truncate, argHint } from "./markdown.js";
 import { EDIT_TOOL_NAMES, buildDiffHtml, openDiffOverlay } from "./diff.js";
 
@@ -63,7 +64,7 @@ const stickTo = (stick) => { if (stick) scrollToBottom(true); };
 
 // 长 assistant 文本（实现方案/计划等）可折叠——实时与历史回放一致，不依赖后端标记
 const isLongAssistant = (t) => { const s = t || ""; return s.split("\n").length > 5 || s.length > 300; };
-const firstLine = (t) => truncate((String(t || "").split("\n").map((x) => x.trim()).find(Boolean)) || "(内容)", 60);
+const firstLine = (t) => truncate((String(t || "").split("\n").map((x) => x.trim()).find(Boolean)) || S.rwContentFallback, 60);
 // ★ 用户行时间戳格式化（transcript ts 为 ISO 字符串）：本地时区 HH:MM，非法值返回空串（不渲染）
 const fmtTime = (iso) => {
   const d = new Date(iso);
@@ -97,12 +98,12 @@ function buildRowEl(row) {
         bubbleEl.classList.add("expandable");
         const openFull = () => {
           if (window.getSelection()?.toString()) return;
-          openDiffOverlay("● 提问原文", `<div class="plan-overlay-content" style="white-space:pre-wrap">${escapeHtml(row.text)}</div>`);
+          openDiffOverlay(S.rwUserOriginal, `<div class="plan-overlay-content" style="white-space:pre-wrap">${escapeHtml(row.text)}</div>`);
         };
         bubbleEl.addEventListener("click", openFull);
         const more = document.createElement("span");
         more.className = "user-more";
-        more.textContent = "展开";
+        more.textContent = S.rwMore;
         more.addEventListener("click", (e) => {
           e.stopPropagation();
           openFull();
@@ -118,8 +119,8 @@ function buildRowEl(row) {
           const img = document.createElement("img");
           img.className = "attach-thumb";
           img.src = String(a.dataUrl || "");
-          img.alt = String(a.name || "图片");
-          img.title = String(a.name || "图片");
+          img.alt = String(a.name || S.rwImage);
+          img.title = String(a.name || S.rwImage);
           box.appendChild(img);
         }
         wrap.appendChild(box);
@@ -129,7 +130,7 @@ function buildRowEl(row) {
       if (row.cpId) {
         const undo = document.createElement("button");
         undo.className = "msg-undo";
-        undo.title = "撤回：回滚到此消息发送前（对话与文件可选），内容回填输入框可改写重发";
+        undo.title = S.rwUndoTitle;
         undo.innerHTML = '<span class="codicon codicon-discard"></span>';
         undo.addEventListener("click", () => {
           const inp = document.querySelector("#input");
@@ -154,7 +155,7 @@ function buildRowEl(row) {
         //   会把 CJK 最小内容仅 1~2 字的标题挤到 min-content，导致标题逐字折行。
         wrap.innerHTML =
           `<div class="assistant-wrap">` +
-          `<div class="assistant-head" title="点击折叠/展开"><span class="assistant-caret">${collapsed ? "▸" : "▾"}</span>${escapeHtml(firstLine(row.text))}</div>` +
+          `<div class="assistant-head" title="${S.rwCollapseToggle}"><span class="assistant-caret">${collapsed ? "▸" : "▾"}</span>${escapeHtml(firstLine(row.text))}</div>` +
           `<div class="assistant-content" style="${collapsed ? "display:none" : ""}">${html}</div>` +
           `</div>`;
         wrap.querySelector(".assistant-head")?.addEventListener("click", () => {
@@ -188,7 +189,7 @@ wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> T
 } else if (row.durationMs != null) {
 wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> Thought for ${Math.round(row.durationMs / 1000)}s</div>`;
 } else {
-wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> Thoughts（${lines} 行）</div>`;
+wrap.innerHTML = `<div class="think-head"><span class="think-caret">›</span> ${S.rwThoughts(lines)}</div>`;
 }
 wrap.querySelector(".think-head")?.addEventListener("click", () => {
 row.expanded = !row.expanded;
@@ -226,7 +227,7 @@ case "tool": {
           const diffHtml = buildDiffHtml(row.toolName, row.args);
           if (diffHtml) body += diffHtml;
           if (diffHtml && row.diffReady && row.toolCallId) {
-            body += `<button class="diff-open-btn" title="在编辑器打开原生左右对比（修改前 → 修改后）">⎇ 打开左右对比</button>`;
+            body += `<button class="diff-open-btn" title="${S.rwOpenDiffTitle}">${S.rwOpenDiff}</button>`;
           }
         }
       }
@@ -246,7 +247,7 @@ case "tool": {
     case "turnHeader": {
       const caret = row.collapsed ? "▸" : "▾";
       const summaryHtml = row.collapsed && row.summary ? ` <span class="turn-summary">${escapeHtml(row.summary)}</span>` : "";
-      wrap.innerHTML = `<div class="turn-head"><span class="turn-caret">${caret}</span><span class="turn-seq">第 ${row.seq} 轮</span>${summaryHtml}</div>`;
+      wrap.innerHTML = `<div class="turn-head"><span class="turn-caret">${caret}</span><span class="turn-seq">${S.rwTurn(row.seq)}</span>${summaryHtml}</div>`;
       wrap.querySelector(".turn-head")?.addEventListener("click", () => toggleTurn(row.seq));
       break;
     }
@@ -261,7 +262,7 @@ case "info":
       // 压缩行：附归档摘要时可点击展开/收起（Show more），直接 DOM 切换不走整行重绘
       const caret = row.summary ? ' <span class="compact-caret">▸</span>' : "";
       const pre = row.summary ? `<pre class="compact-summary" style="display:${row.expanded ? "block" : "none"}">${escapeHtml(row.summary)}</pre>` : "";
-      wrap.innerHTML = `<div class="compact-line${row.summary ? " expandable" : ""}"${row.summary ? ' title="点击展开归档摘要"' : ""}>${escapeHtml(row.text)}${caret}</div>${pre}`;
+      wrap.innerHTML = `<div class="compact-line${row.summary ? " expandable" : ""}"${row.summary ? ` title="${S.rwCompactTitle}"` : ""}>${escapeHtml(row.text)}${caret}</div>${pre}`;
       if (row.summary) {
         wrap.querySelector(".compact-line")?.addEventListener("click", () => {
           row.expanded = !row.expanded;
@@ -336,7 +337,7 @@ const ensureThinkRow = () => {
   thinkRowEl.className = "row row-think busy-think";
   thinkRowEl.id = "busy-think";
   thinkRowEl.hidden = true;
-  thinkRowEl.innerHTML = `<span class="think-glyph">✳&#xFE0E;</span><span id="think-verb">思考中</span><span class="think-ellipsis">…</span>`;
+  thinkRowEl.innerHTML = `<span class="think-glyph">✳&#xFE0E;</span><span id="think-verb">${S.thinkVerbs[0]}</span><span class="think-ellipsis">…</span>`;
   messagesEl().appendChild(thinkRowEl);
   return thinkRowEl;
 };
@@ -516,7 +517,7 @@ function appendImagePreview(dataUrl, name, removable) {
   if (removable) {
     const btn = document.createElement("button");
     btn.className = "attach-remove";
-    btn.title = "移除图片";
+    btn.title = S.rwRemoveImg;
     btn.innerHTML = '<span class="codicon codicon-close"></span>';
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -553,7 +554,7 @@ function appendRefChip(refPath) {
   chip.appendChild(span);
   const btn = document.createElement("button");
   btn.className = "attach-remove";
-  btn.title = "移除引用";
+  btn.title = S.rwRemoveRef;
   btn.innerHTML = '<span class="codicon codicon-close"></span>';
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -615,7 +616,7 @@ function renderTodos() {
   }
   panel.style.display = "";
   panel.innerHTML =
-    `<div class="todos-title">任务</div>` +
+    `<div class="todos-title">${S.rwTodos}</div>` +
     state.todos
       .map((t) => {
         const mark = t.status === "completed" ? "✓" : t.status === "in_progress" ? "◉" : "☐";

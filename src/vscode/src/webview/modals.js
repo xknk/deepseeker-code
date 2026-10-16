@@ -6,6 +6,7 @@
  *  document 级 keydown 首次渲染时注册一次（bindXxxKeydown 的 bound 门闩）。
  */
 import { vscode, $, state } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml, mdToHtml } from "./markdown.js";
 import { buildApprovalDiffHtml, setApprovalDiffSource, openDiffOverlay } from "./diff.js";
 import { addInfo } from "./rows.js";
@@ -53,9 +54,9 @@ function renderApproval() {
   const p = state.pendingApproval;
   const sel = state.approvalSel ?? 0;
   const opts = [
-    { d: "allow-once", cls: "ok", label: "✅ 允许本次" },
-    { d: "allow-always", cls: "warn", label: "♻️ 总是允许" },
-    { d: "deny", cls: "danger", label: "🚫 拒绝" },
+    { d: "allow-once", cls: "ok", label: S.mdAllowOnce },
+    { d: "allow-always", cls: "warn", label: S.mdAllowAlways },
+    { d: "deny", cls: "danger", label: S.mdDeny },
   ];
   const buttons = opts.map((o, i) =>
     `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
@@ -65,10 +66,10 @@ function renderApproval() {
   setApprovalDiffSource(diffHtml ? { detail: p.detail, toolName: p.toolName } : null);
   anchor.innerHTML = `
     <div class="modal approval">
-      <div class="modal-title">🔐 操作审批 · ${escapeHtml(p.toolName)}</div>
-      ${diffHtml || `<pre class="modal-detail">${escapeHtml(p.detail || "(无说明)")}</pre>`}
+      <div class="modal-title">${S.mdApprovalTitle(escapeHtml(p.toolName))}</div>
+      ${diffHtml || `<pre class="modal-detail">${escapeHtml(p.detail || S.mdNoDetail)}</pre>`}
       <div class="modal-actions">${buttons}</div>
-      <div class="modal-hint">↑↓ 选择 · Enter 确认 · Esc 拒绝</div>
+      <div class="modal-hint">${S.mdApprovalHint}</div>
     </div>`;
   anchor.querySelectorAll(".modal-actions .btn").forEach((b) => {
     b.addEventListener("click", () => sendApproval(b.dataset.d));
@@ -166,21 +167,21 @@ function renderQuestion() {
     return;
   }
   const req = state.pendingQuestion;
-  const prompt = String(req.prompt ?? req.question ?? req.message ?? "请选择：");
+  const prompt = String(req.prompt ?? req.question ?? req.message ?? S.mdQDefaultPrompt);
   const options = Array.isArray(req.options) ? req.options : Array.isArray(req.choices) ? req.choices : [];
   const multi = !!(req.multiSelect ?? req.multiple ?? false);
   const sel = Math.min(state.questionSel ?? 0, options.length); // options.length = Other 自由输入行
   anchor.innerHTML = `
     <div class="modal question">
-      <div class="modal-title">❓ 请选择</div>
+      <div class="modal-title">${S.mdQuestionTitle}</div>
       <div class="modal-detail q-prompt">${escapeHtml(prompt)}</div>
       <div class="modal-options"></div>
-      <div class="modal-actions"><button class="btn ${multi ? "ok" : "info"}" id="q-ok">${multi ? "✅ 确定" : "✋ 取消"}</button></div>
-      <div class="modal-hint">${multi ? "↑↓ 选择 · Space 勾选 · Enter 确定 · Esc 取消 · Other 可自由输入" : "↑↓ 选择 · Enter 确认 · Esc 取消 · Other 可自由输入"}</div>
+      <div class="modal-actions"><button class="btn ${multi ? "ok" : "info"}" id="q-ok">${multi ? S.mdQOk : S.mdQCancel}</button></div>
+      <div class="modal-hint">${multi ? S.mdQHintMulti : S.mdQHintSingle}</div>
     </div>`;
   const optBox = anchor.querySelector(".modal-options");
   options.forEach((opt, i) => {
-    const label = typeof opt === "string" ? opt : String(opt.label ?? opt.title ?? `选项 ${i + 1}`);
+    const label = typeof opt === "string" ? opt : String(opt.label ?? opt.title ?? S.mdQOpt(i));
     const desc = typeof opt === "object" ? opt.description : undefined;
     const picked = multi && state.questionPicked.includes(i);
     const btn = document.createElement("button");
@@ -196,7 +197,7 @@ function renderQuestion() {
   // ★ Other 自由输入档（对标 Claude Code）：点击选中并聚焦输入框；光标落此行时 renderQuestion 末尾自动聚焦
   const otherRow = document.createElement("div");
   otherRow.className = ["btn", "opt", "q-other", sel >= options.length && "selected"].filter(Boolean).join(" ");
-  otherRow.innerHTML = `<span class="q-other-label">✎ Other</span><input id="q-other-input" type="text" placeholder="自由输入（粘贴 token / 路径等），Enter 提交" />`;
+  otherRow.innerHTML = `<span class="q-other-label">✎ Other</span><input id="q-other-input" type="text" placeholder="${S.mdQOtherPh}" />`;
   otherRow.addEventListener("click", () => {
     state.questionSel = options.length;
     renderQuestion();
@@ -214,7 +215,7 @@ function renderQuestion() {
 // ———————— 模型选择器（面板内：与提问条同一套 modal + ↑↓/Enter/Esc + 点击交互） ————————
 function openModelPicker() {
   if (!state.models.length) {
-    addInfo("候选清单为空：/model <模型id> 直输切换，或在设置 deepseekerCode.models 里配置候选模型");
+    addInfo(S.mdModelsEmpty);
     return;
   }
   state.modelPicker = true;
@@ -239,7 +240,7 @@ function pickModelLocal(i) {
   state.model = m;
   // setModel 分支统一 host.setModel + workspaceState 持久化（/model 直输与选择器两条路同收口）
   vscode.postMessage({ type: "setModel", model: m });
-  addInfo(`🧠 模型已切换：${m}（下次回复生效，重载窗口后保持）`);
+  addInfo(S.mdModelSwitched(m));
   syncToolbar();
   closeModelPicker();
 }
@@ -259,16 +260,16 @@ function renderModelPicker() {
   const sel = Math.min(state.modelPickerSel ?? 0, state.models.length - 1);
   anchor.innerHTML = `
     <div class="modal model-picker">
-      <div class="modal-title">🧠 选择模型${cur ? `（当前：${escapeHtml(cur)}）` : ""}</div>
+      <div class="modal-title">${S.mdModelPickTitle(cur ? escapeHtml(cur) : "")}</div>
       <div class="modal-options"></div>
-      <div class="modal-hint">${escapeHtml("↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id> 直输）")}</div>
+      <div class="modal-hint">${escapeHtml(S.mdModelHint)}</div>
     </div>`;
   const optBox = anchor.querySelector(".modal-options");
   state.models.forEach((m, i) => {
     const isCur = m === cur;
     const btn = document.createElement("button");
     btn.className = ["btn", "opt", i === sel && "selected"].filter(Boolean).join(" ");
-    btn.innerHTML = `${isCur ? "● " : ""}${escapeHtml(m)}${isCur ? `<span class="opt-desc">当前</span>` : ""}`;
+    btn.innerHTML = `${isCur ? "● " : ""}${escapeHtml(m)}${isCur ? `<span class="opt-desc">${S.mdModelCurrent}</span>` : ""}`;
     btn.addEventListener("click", () => pickModelLocal(i));
     optBox.appendChild(btn);
   });
@@ -358,10 +359,10 @@ function renderPlan() {
   const sel = state.planSel ?? 1;
   // ★ 文案对齐 Claude Code：Ready to code? + 是/是/否三选项（编辑为额外能力保留）
   const opts = [
-    { d: "acceptAuto", cls: "ok", label: "✅ 是，并自动接受编辑" },
-    { d: "accept", cls: "warn", label: "是，并手动审批编辑" },
-    { d: editing ? "acceptEdited" : "edit", cls: "info", label: editing ? "✔️ 按编辑后方案执行" : "✏️ 编辑方案" },
-    { d: "reject", cls: "danger", label: "↩ 否，继续规划" },
+    { d: "acceptAuto", cls: "ok", label: S.mdPlanAuto },
+    { d: "accept", cls: "warn", label: S.mdPlanManual },
+    { d: editing ? "acceptEdited" : "edit", cls: "info", label: editing ? S.mdPlanEdited : S.mdPlanEdit },
+    { d: "reject", cls: "danger", label: S.mdPlanReject },
   ];
   const buttons = opts.map((o, i) =>
     `<button class="btn ${o.cls}${i === sel ? " selected" : ""}" data-d="${o.d}">${o.label}</button>`
@@ -369,13 +370,13 @@ function renderPlan() {
   const hideText = editing || collapsed; // 编辑态正文为空 / 折叠态用户收起 —— 都不占位，把空间让给 textarea
   anchor.innerHTML = `
     <div class="modal plan">
-      <div class="modal-title plan-toggle" title="点击折叠/展开">
-        <span class="plan-caret">${collapsed ? "▶" : "▼"}</span>📋 准备开始编码？${collapsed ? `<span class="plan-collapsed-hint">（已折叠，点击展开）</span>` : ""}
+      <div class="modal-title plan-toggle" title="${S.mdPlanToggle}">
+        <span class="plan-caret">${collapsed ? "▶" : "▼"}</span>${S.mdPlanTitle}${collapsed ? `<span class="plan-collapsed-hint">${S.mdPlanCollapsedHint}</span>` : ""}
       </div>
       <div class="modal-detail plan-text" style="${hideText ? "display:none" : ""}">${editing ? "" : mdToHtml(plan)}</div>
       <textarea id="plan-edit" spellcheck="false" style="${editing ? "" : "display:none"}">${escapeHtml(plan)}</textarea>
       <div class="modal-actions plan-actions">${buttons}</div>
-      <div class="modal-hint">${editing ? "Ctrl+Enter 按编辑后方案执行 · Esc 退出编辑" : "↑↓ 选择 · Enter 确认 · Esc 拒绝 · 点击标题折叠"}</div>
+      <div class="modal-hint">${editing ? S.mdPlanHintEdit : S.mdPlanHintNav}</div>
     </div>`;
   anchor.querySelector(".plan-toggle")?.addEventListener("click", () => {
     state.planCollapsed = !state.planCollapsed;
@@ -385,7 +386,7 @@ function renderPlan() {
   anchor.querySelector(".plan-text")?.addEventListener("click", (e) => {
     if (e.target.closest("a")) return;
     if (window.getSelection()?.toString()) return;
-    openDiffOverlay("📋 实施方案", `<div class="plan-overlay-content">${mdToHtml(plan)}</div>`);
+    openDiffOverlay(S.mdPlanOverlay, `<div class="plan-overlay-content">${mdToHtml(plan)}</div>`);
   });
   anchor.querySelectorAll(".plan-actions .btn").forEach((b) => {
     b.addEventListener("click", () => applyPlanDecision(b.dataset.d));

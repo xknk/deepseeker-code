@@ -7,6 +7,7 @@
  */
 import { $ } from "./state.js";
 import { state } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
 
 export const EDIT_TOOL_NAMES = ["edit_file", "create_file", "write_file"];
@@ -86,7 +87,7 @@ function extractEditPairs(toolName, args) {
     const pairs = list.filter((x) => typeof x?.old_str === "string" && x.old_str.length);
     return pairs.length
       ? pairs.map((x, i) => ({
-          label: pairs.length > 1 ? `第 ${i + 1} 处${x.replace_all ? "（批量替换全部匹配）" : ""}` : "",
+          label: pairs.length > 1 ? S.dfHunk(i, !!x.replace_all) : "",
           old: x.old_str,
           neu: typeof x.new_str === "string" ? x.new_str : "",
         }))
@@ -126,12 +127,12 @@ export function buildDiffHtml(toolName, args, big = false) {
     const rows = alignDiffRows(collapseContext(lineDiff(p.old, p.neu), big ? 6 : 2));
     if (!rows.some((r) => r.k === "del" || r.k === "add" || r.k === "mod")) continue;
     const lines = rows.slice(0, MAX_ROWS).map((r) => {
-      if (r.k === "ellip") return `<div class="drow ellip"><span class="dl"></span><span class="dr">⋯ ${r.n} 行未变</span></div>`;
+      if (r.k === "ellip") return `<div class="drow ellip"><span class="dl"></span><span class="dr">${S.dfEllip(r.n)}</span></div>`;
       const lm = r.k === "ctx" ? " " : r.k === "add" ? " " : "−";
       const rm = r.k === "ctx" ? " " : r.k === "del" ? " " : "+";
       return `<div class="drow ${r.k}"><span class="dl">${lm} ${escapeHtml(r.l)}</span><span class="dr">${rm} ${escapeHtml(r.r)}</span></div>`;
     }).join("");
-    const more = rows.length > MAX_ROWS ? `<div class="drow ellip"><span class="dl"></span><span class="dr">⋯ 另有 ${rows.length - MAX_ROWS} 行未显示</span></div>` : "";
+    const more = rows.length > MAX_ROWS ? `<div class="drow ellip"><span class="dl"></span><span class="dr">${S.dfMore(rows.length - MAX_ROWS)}</span></div>` : "";
     parts.push(`<div class="tool-diff">${p.label ? `<div class="diff-hunk-label">${escapeHtml(p.label)}</div>` : ""}${lines}${more}</div>`);
   }
   return parts.join("");
@@ -185,8 +186,8 @@ export const openDiffOverlay = (title, bodyHtml) => {
     `<div class="diff-overlay-panel">` +
     `<div class="diff-overlay-bar">` +
     `<span class="diff-overlay-title">${title}</span>` +
-    `<span class="diff-overlay-hint">点击空白处 / Esc 关闭</span>` +
-    `<button class="diff-overlay-close" title="关闭 (Esc)">✕</button>` +
+    `<span class="diff-overlay-hint">${S.dfOverlayHint}</span>` +
+    `<button class="diff-overlay-close" title="${S.dfOverlayClose}">✕</button>` +
     `</div>` +
     `<div class="diff-overlay-body">${bodyHtml}</div>` +
     `</div>`;
@@ -223,6 +224,6 @@ document.addEventListener("click", (e) => {
   }
   if (approvalDiffSource) {
     const body = buildApprovalDiffHtml(approvalDiffSource.detail, approvalDiffSource.toolName, true);
-    if (body) openDiffOverlay(`审批对比 · ${escapeHtml(approvalDiffSource.toolName)}`, body);
+    if (body) openDiffOverlay(S.dfApprovalTitle(escapeHtml(approvalDiffSource.toolName)), body);
   }
 });

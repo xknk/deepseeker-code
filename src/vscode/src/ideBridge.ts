@@ -14,6 +14,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import type { IdeActionRequest, IdeActionResult, IdeDiagnosticItem } from "@/host/type.ts";
+import { makeT, type UiLocale } from "./i18n";
 
 /** 相对路径 → 绝对路径：cwd（工作区根）优先，miss 时兜底扫各 workspace folder 取第一个存在的。 */
 const resolveWorkspacePath = (p: string): string | null => {
@@ -39,13 +40,13 @@ const MAX_DIAG_ITEMS = 200;
 
 /** 收集诊断（单文件或全工作区），映射为纯数据并按 error→warning→info 排序、截断 200 条。 */
 const collectDiagnostics = (
-  p: string | undefined, floor: 'error' | 'warning' | 'all' | undefined,
+  p: string | undefined, floor: 'error' | 'warning' | 'all' | undefined, t: (key: string) => any,
 ): IdeActionResult => {
   const severity = floor ?? "error";
   const items: IdeDiagnosticItem[] = [];
   if (p) {
     const abs = resolveWorkspacePath(p);
-    if (!abs) return { ok: false, message: `未找到文件 ${p}（相对工作区根解析失败，可用绝对路径重试）` };
+    if (!abs) return { ok: false, message: t("ideFileMiss")(p) };
     const uri = vscode.Uri.file(abs);
     const rel = vscode.workspace.asRelativePath(uri, false);
     for (const d of vscode.languages.getDiagnostics(uri)) {
@@ -80,37 +81,35 @@ const collectDiagnostics = (
 };
 
 /** 在编辑器打开文件（带行/列则定位选区），返回面向模型的确认文本。 */
-const openInEditor = async (p: string, line?: number, column?: number): Promise<IdeActionResult> => {
+const openInEditor = async (p: string, line?: number, column?: number, t: (key: string) => any = makeT(() => "zh")): Promise<IdeActionResult> => {
   const abs = resolveWorkspacePath(p);
-  if (!abs) return { ok: false, message: `未找到文件 ${p}（相对工作区根解析失败，可用绝对路径重试）` };
+  if (!abs) return { ok: false, message: t("ideFileMiss")(p) };
   const uri = vscode.Uri.file(abs);
   const doc = await vscode.workspace.openTextDocument(uri);
   const at = (line && line > 0) ? new vscode.Range(line - 1, Math.max((column ?? 1) - 1, 0), line - 1, Math.max((column ?? 1) - 1, 0)) : undefined;
   await vscode.window.showTextDocument(doc, { preview: false, selection: at });
   const rel = vscode.workspace.asRelativePath(uri, false);
-  return { ok: true, action: "open", message: `已在编辑器打开 ${rel}${at ? `:${line}:${column ?? 1}` : ""}` };
+  return { ok: true, action: "open", message: t("ideOpened")(rel, at ? `:${line}:${column ?? 1}` : "") };
 };
 
 /** 触发 VSCode 任务：缺省列任务名；有名则启动并以 onDidStartTask 竞速 10s 做启动确认（不等待完成）。 */
-const runTask = async (name: string | undefined): Promise<IdeActionResult> => {
+const runTask = async (name: string | undefined, t: (key: string) => any): Promise<IdeActionResult> => {
   if (!name) {
     const tasks = await vscode.tasks.fetchTasks();
-    const names = [...new Set(tasks.map(t => t.name))].filter(Boolean);
+    const names = [...new Set(tasks.map(x => x.name))].filter(Boolean);
     return {
       ok: true, action: "task",
-      message: names.length > 0
-        ? `可用任务：${names.join("、")}。用 name 参数触发其一。`
-        : "未找到可用任务（当前工作区没有 .vscode/tasks.json 或其中未定义任务）。",
+      message: names.length > 0 ? t("ideTasksAvail")(names) : t("ideTasksNone"),
     };
   }
   const tasks = await vscode.tasks.fetchTasks();
-  const task = tasks.find(t => t.name === name) ?? tasks.find(t => t.name.toLowerCase() === name.toLowerCase());
+  const task = tasks.find(x => x.name === name) ?? tasks.find(x => x.name.toLowerCase() === name.toLowerCase());
   if (!task) {
-    const names = [...new Set(tasks.map(t => t.name))].filter(Boolean).join("、");
-    return { ok: false, message: `未找到任务「${name}」${names ? `，可用：${names}` : "（当前工作区未定义任何任务）"}` };
+    const names = [...new Set(tasks.map(x => x.name))].filter(Boolean);
+    return { ok: false, message: t("ideTaskMiss")(name, names) };
   }
   const already = vscode.tasks.taskExecutions.find(e => e.task.name === task.name);
-  if (already) return { ok: false, message: `任务「${task.name}」已在运行（IDE 终端面板可见），勿重复触发。` };
+  if (already) return { ok: false, message: t("ideTaskRunning")(task.name) };
   const started = new Promise<void>(resolve => {
     const d = vscode.tasks.onDidStartTask(e => {
       if (e.execution.task.name === task.name) { d.dispose(); resolve(); }
@@ -121,20 +120,19 @@ const runTask = async (name: string | undefined): Promise<IdeActionResult> => {
   const outcome = await Promise.race([started, timer]);
   return {
     ok: true, action: "task",
-    message: outcome === "timeout"
-      ? `任务「${task.name}」已发出启动请求（10s 内未确认进程启动，请到 IDE 终端面板确认输出）。`
-      : `任务「${task.name}」已在 IDE 终端启动（不等待完成；要看输出请到 IDE 终端面板，或改用 run_command 程序化执行）。`,
+    message: outcome === "timeout" ? t("ideTaskFired")(task.name) : t("ideTaskStarted")(task.name),
   };
 };
 
-/** IDE 桥处理器工厂：extension.ts makeCallbacks 注入 ChatHostCallbacks.onIdeAction。 */
-export const createIdeActionHandler = (): ((req: IdeActionRequest) => Promise<IdeActionResult>) => {
+/** IDE 桥处理器工厂：extension.ts makeCallbacks 注入 ChatHostCallbacks.onIdeAction（locale getter 随页签 host）。 */
+export const createIdeActionHandler = (getLocale: () => UiLocale): ((req: IdeActionRequest) => Promise<IdeActionResult>) => {
+  const t = makeT(getLocale);
   return async (req: IdeActionRequest): Promise<IdeActionResult> => {
     try {
       switch (req.action) {
-        case "open": return await openInEditor(req.path, req.line, req.column);
-        case "diagnostics": return collectDiagnostics(req.path, req.severity);
-        case "task": return await runTask(req.name);
+        case "open": return await openInEditor(req.path, req.line, req.column, t);
+        case "diagnostics": return collectDiagnostics(req.path, req.severity, t);
+        case "task": return await runTask(req.name, t);
       }
     } catch (e: any) {
       return { ok: false, message: e?.message ?? String(e) };

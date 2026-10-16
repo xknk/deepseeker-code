@@ -26,6 +26,7 @@ import { resolveUserApprovalLock } from "@/tool/approvalGate.ts";
 import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionRequest, IdeActionResult } from "@/host/type.ts";
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
+import { makeT } from "./i18n";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -74,9 +75,10 @@ const tryParseArgs = (raw: unknown): unknown => {
 /**
  * 轻量历史回放：把 transcript messages 转成 UI 行事件（type:"row" / type:"rowUpdate"）。
  * 与 cli/src/replay.ts 的 buildReplayRows 语义一致，但直接以事件流形式送出。
+ * t（宿主侧文案查表）：附件名兜底等用户可见文本按当前 locale 出。
  * cpByLine（行 id → 检查点 id，checkpointIdByUserLine 产物）：user 行贴 cpId，供逐消息 ↺ 撤回。
  */
-function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<string, unknown>) => void, cpByLine?: Map<string, string>): void {
+function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<string, unknown>) => void, t: (key: string) => any, cpByLine?: Map<string, string>): void {
   const pending = new Map<string, string>(); // toolCallId -> row key
   let seq = 0;
   const nextKey = () => `replay-${++seq}`;
@@ -86,7 +88,7 @@ function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<str
       // ★ 多模态：贴图轮 content 是 parts 数组——文本视图照常展示，image part 抽为缩略图（dataURL，CSP 已放行）
       const text = msgText(m.content);
       const urls = imageUrlsOf(m.content);
-      const attachments = urls.map((url, i) => ({ name: urls.length > 1 ? `图片${i + 1}` : "图片", dataUrl: url }));
+      const attachments = urls.map((url, i) => ({ name: urls.length > 1 ? t("imgFallbackName")(i) : t("imgFallbackNameSingle"), dataUrl: url }));
       if (text.trim() || attachments.length) {
         const cpId = cpByLine?.get(String(m.id ?? ""));
         sink({ type: "row", kind: "user", text, attachments, key: nextKey(), ...(m.ts ? { ts: String(m.ts) } : {}), ...(cpId ? { cpId } : {}) });
@@ -141,6 +143,8 @@ export class ChatHost {
   private thinkingLevel: ThinkingLevel =
     !MODEL_THINKING_ENABLED ? "off" : MODEL_REASONING_EFFORT === "max" ? "max" : "high";
   private locale: "zh" | "en" = "zh";
+  /** 宿主侧文案查表（i18n.ts）：闭包按访问时 this.locale 分发，/lang 切换后即时生效。 */
+  private t = makeT(() => this.locale);
   private outputStyle: string | undefined = undefined;
   /** 本主 run 花费预算上限（元，成本信任链第二环 E1，/budget 设置）。undefined=不限。 */
   private budgetYuan: number | undefined = undefined;
@@ -188,6 +192,10 @@ export class ChatHost {
   get activeSessionId(): string | null {
     return this.sessionId;
   }
+  /** 当前 UI 语言（extension 状态快照下发 webview / 宿主侧文案 t() 同源）。 */
+  get currentLocale(): "zh" | "en" {
+    return this.locale;
+  }
 
   /** 事件 sink：先截获 plan 两阶段所需信号 + 挂起交互（approval/question/plan）暂存，再原样转发给 UI。
    *  暂存的挂起交互供 collectPendingUI 在 panel 重建后重广播，杜绝关 tab 后审批死锁。 */
@@ -216,7 +224,7 @@ export class ChatHost {
       const n = Array.isArray(evt.texts) ? (evt.texts as string[]).length : 0;
       if (n > 0) {
         this.queuedUnclaimed = Math.max(0, this.queuedUnclaimed - n);
-        this.callbacks.sink({ type: "info", text: `📬 已送达模型（${n} 条补充输入）` });
+        this.callbacks.sink({ type: "info", text: this.t("inboxDelivered")(n) });
       }
       return;
     }
@@ -276,7 +284,7 @@ export class ChatHost {
   /** 附件 → UI 行缩略图（dataURL）。仅供 webview 显示，不参与模型上下文。 */
   private attachmentThumbs(attachments?: InboundImageAttachment[]): Array<{ name: string; dataUrl: string }> {
     return (attachments ?? []).map((a, i) => ({
-      name: a.name || `图片${i + 1}`,
+      name: a.name || this.t("imgFallbackName")(i),
       dataUrl: `data:${a.mime};base64,${a.base64}`,
     }));
   }
@@ -323,7 +331,7 @@ export class ChatHost {
       // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
       //   flush 落盘（此刻已完成），如实提示下轮自动带入。
       if (this.queuedUnclaimed > 0) {
-        this.sink({ type: "info", text: `📬 本轮结束时 ${this.queuedUnclaimed} 条补充输入未在回合边界送达，已写入会话历史，下轮对话自动带入。` });
+        this.sink({ type: "info", text: this.t("inboxCarryover")(this.queuedUnclaimed) });
         this.queuedUnclaimed = 0;
       }
     }
@@ -341,13 +349,13 @@ export class ChatHost {
     if (res.action === "accept") {
       // 编辑后方案不在 transcript，必须把最终方案全文塞进实现轮 prompt。
       const finalPlan = res.plan ?? plan;
-      if (res.autoExecute) this.sink({ type: "info", text: "⚡ 已进入自动执行：实现阶段工具将免审批直接运行。" });
+      if (res.autoExecute) this.sink({ type: "info", text: this.t("autoExecuteOn") });
       await this.runOnce(`（用户已批准以下方案，请严格按方案开始实现）：\n\n${finalPlan}`, false, res.autoExecute);
       return true;
     }
     this.planMode = true; // 留在计划模式（模型直提方案路径借此处补开）
     this.sink({ type: "mode.change", planMode: true });
-    this.sink({ type: "info", text: "✋ 已留在计划模式：继续输入补充要求，模型将修订方案后再次提交（/plan 或模式面板可退出）。" });
+    this.sink({ type: "info", text: this.t("planStayed") });
     return false;
   }
 
@@ -365,7 +373,7 @@ export class ChatHost {
   private async runBangCommand(raw: string): Promise<void> {
     const cmd = raw.slice(1).trim();
     if (!cmd) {
-      this.sink({ type: "info", text: "用法：!<shell 命令>（如 !git status）；输出会带入下轮对话上下文。" });
+      this.sink({ type: "info", text: this.t("bangUsage") });
       return;
     }
     if (this.sessionId == null) {
@@ -376,8 +384,7 @@ export class ChatHost {
     const bangCpId = await recordCheckpoint(this.sessionId!, cmd);
     this.sink({ type: "row", kind: "user", text: raw, key: `u-${Date.now()}`, ...(bangCpId ? { cpId: bangCpId } : {}) });
     const r = await runBashDirect(cmd, getActiveWorkspaceRoot());
-    const head = r.timedOut ? "⏱ 超时中止" : r.ok ? "✅ 退出码 0" : r.exitCode != null ? `❌ 退出码 ${r.exitCode}` : "❌ 已中止";
-    this.sink({ type: "info", text: `${head} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || "(无输出)"}` });
+    this.sink({ type: "info", text: `${this.t("bangHead")(r)} · ${Math.round(r.durationMs / 100) / 10}s\n${r.output.trim() || this.t("bangNoOutput")}` });
     await recordBashEntry(this.sessionId!, formatBashEntry(cmd, r));
   }
 
@@ -398,13 +405,13 @@ export class ChatHost {
     if (this.busy) {
       const sid = this.sessionId;
       // inbox 协议是纯文本：附件无法随排队消息进上下文，如实告知（不静默丢图）
-      if (hasAtt) this.sink({ type: "info", text: "🖼 生成中贴图无法随排队消息送达，请本轮结束后重新发送图片。" });
+      if (hasAtt) this.sink({ type: "info", text: this.t("imgQueuedBusy") });
       if (sid && pushSessionInbox(sid, text)) {
         this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}` });
-        this.sink({ type: "info", text: "📮 已排队，将在回合边界送达模型（停止按钮仍可中止）。" });
+        this.sink({ type: "info", text: this.t("queuedAck") });
         this.queuedUnclaimed++;
       } else {
-        this.sink({ type: "info", text: "⏳ 生成中，输入未发送。" });
+        this.sink({ type: "info", text: this.t("busyBlocked") });
       }
       return;
     }
@@ -414,12 +421,12 @@ export class ChatHost {
     // ★ C1 Checkpoints：每轮用户消息发送【前】记检查点（transcript 当前边界 + 将发文本预览）。
     //   位置在 busy/inbox 分支之后：排队轮不记（回合边界送达时 runAgent 侧本轮已在上一检查点界内）。
     //   cpId 贴行：该行 ↺ 撤回按钮直达此边界（逐消息撤回，对标 CC 的消息级 rewind）。
-    const cpId = await recordCheckpoint(this.sessionId!, text || (hasAtt ? "[图片消息]" : ""));
+    const cpId = await recordCheckpoint(this.sessionId!, text || (hasAtt ? this.t("imgMsgLabel") : ""));
     // user 行回显带缩略图（dataURL），与回放视图同构
     this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}`, attachments: this.attachmentThumbs(attachments), ...(cpId ? { cpId } : {}) });
     if (this.planMode) {
       // 计划模式轮走只读调研管线（提示词由 host 拼装），附件无载体——如实告知，建议实现阶段再贴图
-      if (hasAtt) this.sink({ type: "info", text: "🖼 计划模式暂不支持随调研轮贴图：图片未进入本轮上下文（退出计划模式后可直接发送）。" });
+      if (hasAtt) this.sink({ type: "info", text: this.t("planNoImage") });
       const kept = await this.runPlanStage(text);
       // ★ 对齐 Claude Code：接受方案（已执行实现）→ 退出计划模式；拒绝/未产出 → 留在计划模式。
       if (kept) {
@@ -437,10 +444,7 @@ export class ChatHost {
       } else {
         const enterReason = this.takeEnterPlanRequest();
         if (enterReason != null) {
-          this.sink({
-            type: "info",
-            text: `📋 模型请求进入计划模式${enterReason ? `：${enterReason}` : ""}，已切换…`,
-          });
+          this.sink({ type: "info", text: this.t("planEnterSwitched")(enterReason) });
           this.planMode = true;
           const kept = await this.runPlanStage(ENTER_PLAN_RESEARCH_PROMPT);
           // 仅「已接受执行」恢复原模式；拒绝（继续规划）保持计划模式开启（对齐 Claude Code）。
@@ -477,11 +481,11 @@ export class ChatHost {
       const cps = await listCheckpointsCore(id);
       const cpByLine = checkpointIdByUserLine(lines, cps);
       const msgs = lines.filter((l) => !isEventLine(l)) as unknown as Array<Record<string, unknown>>;
-      emitReplay(msgs, this.callbacks.sink, cpByLine);
+      emitReplay(msgs, this.callbacks.sink, this.t, cpByLine);
     } catch {
       /* 无历史或读取失败 → 空回放，不阻塞 */
     }
-    this.sink({ type: "info", text: "📂 已载入会话（继续对话将续接此会话）" });
+    this.sink({ type: "info", text: this.t("sessionLoaded") });
     // ★ 回放结束信号：所有 row 已送出，通知前端强制滚到底（展示最新对话，而非回放起点的顶部）。
     //   回放行经 appendRow 追加、滚动受 nearBottom() 门控——长会话下永远停在顶部；此信号绕开门控强制落底。
     this.callbacks.sink({ type: "replayDone" });
@@ -528,10 +532,10 @@ export class ChatHost {
   /** 从锚点分叉当前会话：forkSession 派生新会话（源不动）→ 载入续接。 */
   async forkFrom(lineId: string): Promise<void> {
     const sid = this.sessionId;
-    if (!sid) throw new Error("当前无活动会话，无可分叉");
+    if (!sid) throw new Error(this.t("noSessionFork"));
     const r = await forkSession(sid, lineId);
     await this.loadSession(r.sessionId);
-    this.sink({ type: "info", text: `🌿 已分叉为新会话（源会话不变），继续对话将写入新会话。` });
+    this.sink({ type: "info", text: this.t("forked") });
   }
 
   /** C1：枚举当前会话检查点（回滚面板；无活动会话 → 空表）。 */
@@ -555,15 +559,15 @@ export class ChatHost {
    *  restoreFiles=true 时先恢复该时点后的文件改动（modal 已确认），再截断对话——时序红线：先文件、
    *  再截断，避免"文件已回、对话还在"的半途状态；文件恢复结果明细并入 info 行回显。 */
   async rewindToCheckpoint(checkpointId: string, restoreFiles = false): Promise<void> {
-    if (this.busy) throw new Error("生成中无法回滚，请先停止当前轮");
+    if (this.busy) throw new Error(this.t("rewindBusy"));
     const sid = this.sessionId;
-    if (!sid) throw new Error("当前无活动会话，无可回滚");
+    if (!sid) throw new Error(this.t("noSessionRewind"));
     const cp = (await listCheckpointsCore(sid)).find((c) => c.id === checkpointId);
-    if (!cp) throw new Error(`检查点不存在：${checkpointId}`);
+    if (!cp) throw new Error(this.t("checkpointMissing")(checkpointId));
     const fileLines = restoreFiles ? await restoreFilesForRewind(sid, cp.ts) : [];
     const r = await rewindToCheckpointCore(sid, checkpointId);
     const fileNote = fileLines.length ? `\n${fileLines.join("\n")}` : "";
-    this.sink({ type: "info", text: `⏪ 已回滚到发送前（移除其后 ${r.removedLines} 行转录）。改写消息后重发即可。${fileNote}` });
+    this.sink({ type: "info", text: this.t("rewound")(r.removedLines, fileNote) });
     await this.loadSession(sid);
   }
 
@@ -573,20 +577,20 @@ export class ChatHost {
    *  时 info 行如实回显，绝不假装压过。 */
   async compactNow(): Promise<void> {
     if (this.busy) {
-      this.sink({ type: "info", text: "⏳ 生成中无法手动压缩，请先停止当前轮。" });
+      this.sink({ type: "info", text: this.t("compactBusy") });
       return;
     }
     const sid = this.sessionId;
     if (!sid) {
-      this.sink({ type: "info", text: "当前无活动会话，无需压缩。" });
+      this.sink({ type: "info", text: this.t("compactNoSession") });
       return;
     }
     try {
       const r = await compactSessionNow({ sessionId: sid, onUIEvent: (evt: any) => this.sink(evt) });
-      if (r.empty) this.sink({ type: "info", text: "当前没有可压缩的历史消息。" });
-      else if (!r.compacted) this.sink({ type: "info", text: "✅ 上下文本就健康（免费折叠旧工具结果后已回到阈值内），无需摘要压缩。" });
+      if (r.empty) this.sink({ type: "info", text: this.t("compactNothing") });
+      else if (!r.compacted) this.sink({ type: "info", text: this.t("compactHealthy") });
     } catch (e) {
-      this.sink({ type: "info", text: `⚠️ 手动压缩失败：${e instanceof Error ? e.message : String(e)}` });
+      this.sink({ type: "info", text: this.t("compactFail")(e instanceof Error ? e.message : String(e)) });
     }
   }
 

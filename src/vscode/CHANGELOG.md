@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.66
+
+全插件 UI 双语化（/lang zh|en 一键切换，此前仅 CLI/README/模型回复支持双语）。
+
+- **webview 前端**：全部用户可见文案接入 `S` 词表代理（工具栏/输入区/斜杠菜单/审批/提问/方案/历史/分叉/检查点/diff/动作面板/事件行 ~190 键）；静态 DOM（工具栏 title、输入区模板、浮层骨架）靠 `ds-locale` 重建机制刷新，切换时草稿文本、待发贴图/引用 chip、阻塞中的审批/提问/方案条全量保留；历史 info/system 行属会话记录不追溯翻译（与 CC 行为一致）。
+- **扩展宿主**：extension.ts（命令面板 QuickPick/通知/观测命令回显/导出与回滚对话框）/ host.ts（~25 条 info 行与错误抛出）/ ideBridge.ts（ide_* 工具结果）接入 `i18n.ts` 词表（makeT 闭包按访问时 locale 分发）；无 tab 语境（activate 期）按 VS Code 显示语言。
+- **清单与设置**：package.json 的 description/10 条命令标题/17 项设置描述改 `%key%` 引用 + `package.nls.json`（英文默认）/`package.nls.zh-cn.json`（中文镜像）——命令面板与设置页随 VS Code 显示语言自动切换。
+- **语言解析链**：`/lang` 选择持久化 workspaceState（重开页签/重载窗口不丢，与模型选择同模式）> 设置项 `deepseekerCode.locale` > VS Code 显示语言；`<html lang>` 随语言渲染，切换即时同步。
+- **边界（有意保留中文）**：模型侧提示词（计划调研引导/方案批准重跑语）；core 审批 detail 的【减少】/【增加】标记（diff 解析锚点）；core 观测输出（/usage 等，CLI/VSCode 共用，另行处理）。
+
 ## 1.0.65
 
 提问钉顶与逐消息撤回 UX + 成本信任链四环 + 检查点回滚/统一动作面板（本版起追平 09-17 ~ 10-14 全部未上架批次，即本地 1.0.72–1.0.100 累积更新；版本号按线上 +1 重排，避免与已上架 1.0.64 之间留空洞）。

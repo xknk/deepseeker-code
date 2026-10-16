@@ -7,6 +7,7 @@
  *  本模块在 import 时注册 window message 监听（与原单文件时代一致：先于初始化、早于 ready postMessage）。
  */
 import { vscode, state, nextKey } from "./state.js";
+import { S } from "./strings.js";
 import {
   appendRow, updateRow, removeRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
@@ -97,7 +98,7 @@ switch (evt.type) {
       }
       case "plan.enterRequested": {
         closeStreaming();
-        addInfo(`📋 模型请求进入计划模式${evt.reason ? `：${evt.reason}` : ""}`);
+        addInfo(S.evPlanEnter(evt.reason ? String(evt.reason) : ""));
         break;
       }
       case "final":
@@ -111,7 +112,7 @@ switch (evt.type) {
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 同 final：错误终结时清理进度行
         if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同 final：错误终结时清理子 agent 进度行
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
-        appendRow({ key: nextKey(), kind: "system", text: `❌ ${String(evt.message ?? "未知错误")}` });
+        appendRow({ key: nextKey(), kind: "system", text: S.evError(String(evt.message ?? S.evUnknownError)) });
         break;
       }
       case "info":
@@ -142,7 +143,7 @@ switch (evt.type) {
       }
       case "tool.denied": {
         flush();
-        addInfo(`🚫 ${String(evt.toolName ?? "")} 被拒绝`);
+        addInfo(S.evDenied(String(evt.toolName ?? "")));
         break;
       }
       case "fileDiff.ready": {
@@ -173,7 +174,7 @@ switch (evt.type) {
       case "vision.downgraded": {
         // ★ 零配置多模态自学习：当前模型不支持图片，本轮已自动折叠为文本重试（能力已记住）
         flush();
-        addInfo(`🖼 模型 ${String(evt.model ?? "")} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`);
+        addInfo(S.evVisionDown(String(evt.model ?? "")));
         break;
       }
       case "subagent.count": {
@@ -192,7 +193,7 @@ switch (evt.type) {
         }
         const ptext = String(evt.text ?? "").slice(0, 160);
         if (!ptext) break;
-        const pline = `↳ 子agent ${ptext}`;
+        const pline = S.evSubagent(ptext);
         if (state.subagentProgressKey != null && state.rowMap.has(state.subagentProgressKey)) {
           updateRow(state.subagentProgressKey, { text: pline });
         } else {
@@ -214,16 +215,16 @@ switch (evt.type) {
         const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
-        addInfo(`💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${evt.budgetTruncated ? " · 预算截断" : ""}`);
+        addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated));
         break;
       }
       case "task.exit": {
         // ★ 后台任务退出主动通知（对标 CC「Background command failed」）：成功淡色 info、失败醒目 system、停止中性
         closeStreaming();
         const cmd = String(evt.command ?? "");
-        if (evt.ok) addInfo(`📧 后台任务完成（exit=0）：${cmd}`);
-        else if (evt.status === "killed") addInfo(`⏹ 后台任务已停止：${cmd}`);
-        else appendRow({ key: nextKey(), kind: "system", text: `⚠️ 后台任务失败（exit=${evt.exitCode ?? "?"}）：${cmd}` });
+        if (evt.ok) addInfo(S.evTaskDone(cmd));
+        else if (evt.status === "killed") addInfo(S.evTaskKilled(cmd));
+        else appendRow({ key: nextKey(), kind: "system", text: S.evTaskFail(String(evt.exitCode ?? "?"), cmd) });
         break;
       }
       case "compact.progress": {
@@ -232,7 +233,7 @@ switch (evt.type) {
         closeStreaming();
         const done = Math.max(0, Number(evt.done) || 0);
         const total = Math.max(0, Number(evt.total) || 0);
-        const text = `正在压缩上下文 ${done}/${total} 批…（辅助模型摘要中，请稍候）`;
+        const text = S.evCompacting(done, total);
         if (state.compactProgressKey != null && state.rowMap.has(state.compactProgressKey)) {
           updateRow(state.compactProgressKey, { text });
         } else {
@@ -252,7 +253,7 @@ switch (evt.type) {
         flashCompactRing();
         const freed = Math.max(0, (Number(evt.tokensBefore) || 0) - (Number(evt.tokensAfter) || 0));
         const freedText = freed >= 1000 ? `${Math.round(freed / 1000)}k` : String(freed);
-        const trigger = evt.trigger === "manual" ? "手动" : "自动";
+        const trigger = S.evCompactTrigger(evt.trigger === "manual" ? "manual" : "auto");
         // ★ H1：水位环即时回落——快照按本次释放量同口径减量（不另造第二套估算），下轮 context.usage 校准回真值
         if (state.contextUsage && freed > 0) {
           const used = Math.max(0, state.contextUsage.usedTokens - freed);
@@ -263,7 +264,7 @@ switch (evt.type) {
           };
           syncContextRing();
         }
-        appendRow({ key: nextKey(), kind: "compact", text: `已压缩上下文 · ${trigger} · 释放 ${freedText} tokens · 下条消息将重建缓存`, summary: String(evt.summary ?? "") });
+        appendRow({ key: nextKey(), kind: "compact", text: S.evCompactDone(trigger, freedText), summary: String(evt.summary ?? "") });
         break;
       }
       default:
@@ -302,6 +303,13 @@ function onMessage(msg) {
       state.busy = !!msg.state?.busy;
       state.planMode = !!msg.state?.planMode;
       state.autoMode = !!msg.state?.autoMode;
+      // ★ 界面语言随快照同步（host 持久化为准）：与本地不等才派发 ds-locale 重建静态文案
+      //   （宿主快照可能来自窗口重载后的 workspaceState，或另一入口改过 /lang）。
+      const snapLocale = msg.state?.locale === "en" ? "en" : "zh";
+      if (snapLocale !== state.locale) {
+        state.locale = snapLocale;
+        window.dispatchEvent(new CustomEvent("ds-locale"));
+      }
       // ★ 模型快照（扩展端 host 为准）：修掉 webview 初始为空、/model 提示恒显硬编码默认值的问题
       state.model = String(msg.state?.model ?? state.model);
       // ★ 候选清单随快照下发：/switch 面板内选择器无需往返即可渲染
@@ -366,7 +374,7 @@ function onMessage(msg) {
       // core 在非 vision wire 尾注里给模型 MCP 读图线索）——不再注入输入框，贴图交互与 Claude Code 一致（零文本）。
       const p = String(msg.path ?? "");
       if (!p) {
-        addInfo(`🖼 图片存盘失败：${String(msg.error ?? "未知错误")}`);
+        addInfo(S.evImgSaveFail(String(msg.error ?? S.evUnknownError)));
         break;
       }
       const pending = (state.pendingImages || []).find((x) => x.name === String(msg.name ?? "") && !x.savedPath);
@@ -385,10 +393,10 @@ function onMessage(msg) {
       const inp = document.querySelector("#input");
       const name = String(msg.name ?? "");
       if (!inp || !name) break;
-      inp.value += `\n\n📎 文件 ${name}：\n\`\`\`\n${String(msg.content ?? "")}\n\`\`\`\n`;
+      inp.value += `\n\n${S.evFileIngest(name)}\n\`\`\`\n${String(msg.content ?? "")}\n\`\`\`\n`;
       inp.dispatchEvent(new Event("input")); // 复用输入监听做 autoGrow/slash/@ 菜单刷新
       inp.focus();
-      addInfo(`📎 已入库文件：${name}`);
+      addInfo(S.evFileIngested(name));
       break;
     }
     case "attachRefs": {
@@ -400,7 +408,7 @@ function onMessage(msg) {
           appendRefChip(p);
         }
       }
-      if (paths.length) addInfo(`📎 大文件已转为引用（模型将按需 read_file）：${paths.join("、")}`);
+      if (paths.length) addInfo(S.evRefsConverted(paths));
       break;
     }
     case "bookmarks": {

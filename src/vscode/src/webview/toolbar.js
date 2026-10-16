@@ -6,25 +6,25 @@
  *  DOM 归属 composer、交互与同步归本模块，模块级可变量经 refs 对象收口）、外链点击委托。
  */
 import { vscode, $, state } from "./state.js";
+import { S } from "./strings.js";
 import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
 import { setThinkVisible } from "./rows.js";
 
 // 模式配置面板元素（buildComposer 挂载后回填；交互/同步逻辑在本模块）
 export const modeRefs = { btn: null, popover: null };
-
-// CC 风格思考动画的轮换动词（对标「✳ Creating...」）：busy 期间每 2.4s 换一个，给「无动静等待」生命感
-const THINK_VERBS = ["思考中", "构思中", "推敲中", "斟酌中", "酝酿中", "编织中", "提炼中", "灵感涌现中"];
+// ★ CC 风格思考动画的轮换动词（对标「✳ Creating...」）收进 strings.js（S.thinkVerbs）：
+//   busy 期间每 2.4s 换一个，给「无动静等待」生命感；经 S 访问=按当前语言即时取，/lang 切换下个心跳即换语
 
 // ———————— 工具栏 ————————
 export function buildToolbar() {
 const tb = $("#toolbar");
 tb.innerHTML = `
 <div class="brand"><span class="logo codicon codicon-sparkle"></span> <span class="brand-name">DeepSeeker-Code</span> <span id="busy-dot" class="dot"></span></div>
-<button id="btn-project-root" title="agent 当前工作的项目根（点击切换）" class="project-root"><span class="codicon codicon-root-folder"></span><span id="project-root-name">…</span></button>
+<button id="btn-project-root" title="${S.tbRootBtn}" class="project-root"><span class="codicon codicon-root-folder"></span><span id="project-root-name">…</span></button>
 <div class="actions">
-<button id="btn-new" title="新会话（在新页签打开，当前对话保留）" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
-<button id="btn-sessions" title="历史会话" class="icon-btn"><span class="codicon codicon-history"></span></button>
-<button id="btn-fork" title="分叉当前会话" class="icon-btn"><span class="codicon codicon-gist-fork"></span></button>
+<button id="btn-new" title="${S.tbNew}" class="icon-btn"><span class="codicon codicon-comment-discussion"></span></button>
+<button id="btn-sessions" title="${S.tbSessions}" class="icon-btn"><span class="codicon codicon-history"></span></button>
+<button id="btn-fork" title="${S.tbFork}" class="icon-btn"><span class="codicon codicon-gist-fork"></span></button>
 </div>`;
 $("#btn-project-root").addEventListener("click", () => vscode.postMessage({ type: "selectProjectRoot" }));
 $("#btn-new").addEventListener("click", () => vscode.postMessage({ type: "newSession" }));
@@ -39,12 +39,12 @@ export function syncToolbar() {
 const dot = $("#busy-dot");
 if (dot) {
 dot.className = "dot" + (state.busy ? " busy" : "");
-dot.title = state.busy ? "生成中…" : "就绪";
+dot.title = state.busy ? S.tbBusy : S.tbReady;
 }
 const btnSend = $("#btn-send");
 if (btnSend) {
 btnSend.textContent = state.busy ? "■" : "↑";
-btnSend.title = state.busy ? "中止生成" : "发送 (Enter)";
+btnSend.title = state.busy ? S.tbStop : S.tbSend;
 }
 // CC 风格思考动画（对标「✳ Creating...」）：busy 期间常驻消息流末行（内容区里，非输入框上方）——
 // 工具执行 / API 等待等「无动静」间隙也有可见生命感；空闲 hidden。元素归属 rows.js（末行锚点）
@@ -60,14 +60,14 @@ if (pillLbl) pillLbl.textContent = `${n} agent${n > 1 ? "s" : ""}`;
 }
 // 模型胶囊：显示当前模型 id（快照 / /model / 选择器切换三条路均经 syncToolbar 刷新）；未快照到时显占位
 const chipLbl = $("#model-chip-label");
-if (chipLbl) chipLbl.textContent = state.model || "默认模型";
+if (chipLbl) chipLbl.textContent = state.model || S.tbModelDefault;
 // 项目根：末段文件夹名 + 完整路径 title（让用户一眼看到 agent 工作在哪个项目）
 const rootName = $("#project-root-name");
 if (rootName) {
 const p = state.projectRoot || "";
-const seg = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "未选择";
+const seg = p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || S.tbRootNone;
 rootName.textContent = seg;
-rootName.parentElement.title = p ? `项目根：${p}（点击切换）` : "未选择项目根（点击选择）";
+rootName.parentElement.title = p ? S.tbRootTitle(p) : S.tbRootTitleNone;
 }
 updateModeToggle();
 }
@@ -82,7 +82,8 @@ if (s) el.textContent = `${Math.max(1, Math.round((Date.now() - s) / 1000))}s`;
 if (state.busy) {
 const verbEl = $("#think-verb");
 if (verbEl) {
-const v = THINK_VERBS[Math.floor(Date.now() / 2400) % THINK_VERBS.length];
+const verbs = S.thinkVerbs;
+const v = verbs[Math.floor(Date.now() / 2400) % verbs.length];
 if (verbEl.textContent !== v) verbEl.textContent = v;
 }
 }
@@ -101,7 +102,7 @@ const modePopover = modeRefs.popover;
 if (!btnMode || !modePopover) return;
 const m = state.planMode ? "plan" : state.autoMode ? "auto" : "manual";
 const label = btnMode.querySelector(".mode-label");
-label.textContent = m === "plan" ? "计划" : m === "auto" ? "自动" : "手动";
+label.textContent = S.tbModeLabel(m);
 const ic = btnMode.querySelector(".codicon");
 if (ic) ic.className = "codicon " + (m === "plan" ? "codicon-list-tree" : m === "auto" ? "codicon-sync" : "codicon-comment");
 btnMode.classList.toggle("on", m !== "manual");
@@ -173,8 +174,7 @@ export function syncContextRing() {
   ring.classList.toggle("ok", fill < 0.7);
   ring.classList.toggle("warn", fill >= 0.7 && fill < 0.9);
   ring.classList.toggle("hot", fill >= 0.9);
-  ring.title = `上下文水位（估算口径）：${Math.round(cu.usedTokens).toLocaleString()} / ${Math.round(cu.windowTokens).toLocaleString()} tok（${Math.round(fill * 100)}%）`
-    + `${state.compactCount ? ` · 已压缩 ${state.compactCount} 次` : ""} · 点击立即压缩 · 详情 /context`;
+  ring.title = S.tbRingTip(Math.round(cu.usedTokens), Math.round(cu.windowTokens), Math.round(fill * 100), state.compactCount);
 }
 
 /** 压缩发生：环上闪一次 + 环心短暂显示「×N」（N=会话级压缩计数）。环未显示（尚无水位数据）则只更新计数。 */

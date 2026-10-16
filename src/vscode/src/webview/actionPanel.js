@@ -12,6 +12,7 @@
  *  零布局影响，同 mode-popover 收编机制）。
  */
 import { vscode, $, state } from "./state.js";
+import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
 import { clearMessages, addInfo } from "./rows.js";
 import { syncToolbar, modeRefs } from "./toolbar.js";
@@ -54,28 +55,29 @@ const cycleThinking = () => setThinking(THINK_LEVELS[(THINK_LEVELS.indexOf(state
  *  右槽 × 删除；label 取首行截断（全文在 hint 参与模糊过滤）。 */
 const bookmarkItems = () => (state.bookmarks || []).map((b) => ({
   group: GROUP_BOOKMARKS,
-  label: String(b.text || "").split("\n")[0].slice(0, 60) || "（空书签）",
+  label: String(b.text || "").split("\n")[0].slice(0, 60) || S.apEmptyBookmark,
   hint: String(b.text || ""),
   right: { kind: "remove", id: String(b.id ?? "") },
   action: () => { closeActionPanel(true); bridge.insertText?.(String(b.text || "")); },
 }));
 
-/** Context / Model / Bookmarks 三组动作项（Model 组的 right 是实时值，每次打开/重绘时现取）。 */
+/** Context / Model / Bookmarks 三组动作项（Model 组的 right 是实时值，每次打开/重绘时现取；
+ *  label/hint 经 S 现取——面板每次打开重建 items，/lang 切换后重开即新语言）。 */
 const buildActionItems = () => [
   {
     group: GROUP_CONTEXT, label: "Attach file...",
-    hint: "选文件：≤100KB 全文入消息，大文件自动转引用（模型 read_file）",
-    right: { kind: "value", value: "附加文件（大小自动分流）" },
+    hint: S.apAttachHint,
+    right: { kind: "value", value: S.apAttachRight },
     action: () => { closeActionPanel(); bridge.openFilePicker?.(); },
   },
   {
     group: GROUP_CONTEXT, label: "Bookmark current input...",
-    hint: "把输入框当前内容收藏为书签（常用 prompt 复用；也可 /bookmark <文本>）",
+    hint: S.apBookmarkHint,
     action: () => {
       closeActionPanel();
       const t = (bridge.getInputText?.() || "").trim();
       if (!t) {
-        addInfo("🔖 输入框为空——先写好要收藏的 prompt 再收藏，或用 /bookmark <文本> 直接收藏。");
+        addInfo(S.apBookmarkEmpty);
         return;
       }
       vscode.postMessage({ type: "bookmarkAdd", text: t });
@@ -83,35 +85,35 @@ const buildActionItems = () => [
   },
   {
     group: GROUP_CONTEXT, label: "Clear conversation",
-    hint: "清空当前屏幕（同 /clear）",
-    right: { kind: "value", value: "清空当前屏幕（同 /clear）" },
+    hint: S.apClearHint,
+    right: { kind: "value", value: S.apClearRight },
     action: () => { closeActionPanel(); clearMessages(); },
   },
   {
     group: GROUP_CONTEXT, label: "Export conversation",
-    hint: "导出当前会话为 Markdown 文件（同 /export）",
-    right: { kind: "value", value: "导出 Markdown（同 /export）" },
+    hint: S.apExportHint,
+    right: { kind: "value", value: S.apExportRight },
     action: () => { closeActionPanel(); vscode.postMessage({ type: "exportConversation" }); },
   },
   {
     group: GROUP_CONTEXT, label: "Rewind to checkpoint...",
-    hint: "回滚到任意消息发送前（原地截断，可改写重发；同输入框旁 ⏱ 按钮）",
+    hint: S.apRewindHint,
     action: () => { closeActionPanel(); toggleCheckpointsPanel(); },
   },
   {
     group: GROUP_CONTEXT, label: "Batch queue...",
-    hint: "挂机批处理队列：看 pending/running/done 与报告（投递/执行/清理走 CLI batch 命令）",
+    hint: S.apBatchHint,
     action: () => { closeActionPanel(); vscode.postMessage({ type: "viewBatchQueue" }); },
   },
   {
     group: GROUP_MODEL, label: "Switch model...",
-    hint: "弹出候选选择器（同 /switch）",
-    right: { kind: "value", value: state.model || "默认" },
+    hint: S.apSwitchHint,
+    right: { kind: "value", value: state.model || S.apModelDefault },
     action: () => { closeActionPanel(); toggleModelPicker(); },
   },
   {
-    group: GROUP_MODEL, label: `Effort（${state.thinkingLevel}）`,
-    hint: "思考等级：点击行轮换 off / high / max，点右侧圆点直接定位",
+    group: GROUP_MODEL, label: S.apEffort(state.thinkingLevel),
+    hint: S.apEffortHint,
     right: { kind: "slider", levels: THINK_LEVELS, value: state.thinkingLevel },
     action: () => cycleThinking(),
   },
@@ -122,8 +124,8 @@ const buildActionItems = () => [
 const buildCommandItems = () => (bridge.getCommands?.() || []).map((s) => ({
   group: GROUP_COMMANDS,
   label: s.cmd,
-  hint: (s.hint || "") + (s.arg ? "（需参数：回填输入框补全）" : ""),
-  right: { kind: "value", value: (s.hint || "") + (s.arg ? " · 需参数" : "") },
+  hint: s.arg ? S.apNeedsArg(s.hint || "") : (s.hint || ""),
+  right: { kind: "value", value: s.arg ? S.apNeedsArgShort(s.hint || "") : (s.hint || "") },
   action: () => { closeActionPanel(); bridge.runCommand?.(s); },
 }));
 
@@ -230,7 +232,7 @@ const renderRight = (it) => {
     return `<span class="action-right effort-dots">${dots}</span>`;
   }
   if (it.right.kind === "remove") {
-    return `<span class="action-right action-remove" data-remove="${escapeHtml(it.right.id)}" title="删除书签"><span class="codicon codicon-close"></span></span>`;
+    return `<span class="action-right action-remove" data-remove="${escapeHtml(it.right.id)}" title="${S.apRemoveBookmark}"><span class="codicon codicon-close"></span></span>`;
   }
   return `<span class="action-right">${escapeHtml(String(it.right.value ?? ""))}</span>`;
 };
@@ -242,7 +244,7 @@ function renderActionPanel() {
   filtered = items.filter((it) => fuzzyMatch(filterText, it.label, it.hint));
   if (selIdx >= filtered.length) selIdx = Math.max(0, filtered.length - 1);
   if (!filtered.length) {
-    list.innerHTML = `<div class="action-empty">无匹配动作</div>`;
+    list.innerHTML = `<div class="action-empty">${S.apNoMatch}</div>`;
     return;
   }
   let html = "";
