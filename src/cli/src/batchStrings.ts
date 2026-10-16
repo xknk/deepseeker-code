@@ -8,8 +8,8 @@
  */
 import type { Locale } from "@/common/index.ts";
 
-/** 任务终态（batchRunner 与词表共用；timeout/error 不跑验收，其余必跑验收定 passed/accept-failed）。 */
-export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "rejected";
+/** 任务终态（batchRunner 与词表共用；setup-failed/timeout/error 不跑验收，其余必跑验收定 passed/accept-failed）。 */
+export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected";
 
 const ZH = {
     // —— batchAdmin（add / list / clean / help） ——
@@ -25,6 +25,7 @@ const ZH = {
   ---
   title: 修复日期解析 bug
   accept: npm test
+  setup: pnpm install   # 可选：agent 前在 worktree 内备环境（干净检出无 node_modules，验收依赖环境时先装）
   budget-yuan: 0.5      # 可选：本任务花费上限（元）
   timeout-min: 30       # 可选：agent 阶段超时（分钟，缺省 30）
   tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path）
@@ -48,6 +49,8 @@ const ZH = {
     // —— batchRunner 控制台进度 ——
     ticketRejected: (id: string, err: string) => `🚫 [${id}] 工单被拒：${err}`,
     taskMeta: (budget: number | undefined, timeoutMin: number, accept: string) => `   预算 ${budget !== undefined ? `¥${budget}` : "不限"} · 超时 ${timeoutMin}min · 验收 \`${accept}\``,
+    setupLine: (cmd: string) => `🛠️  setup：\`${cmd}\`（worktree 内备环境）`,
+    setupFail: (cmd: string, code: number | null) => `环境准备失败（setup \`${cmd}\` exit ${code ?? "null"}）——跳过 agent 阶段，任务记失败`,
     roundLine: (ts: string, round: number) => `   [${ts}] 轮 ${round}`,
     wtCreateFail: (e: string) => `创建 worktree 失败（需要主工作区是 git 仓库）：${e}`,
     agentErrorLine: (id: string, err: string) => `💥 [${id}] agent 异常：${err}`,
@@ -72,6 +75,7 @@ const ZH = {
         "accept-failed": "❌ 验收未过",
         timeout: "⏱️ 超时截断",
         error: "💥 agent 异常",
+        "setup-failed": "🛠️ 环境准备失败",
         rejected: "🚫 工单被拒",
     })[s],
 
@@ -130,6 +134,7 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
 ---
   title: Fix date parsing bug
   accept: npm test            # required: acceptance command (exit 0 = pass)
+  setup: pnpm install   # optional: prep env inside the worktree before the agent (fresh checkout has no node_modules)
   budget-yuan: 0.5      # optional: per-task cost cap (yuan)
   timeout-min: 30       # optional: agent-phase timeout (minutes, default 30)
   tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default)
@@ -153,6 +158,8 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
 
     ticketRejected: (id, err) => `🚫 [${id}] Ticket rejected: ${err}`,
     taskMeta: (budget, timeoutMin, accept) => `   Budget ${budget !== undefined ? `¥${budget}` : "uncapped"} · timeout ${timeoutMin}min · accept \`${accept}\``,
+    setupLine: (cmd) => `🛠️  setup: \`${cmd}\` (preparing the environment inside the worktree)`,
+    setupFail: (cmd, code) => `Setup failed (\`${cmd}\` exit ${code ?? "null"}) — agent phase skipped, task marked failed`,
     roundLine: (ts, round) => `   [${ts}] round ${round}`,
     wtCreateFail: (e) => `Failed to create worktree (the main workspace must be a git repo): ${e}`,
     agentErrorLine: (id, err) => `💥 [${id}] agent error: ${err}`,
@@ -176,6 +183,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
         "accept-failed": "❌ acceptance failed",
         timeout: "⏱️ timed out",
         error: "💥 agent error",
+        "setup-failed": "🛠️ setup failed",
         rejected: "🚫 ticket rejected",
     })[s],
 

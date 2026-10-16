@@ -35,9 +35,22 @@ test("合法工单：tools 数组形态 + 可选字段全省 + title 回退", ()
     assert.equal(r.ok, true);
     if (!r.ok) return;
     assert.equal(r.ticket.title, "第一行标题就是它");
+    assert.equal(r.ticket.setup, undefined);
     assert.equal(r.ticket.budgetYuan, undefined);
     assert.equal(r.ticket.timeoutMin, undefined);
     assert.equal(r.ticket.tools, undefined);
+});
+
+test("setup 字段：agent 前环境准备命令解析（空白归一，空串=未设）", () => {
+    const r = parseBatchTicket("---\naccept: npm test\nsetup:   pnpm install --frozen-lockfile  \n---\n正文");
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.ticket.setup, "pnpm install --frozen-lockfile");
+    // setup 留空 = 未设置（不进 ticket）
+    const blank = parseBatchTicket("---\naccept: npm test\nsetup:   \n---\n正文");
+    assert.equal(blank.ok, true);
+    if (!blank.ok) return;
+    assert.equal(blank.ticket.setup, undefined);
 });
 
 test("红线：缺 accept 拒绝（挂机任务必须带可执行验收）", () => {

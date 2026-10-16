@@ -6,6 +6,8 @@
  *  ---
  *  title: 修复日期解析 bug
  *  accept: npm test            ← 必填（缺验收拒绝入队：第一版硬约束，防"看起来做了"）
+ *  setup: pnpm install         ← 可选（agent 阶段前在 worktree 内执行的环境准备命令；worktree 是干净
+ *                                检出、无 node_modules——验收依赖环境时先装依赖。非零退出=任务失败不烧钱）
  *  budget-yuan: 0.5            ← 可选（本任务花费上限，元；缺省不限）
  *  timeout-min: 30             ← 可选（缺省 30）
  *  tools: run_command          ← 可选（显式解锁高危工具，缺省禁 run_command/delete_path，同 SUBAGENT_DENYLIST）
@@ -23,6 +25,8 @@ export interface BatchTicket {
     title: string;
     /** 验收 shell 命令（必填）：跑完后在 worktree 内执行，exit 0 = 过。 */
     accept: string;
+    /** 环境 setup 命令（可选）：agent 阶段前在 worktree 内执行（worktree 是干净检出，验收依赖 node_modules 等时先备好）。 */
+    setup?: string;
     /** 本任务花费预算（元）；缺省 undefined = 不限。 */
     budgetYuan?: number;
     /** agent 阶段超时（分钟）；缺省 30。 */
@@ -116,12 +120,13 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
     }
     const tools = fm["tools"] !== undefined ? parseToolsValue(fm["tools"]) : undefined;
     if (tools && tools.length === 0) return { ok: false, error: ticketMsg(locale, "badTools") };
+    const setup = (fm["setup"] ?? "").trim() || undefined; // 任意非空串即 shell 命令，无需校验形态
 
     const body = bodyRaw.trim();
     if (!body) return { ok: false, error: ticketMsg(locale, "emptyBody") };
 
     const title = (fm["title"] ?? "").trim() || body.split(/\r?\n/).find((l) => l.trim())?.slice(0, 40) || ticketMsg(locale, "untitled");
-    return { ok: true, ticket: { title, accept, budgetYuan, timeoutMin, tools: tools && tools.length > 0 ? tools : undefined, body } };
+    return { ok: true, ticket: { title, accept, setup, budgetYuan, timeoutMin, tools: tools && tools.length > 0 ? tools : undefined, body } };
 };
 
 /** 便捷读取：读文件并解析（入队用）。 */

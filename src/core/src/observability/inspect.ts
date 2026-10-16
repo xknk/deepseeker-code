@@ -14,7 +14,7 @@ import { listHooks } from "@/hooks/registry.ts";
 import { listMcpClients } from "@/tool/mcp/loader.ts";
 import { getTraceStorePath } from "@/observability/store.ts";
 import { readUsageRecords, summarizeUsage, topTools } from "@/observability/usageLog.ts";
-import { calcCostYuan, priceFor } from "@/config/prices.ts";
+import { calcCostYuan, priceFor, pricesAgeDays, PRICES_STALE_DAYS, PRICES_VERIFIED_AT } from "@/config/prices.ts";
 import { getRollingState } from "@/session/store.ts";
 import { getToolOutputSidecarDir } from "@/session/sidecar.ts";
 import { parseSummarySlot } from "@/agent/truncate.ts";
@@ -47,6 +47,8 @@ const OBS: Record<ObsLocale, Record<string, any>> = {
         usageWeekCost: (cost: string, saved: string, unpriced: number) =>
             `    近 7 天花费 ¥${cost}（缓存命中已省 ¥${saved}）${unpriced > 0 ? ` · ${unpriced} 条无价记录未计` : ""}`,
         usageTopSessions: (tops: string) => `    费用 top 会话: ${tops}`,
+        usagePriceStale: (days: number, at: string) =>
+            `  ⚠️ 价格表 ${at} 核实后已 ${days} 天未复核——官网若已调价，上方花费会失真（可设 DEEP_SEEK_PRICE_* 临时校准）。`,
         usageTip: "  提示：并行 workflow 会放大子 agent 用量；缓存命中率越高，输入成本越低。",
         ctxHead: "🧠 上下文治理",
         ctxWindow: (window: string, threshold: string, ratio: number, keep: number) =>
@@ -103,6 +105,8 @@ const OBS: Record<ObsLocale, Record<string, any>> = {
         usageWeekCost: (cost: string, saved: string, unpriced: number) =>
             `    7-day spend ¥${cost} (cache hits saved ¥${saved})${unpriced > 0 ? ` · ${unpriced} unpriced records excluded` : ""}`,
         usageTopSessions: (tops: string) => `    Costliest sessions: ${tops}`,
+        usagePriceStale: (days: number, at: string) =>
+            `  ⚠️ Price table verified on ${at}, ${days} days ago — if official pricing changed, costs above may drift (set DEEP_SEEK_PRICE_* to correct).`,
         usageTip: "  Tip: parallel workflows multiply sub-agent usage; higher cache hit rate means lower input cost.",
         ctxHead: "🧠 Context governance",
         ctxWindow: (window: string, threshold: string, ratio: number, keep: number) =>
@@ -223,12 +227,14 @@ export const inspectUsage = async (sessionId: string, locale: ObsLocale = "zh"):
         const bySession = new Map<string, number>();
         let weekCost = 0, weekSaved = 0, pricedRuns = 0;
         for (const r of weekRecords) {
-            const c = r.costYuan ?? calcCostYuan(r.model, r);
+            // 旧记录（无落盘 costYuan）按现价现算：ts 传记录自身时刻判峰谷档，无效回退现在
+            const at = Number.isNaN(Date.parse(String(r.ts))) ? undefined : new Date(r.ts);
+            const c = r.costYuan ?? calcCostYuan(r.model, r, at);
             if (c == null) continue;
             pricedRuns++;
             weekCost += c;
             bySession.set(r.sessionId, (bySession.get(r.sessionId) ?? 0) + c);
-            const p = priceFor(r.model);
+            const p = priceFor(r.model, at);
             if (p) weekSaved += ((r.cachedTokens ?? 0) * (p.input - p.cacheHit)) / 1e6; // 命中部分按未命中价本要多付的差价
         }
         if (pricedRuns > 0) {
@@ -239,6 +245,9 @@ export const inspectUsage = async (sessionId: string, locale: ObsLocale = "zh"):
             if (tops) lines.push(t("usageTopSessions")(tops));
         }
     }
+    // ★ 价格表过期可见性（2026-10-16 事故教训）：过期必须显式提示，不允许静默错钱
+    const staleDays = pricesAgeDays();
+    if (staleDays >= PRICES_STALE_DAYS) lines.push(t("usagePriceStale")(staleDays, PRICES_VERIFIED_AT));
     lines.push(t("usageTip"));
     return lines.join("\n");
 };

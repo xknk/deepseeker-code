@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.67
+
+价格信任地基修复（峰谷双档价 + 过期可见性）与挂机 setup 环境准备——均由 2026-10-16 挂机首跑实锤修出：官方账单收 ¥0.53 vs 本地折算 ¥0.19（token 计数与官方差 <0.3%，纯单价表错——旧表峰谷不分档、部分数字失真，少报 2.7 倍）。
+
+- **价格表峰谷双档化**：`MODEL_PRICES` 改 `{ idle, peak }` 双档结构（官网 2026-10-16 核实，flash 高峰档并按官方账单对账验证：代入仪表盘 token 分毫不差得 ¥0.5279 ≈ ¥0.53）；`priceFor`/`calcCostYuan` 加可选 `ts` 判档（北京时间工作日 9:00–12:00、14:00–18:00 高峰，午间/晚间/周末空闲=半价；法定节假日本地判不了 → 按工作日处理，方向=高估、预算闸偏保守）。runAgent 逐轮折算即逐轮判档；历史记录折算（/usage 近 7 天、usage-report 脚本）传记录自身 ts 判档。
+- **价格表过期可见性（防再犯）**：`PRICES_VERIFIED_AT` 日期戳 + `pricesAgeDays()`，超 30 天 `/usage` 显「价格表 N 天未复核」提示（zh/en 双语）——「价格表过期」必须可见，不允许静默错钱（本次事故根因即 10-13 核实过的表 3 天后已失真而无人知）。临时校准走 env 三键 `DEEP_SEEK_PRICE_*`（平价语义，覆盖两档）。
+- **对账回归钉**：prices.test.ts 内建官方账单回归钉（batch 会话真实 usage 代入须得 ¥0.5279）与峰谷边界判档钉（12:00 整空闲 / 14:00 整高峰 / 周末高峰时段仍空闲）——峰谷测试全传显式 ts，任何时刻跑结果恒定。
+- **挂机工单 `setup` 字段**：worktree 是干净 git 检出（无 node_modules），验收命令依赖环境时先跑 setup——agent 阶段前在 worktree 内执行（复用验收执行器：同 shell 形态/凭证剔除/超时护栏）；失败即任务失败（新终态 `setup-failed`，报告含输出尾部），不烧 agent 钱。首跑验收 `ERR_MODULE_NOT_FOUND` 的根治。
+- 工程杂项：`.deepseeker-code/batch/` 运行时目录（done 报告存档等）入 .gitignore；CLAUDE.md batch 行补 setup 字段；batch `--wait-window` 注释更新（峰谷价已核实，空闲档半价）。
+
 ## 1.0.66
 
 全插件 UI 与观测/挂机输出双语化（/lang zh|en 一键切换，此前仅 CLI/README/模型回复支持双语）。

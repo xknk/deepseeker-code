@@ -233,6 +233,25 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     }
     setSessionWorktree(sessionId, wt);
 
+    // ★ 环境 setup（可选，2026-10-16 首跑教训）：worktree 是干净检出（无 node_modules 等），验收命令
+    //   依赖环境时先在此备好（复用验收执行器：同 shell 形态/凭证剔除/超时护栏/输出尾部截取）。
+    //   setup 失败 → 任务直接失败，不进 agent 阶段（跑了也过不了验收，白烧钱）。
+    if (t.setup) {
+        emit(T.setupLine(t.setup));
+        const s = await runAcceptCommand(t.setup, wt.path);
+        if (s.code !== 0 || s.timedOut) {
+            const msg = `${T.setupFail(t.setup, s.code)}${s.timedOut ? T.acceptTimeoutSuffix : ""}\n\n\`\`\`\n${s.output}\n\`\`\``;
+            await killBackgroundTasksUnder(wt.path).catch(() => { });
+            const cost = await collectSessionCost(sessionId);
+            await finishTicket(task.id, buildReport({
+                id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
+                finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
+            }));
+            emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
+            return { status: "setup-failed", cost, budgetTruncated: false };
+        }
+    }
+
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
     let receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
@@ -303,7 +322,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     return { status, cost, budgetTruncated };
 };
 
-// ============ 等待窗口（--wait-window HH:MM-HH:MM：仅延迟启动语义，错峰价是否存在未核实） ============
+// ============ 等待窗口（--wait-window HH:MM-HH:MM：仅延迟启动语义；峰谷价已核实——空闲档半价，窗口对准空闲时段即半价跑批） ============
 
 export const parseWaitWindow = (s?: string): { startMin: number; endMin: number } | null => {
     if (!s) return null;

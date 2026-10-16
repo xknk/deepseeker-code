@@ -5,14 +5,16 @@
  * 数据源：<dataDir>/usage/usage-YYYY-MM.jsonl（recordUsageRun 每 run 一行，纯本地）；
  *        selftest- 与 eval- 前缀的受控实验会话已在 readUsageRecords 读侧剔除。
  * 运行：npx tsx --tsconfig src/core/tsconfig.json scripts/usage-report.ts [--days 30]
- * 成本口径（成本信任链 D1 起单一来源）：src/core/src/config/prices.ts（官网价，2026-10-13 核实，元/百万 tokens）；
- * 优先读落盘 costYuan（D2 起随 run 落盘，run 当时单价），旧记录按现价现算；无价模型不计入钱的和（看 token）。
+ * 成本口径（成本信任链 D1 起单一来源）：src/core/src/config/prices.ts（官网峰谷价，2026-10-16 核实，元/百万 tokens）；
+ * 优先读落盘 costYuan（D2 起随 run 落盘，run 当时单价），旧记录按现价现算（ts 传记录自身时刻判峰谷档）；
+ * 无价模型不计入钱的和（看 token）。
  */
 import { readUsageRecords, summarizeUsage, topTools, type UsageRunRecord } from "@/observability/usageLog.ts";
 import { calcCostYuan } from "@/config/prices.ts";
 
-/** 单 run 折算成本（元）：落盘 costYuan 优先，旧记录现算兜底；无价模型 → null 不进和 */
-const costOf = (r: UsageRunRecord): number | null => r.costYuan ?? calcCostYuan(r.model, r);
+/** 单 run 折算成本（元）：落盘 costYuan 优先，旧记录现算兜底（按记录时刻判峰谷档）；无价模型 → null 不进和 */
+const costOf = (r: UsageRunRecord): number | null =>
+    r.costYuan ?? calcCostYuan(r.model, r, Number.isNaN(Date.parse(String(r.ts))) ? undefined : new Date(r.ts));
 
 const fmt = (n: number): string => n.toLocaleString("en-US");
 const padL = (s: string, w: number): string => s.padStart(w);

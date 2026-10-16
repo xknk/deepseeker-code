@@ -14,3 +14,6 @@ src/core/tests/evals/.results/*
 
 # playwright MCP 浏览器会话产物（console log 等测试痕迹，非源码）
 .playwright-mcp/
+
+# 挂机批处理运行时目录（done/ 报告存档 + 空态 pending/running——本地产物不入库；工单要入库可 git add -f）
+.deepseeker-code/batch/
