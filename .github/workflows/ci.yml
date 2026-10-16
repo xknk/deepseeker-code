@@ -29,6 +29,10 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
+        # GITHUB_TOKEN：vscode-ripgrep postinstall 要从 api.github.com 拉 rg 二进制，
+        # 未鉴权 60 次/小时限流会 403（2026-10-16 实锤挂过一次）；带 token 后额度 1000/时。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck
