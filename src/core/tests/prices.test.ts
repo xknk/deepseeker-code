@@ -20,7 +20,7 @@ const { MODEL_PRICES, priceFor, calcCostYuan, isBeijingPeak, pricesAgeDays, PRIC
 const PEAK_TS = new Date("2026-10-16T01:30:00Z"); // 北京周五 09:30
 const IDLE_TS = new Date("2026-10-16T04:30:00Z"); // 北京周五 12:30（午间空闲档）
 
-test("官网峰谷价表：两模型 idle/peak 双档条目，vision-exp 官网无价刻意无条目", () => {
+test("官网峰谷价表：模型 idle/peak 双档条目；vision-exp 按官网脚注与 flash 同价", () => {
     assert.deepEqual(MODEL_PRICES["deepseek-flash"], {
         idle: { input: 1, output: 4, cacheHit: 0.02 },
         peak: { input: 2, output: 8, cacheHit: 0.04 },
@@ -29,7 +29,8 @@ test("官网峰谷价表：两模型 idle/peak 双档条目，vision-exp 官网�
         idle: { input: 4.5, output: 13.5, cacheHit: 0.15 },
         peak: { input: 9, output: 27, cacheHit: 0.3 },
     });
-    assert.equal(MODEL_PRICES["deepseek-flash-vision-exp"], undefined);
+    // 官网脚注 (1)（2026-10-19 核实）：旧名 vision-exp 由 V4.1-Flash-1017 提供服务并按 Flash 价格计费
+    assert.deepEqual(MODEL_PRICES["deepseek-flash-vision-exp"], MODEL_PRICES["deepseek-flash"]);
 });
 
 test("isBeijingPeak：工作日 9–12/14–18 高峰，边界、午间、晚间与周末均空闲", () => {
@@ -63,19 +64,21 @@ test("calcCostYuan：算式与缓存命中口径（非缓存输入 = prompt − 
     assert.ok(calcCostYuan("deepseek-flash", { promptTokens: 100, cachedTokens: 500, completionTokens: 0 }, IDLE_TS)! >= 0);
 });
 
-test("对账回归钉（2026-10-16 事故）：官方仪表盘 flash 高峰档实收 ¥0.53，本表代入须分毫不差", () => {
+test("对账回归钉（2026-10-16 事故，快照解耦）：历史 token × 当日高峰价手算须复现官方账单 ¥0.53", () => {
     // 事故回放：batch 会话 09:43–09:47（周五高峰档）真实 usage——官方按高峰价收 ¥0.53，
-    // 旧表（命中 0.02/未命中 1/输出 2）算出 ¥0.19，少报 2.7 倍。新表代入：
-    // miss 78,259×2 + hit 2,278,528×0.04 + out 35,025×8 = ¥0.5279（仪表盘 ¥0.53 的未取整原值）
-    const c = calcCostYuan("deepseek-flash",
-        { promptTokens: 2_356_787, completionTokens: 35_025, cachedTokens: 2_278_528 },
-        new Date("2026-10-16T01:48:10Z")); // 落盘记录原 ts（北京 09:48 高峰档）
-    assert.ok(c !== null && Math.abs(c - 0.527859) < 1e-4, `对账失败：算出 ${c}，官方 ¥0.53`);
+    // 旧表（命中 0.02/未命中 1/输出 2）算出 ¥0.19，少报 2.7 倍。
+    // 快照语义：内嵌 10-16 高峰价（miss ¥2 / hit ¥0.04 / out ¥8 每百万）直接手算，不吃当前表价——
+    // 官网调价后 MODEL_PRICES 变动不再挂本钉（表价正确性职责移交 scripts/check-prices.ts 周核对；
+    // calcCostYuan 算式回归由上条 env 覆盖测试守，公式与单价来源解耦）。
+    const miss = 2_356_787 - 2_278_528, hit = 2_278_528, out = 35_025;
+    const yuan = (miss * 2 + hit * 0.04 + out * 8) / 1e6;
+    assert.ok(Math.abs(yuan - 0.527859) < 1e-4, `对账失败：算出 ${yuan}，官方 ¥0.53（未取整原值 0.527859）`);
 });
 
 test("无价模型：返回 null（不编数，上层只显 token；换新模型不在表里也不会猜价）", () => {
-    assert.equal(calcCostYuan("deepseek-flash-vision-exp", { promptTokens: 1000, completionTokens: 100 }, IDLE_TS), null);
     assert.equal(calcCostYuan("unknown-model", { promptTokens: 1000 }, IDLE_TS), null);
+    // vision-exp 已有表价（官网脚注：按 Flash 价格计费）→ 正常折算，不再是 null
+    assert.ok(calcCostYuan("deepseek-flash-vision-exp", { promptTokens: 1000, completionTokens: 100 }, IDLE_TS)! > 0);
 });
 
 test("env 覆盖：所设字段覆盖（平价，两档同用）、未设字段回退表价（随档）、无效值忽略", () => {
@@ -88,7 +91,7 @@ test("env 覆盖：所设字段覆盖（平价，两档同用）、未设字段�
 });
 
 test("env 三键不全：无表价模型仍为 null（env-only 条目须三键全设，用户声明价才算数）", () => {
-    assert.equal(priceFor("deepseek-flash-vision-exp", IDLE_TS), null);
+    assert.equal(priceFor("unknown-model", IDLE_TS), null);
 });
 
 test("价格表日期戳：可解析且账龄非负（过期提示的锚点，见 /usage 的 N 天未复核提示）", () => {

@@ -105,6 +105,8 @@ interface SessionCost {
     cachedTokens: number;
     /** 合计花费（元）；null=全部记录无价（无价模型）；部分无价时 partialPrice=true。 */
     costYuan: number | null;
+    /** 按次计费工具花费合计（元，DeepSeek Search/Fetch；0=本任务无按次调用）。 */
+    toolCostYuan: number;
     partialPrice: boolean;
     durationMs: number;
 }
@@ -112,7 +114,7 @@ interface SessionCost {
 /** 读 usageLog 聚合本任务会话（主 run + 子 run 按记录求和；batch- 前缀不被读侧剔除）。 */
 const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
     const recs = (await readUsageRecords(2)).filter((r) => r.sessionId === sessionId);
-    const c: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: null, partialPrice: false, durationMs: 0 };
+    const c: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: null, toolCostYuan: 0, partialPrice: false, durationMs: 0 };
     for (const r of recs) {
         c.rounds += r.rounds || 0;
         if (r.depth === 0) c.mainRounds += r.rounds || 0; else c.subRuns++;
@@ -120,6 +122,7 @@ const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
         c.completionTokens += r.completionTokens ?? 0;
         c.cachedTokens += r.cachedTokens ?? 0;
         c.durationMs += r.durationMs || 0;
+        c.toolCostYuan += r.toolCostYuan ?? 0;
         if (typeof r.costYuan === "number") c.costYuan = (c.costYuan ?? 0) + r.costYuan;
         else c.partialPrice = true;
     }
@@ -194,7 +197,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     const parsed = parseBatchTicket(source, getLocale());
     if (!parsed.ok) {
         // 工单格式问题：不入 worktree 直接出报告（running/ 里工单收尾回 done/）
-        const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, partialPrice: false, durationMs: 0 };
+        const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, toolCostYuan: 0, partialPrice: false, durationMs: 0 };
         await finishTicket(task.id, `---\nid: ${task.id}\ntitle: ${task.id}\nstatus: rejected\n---\n\n${T.rejectedTitle}\n\n${parsed.error}`);
         emit(T.ticketRejected(task.id, parsed.error));
         return { status: "rejected", cost, budgetTruncated: false };

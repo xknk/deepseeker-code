@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.58
+
+DeepSeek Search & Fetch 接入（与 VSCode 端 1.0.69 同源）：web_search 缺省升级 DeepSeek 自家搜索后端（长摘要直出，`SEARCH_PROVIDER` 可切回 bing/tavily/ddg）；web_fetch 可选 `backend:"deepseek"`；按次成本（¥0.005/次）经 toolCostSink 进 receipt/usageLog/E1/E2，结算行加「联网 ¥x」段、挂机报告费用行同步聚合；`DEEP_SEEK_TOOL_COST=0` 关上报。守门测试 web-deepseek.test.ts 10 例（含 0 命中+site:带路径误用签名纠正模板——0 命中若带误用签名当场给「site: 只接域名」纠正示例，不再给「未找到相关结果」过强结论）。
+
 ## 1.0.56
 
 CLI 双语化收口（此前仅 README/模型回复双语）。

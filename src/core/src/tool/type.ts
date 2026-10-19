@@ -130,6 +130,11 @@ export interface ToolContext {
     /** 子 run 成本回灌父累计器（成本信任链第二环 E1）：runSubagent 经此把子 runAgent 总花费报给父，
      *  父在轮边界预算检查时天然包含子 run 花费（父预算自动继承约束）。runAgent 构造 toolCtx 时注入。 */
     reportCost?: (yuan: number) => void;
+    /** 按次计费工具成本上报（DeepSeek Search/Fetch 接入）：web_search/web_fetch 等按次计费后端在
+     *  成功调用后经此上报当次花费（元），runAgent 汇入 run 级 toolCostYuanAcc → receipt/usageLog 落盘
+     *  并并入预算累计器（E2 圈）。命名呼应 reportCost（E1）。DEEP_SEEK_TOOL_COST=0 时 runAgent 不注入
+     *  （回退开关：成本链异常时保结算单不脏）。 */
+    toolCostSink?: (yuan: number) => void;
 }
 
 

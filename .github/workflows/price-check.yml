@@ -1,0 +1,93 @@
+# 价格核对 / 自动同步：每周拉 DeepSeek 官网定价页与 MODEL_PRICES 逐项比对（scripts/check-prices.ts）。
+# 一致 → 刷新 PRICES_VERIFIED_AT 后推送；漂移 → 自动写回新价（--update）+ 就地自验 + 开 issue 通知；
+# 解析失败（官网改版）→ 脚本 exit 2，job 红，失败邮件报警人工处理。
+# ★ 自验必须在 job 内完成：GITHUB_TOKEN 的 push 不触发其他 workflow（GitHub 防递归内建机制），
+#   守门 CI 不会跑这个 commit。发版（vsix/npm）仍人工——用户端新价等下次发版，期间 30 天过期提示兜底。
+name: Price check
+
+on:
+  schedule:
+    - cron: "23 18 * * 1" # UTC 周一 18:23 = 北京周二 02:23（避开整点）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: price-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        # GITHUB_TOKEN：vscode-ripgrep postinstall 拉 rg 二进制会被 api.github.com 未鉴权限流 403（同 ci.yml 的坑）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Check / auto-update prices
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run prices:check -- --stamp --update | tee /tmp/price-check-output.txt
+
+      - name: Classify result
+        id: result
+        run: echo "kind=$(grep -o 'PRICES_RESULT=[a-z-]*' /tmp/price-check-output.txt | head -1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      # 改价类变更：就地自验 typecheck + 全量单测（见文件头 ★）——红则不提交，job 失败报警
+      - name: Self-verify (typecheck + tests)
+        if: steps.result.outputs.kind == 'updated'
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Commit & push
+        if: steps.result.outputs.kind == 'updated' || steps.result.outputs.kind == 'stamp-only'
+        env:
+          KIND: ${{ steps.result.outputs.kind }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/core/src/config/prices.ts
+          if [ "$KIND" = "updated" ]; then
+            N=$(grep -cE '^  deepseek[^：]*：本地 ¥' /tmp/price-check-output.txt)
+            git commit -m "价格：官网调价自动同步（${N} 项，$(date -u +%F) 核实，详见 issue）"
+          else
+            git commit -m "价格：周核对通过，刷新 PRICES_VERIFIED_AT=$(date -u +%F)"
+          fi
+          git push
+
+      # 改价通知：GITHUB_TOKEN push 无通知、绿 job 无邮件，issue 是「价格变了」的唯一稳定通道（预算语义变化，用户必须知道）
+      - name: Notify via issue
+        if: steps.result.outputs.kind == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="官网调价已自动同步（$(date -u +%F) 核实）"
+          if [ -n "$(gh issue list --state open --search "in:title $TITLE")" ]; then
+            echo "同标题 issue 已存在，跳过"; exit 0
+          fi
+          {
+            echo "DeepSeek 官网价格变动，已由 price-check workflow 自动同步到 \`MODEL_PRICES\`（commit 已推 main）："
+            echo
+            grep -E '^  deepseek[^：]*：本地 ¥' /tmp/price-check-output.txt | sed 's/^  /  - /'
+            echo
+            echo "**注意**：CLI / vsix 用户端要等下次打包发版才拿到新价（发版仍人工）；期间用户端 30 天过期提示兜底可见性。"
+          } > /tmp/issue-body.md
+          gh issue create --title "$TITLE" --body-file /tmp/issue-body.md

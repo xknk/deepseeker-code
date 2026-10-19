@@ -42,10 +42,17 @@ export interface TieredPrice {
  *  deepseek-flash 命中 ¥0.02/¥0.04（空闲/高峰）、未命中 ¥1/¥2、输出 ¥4/¥8；
  *  deepseek-v4-pro ¥0.15/¥0.30、¥4.5/¥9、¥13.5/¥27。
  *  只填 SELECTABLE_MODELS 内的模型（明确不做价格表泛化）；
- *  deepseek-flash-vision-exp 官网无公开报价 → 刻意无条目（null 语义）。
+ *  deepseek-flash-vision-exp 官网无独立报价行，但脚注明示「按 Flash 价格计费」（见下）→ 与 flash 同价。
+ *  2026-10-19 复核：12 项峰谷数字与官网逐项一致；官网脚注 (1)——旧模型名 deepseek-v4-flash /
+ *  deepseek-flash-vision-exp 仍可调用，已下线模型由 V4.1-Flash-1017 提供服务并按 Flash 价格计费。
  */
 export const MODEL_PRICES: Record<string, TieredPrice> = {
     "deepseek-flash": {
+        idle: { input: 1, output: 4, cacheHit: 0.02 },
+        peak: { input: 2, output: 8, cacheHit: 0.04 },
+    },
+    // 官网脚注明示旧名按 Flash 价格计费（2026-10-19 核实），非猜测——与 flash 同价条目
+    "deepseek-flash-vision-exp": {
         idle: { input: 1, output: 4, cacheHit: 0.02 },
         peak: { input: 2, output: 8, cacheHit: 0.04 },
     },
@@ -56,7 +63,7 @@ export const MODEL_PRICES: Record<string, TieredPrice> = {
 };
 
 /** 价格表（含峰谷时段定义）核实日期——过期提示与「换价须重核」红线的锚点。 */
-export const PRICES_VERIFIED_AT = "2026-10-16";
+export const PRICES_VERIFIED_AT = "2026-10-19";
 
 /** 过期提示门槛（天）：超过即 /usage 显「价格表 N 天未复核」——过期必须可见，不静默错钱。 */
 export const PRICES_STALE_DAYS = 30;

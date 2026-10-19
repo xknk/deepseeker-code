@@ -109,6 +109,8 @@ export type ToolCallContext = {
     readTracker?: Map<string, { mtimeMs: number; count: number }>;
     /** ★ 子 run 成本回灌父累计器（成本信任链第二环 E1），见 ToolContext.reportCost。 */
     reportCost?: (yuan: number) => void;
+    /** ★ 按次计费工具成本上报（DeepSeek Search/Fetch），见 ToolContext.toolCostSink。 */
+    toolCostSink?: (yuan: number) => void;
 };
 
 /**
@@ -141,7 +143,7 @@ export const scaleTruncBudget = (base: number, fill: number | undefined): number
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const { sessionId, depth, round, startTime, llmDecisionSource, signal, rawTools, events,
         permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction,
-        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker, reportCost } = ctx;
+        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker, reportCost, toolCostSink } = ctx;
     let calledName = "";
     let calledArgs: any = {};
     let parseFailed = false;
@@ -192,7 +194,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   的回退（process.env.WORKSPACE_ROOT || process.cwd()）不同源——在 VSCode 多根重定向未 chdir / run_workflow
     //   worktree 子 agent 下，审批网关 isProtectedWrite(path, toolCtx.cwd) 与工具实际操作的根会指向不同目录。
     //   统一到 getActiveWorkspaceRoot() 消除错位（ToolCallContext.cwd 字段仍保留，供 subagent/runAgent 透传）。
-    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode, readTracker, reportCost };
+    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode, readTracker, reportCost, toolCostSink };
     let result = "";
     // ★ #8b 结构化成败跟踪（替代 FAILED_PREFIXES 前缀嗅探 + explicitOk 手工短路）：
     //   默认 success；拒绝/熔断/解析失败/verifyResult FAILED 显式置 failed。文案只是呈现，成败看状态。

@@ -1,9 +1,13 @@
 /**
  * @file tool/registry/web.ts
  * @description 联网类工具集：
- *  web_fetch（DANGER，对外抓取 URL → 转 Markdown，带 SSRF 防护 + 强制审批 + 长度熔断）。
+ *  web_fetch（DANGER，对外抓取 URL → 转 Markdown，带 SSRF 防护 + 强制审批 + 长度熔断）；
+ *  web_search（DANGER，多后端：deepseek（缺省优先，/tools/search REST）> tavily > bing（免注册）> ddg）。
  *  设计原则：对外抓取走 undici fetch（钉 IP 防 DNS rebinding）+ 内建 dns；HTML→Markdown 走自研轻量转换器
  *  （目标是给大模型干净可读文本，不追求像素级还原；如需更强可后续替换为 turndown）。
+ *  DeepSeek Tools 后端（2026-10-17 开放的 /tools/search · /tools/fetch REST 端点）以「工具后端」形态接入：
+ *  ★ 刻意不做生成内 server-side tool——那会绕过本地工具系统（审批/trace/侧车/结算全瞎，与成本信任链冲突）。
+ *  按次成本（¥0.005/次）经 ctx.toolCostSink 上报进结算单闭环；失败不静默回退，报错附切换指引。
  */
 import { promises as dns } from "dns";
 import { lookup as dnsLookupCb } from "dns";    // 回调风格，供 undici connect.lookup 钉 IP
@@ -257,19 +261,89 @@ function decodeEntities(s: string): string {
 type SearchResult = { title: string; url: string; snippet: string };
 type SearchResponse = { answer: string; results: SearchResult[] };
 
+// ============ DeepSeek Tools 后端（/tools/search · /tools/fetch，2026-10-17 随 V4.1-Flash-1017 开放）============
+/**
+ * 按次单价（官网 ¥5/1000 次 ≈ ¥0.005/次，按次计费、非 token）。★ 刻意不放 prices.ts——那是 token 价表
+ * 且有 check-prices CI 结构守护，按次价混入会破坏其假设。结算口径经 ctx.toolCostSink 通道进
+ * receipt/usageLog/E1/E2（成本信任链），DEEP_SEEK_TOOL_COST=0 可关上报（回退开关）。
+ */
+const TOOL_CALL_PRICE_YUAN = { search: 0.005, fetch: 0.005 };
+/** DeepSeek Tools 复用 LLM 同两个 env（同 deepseek/client.ts）：base + key，与对话模型同账号。 */
+const dsToolsBase = (): string => (process.env.DEEP_SEEK_API_URL || "https://api.deepseek.com").replace(/\/+$/, "");
+const dsApiKey = (): string => (process.env.DEEP_SEEK_API_KEY || "").trim();
+
+/** DeepSeek Search 后端（自家引擎；官方字段 query + count(1-50，缺省 10)，支持 site:/引号语法）。
+ *  ★ 字段名是 count 不是 max_results——写错会被服务端静默忽略、返回缺省 10 条（2026-10-19 实测钉死）。
+ *  响应映射：summary（面向模型，实测 500~3700 字、均值 ~1800）→ snippet 槽；title/url 直映；顶层无 answer。
+ *  输出体积预算：缺省 10 条 × ~1800 字 ≈ 18K 超 web_search 16K 输出上限（全局熔断会拦腰截掉尾部整条）——
+ *  按 summary 实际长度做预算截断（整条丢弃不拦腰），保住格式完整；解析防御性（缺字段降级不炸）。 */
+export const DS_SNIPPET_BUDGET_CHARS = 14000; // 留 ~2K 余量给标题/URL/编号/头尾标注
+export async function searchDeepseek(query: string, maxResults: number, signal: AbortSignal): Promise<SearchResponse> {
+    const apiKey = dsApiKey();
+    if (!apiKey) throw new Error("未配置 DEEP_SEEK_API_KEY（与 LLM 调用同 key，DeepSeek 控制台申请）");
+    const res = await fetch(`${dsToolsBase()}/tools/search`, {
+        method: "POST",
+        signal,
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        body: JSON.stringify({ query, count: Math.max(1, Math.min(maxResults, 50)) })
+    });
+    if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(`DeepSeek Search HTTP ${res.status} ${res.statusText}${t ? ` | ${t.slice(0, 200)}` : ""}`);
+    }
+    const data: any = await res.json();
+    const results: SearchResult[] = [];
+    let budget = DS_SNIPPET_BUDGET_CHARS;
+    for (const r of (Array.isArray(data?.results) ? data.results : [])) {
+        const title = (r?.title ?? "").toString().trim();
+        const url = (r?.url ?? "").toString().trim();
+        if (!title || !url) continue;
+        const snippet = (r?.summary ?? r?.snippet ?? "").toString().trim(); // summary 面向模型；snippet 仅 ~200 字（面向前端），缺 summary 时兜底
+        if (results.length > 0 && snippet.length > budget) break; // 预算尽则整条丢弃（首条恒保留，避免空手而归）
+        results.push({ title, url, snippet });
+        budget -= snippet.length;
+    }
+    return { answer: "", results };
+}
+
+/** DeepSeek Fetch 后端（服务端抓取；官方请求仅 {url} 一个字段，响应 {title, content} markdown 正文）。
+ *  ★ allow_private/SSRF 防护对该后端无意义：抓取由 DeepSeek 服务端发起，不经过本机网络（本机语义勿混用）。
+ *  实测边界（2026-10-19）：反爬/国际站同样受限（SO/npmjs 504、知乎/medium/维基 404）——失败引导走
+ *  web_search 的 site: 语法从索引侧拿正文，不做自动切换（失败要暴露原则）。 */
+const DS_FETCH_TIMEOUT_MS = 30000; // 服务端自身失败语义 ~30s（504），本地超时放宽免得先掐掉响应
+async function fetchDeepseek(url: string, signal: AbortSignal): Promise<{ title: string; content: string }> {
+    const apiKey = dsApiKey();
+    if (!apiKey) throw new Error("未配置 DEEP_SEEK_API_KEY（与 LLM 调用同 key，DeepSeek 控制台申请）");
+    const res = await fetch(`${dsToolsBase()}/tools/fetch`, {
+        method: "POST",
+        signal,
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+        body: JSON.stringify({ url })
+    });
+    if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(`DeepSeek Fetch HTTP ${res.status} ${res.statusText}${t ? ` | ${t.slice(0, 200)}` : ""}`);
+    }
+    const data: any = await res.json();
+    return { title: (data?.title ?? "").toString().trim(), content: (data?.content ?? "").toString() };
+}
+
 /**
  * 选择搜索后端：
- *  - 环境变量 SEARCH_PROVIDER=tavily|bing|ddg 强制指定；
- *  - 否则自动：有 TAVILY_API_KEY 用 Tavily（结果更干净），否则用 Bing（免注册默认，中国/全球皆可达）。
- *  注：DuckDuckGo 在中国大陆被墙（连接超时），故不作默认；非中国区可用 SEARCH_PROVIDER=ddg 切换。
+ *  - 环境变量 SEARCH_PROVIDER=deepseek|tavily|bing|ddg 强制指定（forced 但缺对应配置时按现状语义静默落回缺省序）；
+ *  - 否则自动：有 DEEP_SEEK_API_KEY → deepseek（自家引擎，实测中文/英文长尾均显著优于 Bing 爬虫路径，
+ *    半分钱/次进结算单）> 有 TAVILY_API_KEY 用 Tavily > Bing（免注册默认，中国/全球皆可达）。
+ *  注：DuckDuckGo 在中国大陆被墙（连接超时），故不作默认；非中国区可用 SEARCH_PROVIDER=ddg 切换；
+ *  要零成本回退显式 SEARCH_PROVIDER=bing 一键切回。
  */
-type SearchProvider = "tavily" | "bing" | "duckduckgo";
+type SearchProvider = "tavily" | "bing" | "duckduckgo" | "deepseek";
 function pickSearchProvider(): SearchProvider {
     const forced = (process.env.SEARCH_PROVIDER || "").toLowerCase();
+    if (forced === "deepseek" && dsApiKey()) return "deepseek";
     if (forced === "tavily" && appConfig.tavilyApiKey) return "tavily";
     if (forced === "ddg" || forced === "duckduckgo") return "duckduckgo";
     if (forced === "bing") return "bing";
-    return appConfig.tavilyApiKey ? "tavily" : "bing";
+    return dsApiKey() ? "deepseek" : appConfig.tavilyApiKey ? "tavily" : "bing";
 }
 
 /** Tavily 后端（需 key，结果干净、带摘要） */
@@ -355,10 +429,25 @@ async function searchDuckDuckGo(query: string, maxResults: number, signal: Abort
     return { answer: "", results };
 }
 
-/** 统一格式化搜索结果（带长度熔断） */
+/** 统一格式化搜索结果（带长度熔断）。
+ *  ★ 每行摘要切片上限按后端区分：bing/tavily/ddg 的 snippet 本就 ~200-300 字，240 上限只是兜底；
+ *  deepseek 的 snippet 槽装的是 summary（面向模型的长摘要，实测含直达答案）——放宽到 3000/条才不白映射。
+ *  总量由 searchDeepseek 的预算截断（14K 整条丢弃）兜住，不会触发下面的全局熔断拦腰。 */
+const DS_SUMMARY_SLICE_CHARS = 3000;
 function formatSearchResults(query: string, provider: string, resp: SearchResponse): string {
-    if (resp.results.length === 0) return `[web_search | "${query}" | ${provider}]：未找到相关结果。`;
-    const lines = resp.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet.slice(0, 240)}`);
+    if (resp.results.length === 0) {
+        // ★ 0 命中 + site: 后带路径 = 已知误用签名（2026-10-19 A/B 实锤：site:域名/路径 → 恒 0 条）。
+        //   「未找到相关结果」这种过强结论会诱导模型误判「索引里没有」而连环空转——当场识别语法问题、
+        //   给可照抄的纠正模板（host 现场剥出，路径不进查询）。检索本身 HTTP 成功，维持 success 语义。
+        const siteArg = query.match(/site:(\S+)/i)?.[1];
+        if (siteArg?.includes("/")) {
+            const host = siteArg.split("/")[0];
+            return `[web_search | "${query}" | ${provider}]：0 命中——site: 后带了路径（site: 只接域名，带路径恒 0 条）。改用：site:${host} 页面标题或主题关键词`;
+        }
+        return `[web_search | "${query}" | ${provider}]：未找到相关结果。`;
+    }
+    const snippetCap = provider === "deepseek" ? DS_SUMMARY_SLICE_CHARS : 240;
+    const lines = resp.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet.slice(0, snippetCap)}`);
     const body = (resp.answer ? `💡 摘要: ${resp.answer}\n\n` : "") + lines.join("\n\n");
     if (body.length > DEFAULT_MAX_CHARS) {
         return [
@@ -540,13 +629,14 @@ export const webTools: CustomTool[] = [
             planAllowed: true,
             primaryArg: 'url',
             autoApproval: 'aggressive',
-            description: "抓取指定公开 URL 的网页内容并转为干净的 Markdown 文本，用于查阅 API 文档、报错说明、官方 changelog 等外部资料。仅支持 http/https，默认拦截内网/回环/链路本地地址（防 SSRF）；本地开发/自动化测试需抓 localhost 服务或内网页面时，传 allow_private=true 放行（云元数据端点仍拦）。",
+            description: "抓取指定公开 URL 的网页内容并转为干净的 Markdown 文本，用于查阅 API 文档、报错说明、官方 changelog 等外部资料。仅支持 http/https，默认拦截内网/回环/链路本地地址（防 SSRF）；本地开发/自动化测试需抓 localhost 服务或内网页面时，传 allow_private=true 放行（云元数据端点仍拦）。可选 backend=\"deepseek\" 走 DeepSeek 服务端抓取（返回 markdown 正文；该后端下 allow_private 无效——抓取不经过本机网络，SSRF 防护是本机语义）。",
             parameters: {
                 type: "object",
                 properties: {
                     url: { type: "string", description: "要抓取的完整 http(s) URL" },
+                    backend: { type: "string", enum: ["local", "deepseek"], description: "抓取后端：local=本机直抓（缺省，带全套 SSRF 防护）；deepseek=DeepSeek 服务端抓取（反爬受限，失败时可试 web_search 用 site: 语法从索引侧拿正文）。" },
                     max_length: { type: "number", description: `返回内容的最大字符数（默认 ${DEFAULT_MAX_CHARS}，超出自动截断）` },
-                    allow_private: { type: "boolean", description: "是否允许访问内网/回环地址（如 localhost:5173 本地服务、内网文档）。默认 false。也可用环境变量 WEB_FETCH_ALLOW_PRIVATE=1 全局开启。即便开启仍拦截云元数据端点（169.254.169.254 等）。" }
+                    allow_private: { type: "boolean", description: "是否允许访问内网/回环地址（如 localhost:5173 本地服务、内网文档）。默认 false。也可用环境变量 WEB_FETCH_ALLOW_PRIVATE=1 全局开启。即便开启仍拦截云元数据端点（169.254.169.254 等）。仅 local 后端有效；backend=deepseek 时忽略。" }
                 },
                 required: ["url"]
             },
@@ -555,8 +645,49 @@ export const webTools: CustomTool[] = [
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: { url: string; allow_private?: boolean }) =>
                 `⚠️【联网抓取审批】\n目标 URL: ${args.url}${args.allow_private ? "\n🔓 allow_private=true：已放行内网/回环地址（云元数据端点仍拦）" : ""}\n（将发起对外网络请求，且抓取到的内容会进入云端模型上下文；请确认 URL 来源可信、不含敏感回传数据）`,
-            async execute(args: { url: string; max_length?: number; allow_private?: boolean }, ctx?: ToolContext) {
+            async execute(args: { url: string; max_length?: number; allow_private?: boolean; backend?: string }, ctx?: ToolContext) {
                 const maxChars = args.max_length && args.max_length > 0 ? args.max_length : DEFAULT_MAX_CHARS;
+
+                // ---- deepseek 服务端抓取后端（可选；官方仅 {url} 字段，服务端返回 markdown 正文）----
+                if (args.backend === "deepseek") {
+                    let dsUrl: URL;
+                    try {
+                        dsUrl = new URL(args.url);
+                    } catch {
+                        return toolFailure(`[抓取失败]：URL 格式不合法：${args.url}`);
+                    }
+                    if (dsUrl.protocol !== "http:" && dsUrl.protocol !== "https:") {
+                        return toolFailure(`[安全熔断]：仅允许 http/https 协议，拒绝 ${dsUrl.protocol}`);
+                    }
+                    const dsSignals: AbortSignal[] = [AbortSignal.timeout(DS_FETCH_TIMEOUT_MS)];
+                    if (ctx?.abortSignal) dsSignals.push(ctx.abortSignal);
+                    try {
+                        const { title, content } = await fetchDeepseek(dsUrl.href, AbortSignal.any(dsSignals));
+                        ctx?.toolCostSink?.(TOOL_CALL_PRICE_YUAN.fetch); // 按次成本上报（成功才计，进结算单闭环）
+                        const body = title ? `# ${title}\n\n${content}` : content;
+                        if (body.length > maxChars) {
+                            return [
+                                `[web_fetch | deepseek | ${dsUrl.href} | 已截断前 ${maxChars} 字符，原文共 ${body.length} 字符]`,
+                                body.slice(0, maxChars),
+                                `\n[... ⚠️ 内容过长，已隐藏剩余 ${body.length - maxChars} 字符，可调大 max_length ...]`,
+                            ].join("\n");
+                        }
+                        return `[web_fetch | deepseek | ${dsUrl.href}]\n${body}`;
+                    } catch (error: any) {
+                        if (error?.name === "TimeoutError") {
+                            return toolFailure(`[抓取超时]：${DS_FETCH_TIMEOUT_MS / 1000}s 内未响应：${dsUrl.href}`);
+                        }
+                        if (error?.name === "AbortError") {
+                            return `⏹️ [已中止]：用户中断了抓取：${dsUrl.href}`;
+                        }
+                        // ★ 引导必须带「可照抄的正确形态」示例（2026-10-19 A/B 实锤）：只写「用 site: 语法」
+                        //   模型会把失败 URL 整条塞进 site:（site:域名/路径 → 0 命中 → 误判索引没有 → 连环空转）。
+                        //   现场用失败 URL 的 hostname 拼好前缀，路径没机会进去；模型只需补标题/主题关键词。
+                        return toolFailure(`[抓取失败 | deepseek]：${error.message}（该后端对反爬/国际站点同样受限；可改用 web_search 从索引侧拿正文——site: 只接域名不带路径，例：site:${dsUrl.hostname} 页面标题或主题关键词）`);
+                    }
+                }
+
+                // ---- local 本机直抓后端（缺省，现状不动）----
                 // allow_private：参数优先，否则取全局 env 默认（WEB_FETCH_ALLOW_PRIVATE=1）
                 const allowPrivate = args.allow_private ?? appConfig.webFetchAllowPrivate;
 
@@ -633,7 +764,7 @@ export const webTools: CustomTool[] = [
             planAllowed: true,
             primaryArg: 'query',
             autoApproval: 'aggressive',
-            description: "联网搜索外部资料（API 文档、报错解法、库用法、最新信息等），返回结果列表（标题/URL/片段）。默认用 Bing（免注册、中国/全球皆可用）；配置了 TAVILY_API_KEY 会自动升级到 Tavily（结果更干净、带摘要）；可用环境变量 SEARCH_PROVIDER=bing|ddg|tavily 强制指定。查询陌生库或报错时优先用本工具替代凭记忆作答。结果按长度熔断。",
+            description: "联网搜索外部资料（API 文档、报错解法、库用法、最新信息等），返回结果列表（标题/URL/摘要）。后端自动选择：配置了 DEEP_SEEK_API_KEY（通常已配）默认走 DeepSeek 自家搜索引擎（长摘要质量最佳，¥0.005/次按次计费进结算单）；否则有 TAVILY_API_KEY 用 Tavily，再否则 Bing（免注册）。可用 SEARCH_PROVIDER=deepseek|tavily|bing|ddg 强制指定（deepseek 异常时可临时切 bing 回退）。查询陌生库或报错时优先用本工具替代凭记忆作答。结果按长度熔断。",
             parameters: {
                 type: "object",
                 properties: {
@@ -654,11 +785,17 @@ export const webTools: CustomTool[] = [
                 if (ctx?.abortSignal) signals.push(ctx.abortSignal);
                 try {
                     const signal = AbortSignal.any(signals);
-                    const resp = provider === "tavily"
-                        ? await searchTavily(args.query, maxResults, signal)
-                        : provider === "duckduckgo"
-                            ? await searchDuckDuckGo(args.query, maxResults, signal)
-                            : await searchBing(args.query, maxResults, signal);
+                    let resp: SearchResponse;
+                    if (provider === "deepseek") {
+                        resp = await searchDeepseek(args.query, maxResults, signal);
+                        ctx?.toolCostSink?.(TOOL_CALL_PRICE_YUAN.search); // 按次成本上报（成功才计，进结算单闭环）
+                    } else if (provider === "tavily") {
+                        resp = await searchTavily(args.query, maxResults, signal);
+                    } else if (provider === "duckduckgo") {
+                        resp = await searchDuckDuckGo(args.query, maxResults, signal);
+                    } else {
+                        resp = await searchBing(args.query, maxResults, signal);
+                    }
                     return formatSearchResults(args.query, provider, resp);
                 } catch (error: any) {
                     if (error?.name === "TimeoutError") {
@@ -667,7 +804,9 @@ export const webTools: CustomTool[] = [
                     if (error?.name === "AbortError") {
                         return `⏹️ [已中止]：用户中断了搜索。`;
                     }
-                    return toolFailure(`[web_search 失败 | ${provider}]：${error.message}`);
+                    // 失败不静默回退（静默 fallback 会掩盖端点劣化）：报错附切换指引
+                    const hint = provider === "deepseek" ? "（可设 SEARCH_PROVIDER=bing 临时切回本地爬虫后端）" : "";
+                    return toolFailure(`[web_search 失败 | ${provider}]：${error.message}${hint}`);
                 }
             }
         }

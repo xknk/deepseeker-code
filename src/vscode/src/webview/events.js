@@ -212,10 +212,12 @@ switch (evt.type) {
         const durMs = Number(evt.durationMs) || 0;
         const durText = durMs >= 60000 ? `${Math.floor(durMs / 60000)}m${Math.round((durMs % 60000) / 1000)}s` : `${(durMs / 1000).toFixed(1)}s`;
         const cost = typeof evt.costYuan === "number" ? evt.costYuan : null;
+        // 按次计费工具花费（DeepSeek Search/Fetch）：>0 才拼段，无调用不出现（undefined 自动省略）
+        const toolCost = typeof evt.toolCostYuan === "number" && evt.toolCostYuan > 0 ? evt.toolCostYuan : null;
         const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
-        addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated));
+        addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated, toolCost != null ? S.evReceiptWeb(toolCost) : ""));
         break;
       }
       case "task.exit": {

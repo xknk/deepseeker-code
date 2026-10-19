@@ -178,8 +178,9 @@ const ZH = {
   evDenied: (name) => `🚫 ${name} 被拒绝`,
   evVisionDown: (model) => `🖼 模型 ${model} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`,
   evSubagent: (t) => `↳ 子agent ${t}`,
-  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated) =>
-    `💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${budgetTruncated ? " · 预算截断" : ""}`,
+  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText) =>
+    `💰 本次 ${rounds} 轮 · ${costText}${toolText ? ` · ${toolText}` : ""} · 缓存命中 ${hitPct}% · ${durText}${budgetTruncated ? " · 预算截断" : ""}`,
+  evReceiptWeb: (yuan) => `联网 ¥${yuan.toFixed(3)}`,
   evTaskDone: (cmd) => `📧 后台任务完成（exit=0）：${cmd}`,
   evTaskKilled: (cmd) => `⏹ 后台任务已停止：${cmd}`,
   evTaskFail: (code, cmd) => `⚠️ 后台任务失败（exit=${code}）：${cmd}`,
@@ -390,8 +391,9 @@ const EN = {
   evDenied: (name) => `🚫 ${name} denied`,
   evVisionDown: (model) => `🖼 Model ${model} doesn't support images; automatically downgraded to text this turn (remembered — later messages go as text directly)`,
   evSubagent: (t) => `↳ subagent ${t}`,
-  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated) =>
-    `💰 Run: ${rounds} turn${rounds > 1 ? "s" : ""} · ${costText} · cache hit ${hitPct}% · ${durText}${budgetTruncated ? " · budget-capped" : ""}`,
+  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText) =>
+    `💰 Run: ${rounds} turn${rounds > 1 ? "s" : ""} · ${costText}${toolText ? ` · ${toolText}` : ""} · cache hit ${hitPct}% · ${durText}${budgetTruncated ? " · budget-capped" : ""}`,
+  evReceiptWeb: (yuan) => `web ¥${yuan.toFixed(3)}`,
   evTaskDone: (cmd) => `📧 Background task finished (exit=0): ${cmd}`,
   evTaskKilled: (cmd) => `⏹ Background task stopped: ${cmd}`,
   evTaskFail: (code, cmd) => `⚠️ Background task failed (exit=${code}): ${cmd}`,

@@ -174,6 +174,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             budgetSpentYuan += cost; // 预算累计器同轮入账（落盘/预算分账，见上方声明处注释）
         }
     };
+    // ★ 按次计费工具成本累计（DeepSeek Search/Fetch 接入）：web 工具成功调用后经 toolCostSink 上报当次
+    //   花费（半分钱级）。与 costYuanAcc（token 口径）分账落盘（receipt/usageLog 各带 toolCostYuan 字段），
+    //   但同轮并入预算累计器——按次花费同为真金白银，不入 E2 预算圈则预算制被搜索调用打穿。
+    //   DEEP_SEEK_TOOL_COST=0 回退开关：不注入 sink（成本链异常时保结算单/预算零污染）。
+    let toolCostYuanAcc = 0;
+    const addToolCost = (yuan: number) => {
+        if (!Number.isFinite(yuan) || yuan <= 0) return;
+        toolCostYuanAcc += yuan;
+        budgetSpentYuan += yuan; // E2 预算圈同轮入账（落盘分账、预算并账）
+    };
+    const toolCostSink = process.env.DEEP_SEEK_TOOL_COST === "0" ? undefined : addToolCost;
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
     const toolCounts: Record<string, number> = {};
@@ -387,6 +398,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ 子 run 成本回灌（成本信任链第二环 E1）：runSubagent 经 toolCtx.reportCost 拿到闭包，
                 //   子 run 结束时把总花费记进本 run 预算累计器——父预算自动继承约束（子花费计入父 spent）。
                 reportCost: (yuan: number) => { if (Number.isFinite(yuan) && yuan > 0) budgetSpentYuan += yuan; },
+                // ★ 按次计费工具成本上报（DeepSeek Search/Fetch）：web 工具经 toolCtx.toolCostSink 拿到闭包，
+                //   成功调用后按次上报进本 run 累计器。
+                toolCostSink,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
@@ -449,13 +463,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 totalTokens: usageSum?.total_tokens,
                 cachedTokens: usageSum?.cached_tokens,
                 costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : undefined,
+                toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（Search/Fetch）
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
         // ★ 子 run 成本回灌（成本信任链第二环 E1）：本 runAgent 为子 run 时（options.costSink 已注入），
         //   收尾把自身总花费报给父累计器——父下一轮边界预算检查即包含本子 run 花费。旁路，绝不击垮收尾。
+        //   ★ 并账：token 花费 + 按次工具花费（toolCostYuanAcc）并入总额——否则子 run 搜索花费漏出预算圈。
+        //   按次花费与 costKnown 无关（单价恒定），total>0 即报。
         try {
-            if (options.costSink && costKnown && costYuanAcc > 0) options.costSink(Math.round(costYuanAcc * 1e6) / 1e6);
+            const spentTotal = costYuanAcc + toolCostYuanAcc;
+            if (options.costSink && spentTotal > 0) options.costSink(Math.round(spentTotal * 1e6) / 1e6);
         } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
@@ -471,6 +489,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     cachedTokens: usageSum.cached_tokens ?? 0,
                     cacheHitRate: prompt > 0 ? (usageSum.cached_tokens ?? 0) / prompt : 0,
                     costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
+                    toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（undefined 自动省略）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
                 });

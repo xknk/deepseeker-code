@@ -34,6 +34,7 @@ export type UsageRunRecord = {
     cachedTokens?: number;         // 前缀缓存命中（DeepSeek prompt_cache_hit_tokens 口径）
     tools: Record<string, number>; // 工具分布：模型请求的 tool_calls 按名计数（含被拒/校验失败——反映模型行为而非仅执行面）
     costYuan?: number;             // 本 run 折算成本（元，按 run 当时单价；无价模型缺省 undefined——加字段不 bump v，读侧缺省容错）
+    toolCostYuan?: number;         // 按次计费工具花费（元，DeepSeek Search/Fetch ¥0.005/次；缺省 undefined=本 run 无按次调用）
     workspace: string;             // 项目键（appConfig.userWorkspaceDir，由本模块统一盖章，调用方不传）
 };
 

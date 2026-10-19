@@ -75,7 +75,7 @@ export const appConfig = {
      *  - 'allow'：照常明文备份（隐私差，谨慎使用）。
      */
     undoBackupSensitive: 'skip' as 'skip' | 'deny' | 'allow',
-    /** web_search 搜索后端：环境变量 SEARCH_PROVIDER 可强制 "tavily"|"bing"|"ddg"；不设则自动——有 TAVILY_API_KEY 用 Tavily，否则用 Bing（免注册，中国/全球可达）。 */
+    /** web_search 搜索后端：环境变量 SEARCH_PROVIDER 可强制 "deepseek"|"tavily"|"bing"|"ddg"；不设则自动——有 DEEP_SEEK_API_KEY 用 DeepSeek 自家搜索（¥0.005/次进结算单），否则有 TAVILY_API_KEY 用 Tavily，否则用 Bing（免注册，中国/全球可达）。 */
     searchProvider: process.env.SEARCH_PROVIDER || "",
     /** Tavily 搜索 API 密钥（可选升级后端）。从环境变量 TAVILY_API_KEY 读取；未配置时 web_search 自动回退到免注册的 DuckDuckGo。 */
     tavilyApiKey: process.env.TAVILY_API_KEY || "",

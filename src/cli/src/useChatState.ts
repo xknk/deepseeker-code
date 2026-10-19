@@ -356,12 +356,13 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 const durMs = (obj.durationMs as number) ?? 0;
                 const durText = durMs >= 60000 ? `${Math.floor(durMs / 60000)}m${Math.round((durMs % 60000) / 1000)}s` : `${(durMs / 1000).toFixed(1)}s`;
                 const cost = obj.costYuan as number | null | undefined;
+                const toolCost = typeof obj.toolCostYuan === "number" && obj.toolCostYuan > 0 ? (obj.toolCostYuan as number) : null;
                 const tokTotal = promptT + completionT;
                 const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
                 const costText = typeof cost === "number" ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "meta",
-                    text: `💰 本次 ${rounds} 轮 · ${costText} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
+                    text: `💰 本次 ${rounds} 轮 · ${costText}${toolCost != null ? ` · 联网 ¥${toolCost.toFixed(3)}` : ""} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
                 }]);
                 lastRunCostRef.current = typeof cost === "number" ? cost : undefined;
                 sessionCostRef.current = typeof cost === "number" ? (sessionCostRef.current ?? 0) + cost : sessionCostRef.current;
