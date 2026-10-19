@@ -1,37 +1,17 @@
 # Changelog
 
-## 1.0.71
+## 1.0.68
 
-修复：web_search deepseek 后端 0 命中且 site:带路径时，当场给纠正模板（不再回「未找到相关结果」过强结论）。
-
-- **场景**：模型把 site: 用错（带完整路径，如 `site:zhuanlan.zhihu.com/p/37196599`）→ DeepSeek 索引对坏语法恒 0 条 → 旧文案「未找到相关结果。」被模型读成「索引里没有」→ 连环空转（A/B 实锤多烧 2 轮 5 个工具调用）。转发链路无罪（同样查询直连 API 也是 0 条），但**过强结论文案是代码侧问题**。
-- **修法**：0 命中响应若带 `site:xxx/yyy` 误用签名（site: 后含 `/`），输出改为「0 命中——site: 只接域名，带路径恒 0 条」并附剥好路径的纠正模板（`site:zhuanlan.zhihu.com 页面标题或主题关键词`），维持 success 语义不触发失败计数；无 site: 或合法 site:域名 的 0 命中维持原文案。
-- 守门测试钉死：纠正模板须用剥好路径的 host、不得复现带路径形态。
-
-## 1.0.70
-
-修复：web_fetch deepseek 后端失败引导补「可照抄的 site: 动态示例」（A/B 实锤，2026-10-19）。
-
-- **根因**：引导只写「可试 web_search 用 site: 语法」没给示例——模型把引导当模板逐字照做，把失败 URL 整条塞进 site:（`site:zhuanlan.zhihu.com/p/xxx`，site: 后带完整路径）→ 0 命中 → 误判「索引里没有」→ 连环空转（实测多烧 2 轮 5 个工具调用）。
-- **修法**：失败文案现场用失败 URL 的 hostname 拼好 `site:域名` 前缀并声明「只接域名不带路径」，示例形如 `site:zhuanlan.zhihu.com 页面标题或主题关键词`——路径没机会进去，模型只需补关键词，正确形态下第二轮即可命中目标文章（实测 5 条、首条即目标、1756 字摘要）。
-- 守门测试钉死两个形态：示例须含 hostname 版 site: 前缀、**不得**出现 site:后带路径的误用形态。
-
-## 1.0.69
-
-DeepSeek Search & Fetch 接入：以现有 web_search / web_fetch 的「工具后端」形态补强联网能力（2026-10-19 随 V4.1-Flash-1017 开放的 /tools/search · /tools/fetch REST 端点）。
+DeepSeek Search & Fetch 接入（以现有 web_search / web_fetch 的「工具后端」形态补强联网能力，2026-10-19 随 V4.1-Flash-1017 开放的 /tools/search · /tools/fetch REST 端点）+ 价格表例行复核 + vision-exp 补价。
 
 - **web_search 新增 deepseek 后端并设为缺省优先**（配 DEEP_SEEK_API_KEY 即自动启用，通常已配）：自家引擎、长摘要直出（summary 面向模型，实测中文/英文长尾显著优于 Bing 爬虫路径）；`SEARCH_PROVIDER=deepseek|tavily|bing|ddg` 可强制，失败不静默回退（报错附 `SEARCH_PROVIDER=bing` 一键回退指引）；原 bing/tavily/ddg 路径零改动。输出体积按 summary 长度做预算截断（整条丢弃），不再触发 16K 全局熔断拦腰。
 - **web_fetch 新增可选 `backend:"deepseek"` 参数**（缺省 local 现状不动）：服务端返回 markdown 正文，套现有长度熔断；`allow_private` 对该后端无效（SSRF 防护是本机语义）。实测反爬/国际站同样受限，失败引导改走 web_search 的 `site:` 语法从索引侧拿正文，不做自动切换。
+- **site: 误用防连环空转（A/B 实锤两轮修出）**：失败引导只写「可用 site: 语法」不给示例时，模型会把失败 URL 整条塞进 site:（`site:域名/路径`，坏语法恒 0 命中）→ 误判「索引里没有」连环空转（实测多烧 2 轮 5 个工具调用）。修法两处——web_fetch 失败文案现场用失败 URL 的 hostname 拼好 `site:域名` 可照抄前缀（示例形如 `site:zhuanlan.zhihu.com 页面标题或主题关键词`）；web_search 0 命中若带 `site:xxx/yyy` 误用签名，当场点破语法问题并给剥好路径的纠正模板（维持 success 语义；无 site: 或合法 site:域名 的 0 命中维持原文案）。
 - **按次成本进结算单闭环**（¥0.005/次，官网 ¥5/1000 次）：新增 `toolCostSink` 通道（呼应 E1 reportCost），成功调用后按次上报——receipt 结算单与 usageLog 各加 `toolCostYuan` 字段（无调用自动省略）、E1 子 run 回灌与 E2 预算圈并入按次花费；CLI/VSCode 结算行加「联网 ¥x」段、挂机报告费用行同步聚合。`DEEP_SEEK_TOOL_COST=0` 可关上报（成本链异常时保结算单不脏）。
-- **刻意不做生成内 server-side tool**：那会绕过本地工具系统（审批/trace/侧车/结算全瞎，与成本信任链冲突）；与对标 CC 的差异是有意的。守门测试 web-deepseek.test.ts 9 例（count 字段钉死/钳位/映射/预算截断/失败指引/计费时机/local 零改动）。
-
-## 1.0.68
-
-价格表例行复核（2026-10-19，官网页面实拉核对）+ vision-exp 补价。
-
-- **峰谷价表复核无漂移**：官网模型 & 价格页 HTML 实拉逐项比对——flash/pro 两模型共 12 项峰谷数字、峰谷时段定义（工作日 9–12/14–18 高峰、空闲减半）、扣费公式（token×单价）与本地 `MODEL_PRICES`/`isBeijingPeak`/`calcCostYuan` 全部一致；`PRICES_VERIFIED_AT` 刷新为 2026-10-19。
+- **价格表例行复核无漂移**（2026-10-19 官网页面实拉逐项比对）：flash/pro 两模型共 12 项峰谷数字、峰谷时段定义（工作日 9–12/14–18 高峰、空闲减半）、扣费公式（token×单价）与本地 `MODEL_PRICES`/`isBeijingPeak`/`calcCostYuan` 全部一致；`PRICES_VERIFIED_AT` 刷新为 2026-10-19。
 - **`deepseek-flash-vision-exp` 补表价**：官网脚注 (1) 明示旧模型名仍可调用、由 V4.1-Flash-1017 提供服务并**按 Flash 价格计费**——1.0.67 时「官网无公开报价→刻意无条目」的前提不再成立，补与 flash 同价条目（非猜价，官方口径）；此前选 vision-exp 时只显 token 不显钱，现在正常折算。prices.test.ts 三处断言随语义更新（无价模型样例改用 unknown-model）。
-- **顺手核实 11 月按次收费边界**：官网 Search/Fetch API 5 元/千次（11-01 起计费）只覆盖官方搜索/抓取接口——本项目 web 工具走 Tavily/Bing/DDG，模型调用仍按 token 计费，成本信任链计费根基不变。
+- **顺手核实 11 月按次收费边界**：官网 Search/Fetch API 5 元/千次（11-01 起计费）只覆盖官方搜索/抓取接口——模型调用仍按 token 计费不变，Search/Fetch 的按次花费已经上方 toolCostSink 通道独立入账，成本信任链计费根基不变。
+- **刻意不做生成内 server-side tool**：那会绕过本地工具系统（审批/trace/侧车/结算全瞎，与成本信任链冲突）；与对标 CC 的差异是有意的。守门测试 web-deepseek.test.ts 10 例（count 字段钉死/钳位/映射/预算截断/失败指引/计费时机/site: 纠正两形态/local 零改动）。
 
 ## 1.0.67
 
