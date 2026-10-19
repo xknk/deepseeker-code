@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.56
+
+CLI 双语化收口（此前仅 README/模型回复双语）。
+
+- **观测输出双语化**：`/usage` `/context` `/permissions` `/mcp` `/hooks` `/debug` 六命令输出接入 inspect.ts OBS 词表（zh/en 双表，缺省 zh 向后兼容），尾参 locale 由调用方显式传入。
+- **本地命令回显双语化**：/trust 列表与撤销、/archive、/plan、/budget 查看·关闭·设置、/auto、/thinking 三态、引擎加载、未知命令、`!` shell 直跑（用法/退出码头行/空输出）、vision 降级与计划模式切换事件提示接入 strings.ts 词表（+22 键）。
+- **挂机批处理全链路双语化**：`batch add|list|clean|help` 管理输出与 `batch run` 控制台进度/落盘报告接入 batchStrings.ts 词表（en 表按 typeof ZH 编译校验，非法 locale 回退 zh）；报告按运行时刻语言生成，属存档不追溯翻译，frontmatter 键名保持英文供 list 解析；core 侧工单校验/运行锁错误文案同批加 locale 尾参。batchAdmin 在 main 语言初始化前派发，自行从 prefs 补读 locale（headless 不弹首次询问）。
+- 工程修复：package.json 补 ajv 运行时依赖（工具运行时参数校验此前缺装，干净环境 dist 报 Cannot find package 'ajv'）；新增 i18n 词表键集一致性闸门测试（四张词表 zh/en 键集双向相等 + 提取下限/闸门自检两道防假绿闸）。
+
+## 1.0.55
+
+成本信任链 CLI 面 + 挂机批处理（10-13 ~ 10-16 批次，与 VSCode 端 1.0.65 同源）。
+
+- **任务结算单**：每个任务完成落一行结算（run.receipt，按官网价折算 `DEEP_SEEK_PRICE_*` 可覆盖，无价模型只显 token）；usage-report 脚本切单一价格源显 ¥。
+- **/usage 花费聚合**：近 7 天总花费 / 缓存节省额 / 费用 top 会话；statusline 上下文新增花费两键（`last_run_cache_hit_rate`、context，undefined 自动省略）。
+- **/budget 预算制**：`/budget 0.5` 设单任务花费上限（触顶软提醒 nudge + 120% 轮边界硬截断，receipt 标 budgetTruncated），子代理花费经 reportCost 回灌合并计账；`/budget off` 关闭。
+- **/context 增强**：追加归档实体数 / 召回命中 / 侧车存档计数三行。
+- **挂机批处理**：`deepseeker-code batch add|list|run|clean [--wait-window HH:MM-HH:MM]`——工单落 `<项目>/.deepseeker-code/batch/pending/`（frontmatter：title + accept 验收命令必填，setup 环境准备/budget-yuan/timeout-min/tools 可选），batch run 串行执行（worktree 隔离 + setup 备环境 + 审批自动应答：编辑类放行/高危拒绝记录 + 直跑验收），报告落 `done/<id>.report.md`，改动 worktree 保留待人工处置。
+- 归因脚本 `scripts/round-attribution.ts`：按行为信号（同参重试/编辑切分/重复检索）给每轮打标，输出浪费轮占比与肇事样本。
+- **价格表峰谷双档化**（10-16 对账修正）：官方账单实锤旧表少报 2.7 倍——`MODEL_PRICES` 改 `{ idle, peak }` 双档（北京时间工作日高峰全价、其余半价，按记录 ts 判档），`PRICES_VERIFIED_AT` 超 30 天 `/usage` 显复核提示；官方账单回归钉入 prices.test.ts。
+
+## 1.0.54
+
+09-17 ~ 10-08 批次追平（发布时未补条目，此处按交付内容补记）。
+
+- **子代理进度跟踪与限制**：run_workflow 执行期实时进度回显，任务异常退出有通知与摘要，收尾不再静默。
+- **压缩完成显示行**：上下文压缩后消息流插淡色提示行「已压缩上下文 · 自动 · 释放 Nk tokens」（对标 CC Compacted 行，UIEvent compact.done）。
+- **ask_question Other 自由输入档**：提问模态恒有 Other 行，可自由键入 token/路径等资料回灌工具结果。
+- **运行/验证四技能**：build-fix 编译闭环 / browser-test 浏览器测试（MCP playwright）/ run-stack 服务编排 / api-test 接口测试（目录即注册）。
+- 性能：消息批量落盘（减少逐条写盘开销）+ 上下文用量估算优化截断预算。
+
 ## 1.0.53
 
 工具系统重建（声明化策略/结构化结果/运行时参数校验）+ 压缩熔断单点治理 + hooks 首跑审批门与记忆治理三件套 + 归档索引中文召回增强 + 新工具 read_image 视觉读取 + CI 守门上线 + evals 三套成型 + 本地使用日志 + `/new` 新会话命令；及 09-14 批次：零配置多模态（乐观直发 + 400 自学习降级）、供应链审批整族收紧、`!` shell 直执行、历史思考剥离省 ~25% 请求体积、微压缩保真；及更早未发布：看门狗自动转后台、红绿 diff、计划模式对齐 CC。

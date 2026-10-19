@@ -9,6 +9,8 @@
 - **对账回归钉**：prices.test.ts 内建官方账单回归钉（batch 会话真实 usage 代入须得 ¥0.5279）与峰谷边界判档钉（12:00 整空闲 / 14:00 整高峰 / 周末高峰时段仍空闲）——峰谷测试全传显式 ts，任何时刻跑结果恒定。
 - **挂机工单 `setup` 字段**：worktree 是干净 git 检出（无 node_modules），验收命令依赖环境时先跑 setup——agent 阶段前在 worktree 内执行（复用验收执行器：同 shell 形态/凭证剔除/超时护栏）；失败即任务失败（新终态 `setup-failed`，报告含输出尾部），不烧 agent 钱。首跑验收 `ERR_MODULE_NOT_FOUND` 的根治。
 - 工程杂项：`.deepseeker-code/batch/` 运行时目录（done 报告存档等）入 .gitignore；CLAUDE.md batch 行补 setup 字段；batch `--wait-window` 注释更新（峰谷价已核实，空闲档半价）。
+- **i18n 词表键集一致性闸门测试**：四张词表（webview strings.js / core inspect OBS / cli batchStrings / 宿主 i18n.ts）各自断言 zh/en 键集双向相等——各端都是「缺键回退 zh」的容错结构，单边加键运行时静默不报错，肉眼难发现；配提取下限（防正则失配空集假绿）与闸门自检（内存 fixture 证明单边加键必失败）两道防假绿闸。
+- **CI 修复**：GitHub Actions install 步注入 `GITHUB_TOKEN`——vscode-ripgrep 的 postinstall 拉 rg 二进制被 api.github.com 未鉴权限流 403（2026-10-16 run 实锤：41s 挂在 install、代码判据未跑）；注入后限额 60→1000 次/时。
 
 ## 1.0.66
 
