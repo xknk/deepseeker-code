@@ -22,14 +22,16 @@ import { dispatch } from "@/tool/hooks.ts";
 import { ownerCanApprove } from "@/session/lineage.ts";
 
 /**
- * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）
- * 与递归删除（delete_path）能力——这两者是爆炸半径最大的高危原语。
+ * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）、
+ * 递归删除（delete_path）与后台挂起（run_in_background）能力——前两者是爆炸半径最大的高危原语，
+ * 后者在子 agent 场景无意义且失控（父 run 收尾时后台任务成孤儿，产物无人验收；
+ * 审查报告 P1-8′，2026-10-20）。
  * 保留 read/edit/write（委派代码工作合理）；MUTATION/DANGER 仍各自走审批网关作为真正后盾。
  *
  * ★ 声明式子 Agent 的显式 tools 白名单会替代此黑名单（对标 Claude Code agents 的有意授权）；
  *   仅当未声明 tools（或缺省/空）时才回退此黑名单，保证现有 spawn_agent 行为不变。
  */
-export const SUBAGENT_DENYLIST = new Set(["run_command", "delete_path"]);
+export const SUBAGENT_DENYLIST = new Set(["run_command", "delete_path", "run_in_background"]);
 
 /** 单个子 agent 的派生规格（spawn_agent 与 run_workflow 的每个步骤均产出一个）。 */
 export interface SubagentSpec {

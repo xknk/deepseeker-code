@@ -12,15 +12,18 @@ import { Msg } from "@/session/contextCore.ts";
 import { outMsg, toolMsg, MsgParams } from "../../type.ts";
 import { getModel, AUX_MODEL_NAME } from "./client.ts";
 import { streamChat, stripHistoricalReasoning } from "./stream.ts";
+import type { AuxUsageReporter } from "@/agent/type.ts";
 
 /**
  * 非流式摘要（走辅助模型 AUX_MODEL_NAME、关思考）：用于上下文压缩等不需流式的场景。
  * 从 llm/model.ts chatWithModelWithSummary 搬迁，逻辑等价。
+ * ★ P0-2：opts.onAuxUsage 在成功响应后回传 usage——runAgent 按 AUX_MODEL_NAME 计价入账
+ *   （成本信任链：辅助调用不入账则预算被压缩调用打穿）。旁路计量，回调抛错不影响摘要本体。
  */
 const summarize = async (
     messages: Msg[],
     tools: toolMsg[] | undefined,
-    opts: { signal?: AbortSignal },
+    opts: { signal?: AbortSignal; onAuxUsage?: AuxUsageReporter },
 ): Promise<outMsg> => {
     try {
         const requestBody = {
@@ -35,6 +38,7 @@ const summarize = async (
         const completion = await getModel().chat.completions.create(requestBody, {
             signal: opts.signal,
         });
+        try { opts.onAuxUsage?.((completion as any).usage, 'compact'); } catch { /* 旁路计量 */ }
         if (completion && 'choices' in completion) return completion as outMsg;
         throw new Error("API 响应异常，未包含 choices 结构");
     } catch (error) {
@@ -48,9 +52,12 @@ const summarize = async (
  * 只回 'safe'/'risky'。严格解析——只接受显式 SAFE，其余一律 risky（fail-closed）。
  * 静默：异常/超时（10s）/中止 → risky，不 console.error/throw（避免污染 CLI 的 Ink stdout 追踪）。
  * 从 llm/model.ts classifyToolRisk 搬迁，逻辑等价。
+ * ★ P0-2：第 5 参 onAuxUsage 在成功响应后回传 usage（计价入账见 summarize 注；异常路径无 usage 不回调）。
+ * ★ P0-3（裁定 B 方案）：文件类调用在本函数上游已被二元快路径分流（autoPermission.runAutoCheck），
+ *   本分类器只保留给 command/aggressive 类——勿在文件类路径重新接回（快路径缺一不可，见 autoPermission.ts）。
  */
 const classifyRisk = async (
-    toolName: string, args: any, detail: string, signal?: AbortSignal,
+    toolName: string, args: any, detail: string, signal?: AbortSignal, onAuxUsage?: AuxUsageReporter,
 ): Promise<'safe' | 'risky'> => {
     // 合并「外部中止信号」与「10s 超时」——分类器不能拖慢审批（model 单例默认 timeout 120s 太长）
     const ac = new AbortController();
@@ -66,6 +73,7 @@ const classifyRisk = async (
             thinking: { type: 'disabled' },
             stream: false,
         } as MsgParams, { signal: ac.signal });
+        try { onAuxUsage?.((completion as any).usage, 'classify'); } catch { /* 旁路计量 */ }
         const text = ((completion as outMsg).choices[0]?.message?.content ?? '').trim().toUpperCase();
         return text.startsWith('SAFE') ? 'safe' : 'risky';
     } catch {

@@ -37,8 +37,9 @@ import { getLocale } from "./strings.ts";
 
 /** 编辑类白名单：挂机任务的核心动作（MUTATION 级文件编辑），自动 allow-once。 */
 const BATCH_EDIT_TOOLS = new Set(["edit_file", "create_file", "write_file", "move_file", "notebook_edit"]);
-/** 缺省禁用清单（对模型不可见，同 SUBAGENT_DENYLIST）：工单 tools: 字段可显式解锁。 */
-const BATCH_DEFAULT_DENYLIST = new Set(["run_command", "delete_path"]);
+/** 缺省禁用清单（对模型不可见，同 SUBAGENT_DENYLIST）：工单 tools: 字段可显式解锁。
+ *  run_in_background 同步收权（审查报告 P1-8′）：挂机是无人值守场景，后台孤儿任务产物无人验收。 */
+const BATCH_DEFAULT_DENYLIST = new Set(["run_command", "delete_path", "run_in_background"]);
 /** 验收命令自身超时（分钟）：验收挂死不能拖垮整队。 */
 const ACCEPT_TIMEOUT_MIN = 10;
 /** 验收输出进报告的尾部长度（行）。 */
@@ -107,14 +108,18 @@ interface SessionCost {
     costYuan: number | null;
     /** 按次计费工具花费合计（元，DeepSeek Search/Fetch；0=本任务无按次调用）。 */
     toolCostYuan: number;
+    /** 辅助模型花费合计（元，压缩摘要+风险分类器；0=本任务无 aux 调用）。 */
+    auxCostYuan: number;
     partialPrice: boolean;
     durationMs: number;
 }
 
-/** 读 usageLog 聚合本任务会话（主 run + 子 run 按记录求和；batch- 前缀不被读侧剔除）。 */
+/** 读 usageLog 聚合本任务会话（主 run + 子 run 按记录求和；batch- 前缀不被读侧剔除。
+ *  子 run 的 sessionId 带 `__sub__` 后缀，按前缀归拢——精确等值会把子 run 全漏掉，
+ *  结算单恒显 subRuns=0（审查报告 N4，2026-10-20）。 */
 const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
-    const recs = (await readUsageRecords(2)).filter((r) => r.sessionId === sessionId);
-    const c: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: null, toolCostYuan: 0, partialPrice: false, durationMs: 0 };
+    const recs = (await readUsageRecords(2)).filter((r) => r.sessionId === sessionId || r.sessionId.startsWith(sessionId + "__sub__"));
+    const c: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: null, toolCostYuan: 0, auxCostYuan: 0, partialPrice: false, durationMs: 0 };
     for (const r of recs) {
         c.rounds += r.rounds || 0;
         if (r.depth === 0) c.mainRounds += r.rounds || 0; else c.subRuns++;
@@ -123,6 +128,7 @@ const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
         c.cachedTokens += r.cachedTokens ?? 0;
         c.durationMs += r.durationMs || 0;
         c.toolCostYuan += r.toolCostYuan ?? 0;
+        c.auxCostYuan += r.auxCostYuan ?? 0;
         if (typeof r.costYuan === "number") c.costYuan = (c.costYuan ?? 0) + r.costYuan;
         else c.partialPrice = true;
     }
@@ -197,7 +203,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     const parsed = parseBatchTicket(source, getLocale());
     if (!parsed.ok) {
         // 工单格式问题：不入 worktree 直接出报告（running/ 里工单收尾回 done/）
-        const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, toolCostYuan: 0, partialPrice: false, durationMs: 0 };
+        const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, toolCostYuan: 0, auxCostYuan: 0, partialPrice: false, durationMs: 0 };
         await finishTicket(task.id, `---\nid: ${task.id}\ntitle: ${task.id}\nstatus: rejected\n---\n\n${T.rejectedTitle}\n\n${parsed.error}`);
         emit(T.ticketRejected(task.id, parsed.error));
         return { status: "rejected", cost, budgetTruncated: false };

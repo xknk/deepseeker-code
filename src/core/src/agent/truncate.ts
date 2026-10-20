@@ -22,7 +22,7 @@ import { activeProvider } from "@/llm/model.ts";
 import path from "path";
 import { getRollingState, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
-import { ensureOptions, RunAgentEvents } from "./type.ts";
+import { ensureOptions, RunAgentEvents, AuxUsageReporter } from "./type.ts";
 import { UIEvent } from "@/observability/type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 
@@ -191,12 +191,13 @@ export const batchSummaryPrompt = (tailContext?: boolean): string =>
  * @param {boolean} tailContext // 是否紧邻保留区（贴尾批次附加「为保留区补背景」框定）
  * @return {*}
  */
-export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailContext?: boolean): Promise<string> => {
+export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailContext?: boolean, onAuxUsage?: AuxUsageReporter): Promise<string> => {
     const resp = await chatWithModelWithSummary(
         // ★ 辅助模型是 text-only：送前把 image part 降级为占位符——base64 绝不能进摘要批（烧钱且无意义）
         [...batch.map(degradeImagesForAux), { role: 'user', content: batchSummaryPrompt(tailContext) }],
         [],
-        { signal }
+        // ★ P0-2：aux usage 回传 run 级成本账（成本信任链：摘要调用不入账则预算被压缩打穿）
+        { signal, onAuxUsage }
     );
     return `- ${resp.choices[0].message.content || ''}`;
 }
@@ -397,7 +398,7 @@ const parseSlotNarrativeState = (slotContent: string) => {
     return { index, hasPrevious };
 };
 
-export const synthesizeSlotNarrative = async (slotContent: string, newLines: string, signal?: AbortSignal): Promise<string> => {
+export const synthesizeSlotNarrative = async (slotContent: string, newLines: string, signal?: AbortSignal, onAuxUsage?: AuxUsageReporter): Promise<string> => {
     const { index, hasPrevious } = parseSlotNarrativeState(slotContent);
     const lines = newLines.trim();
     const resp = await chatWithModelWithSummary(
@@ -406,7 +407,7 @@ export const synthesizeSlotNarrative = async (slotContent: string, newLines: str
             { role: 'user', content: `${lines ? `本轮新归档的摘要行：\n${lines}\n\n` : ''}${checkpointPrompt(hasPrevious)}` },
         ],
         [],
-        { signal }
+        { signal, onAuxUsage }
     );
     const newNotes = (resp.choices[0].message.content || '').trim();
     return assembleSlot(index, newNotes);
@@ -418,7 +419,7 @@ export const synthesizeSlotNarrative = async (slotContent: string, newLines: str
  *  批次消息按对话单元封批（groupUnits 保证 assistant(tool_calls)+tool 成对完整），插在 system 档案与
  *  user 指令之间 API 序列合法；贴图已降级占位（base64 绝不进摘要批）。
  */
-export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batch: Msg[], signal?: AbortSignal): Promise<string> => {
+export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batch: Msg[], signal?: AbortSignal, onAuxUsage?: AuxUsageReporter): Promise<string> => {
     const { index, hasPrevious } = parseSlotNarrativeState(slotContent);
     const resp = await chatWithModelWithSummary(
         [
@@ -427,7 +428,7 @@ export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batc
             { role: 'user', content: checkpointDirectPrompt(hasPrevious) },
         ],
         [],
-        { signal }
+        { signal, onAuxUsage }
     );
     const newNotes = (resp.choices[0].message.content || '').trim();
     return assembleSlot(index, newNotes);
@@ -437,8 +438,8 @@ export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batc
  * 自收敛安全网（仅叙述段）：槽自身超 SUMMARY_SELF_COMPACT_THRESHOLD 时就地再收敛。
  *  检查点路线下正常恒低于阈值，此函数几乎只在异常膨胀时触发；newLines 为空 → 纯改写既有叙述。
  */
-export const compactSlotNarrative = async (slotContent: string, _modelWindow: number, signal?: AbortSignal): Promise<string> =>
-    synthesizeSlotNarrative(slotContent, '', signal);
+export const compactSlotNarrative = async (slotContent: string, _modelWindow: number, signal?: AbortSignal, onAuxUsage?: AuxUsageReporter): Promise<string> =>
+    synthesizeSlotNarrative(slotContent, '', signal, onAuxUsage);
 
 /**
  * 单批 token 预算：单元超预算不可跨批（保配对硬约束），但超预算单元必须先经 pretruncateOversizedUnit
@@ -583,11 +584,11 @@ export const splitIntoBatches = (toCompact: Msg[]): Msg[][] => {
  * （整轮压缩白做 + 上下文原样超限）。启动前发 {done:0,total:N}，各批完成时按完成序递增（并行批完成序
  * 与请求序无关）；完成后由 compact.done 收敛替换（前端删瞬态进度行）。门禁在调用方（仅 depth=0 且有出口）。
  */
-const compactBatches = async (batches: Msg[][], signal?: AbortSignal, onUIEvent?: (evt: UIEvent) => void): Promise<string> => {
+const compactBatches = async (batches: Msg[][], signal?: AbortSignal, onUIEvent?: (evt: UIEvent) => void, onAuxUsage?: AuxUsageReporter): Promise<string> => {
     if (onUIEvent && batches.length > 0) onUIEvent({ type: 'compact.progress', done: 0, total: batches.length });
     let done = 0;
     const lines = await Promise.all(batches.map((b, i) =>
-        compactBatch(b, signal, i === batches.length - 1).then((line) => {
+        compactBatch(b, signal, i === batches.length - 1, onAuxUsage).then((line) => {
             done++;
             onUIEvent?.({ type: 'compact.progress', done, total: batches.length });
             return line;
@@ -603,8 +604,8 @@ const compactBatches = async (batches: Msg[][], signal?: AbortSignal, onUIEvent?
  * @param {AbortSignal} signal
  * @return {*}
  */
-export const compactToLine = async (toCompact: Msg[], _modelWindow: number, signal?: AbortSignal): Promise<string> =>
-    compactBatches(splitIntoBatches(toCompact), signal);
+export const compactToLine = async (toCompact: Msg[], _modelWindow: number, signal?: AbortSignal, onAuxUsage?: AuxUsageReporter): Promise<string> =>
+    compactBatches(splitIntoBatches(toCompact), signal, undefined, onAuxUsage);
 /**
  * @description: 预留系统提示词和摘要区域
  *  约定：messageArr[0] = 系统提示词、messageArr[1] = 滚动摘要槽。
@@ -725,13 +726,13 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 //   省 1 次 LLM 调用与一轮串行延迟，少一次「原文→行」有损转手；多批保持并行行式路线。
                 const batches = splitIntoBatches(toCompact);
                 summaryMsg.content = batches.length === 1
-                    ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal)
-                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined), event.signal);
+                    ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal, event.onAuxUsage)
+                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined, event.onAuxUsage), event.signal, event.onAuxUsage);
                 // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
                 //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
                 //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
                 if (estimateTokens([summaryMsg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
-                    summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal);
+                    summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
                 }
                 const endTime = performance.now();
 
@@ -763,7 +764,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 continue;
             } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
                 // 同样走仅叙述段自收敛（实体索引保留）
-                summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal);
+                summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
                 event.messageArr.length = 0;
                 event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
                 const store = await getRollingState(event.sessionId);

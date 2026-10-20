@@ -7,7 +7,7 @@
  *     并发锁 / 上下文裁剪 / 环境断言 / 防幻觉校验 / 终端渲染等工业级字段。
  */
 import OpenAI from "openai";
-import { RunAgentEvents, PermissionMode } from "@/agent/type.ts";
+import { RunAgentEvents, PermissionMode, AuxUsageReporter } from "@/agent/type.ts";
 import { UIEvent } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
 
@@ -135,6 +135,9 @@ export interface ToolContext {
      *  并并入预算累计器（E2 圈）。命名呼应 reportCost（E1）。DEEP_SEEK_TOOL_COST=0 时 runAgent 不注入
      *  （回退开关：成本链异常时保结算单不脏）。 */
     toolCostSink?: (yuan: number) => void;
+    /** 辅助模型用量上报（成本信任链 P0-2）：auto 档风险分类器的 aux 调用经此回传 runAgent 计价入账
+     *  （汇入 auxCostYuanAcc → receipt/usageLog + 预算累计器）。runAgent 构造 toolCtx 时注入 reportAuxUsage。 */
+    onAuxUsage?: AuxUsageReporter;
 }
 
 

@@ -10,7 +10,7 @@
  */
 import { Msg } from "@/session/contextCore.ts";
 import { outMsg, toolMsg } from "./type.ts";
-import { ThinkingLevel } from "@/agent/type.ts";
+import { ThinkingLevel, AuxUsageReporter } from "@/agent/type.ts";
 
 /** 标准化流式 chunk（provider 在 yield 前把厂商字段映射为此联合）。
  *  - text：正文增量（DeepSeek/OpenAI 的 delta.content）
@@ -60,11 +60,13 @@ export interface LLMProvider {
      *  厂商 idle stall 超时、思考模式参数（thinking/reasoning_effort）映射均在实现内。 */
     streamChat: (messages: Msg[], tools: toolMsg[] | undefined, opts: ProviderStreamOpts) => AsyncGenerator<ProviderStreamChunk>;
 
-    /** 非流式摘要（走辅助模型、关思考）。签名对齐 chatWithModelWithSummary。 */
-    summarize: (messages: Msg[], tools: toolMsg[] | undefined, opts: { signal?: AbortSignal }) => Promise<outMsg>;
+    /** 非流式摘要（走辅助模型、关思考）。签名对齐 chatWithModelWithSummary。
+     *  opts.onAuxUsage：成功响应后回传 aux usage（成本信任链 P0-2，runAgent 计价入账）。 */
+    summarize: (messages: Msg[], tools: toolMsg[] | undefined, opts: { signal?: AbortSignal; onAuxUsage?: AuxUsageReporter }) => Promise<outMsg>;
 
-    /** 工具调用风险分类器（走辅助模型、关思考、fail-closed）。签名对齐 classifyToolRisk。 */
-    classifyRisk: (toolName: string, args: any, detail: string, signal?: AbortSignal) => Promise<'safe' | 'risky'>;
+    /** 工具调用风险分类器（走辅助模型、关思考、fail-closed）。签名对齐 classifyToolRisk。
+     *  onAuxUsage：成功响应后回传 aux usage（P0-2）。注意 P0-3 后文件类不再进本分类器（上游二元分流）。 */
+    classifyRisk: (toolName: string, args: any, detail: string, signal?: AbortSignal, onAuxUsage?: AuxUsageReporter) => Promise<'safe' | 'risky'>;
 
     /** 把推理/工具调用零件构造成厂商特定 wire 消息（DeepSeek 挂 reasoning_content）。
      *  streamInference 落盘时直接 push/append 此产物，杜绝手工列举字段漏挂 reasoning_content。

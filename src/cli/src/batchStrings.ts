@@ -87,15 +87,15 @@ const ZH = {
 
     // —— 结算单聚合与 receipt 行（报告内嵌） ——
     costFree: "（无价模型，不计钱）",
-    costSummary: (c: { rounds: number; promptTokens: number; cachedTokens: number; costYuan: number | null; toolCostYuan: number; partialPrice: boolean; durationMs: number; subRuns: number }) => {
+    costSummary: (c: { rounds: number; promptTokens: number; cachedTokens: number; costYuan: number | null; toolCostYuan: number; auxCostYuan: number; partialPrice: boolean; durationMs: number; subRuns: number }) => {
         const money = c.costYuan !== null ? `¥${c.costYuan.toFixed(4)}` : "（无价模型，不计钱）";
         const hit = c.promptTokens > 0 ? Math.round((c.cachedTokens / c.promptTokens) * 100) : 0;
         const mins = Math.round(c.durationMs / 6000) / 10;
-        return `${c.rounds} 轮 · ${money} · 缓存命中 ${hit}% · ${mins}min${c.partialPrice ? "（部分记录无价，钱为部分和）" : ""}${c.subRuns > 0 ? ` · 子 run ${c.subRuns} 个已计入` : ""}${c.toolCostYuan > 0 ? ` · 联网 ¥${c.toolCostYuan.toFixed(4)}` : ""}`;
+        return `${c.rounds} 轮 · ${money} · 缓存命中 ${hit}% · ${mins}min${c.partialPrice ? "（部分记录无价，钱为部分和）" : ""}${c.subRuns > 0 ? ` · 子 run ${c.subRuns} 个已计入` : ""}${c.toolCostYuan > 0 ? ` · 联网 ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · 辅助 ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "（无结算单——run 未到收尾即被截断，花费以上方 usageLog 聚合为准）",
-    receiptLine: (r: { rounds: number; costYuan: number | null; cacheHitRate: number; durationMs: number; toolCostYuan?: number }) =>
-        `${r.rounds} 轮 · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "无价"} · 缓存命中 ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · 联网 ¥${r.toolCostYuan.toFixed(4)}` : ""}`,
+    receiptLine: (r: { rounds: number; costYuan: number | null; cacheHitRate: number; durationMs: number; toolCostYuan?: number; auxCostYuan?: number }) =>
+        `${r.rounds} 轮 · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "无价"} · 缓存命中 ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · 联网 ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · 辅助 ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 
     // —— 报告骨架 ——
     rejectedTitle: "# 挂机任务被拒",
@@ -197,11 +197,11 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
         const money = c.costYuan !== null ? `¥${c.costYuan.toFixed(4)}` : "(unpriced model, no money counted)";
         const hit = c.promptTokens > 0 ? Math.round((c.cachedTokens / c.promptTokens) * 100) : 0;
         const mins = Math.round(c.durationMs / 6000) / 10;
-        return `${c.rounds} rounds · ${money} · cache hit ${hit}% · ${mins}min${c.partialPrice ? " (some records unpriced; money is a partial sum)" : ""}${c.subRuns > 0 ? ` · ${c.subRuns} sub-runs included` : ""}${c.toolCostYuan > 0 ? ` · web ¥${c.toolCostYuan.toFixed(4)}` : ""}`;
+        return `${c.rounds} rounds · ${money} · cache hit ${hit}% · ${mins}min${c.partialPrice ? " (some records unpriced; money is a partial sum)" : ""}${c.subRuns > 0 ? ` · ${c.subRuns} sub-runs included` : ""}${c.toolCostYuan > 0 ? ` · web ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · aux ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "(no receipt — the run was truncated before finishing; cost per the usageLog aggregate above)",
     receiptLine: (r) =>
-        `${r.rounds} rounds · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "unpriced"} · cache hit ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · web ¥${r.toolCostYuan.toFixed(4)}` : ""}`,
+        `${r.rounds} rounds · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "unpriced"} · cache hit ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · web ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · aux ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 
     rejectedTitle: "# Batch task rejected",
     reportTitle: (title) => `# Batch task report: ${title}`,

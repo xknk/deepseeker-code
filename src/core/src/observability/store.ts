@@ -51,7 +51,8 @@ export const getGlobalClockPath = (): string => {
 
 export const getTraceStorePath = async (mainTraceId: string): Promise<string> => {
     assertSafeSessionId(mainTraceId, "traceId"); // ★ 文件名含 `${rootId}`，单独硬守防穿越
-    // 💡 修复级联截断 Bug：只切断最后一段 __sub__，保留完整上级链路前缀，防止多子 Agent 并发写入冲突
+    // 💡 子 run 归一：`root__sub__…`（含多级嵌套）一律截到首段主会话 rootId——子 run 与主 run
+    // 共写同一 trace 文件（有意设计，2026-09 确认；depth 字段本就按 run 拆分，勿改独立文件）
     const rootId = getFileName(mainTraceId);
 
     // ★ 命中缓存：同一 rootId 的 jsonl 路径进程内稳定（首调选定文件名即永久复用，跨天不断流）

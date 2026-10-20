@@ -282,6 +282,27 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 scheduleFlush();
                 break;
             }
+            case "text.reset": {
+                // ★ 流式重试重置（内核审查报告 N1，2026-10-20）：streamInference stall/瞬态错误重试前发——
+                //   重试从同一上下文重新生成，已累积的部分正文/思考必须丢弃，否则旧前导文案与新输出同行拼接。
+                //   旧实现无此 case：textBuffer 里的半截文本留着，且 assistantStreamingId 未清导致
+                //   ensureAssistantRow 早退，重试文本直接拼在废弃前导后面。三步对齐 VSCode resetStreams：
+                //   ① 取消挂起的 flush 定时器（否则下一拍 flush 把旧缓冲写回行）；② 清空增量缓冲；
+                //   ③ 清空流式行已显示文本（行保留、流式态不变——后续 delta 继续并入同一行，语义与 webview 一致）。
+                if (flushTimer.current) { clearTimeout(flushTimer.current); flushTimer.current = null; }
+                textBuffer.current = "";
+                thinkingBuffer.current = "";
+                const raId = assistantStreamingId.current;
+                const rthId = thinkingStreamingId.current;
+                if (raId != null || rthId != null) {
+                    setRows((prev) => prev.map((row) => {
+                        if (row.id === raId && row.kind === "assistant") return { ...row, text: "" };
+                        if (row.id === rthId && row.kind === "thinking") return { ...row, text: "" };
+                        return row;
+                    }));
+                }
+                break;
+            }
             case "tool.start": {
                 closeStreaming();
                 const id = newRowId();
@@ -357,15 +378,20 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 const durText = durMs >= 60000 ? `${Math.floor(durMs / 60000)}m${Math.round((durMs % 60000) / 1000)}s` : `${(durMs / 1000).toFixed(1)}s`;
                 const cost = obj.costYuan as number | null | undefined;
                 const toolCost = typeof obj.toolCostYuan === "number" && obj.toolCostYuan > 0 ? (obj.toolCostYuan as number) : null;
+                // 辅助模型花费（P0-2：压缩摘要+风险分类器，按 AUX 价目折算；undefined=本 run 无 aux 调用）
+                const auxCost = typeof obj.auxCostYuan === "number" && obj.auxCostYuan > 0 ? (obj.auxCostYuan as number) : null;
                 const tokTotal = promptT + completionT;
                 const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
                 const costText = typeof cost === "number" ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "meta",
-                    text: `💰 本次 ${rounds} 轮 · ${costText}${toolCost != null ? ` · 联网 ¥${toolCost.toFixed(3)}` : ""} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
+                    text: `💰 本次 ${rounds} 轮 · ${costText}${toolCost != null ? ` · 联网 ¥${toolCost.toFixed(3)}` : ""}${auxCost != null ? ` · 辅助 ¥${auxCost.toFixed(3)}` : ""} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
                 }]);
-                lastRunCostRef.current = typeof cost === "number" ? cost : undefined;
+                // 最近 run 花费（含辅助花费并账，预算口径与 runAgent 预算累计器一致；无价但有 aux 时显 aux）
+                lastRunCostRef.current = typeof cost === "number" ? cost + (auxCost ?? 0) : (auxCost != null ? auxCost : undefined);
                 sessionCostRef.current = typeof cost === "number" ? (sessionCostRef.current ?? 0) + cost : sessionCostRef.current;
+                // 辅助花费并入会话累计（同为真金白银；statusline session_cost_yuan 口径完整）
+                if (auxCost != null) sessionCostRef.current = (sessionCostRef.current ?? 0) + auxCost;
                 lastRunCacheHitRef.current = typeof obj.cacheHitRate === "number" ? (obj.cacheHitRate as number) : undefined;
                 break;
             }

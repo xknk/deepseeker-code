@@ -212,6 +212,9 @@ export const handleUnifiedChat = async (
             locale: opts?.locale,
             outputStyle: opts?.outputStyle,
             budgetYuan: opts?.budgetYuan, // ★ 预算制运行（成本信任链第二环 E1）：主 run 传入，子 run 经 costSink 回灌
+            // ★ P0-1：本轮用户输入原文（inbound.content 已过 slash 展开与 hook 注入定型），供 firstPrompt
+            //   判定取「当前轮」而非消息数组首条（首条复杂 + 本轮寒暄曾误触发 PLAN_FIRST/EARLY_FINAL）。
+            currentUserText: inbound.content,
         }
 
         // ★ 外裹 session 上下文（携带 sessionId）：整个 turn 的 async 链（工具调用 / 路径解析 / hook 派发）

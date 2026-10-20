@@ -66,9 +66,10 @@ export const chatWithModelWithSummary: typeof deepseekProvider.summarize = (mess
     activeProvider.summarize(messages, tools, opts);
 
 /** 工具调用风险分类器（向后兼容 re-export）：autoPermission.ts 继续从此导入。
- *  动态委托 activeProvider（回放模式默认裁决 'safe'，harness 回归免审批）。 */
-export const classifyToolRisk: typeof deepseekProvider.classifyRisk = (toolName, args, detail, signal) =>
-    activeProvider.classifyRisk(toolName, args, detail, signal);
+ *  动态委托 activeProvider（回放模式默认裁决 'safe'，harness 回归免审批）。
+ *  第 5 参 onAuxUsage 透传（成本信任链 P0-2：分类器 aux usage 入 run 级成本账）。 */
+export const classifyToolRisk: typeof deepseekProvider.classifyRisk = (toolName, args, detail, signal, onAuxUsage) =>
+    activeProvider.classifyRisk(toolName, args, detail, signal, onAuxUsage);
 
 /** 错误分类（向后兼容 re-export）：tests/model.test.ts 继续从此导入。
  *  动态委托 activeProvider（回放 provider 自识别注入的故障标记）。 */

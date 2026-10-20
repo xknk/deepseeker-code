@@ -29,8 +29,27 @@ export type RunAgentEvents = (base: TraceBase) => Promise<void>
  */
 /** 思考等级（运行时可切换，缺省回退全局 env 配置）：off=关闭思考 / high=常规 / max=深度。映射见 llm/model.ts。 */
 export type ThinkingLevel = "off" | "high" | "max";
-/** 权限模式（运行时可切换）：default=常规（MUTATION/DANGER 走人工审批）/ auto=辅助模型分类器智能放行（仅工作区内文件编辑，其余转人工）。 */
+/**
+ * 权限模式（运行时可切换）。两档共用同一套自动判定（审查报告 P0-3 裁定 B 方案，2026-10-20）：
+ * 工作区内文件编辑走**确定性三条件快路径**放行——`autoApproval==='file' && safetyLevel!==DANGER
+ * && triggersUndo 为 overwrite/create`（缺一不可）；其余文件类调用一律转人工（二元分类，
+ * LLM 分类器对文件类**整体退出**）。分类器只保留给 command/aggressive 类。
+ * delete_path（DANGER）与 move_file（无 undo）因此**必须**仍走人工审批，不得回落分类器。
+ * ★ 快路径与文件/命令判定**不分档**（default 亦生效，安全定位见 tool/autoPermission.ts）：
+ *   两档差异仅在作用域——auto 额外纳入 'aggressive' 类（web_fetch/web_search、git_commit）与 MCP（mcp__*）。
+ */
 export type PermissionMode = "default" | "auto";
+
+/**
+ * 辅助模型（AUX_MODEL_NAME）用量上报回调（成本信任链 P0-2）：压缩摘要（kind='compact'）与
+ * 风险分类器（kind='classify'）的 aux 调用经此回传 runAgent，按 AUX_MODEL_NAME 单价折算汇入
+ * auxCostYuanAcc → receipt/usageLog 落盘 + 预算累计器。usage 缺省时回调仍触发，计价侧容错跳过
+ * （缺失不计、不阻断）。单价取 run 当时 AUX 价目表；无价（calcCostYuan=null）同样跳过。
+ */
+export type AuxUsageReporter = (
+    usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_tokens?: number } | undefined | null,
+    kind: "compact" | "classify",
+) => void;
 
 export interface RunAgentOptions {
     /** 工具 schema 列表（必传）。不在 runAgent 内置默认，避免与 tool/index.ts 循环依赖。 */
@@ -73,7 +92,9 @@ export interface RunAgentOptions {
     /** 关闭 EARLY_FINAL 早收尾守护（子 agent 用）：final 是交付父级的汇报，「轮次少且无完成声明」是常态而非病理，
      *  误推一轮 = 白烧一次全上下文调用；父级可经 spawn_agent 续跑纠错。TOOL_DIGEST/PHANTOM 不受影响仍拦。 */
     noEarlyFinal?: boolean,
-    /** 权限模式（CLI `/auto` 或 `--auto`）：auto=工作区内文件编辑（edit/write/create）由辅助模型分类器智能放行、高危/异常转人工；default=常规人工审批。见 tool/autoPermission.ts。 */
+    /** 权限模式（CLI `/auto` 或 `--auto`）：两档共用文件类三条件快路径与命令类分类器判定（default 亦自动放行，
+     *  见 PermissionMode 注与 tool/autoPermission.ts——勿再写「default=纯人工审批」）；auto 仅额外纳入
+     *  'aggressive' 类（web_fetch/web_search、git_commit）与 MCP。 */
     permissionMode?: PermissionMode,
     /** 思考等级（运行时覆盖，缺省回退全局 env）：off=关闭 / high=常规 / max=深度（映射见 llm/model.ts）。 */
     thinkingLevel?: ThinkingLevel,
@@ -89,6 +110,14 @@ export interface RunAgentOptions {
      *  仅 runSubagent 经 ToolContext.reportCost 注入；主 run 不设。注意：只进父的预算累计器，
      *  不进父的 receipt/usageLog costYuan（后者按 run 自身 usage 落盘、读侧按 depth 拆分，避免双重计量）。 */
     costSink?: (yuan: number) => void,
+    /** ★ 本轮用户输入原文（成本信任链 P0-1）：供 agentNudges 的 firstPrompt 判定用「当前轮」输入。
+     *  由 serve/cli 宿主定型传入（serve 侧取 slash 展开且 hook 注入**之后**的 inbound.content，值可能含
+     *  hook 注入文本——仅作 nudge 判定用，行为无害）；缺省回退「消息数组末尾最近一条
+     *  非空 user 文本」（多轮对话下等价于本轮输入，修复旧实现 find 从头取首条导致的 PLAN_FIRST 误触发）。 */
+    currentUserText?: string,
+    /** 辅助模型用量上报（成本信任链 P0-2）：runAgent 注入给压缩摘要与工具分类器的回调，
+     *  按 AUX_MODEL_NAME 计价汇入 auxCostYuanAcc（receipt.auxCostYuan / usageLog / 预算累计器）。 */
+    onAuxUsage?: AuxUsageReporter,
 }
 
 /**
@@ -133,6 +162,8 @@ export interface ensureOptions  {
     forceCompact?: boolean,
     /** compact.done 的 trigger 标记（自动治理缺省 'auto'；手动压缩传 'manual'，前端压缩行据此显示「手动」）。 */
     compactTrigger?: 'auto' | 'manual',
+    /** 辅助模型用量上报（成本信任链 P0-2）：压缩摘要调用的 aux usage 经此回传 runAgent 计价入账。 */
+    onAuxUsage?: AuxUsageReporter,
 }
 
 /**

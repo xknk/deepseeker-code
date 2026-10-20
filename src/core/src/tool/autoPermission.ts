@@ -12,16 +12,21 @@
  *
  *  分层判定：
  *   1) 范围：按工具声明 autoApproval（#8a 声明化，原三份 AUTO_*名单已退役）；aggressive 再加 mcp__*。
- *   2) 文件类：工作区围栏（path 不在工作区内→ask）+ 敏感文件 deny 清单（.env/.git/.ssh/密钥→deny）。
+ *   2) 文件类（P0-3 裁定 B 方案，2026-10-20）：工作区围栏（path 不在工作区内→ask）+ 敏感文件 deny 清单
+ *      （.env/.git/.ssh/密钥→deny）之后**二元判定、LLM 分类器对文件类整体退出**——
+ *      三条件快路径（声明 autoApproval='file' && safetyLevel!==DANGER && triggersUndo∈{overwrite,create}，
+ *      缺一不可）命中 → 确定性 allow；否则（delete_path 的 DANGER、move_file 无 undo 等）恒 ask 转人工。
+ *      刻意不做「文件类 !triggersUndo → 分类器」的回落——那会让 delete_path 漏进分类器。
  *   3) 命令类（default 起即覆盖）：高危命令 deny 清单（rm -rf /、格式化、curl|sh、外传敏感、shutdown…→deny）。
- *   4) 辅助模型分类器：safe→allow；risky/异常/超时→ask（fail-closed，绝不静默放行）。
+ *   4) 辅助模型分类器：仅 command/aggressive 类进入——safe→allow；risky/异常/超时→ask（fail-closed）。
  *
  *  ★ 安全定位：分类器是「减少打扰的启发式」，非安全边界——既有后盾（checkPermission 规则、guard 审批网关、
  *    工具内部 resolveSafePath/SSRF/undo 备份）全部保留，在本层之前或独立执行。MCP 黑盒，分类器倾向保守（risky→人工）。
+ *    快路径的 undo 备份兜底在执行层 beforeMutationBackup（凡改必可回退，快路径放行同样触发）。
  */
 import path from "path";
 import { classifyToolRisk } from "@/llm/model.ts";
-import type { ToolContext } from "./type.ts";
+import { ToolContext, ToolSafetyLevel } from "./type.ts";
 
 export type AutoVerdict = 'allow' | 'deny' | 'ask';
 
@@ -39,6 +44,12 @@ export type AutoApprovalDecl = {
     autoApproval?: 'file' | 'command' | 'aggressive';
     pathArgs?: string[];
     primaryArg?: string;
+    /** ★ P0-3（裁定 B 方案）：文件类二元分类读工具声明的安全等级与 undo 策略——
+     *  safetyLevel!==DANGER 且 triggersUndo∈{overwrite,create} → 快路径确定性放行（免 LLM 分类）；
+     *  其余（delete_path 的 DANGER、move_file 无 undo）恒转人工。两字段由调用方（toolExecution）
+     *  从匹配到的 CustomTool.function 原样透传，勿在此按工具名特判（#8a 声明化纪律）。 */
+    safetyLevel?: ToolSafetyLevel;
+    triggersUndo?: 'overwrite' | 'create' | 'delete';
 };
 
 const isMcpTool = (name: string): boolean => name.startsWith('mcp__');
@@ -239,9 +250,12 @@ const isWithinWorkspace = (p: string, cwd?: string): boolean => {
 /**
  * 分类器审批判定：返回 allow（放行，allow-once 语义，不写持久规则）/ deny（硬拒）/ ask（转人工）。
  * @param aggressive false=default（仅文件增删改移 + 命令）；true=/auto（额外含网络/git_commit/MCP）。
- * @param decl 工具的策略声明（CustomTool.function 的 autoApproval/pathArgs/primaryArg，#8a 声明化透传；
- *   MCP 合成名的调用点无对应声明，缺省——mcp__ 前缀按 name 判定）。未声明作用域 → 恒 ask（fail-closed）。
+ * @param decl 工具的策略声明（CustomTool.function 的 autoApproval/pathArgs/primaryArg/safetyLevel/triggersUndo，
+ *   #8a 声明化透传；MCP 合成名的调用点无对应声明，缺省——mcp__ 前缀按 name 判定）。未声明作用域 → 恒 ask（fail-closed）。
  * 静默 fail-closed：分类器异常/超时 → ask（绝不静默放行）。
+ * ★ P0-3（裁定 B 方案，2026-10-20）：文件类改为**二元判定、整体退出 LLM 分类器**——围栏+deny 清单之后，
+ *   三条件快路径（autoApproval='file' && safetyLevel!==DANGER && triggersUndo∈{overwrite,create}，缺一不可）
+ *   命中 → allow（确定性、零分类调用），否则恒 ask。分类器只保留给 command/aggressive 类。
  */
 export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, aggressive = false, decl?: AutoApprovalDecl): Promise<AutoVerdict> => {
     // 1) 范围：default = 文件增删改移（'file'）+ 命令执行（'command'）；
@@ -258,6 +272,13 @@ export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, ag
             if (!isWithinWorkspace(s, ctx.cwd)) return 'ask';
             if (matchBuiltinDeny(s)) return 'deny';
         }
+        // ★ P0-3 二元快路径（缺一不可，全部来自工具声明）：工作区内 + 非敏感文件后，
+        //   非 DANGER 且有 overwrite/create undo 兜底 → 确定性放行（快路径放行同样触发执行层
+        //   beforeMutationBackup，凡改必可回退不变）。其余文件类调用（delete_path 的 DANGER、
+        //   move_file 无 undo 兜底）恒转人工——刻意不回落分类器（二元分类，绝不静默放行）。
+        const fastPath = decl.safetyLevel !== ToolSafetyLevel.DANGER
+            && (decl.triggersUndo === 'overwrite' || decl.triggersUndo === 'create');
+        return fastPath ? 'allow' : 'ask';
     }
     // 3) 命令类：高危命令 deny 清单硬拒（兜底分类器误判；命令无 undo）；命令串按声明主参数取（缺省 command）
     if (decl?.autoApproval === 'command') {
@@ -266,7 +287,8 @@ export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, ag
         if (matchCommandDeny(cmd)) return 'deny';
     }
     // 4) 网络/web：SSRF 已在工具内拦截；MCP/git_commit：黑盒/低危——均仅分类器判断
-    // 5) 辅助模型分类器：safe→放行，risky/异常/超时→转人工（fail-closed）
-    const v = await classifyToolRisk(name, args, '', ctx.abortSignal);
+    // 5) 辅助模型分类器（P0-3 后仅 command/aggressive 类到达此处）：safe→放行，risky/异常/超时→转人工。
+    //    P0-2：ctx.onAuxUsage 透传——分类器 aux 调用回传 runAgent 计价入账（成本信任链）。
+    const v = await classifyToolRisk(name, args, '', ctx.abortSignal, ctx.onAuxUsage);
     return v === 'safe' ? 'allow' : 'ask';
 };

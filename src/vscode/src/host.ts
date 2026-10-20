@@ -216,8 +216,11 @@ export class ChatHost {
     } else if (type === "approval_request") {
       this.lastApprovalEvt = { ...evt };
     } else if (type === "run.receipt") {
-      // ★ 结算单记账（成本信任链第二环）：最近完成 run 的花费供 /budget 查看「上个 run 已花」
-      this.lastRunCostYuan = typeof evt.costYuan === "number" ? evt.costYuan : undefined;
+      // ★ 结算单记账（成本信任链第二环）：最近完成 run 的花费供 /budget 查看「上个 run 已花」。
+      //   token 花费 + 辅助模型花费（P0-2：压缩摘要+风险分类器）并入——预算口径与 runAgent 预算累计器一致（并账）。
+      const cost = typeof evt.costYuan === "number" ? evt.costYuan : null;
+      const aux = typeof evt.auxCostYuan === "number" ? evt.auxCostYuan : 0;
+      this.lastRunCostYuan = cost != null ? cost + aux : (aux > 0 ? aux : undefined);
     } else if (type === "inbox.claimed") {
       // ★ inbox steering：排队文本已在 submit 时渲染过 user 行，此处仅转成 info 提示送达
       //   （勿重复渲染文本；webview 无此事件 case，转换后转发保持零新协议感知）。

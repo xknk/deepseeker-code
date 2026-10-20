@@ -21,7 +21,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
 import { getRollingState, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
-import { AgentEvent, RunAgentOptions } from "./type.ts";
+import { AgentEvent, RunAgentOptions, AuxUsageReporter } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { ToolCallContext } from "./toolExecution.ts";
 import { createRepeatBreaker } from "./repeatBreaker.ts";
@@ -32,8 +32,36 @@ import { createNudgeScheduler } from "./agentNudges.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
 import { calcCostYuan } from "@/config/prices.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
+import { AUX_MODEL_NAME } from "@/llm/providers/deepseek/client.ts";
 
 // ============ 主流程 ============
+/**
+ * P0-1（内核审查报告，2026-10-20）：firstPrompt 解析抽成纯函数——供 PLAN_FIRST / EARLY_FINAL 的
+ * looksComplex 判定取「当前轮」用户输入。取值顺序：
+ *  1) 显式 `options.currentUserText`（宿主在 slash 展开后、hook 注入前定型的本轮输入原文）；
+ *  2) 回退扫消息数组**末尾**最近一条非空 user 文本（多轮对话下等价本轮输入；多模态 parts 取纯文本视图，
+ *     纯贴图轮空文本继续向前找）。
+ * 旧实现 `find` 从头取**首条** user 消息——「首条复杂 prompt + 第 2 轮寒暄」会被误判成复杂轮，
+ * 在寒暄轮误注入 PLAN_FIRST 引导 / 误拦 EARLY_FINAL。修复只动取值方向，判定逻辑（agentNudges）不动。
+ * depth 门保留在这里而非调用方：subagent 工具表含 enter_plan_mode，firstPrompt 泄漏给子 run 会诱导
+ * 其提前进入计划模式（PLAN_FIRST 对子 agent 是病理），抽函数后仍不许绕过。
+ */
+export const resolveFirstPrompt = (
+    message: OpenAI.Chat.ChatCompletionMessageParam[],
+    options: { currentUserText?: string; depth?: number },
+): string => {
+    if ((options.depth ?? 0) !== 0) return "";
+    const explicit = options.currentUserText?.trim();
+    if (explicit) return explicit;
+    const arr = message as any[];
+    for (let i = arr.length - 1; i >= 0; i--) {
+        if (arr[i]?.role !== "user") continue;
+        const t = msgText(arr[i]?.content);
+        if (t.trim()) return t;
+    }
+    return "";
+};
+
 /**
  * 运行 Agent 主循环（流式）。
  *
@@ -81,14 +109,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //         文案/阈值/触发/预算/死循环保险统一抽到 agentNudges.ts；此处仅持实例 + 薄调用，控制流与提示词解耦。
     //  兜底：MAX_AGENT_ROUNDS 极高（500），仅防失控烧 token 的病理死循环；正常任务不会触及，触及亦 graceful（可"继续"接续）。
     const MAX_AGENT_ROUNDS = 500;
-    // ★ 首轮 PLAN_FIRST nudge 入参：首条 user prompt（仅顶层 agent；subagent 不引导自主进计划模式）+ 当前 planMode。
+    // ★ 首轮 PLAN_FIRST nudge 入参：「当前轮」user prompt（仅顶层 agent；subagent 不引导自主进计划模式）+ 当前 planMode。
     //   looksComplex 命中即在首轮注入「先调 enter_plan_mode 规划」引导，配合 systemPrompt 强提示扭转从不进计划模式的问题。
-    const firstPrompt = (() => {
-        if (depth !== 0) return "";
-        const m = (message as any[]).find((x) => x?.role === "user");
-        // ★ 多模态：user content 可能是 parts 数组，取纯文本视图（兼容贴图轮的 PLAN_FIRST 判定）
-        return msgText(m?.content);
-    })();
+    const firstPrompt = resolveFirstPrompt(message, options);
     // ★ 预算累计器（成本信任链第二环 E1）：本 run 经济花费真值 = 自身各轮 usage 折算 + 子 run 经 reportCost
     //   回灌的花费。与 costYuanAcc（receipt/usageLog 落盘口径=run 自身）刻意分账——子 run 花费若并入落盘
     //   costYuan，读侧按 depth 拆分时会同笔钱计两次；预算是控制面，落盘是计量面，各记各的。
@@ -185,6 +208,23 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         budgetSpentYuan += yuan; // E2 预算圈同轮入账（落盘分账、预算并账）
     };
     const toolCostSink = process.env.DEEP_SEEK_TOOL_COST === "0" ? undefined : addToolCost;
+    // ★ 辅助模型成本累计（成本信任链 P0-2，2026-10-20）：压缩摘要（kind='compact'）与风险分类器
+    //   （kind='classify'）的 aux 调用按 AUX_MODEL_NAME 当时单价折算入账。与 costYuanAcc（主模型 token 口径）、
+    //   toolCostYuanAcc（按次计费）三账并立、独立落盘（receipt.auxCostYuan / usageLog.auxCostYuan），
+    //   但同轮并入预算累计器——辅助调用同为真金白银，不入 E2 圈则预算被压缩/分类调用打穿。
+    //   容错：usage 缺省（流式无统计）或 AUX 无价（calcCostYuan=null）→ 不计、不阻断；宿主注入的
+    //   options.onAuxUsage 作为旁路观察者在计价后转发（观察者抛错绝不击垮主链路）。
+    let auxCostYuanAcc = 0;
+    const reportAuxUsage: AuxUsageReporter = (usage, kind) => {
+        if (usage) {
+            const cost = calcCostYuan(AUX_MODEL_NAME, { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, cachedTokens: usage.cached_tokens });
+            if (cost != null && Number.isFinite(cost) && cost > 0) {
+                auxCostYuanAcc += cost;
+                budgetSpentYuan += cost; // E2 预算圈同轮入账（落盘分账、预算并账）
+            }
+        }
+        try { options.onAuxUsage?.(usage, kind); } catch { /* 旁路观察者 */ }
+    };
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
     const toolCounts: Record<string, number> = {};
@@ -259,6 +299,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         lastRealPromptTokens,
                         lastCachedTokens,
                         toolsTokens,
+                        // ★ P0-2：压缩摘要（summarize）的 aux usage 回传计价（见 reportAuxUsage 声明处）
+                        onAuxUsage: reportAuxUsage,
                         // ★ H1：旁路数 compact.done 供 context.usage.compactCount（透传不拦截）
                         onUIEvent: (evt) => { if (evt.type === 'compact.done') runCompactCount++; options.onUIEvent?.(evt); },
                     }
@@ -291,6 +333,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 cleanedToolSchemas, model: options.model, thinkingLevel: options.thinkingLevel,
                 events, keepRecentUnits, compactRatio, modelWindow, toolsTokens,
                 onUIEvent: options.onUIEvent,
+                onAuxUsage: reportAuxUsage,
             });
             if (infResult.kind === 'aborted') {
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
@@ -401,6 +444,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ 按次计费工具成本上报（DeepSeek Search/Fetch）：web 工具经 toolCtx.toolCostSink 拿到闭包，
                 //   成功调用后按次上报进本 run 累计器。
                 toolCostSink,
+                // ★ P0-2：auto 档风险分类器（classifyToolRisk）的 aux usage 回传计价（见 reportAuxUsage 声明处）
+                onAuxUsage: reportAuxUsage,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
@@ -464,15 +509,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 cachedTokens: usageSum?.cached_tokens,
                 costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : undefined,
                 toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（Search/Fetch）
+                auxCostYuan: auxCostYuanAcc > 0 ? Math.round(auxCostYuanAcc * 1e6) / 1e6 : undefined, // 辅助模型花费（压缩摘要+风险分类器，P0-2）
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
         // ★ 子 run 成本回灌（成本信任链第二环 E1）：本 runAgent 为子 run 时（options.costSink 已注入），
         //   收尾把自身总花费报给父累计器——父下一轮边界预算检查即包含本子 run 花费。旁路，绝不击垮收尾。
-        //   ★ 并账：token 花费 + 按次工具花费（toolCostYuanAcc）并入总额——否则子 run 搜索花费漏出预算圈。
-        //   按次花费与 costKnown 无关（单价恒定），total>0 即报。
+        //   ★ 并账：token 花费 + 按次工具花费（toolCostYuanAcc）+ 辅助模型花费（auxCostYuanAcc，P0-2）
+        //   并入总额——任何一笔漏出预算圈，预算制就被那一类调用打穿。后两类与 costKnown 无关（单价恒定
+        //   或独立计价），total>0 即报。
         try {
-            const spentTotal = costYuanAcc + toolCostYuanAcc;
+            const spentTotal = costYuanAcc + toolCostYuanAcc + auxCostYuanAcc;
             if (options.costSink && spentTotal > 0) options.costSink(Math.round(spentTotal * 1e6) / 1e6);
         } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
@@ -490,6 +537,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     cacheHitRate: prompt > 0 ? (usageSum.cached_tokens ?? 0) / prompt : 0,
                     costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
                     toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（undefined 自动省略）
+                    auxCostYuan: auxCostYuanAcc > 0 ? Math.round(auxCostYuanAcc * 1e6) / 1e6 : undefined, // 辅助模型花费（压缩摘要+风险分类器；undefined 自动省略）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
                 });

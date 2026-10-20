@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.69
+
+Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第一批修复五项（2026-10-20）：审批快路径确定性化、辅助模型花费入账闭环、流式重试文本治理、后台任务收权——报告 §8 第一批验收五判据全过，守门测试 kernel-audit-firstbatch.test.ts 22 例 + core 全量 662 例绿。
+
+- **firstPrompt 取「当前轮」输入（P0-1）**：新增 `resolveFirstPrompt`——宿主显式 `currentUserText`（serve/cli 定型传入）优先，缺省从消息数组**末尾**回退扫最近一条非空 user（旧实现 `find` 从头取首条），`depth!==0` 恒空串门禁保留（§8.0②：子 agent 工具表实有 enter_plan_mode，PLAN_FIRST 一调即被转终结信号提前收尾）。修复多轮病理：第 2 轮寒暄（"谢谢，先不用"）被当复杂首条 → 误注入 PLAN_FIRST + EARLY_FINAL 拦掉正常收尾。回归测试双向钉（寒暄零触发、复杂首条照常触发）。
+- **辅助模型花费入账（P0-2）**：压缩摘要与工具风险分类器烧的 AUX 模型钱不再漏账——`onAuxUsage` 回调按 §8.0④ 三处定义全链贯通（`ensureOptions` 压缩链 6 函数逐层透传 / `ToolContext`+`ToolCallContext` 分类链 / runAgent 单一累加器），一律按 `AUX_MODEL_NAME` 价目折算（复用主模型单价=金额直接错）；无价/零花费缺失不计、不阻断。`auxCostYuan` 进预算圈（超限熔断把 aux 钱也算上）、receipt 结算单与 usageLog（无调用自动省略），CLI 结算行 / VSCode 事件行 / 挂机报告三端显「辅助 ¥x」。
+- **400 降级压缩补漏**（实施后残留点）：streamInference 的 context_length 降级路径也调 `ensureFitsWindow`，初版漏接 onAuxUsage——已透传并入守门断言（主循环压缩与降级压缩同一本账）。
+- **文件类审批二元化（P0-3，裁定 B 方案）**：`autoApproval='file'` 改纯确定性判定——工作区围栏 + 敏感文件 deny 清单照旧，其后三条件快路径（`safetyLevel!==DANGER && triggersUndo∈{overwrite,create}`，缺一不可，§8.0①）命中 → allow；其余（delete_path 的 DANGER、move_file 无 undo 兜底）恒 ask 转人工。**LLM 分类器对文件类整体退出**（分类器调用次数=0 进测试断言，不只验放行结果）；刻意不做「!triggersUndo → 分类器」回落（那会让 delete_path 漏进分类器）。快路径放行同样触发执行层 beforeMutationBackup（凡改必可回退，结构断言钉住备份门与审批解耦）。命令/aggressive 类照旧走分类器。注释同步：PermissionMode 两档语义澄清（快路径 default 亦生效，两档差异仅 aggressive/MCP 作用域）。
+- **text.reset 宿主消费矩阵（N1）**：流式重试前 core 发的 text.reset 此前 CLI/webview/挂机三宿主漏消费，重试文本会拼在旧残影后——CLI 新增 case 按 §8.0③ 清干净（取消 pending flushTimer + 清 text/thinking buffer + 清流式行文本，重试从行原点重写）；webview/挂机消费点核验，四触点矩阵测试钉住。
+- **run_in_background 收权（P1-8′）**：进 `SUBAGENT_DENYLIST`（父 run 收尾时后台任务成孤儿）与 `BATCH_DEFAULT_DENYLIST`（挂机 detached 进程无人观测）；工单 `tools:` 显式解锁语义不变（§8.0⑤：应答器放行集=编辑类∪解锁，无需动应答器）。
+- **结算与台账修正（N4 顺手项）**：batch 子 run 花费聚合改 `__sub__` 前缀归拢（旧精确等值把子 run 花费全漏掉）；store.ts trace 文件名注释纠偏（`__sub__` 一律截到首段主会话 id、子 run 与主 run 共写同一 trace 文件系有意设计）。
+
 ## 1.0.68
 
 DeepSeek Search & Fetch 接入（以现有 web_search / web_fetch 的「工具后端」形态补强联网能力，2026-10-19 随 V4.1-Flash-1017 开放的 /tools/search · /tools/fetch REST 端点）+ 价格表例行复核 + vision-exp 补价。

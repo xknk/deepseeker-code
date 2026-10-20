@@ -214,10 +214,14 @@ switch (evt.type) {
         const cost = typeof evt.costYuan === "number" ? evt.costYuan : null;
         // 按次计费工具花费（DeepSeek Search/Fetch）：>0 才拼段，无调用不出现（undefined 自动省略）
         const toolCost = typeof evt.toolCostYuan === "number" && evt.toolCostYuan > 0 ? evt.toolCostYuan : null;
+        // 辅助模型花费（P0-2：压缩摘要+风险分类器，按 AUX 价目折算）：同款 >0 才拼段
+        const auxCost = typeof evt.auxCostYuan === "number" && evt.auxCostYuan > 0 ? evt.auxCostYuan : null;
         const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
-        addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated, toolCost != null ? S.evReceiptWeb(toolCost) : ""));
+        addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated,
+          toolCost != null ? S.evReceiptWeb(toolCost) : "",
+          auxCost != null ? S.evReceiptAux(auxCost) : ""));
         break;
       }
       case "task.exit": {
