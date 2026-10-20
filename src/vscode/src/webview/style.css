@@ -234,6 +234,47 @@ body {
   100% { stroke-width: 2; }
 }
 
+/* ★ 水位悬浮卡（hover 环即出，对标 CC 悬浮百分比卡；逻辑在 toolbar.js showRingCard）：
+   body 直挂 fixed 弹层（composer 内层 overflow/z-index 复杂，body 级最稳）；
+   pointer-events:none 纯展示——不截获 hover，移开即隐无闪现；百分比随水位同色（健康灰/橙/红）。 */
+.ctx-ring-card {
+  position: fixed;
+  z-index: 40; /* 弹层同档（30+），压过 composer/消息流 */
+  pointer-events: none;
+  min-width: 128px;
+  padding: 7px 11px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, var(--bg-deep));
+  box-shadow: var(--vscode-widget-shadow, 0 4px 14px rgba(0, 0, 0, 0.45));
+  text-align: center;
+}
+
+.ctx-ring-card-pct {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--fg);
+}
+
+/* 百分比着色与环弧同阈值同色：ok 火灰不动（默认 var(--fg)），warn 橙 / hot 红 */
+.ctx-ring-card.warn .ctx-ring-card-pct { color: var(--vscode-charts-orange, #d18616); }
+.ctx-ring-card.hot .ctx-ring-card-pct { color: var(--vscode-charts-red, #f14c4c); }
+
+.ctx-ring-card-sub {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  margin-top: 2px;
+}
+
+.ctx-ring-card-hint {
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  margin-top: 5px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .actions {
   display: flex;
   gap: 1px;
@@ -408,11 +449,13 @@ body {
 
 /* ★ 钉住态渐隐（反馈：首版生硬切边，滑过的内容在块底被拦腰切断，CC 是溶入底色）：
    rows.js 滚动时给已钉住的行打 .stuck，此处才渲染块底渐变——自然流里绝不渲染，
-   否则渐变顶部的实底段会吃掉下一条回答的开头。 */
-.row-user.stuck::after {
+   否则渐变顶部的实底段会吃掉下一条回答的开头。
+   锚点=.user-block 顶按卡片视觉底边定位（head+cardH）：钉住钳高是 clip-path 视觉裁剪，
+   行盒不再收缩——旧写法 top:100%（行底）会落到 320px 盒底，渐变飘离卡片。 */
+.row-user.stuck .user-block::after {
   content: "";
   position: absolute;
-  top: 100%;
+  top: calc(var(--stuck-head-h) + var(--stuck-card-h));
   left: 0;
   right: 0;
   height: 34px;
@@ -433,12 +476,45 @@ body {
 }
 
 /* ★ 钉住态钳高（对标 CC 钉住卡：只露 2 行，第二行截断）：钉住的职责是「提醒你问过什么」而非
-   复读全文——气泡外观保持自然流原样（描边/圆角/底色，CC 同款卡片，不蜕壳不通栏），高度钳到
+   复读全文——气泡外观保持自然流原样（描边/圆角/底色，CC 同款卡片，不蜕壳不通栏），视觉钳到
    ~2 行，超出带内自滚（滚动条已藏），全文走「展开」pill / 点击卡片浮层。自然流维持
-   min(50vh,320px) 不变；两侧限高不同，钉住瞬间卡片收缩一次，webview 是 Chromium，
-   滚动锚定（overflow-anchor）自动补偿位移。 */
+   min(50vh,320px) 不变。
+   ★★ 钳高必须「只裁视觉、不动布局」（clip-path，绝非 max-height）：.stuck 由滚动位置驱动
+   （syncStuckRows 按 rect.top 打标），钳高若改布局，钉住瞬间行高塌 ~272px（320→48），后随内容
+   与 scrollHeight 同步跳变 → 浏览器钳回 scrollTop、滚动锚定再补偿，而打标阈值本身就是滚动位置
+   ——自指反馈震荡：贴底被弹回、nearBottom 量到幻影大缝隙（>100px 门禁）跟随永失、手动滚轮
+   过阈值即被弹回（实锤：长提问钉住后内容区既不能自动也不能手动落底）。clip-path 纯裁剪
+   不参与布局，滚动 ⇄ 布局彻底解耦。 */
+.row-user.stuck {
+  --stuck-card-h: min(12vh, 48px); /* 卡片可见高（时间行以下 ~2 行） */
+  --stuck-head-h: 18px; /* .user-time 高（11px×1.5 行高 + 1px margin ≈17.5 取整） */
+  /* 行盒仍是布局全高（320px 气泡），裁剪后只露卡片——行底必须透明，让内容从卡片下滑过可见 */
+  background: transparent;
+  /* 320px 不可见区不挡点击：交互放行收敛到卡片/pill/徽标/贴图（下两条） */
+  pointer-events: none;
+}
+.row-user.stuck .user-block:not(.has-time) {
+  --stuck-head-h: 0px; /* 无时间行：卡片顶=块顶 */
+}
 .row-user.stuck .user-bubble {
-  max-height: min(12vh, 48px);
+  /* 底边 max(0,…) 兜底短提问：气泡不足 48px 时整段 max→0=不裁 */
+  clip-path: inset(0 0 max(0px, calc(100% - var(--stuck-card-h))) 0 round 10px);
+  /* 行底已透明，卡片自带的 7% 灰罩是半透明——实底化（罩色合成 sideBar 底色）防滑过内容透字；
+     降级线：不支持 color-mix 的宿主退回不透明 sideBar 底色（丢灰罩、不出色差） */
+  background: var(--vscode-sideBar-background, #252526);
+  background: color-mix(in srgb, rgba(128, 128, 128, 0.07), var(--vscode-sideBar-background, #252526));
+  pointer-events: auto;
+}
+.row-user.stuck .user-attachments,
+.row-user.stuck .user-more,
+.row-user.stuck .msg-undo {
+  pointer-events: auto;
+}
+/* ★ 「展开」pill 钉住态换位：块盒不再收缩，bottom:6px 会落到 320px 盒底——按卡片视觉底边
+   重算（card 底 - pill 高 ~18px - 6px 间距） */
+.row-user.stuck .user-more {
+  top: calc(var(--stuck-head-h) + var(--stuck-card-h) - 24px);
+  bottom: auto;
 }
 
 /* ★ 超长提问点击全文阅读：气泡被 320px 封顶后行内自滚，点气泡弹全屏浮层看全文（复用 assistant
@@ -1252,6 +1328,24 @@ body {
 }
 .diff-overlay-body .plan-overlay-content a {
   color: var(--vscode-textLink-foreground, var(--focus));
+}
+/* overlay 全文中的 GFM 表格：与消息流内同款描边+表头底（此前只在 .assistant-body 有作用域，
+   长回复（.assistant-content）与 overlay 双双漏表格样式——表格无线不可读） */
+.diff-overlay-body .plan-overlay-content table {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+.diff-overlay-body .plan-overlay-content th,
+.diff-overlay-body .plan-overlay-content td {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.35));
+  padding: 3px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.diff-overlay-body .plan-overlay-content th {
+  background: rgba(128, 128, 128, 0.12);
+  font-weight: 700;
 }
 
 /* 计划标题可点击折叠条（▼/▶ 切换正文显示） */

@@ -95,7 +95,7 @@ export interface Todo {
  * - 工具进度（tool.start/end）不在此处，由 AgentEvent 负责，避免重复
  */
 export type UIEvent =
-    | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string }
+    | { type: 'approval_request'; sessionId: string; toolsId: string; toolName: string; detail: string; fullDetail?: string }
     | { type: 'tool.denied'; toolsId: string; toolName: string }
     | { type: 'tool.progress'; toolsId?: string; toolName?: string; message: string }
     | { type: 'todo.update'; todos: Todo[] }
@@ -109,7 +109,7 @@ export type UIEvent =
     /** 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费（对标 CC /cost 的每 run 实时行版）。
      *  只用 usage 真实回传数字按当时单价折算（官网价可对账）；无价模型 costYuan=null（前端只显 token 不显钱）。
      *  门禁照 compact.done：仅主 agent（depth 0）且有 onUIEvent 出口；未产生推理的空 run（无 usageSum）不发零单。 */
-    | { type: 'run.receipt'; rounds: number; promptTokens: number; completionTokens: number; cachedTokens: number; cacheHitRate: number; costYuan: number | null; toolCostYuan?: number; auxCostYuan?: number; durationMs: number; budgetTruncated?: boolean }
+    | { type: 'run.receipt'; rounds: number; promptTokens: number; completionTokens: number; cachedTokens: number; cacheHitRate: number; costYuan: number | null; toolCostYuan?: number; auxCostYuan?: number; subCostYuan?: number; durationMs: number; budgetTruncated?: boolean }
     /** 后台任务退出主动通知（对标 CC「Background command X failed」）：进程退出（含被杀）即发，
      *  不再依赖模型轮询 get_background_output。ok=exited 且 exitCode===0；killed=用户中止/手动停止。 */
     | { type: 'task.exit'; taskId: string; command: string; status: 'exited' | 'killed'; exitCode: number | null; ok: boolean }
@@ -118,8 +118,10 @@ export type UIEvent =
      *  前端仅镜像 running；phase/name/depth 供调试与未来扩展。 */
     | { type: 'subagent.count'; running: number; phase: 'start' | 'stop'; name?: string; depth: number }
     /** P3-7 子 agent 中间叙述透出：~1s 节流取最后完整行（纯 UX，防长任务静默被当卡死）。
-     *  done=true 表示该子 agent 已结束 → 前端清瞬态行；并发多子 agent 时单行槽 last-writer-wins（可接受）。 */
-    | { type: 'subagent.progress'; text: string; done?: boolean }
+     *  done=true 表示该子 agent 已结束 → 前端清其瞬态行。
+     *  ★ I-7：agentKey（子会话 id，唯一）供前端每 agent 一行（原单行槽并发时 last-writer-wins）；
+     *  name（manifest 名）供行首标注。 */
+    | { type: 'subagent.progress'; text: string; done?: boolean; agentKey?: string; name?: string }
     /** 上下文水位（成本信任链第三环 H1）：每轮 round.end 发（门禁仅主 agent depth=0）。
      *  usedTokens 为估算口径（estimateTokens×calibRatio+toolsTokens，与 ensureFitsWindow/nudge 同公式，非 API 真实值）；
      *  compactCount=本 run 内已发生压缩次数（前端另有会话级累计，见 events.js compact.done 消费处）。

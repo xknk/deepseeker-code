@@ -16,6 +16,8 @@ type Props = { toolName: string; detail: string; selectedIndex: number; wrapW: n
 
 const OPTIONS = [
     { label: S.approvalAllow, value: 'allow-once', color: THEME.ok },
+    // ★ I-4：会话级记忆（对标 CC「本会话不再询问」）——纯内存，会话结束失效
+    { label: S.approvalAllowSession, value: 'allow-session', color: THEME.ok },
     { label: S.approvalAllowAlways, value: 'allow-always', color: THEME.warn },
     { label: S.approvalDeny, value: 'deny', color: THEME.danger },
 ];

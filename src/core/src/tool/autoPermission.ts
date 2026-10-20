@@ -203,6 +203,40 @@ export const isScriptRunnerCommand = (cmd: string): boolean => {
 };
 
 /**
+ * ★ N5（内核审查报告第三批，2026-10-20 维护者拍板：仅 batch 场景纳入）：判定「解释器直接执行
+ *  仓库内代码」形态——node ./x.js / python x.py / 裸 tsc / make / cargo build / go test 等。
+ *  与 npm 族（isScriptRunnerCommand）风险同源（都是执行仓库作者提交的代码），但历史上只走分类器，
+ *  判 SAFE 即放行。交互场景有分类器 + 人工在场兜底，维持零打扰（本函数刻意不进 toolExecution 判定链）；
+ *  batch 挂机无人值守则由 batchRunner 据此拦截（execute 包装，见该处注释），工单 tools: 加
+ *  伪槽位 "interpreter" 显式解锁后放行。
+ *
+ *  两组头（照 SCRIPT_RUNNER_HEADS 纪律：容忍路径前缀/Windows 扩展名/任意空白，宁窄勿漏）：
+ *   - 需脚本路径参数：node/deno/bun/tsx/ts-node/python/python3/py/ruby/perl/php——无仓库内脚本
+ *     路径参数（node -v、python -c）不拦；脚本路径须是仓库相对形态（./x、../x 或脚本扩展名相对
+ *     token；盘符/UNC//开头绝对路径视为外部程序，不属「仓库内」面）。
+ *   - 裸跑即执行仓库定义：tsc（tsconfig）/make（Makefile）/cargo（Cargo.toml）/go（go.mod，
+ *     test/build/run 都是编译执行仓库代码）——无需路径参数，出现即拦。
+ *  含 shell 元字符（; | $( 等）不判：与 isScriptRunnerCommand 同纪律，交下游既有闸门。
+ */
+const INTERP_EXE = String.raw`\s*([^\s"'\`]*[\\/])?(node|deno|bun|tsx|ts-node|python3?|py|ruby|perl|php)(\.exe|\.cmd|\.bat|\.ps1)?\b`;
+const INTERP_BARE_EXE = String.raw`\s*([^\s"'\`]*[\\/])?(tsc|make|cargo|go)(\.exe|\.cmd|\.bat|\.ps1)?\b`;
+/** 仓库内脚本路径 token：./x、../x 前缀或相对路径（含子目录 src/build.ts）；盘符/UNC//开头绝对路径=外部程序，不算。 */
+const REPO_SCRIPT_TOKEN = /^(?![A-Za-z]:)(?![\\/])(?:\.{1,2}[\\/])?(?:[^\\/: \t"']+[\\/])*[^\\/: \t"']+\.(?:js|mjs|cjs|ts|mts|cts|tsx|jsx|py|pyw|sh|bash|rb|pl|php)$/i;
+
+export const isInterpreterRepoScript = (cmd: string): boolean => {
+    const c = (cmd || "").trim();
+    if (!c || hasShellMetachars(c)) return false;
+    const head = new RegExp(`^${INTERP_EXE}`, 'i');
+    const bare = new RegExp(`^${INTERP_BARE_EXE}`, 'i');
+    if (bare.test(c)) return true; // tsc/make/cargo/go：裸跑即执行仓库定义
+    const m = head.exec(c);
+    if (!m) return false;
+    // 解释器组：扫其余 token，存在仓库内脚本路径参数即命中（flag 形态 --x / -x 跳过）
+    const rest = c.slice(m[0].length);
+    return rest.split(/\s+/).filter(Boolean).some(t => !t.startsWith("-") && REPO_SCRIPT_TOKEN.test(t));
+};
+
+/**
  * 只读命令的写选项检测：sed 的 -i（原地写）、find 的 -delete/-exec/-ok（销毁/执行子句）是写操作，命中即不免审。
  * ★ hasShellMetachars 已挡住 `;`/`|`/`$(` 等，故此处只做 token 级匹配（find -exec cmd \; 的 \; 本就含 `;`，已被前置挡）。
  *   -i 检测仅对 sed 头限定，避免误杀 ls -i（显示 inode）等无关 -i flag。
@@ -289,6 +323,12 @@ export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, ag
     // 4) 网络/web：SSRF 已在工具内拦截；MCP/git_commit：黑盒/低危——均仅分类器判断
     // 5) 辅助模型分类器（P0-3 后仅 command/aggressive 类到达此处）：safe→放行，risky/异常/超时→转人工。
     //    P0-2：ctx.onAuxUsage 透传——分类器 aux 调用回传 runAgent 计价入账（成本信任链）。
+    //    ★ I-5 分类器可见性（内核审查报告第三批，2026-10-20）：分类器最长静默 10s，是「工具卡住」
+    //    误感知的主源——调用前发「安全判定中…」进度、完成后回报结论，三宿主 tool.progress 已消费
+    //    （CLI 工具卡 / VSCode 工具卡；headless 宿主未注入 emitProgress 时静默跳过，零影响）。
+    //    此处发在分类器真正运行的作用域内：文件类快路径等确定性分支零打扰，不刷无谓进度。
+    ctx.emitProgress?.('🔒 安全判定中…（辅助模型分类，最长 10s）');
     const v = await classifyToolRisk(name, args, '', ctx.abortSignal, ctx.onAuxUsage);
+    ctx.emitProgress?.(v === 'safe' ? '🔒 安全判定：放行' : '🔒 安全判定：未放行（转人工审批）');
     return v === 'safe' ? 'allow' : 'ask';
 };

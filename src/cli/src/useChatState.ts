@@ -140,14 +140,23 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         compactProgressIdRef.current = null;
         setRows((prev) => prev.filter((r) => r.id !== pid));
     }, []);
-    /** 子 agent 进度瞬态行 id（subagent.progress 单行更新；done/final/error 收敛删除，P3-7 长任务防「只见计数器」）。 */
-    const subagentProgressIdRef = useRef<number | null>(null);
-    /** 删除子 agent 进度瞬态行（done / run 终结共用）。 */
-    const dropSubagentProgressRow = useCallback(() => {
-        const pid = subagentProgressIdRef.current;
-        if (pid == null) return;
-        subagentProgressIdRef.current = null;
-        setRows((prev) => prev.filter((r) => r.id !== pid));
+    /** 子 agent 进度瞬态行槽（P3-7 长任务防「只见计数器」；I-7 每 agent 一行：key=agentKey → 行 id）。
+     *  done 按 key 删行；run 终结（final/error）清全部。 */
+    const subagentProgressRowsRef = useRef<Map<string, number>>(new Map());
+    /** 删除子 agent 进度瞬态行：带 key 删对应 agent 行；不带 key 清全部（run 终结兜底）。 */
+    const dropSubagentProgressRow = useCallback((key?: string) => {
+        const m = subagentProgressRowsRef.current;
+        if (key) {
+            const rid = m.get(key);
+            if (rid == null) return;
+            m.delete(key);
+            setRows((prev) => prev.filter((r) => r.id !== rid));
+            return;
+        }
+        if (m.size === 0) return;
+        const ids = new Set(m.values());
+        m.clear();
+        setRows((prev) => prev.filter((r) => !ids.has(r.id!)));
     }, []);
     /** 输出风格名（P2-16）；/output-style 运行时覆盖，runOnce 透传注入 system prompt 的 persona。undefined=中性默认。 */
     const outputStyleRef = useRef<string | undefined>(undefined);
@@ -380,12 +389,14 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 const toolCost = typeof obj.toolCostYuan === "number" && obj.toolCostYuan > 0 ? (obj.toolCostYuan as number) : null;
                 // 辅助模型花费（P0-2：压缩摘要+风险分类器，按 AUX 价目折算；undefined=本 run 无 aux 调用）
                 const auxCost = typeof obj.auxCostYuan === "number" && obj.auxCostYuan > 0 ? (obj.auxCostYuan as number) : null;
+                // 子 run 花费（Q12：父结算单口径不含子 run，此处并列补偿展示；undefined=本 run 无子任务花费）
+                const subCost = typeof obj.subCostYuan === "number" && obj.subCostYuan > 0 ? (obj.subCostYuan as number) : null;
                 const tokTotal = promptT + completionT;
                 const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
                 const costText = typeof cost === "number" ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
                 setRows((prev) => [...prev, {
                     id: newRowId(), kind: "meta",
-                    text: `💰 本次 ${rounds} 轮 · ${costText}${toolCost != null ? ` · 联网 ¥${toolCost.toFixed(3)}` : ""}${auxCost != null ? ` · 辅助 ¥${auxCost.toFixed(3)}` : ""} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
+                    text: `💰 本次 ${rounds} 轮 · ${costText}${toolCost != null ? ` · 联网 ¥${toolCost.toFixed(3)}` : ""}${auxCost != null ? ` · 辅助 ¥${auxCost.toFixed(3)}` : ""}${subCost != null ? ` · 子任务 ¥${subCost.toFixed(3)}` : ""} · 缓存命中 ${hitPct}% · ${durText}${obj.budgetTruncated ? " · 预算截断" : ""}`,
                 }]);
                 // 最近 run 花费（含辅助花费并账，预算口径与 runAgent 预算累计器一致；无价但有 aux 时显 aux）
                 lastRunCostRef.current = typeof cost === "number" ? cost + (auxCost ?? 0) : (auxCost != null ? auxCost : undefined);
@@ -422,20 +433,25 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
                 break;
             }
             case "subagent.progress": {
-                // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行，单行原位更新；
-                // done / run 终结时清行。纯 UX，恒留动态区（isDynamicRow），不落 Static。
+                // 子 agent 中间叙述瞬态行（P3-7）：~1s 节流的最后完整行；★ I-7 每 agent 一行
+                // （key=agentKey 子会话 id，行首带 manifest 名），done 按 key 删行、run 终结清全部。
+                // 纯 UX，恒留动态区（isDynamicRow），不落 Static。
                 flush();
-                if (obj.done) { dropSubagentProgressRow(); break; }
+                const agentKey = typeof obj.agentKey === "string" && obj.agentKey ? obj.agentKey : "__default__";
+                if (obj.done) { dropSubagentProgressRow(agentKey); break; }
                 const ptext = String(obj.text ?? "").slice(0, 160);
                 if (!ptext) break;
-                if (subagentProgressIdRef.current == null) {
+                const agentName = typeof obj.name === "string" && obj.name ? `⟨${obj.name}⟩ ` : "";
+                const pline = `${agentName}${ptext}`;
+                const rowMap = subagentProgressRowsRef.current;
+                const existingId = rowMap.get(agentKey);
+                if (existingId == null) {
                     const id = newRowId();
-                    subagentProgressIdRef.current = id;
-                    setRows((prev) => [...prev, { id, kind: "subagent-progress", text: ptext }]);
+                    rowMap.set(agentKey, id);
+                    setRows((prev) => [...prev, { id, kind: "subagent-progress", text: pline }]);
                 } else {
-                    const pid = subagentProgressIdRef.current;
                     setRows((prev) => prev.map((r) =>
-                        r.id === pid && r.kind === "subagent-progress" ? { ...r, text: ptext } : r));
+                        r.id === existingId && r.kind === "subagent-progress" ? { ...r, text: pline } : r));
                 }
                 break;
             }
@@ -647,9 +663,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const runPlanStage = useCallback(async (sid: string, researchPrompt: string): Promise<boolean> => {
         await runOnce(sid, researchPrompt, true);
         const plan = takeProposedPlan();
-        if (plan == null) return false;
+        // ★ I-1（内核审查报告第三批，2026-10-20）：计划轮未产出方案时不再静默——「拒绝方案」路径
+        //   有 pushInfo（planKeepPlanning），此处对齐补提示，用户明确知道仍在计划模式及可选出路。
+        if (plan == null) { pushInfo(S.planNoProposal); return false; }
         return await approveAndImplement(sid, plan);
-    }, [runOnce, takeProposedPlan, approveAndImplement]);
+    }, [runOnce, takeProposedPlan, approveAndImplement, pushInfo]);
 
     /** ★ inbox steering：busy 期间排队补充输入（入 core per-session 队列，runAgent 回合边界 claim）。
      *  本地立即渲染 user 行与提示行（runAgent claim 时会 appendMessage 落盘，回放不重复——本地行不落盘）。

@@ -24,16 +24,22 @@ export interface ApprovalMeta {
     toolCallId: string;
     /** 所属会话 ID（Web 宿主据此做跨会话审批越权校验） */
     sessionId: string;
+    /** ★ I-6（内核审查报告第三批，2026-10-20）：截断前的审批说明全文——detail 进审批流前经
+     *  truncateApprovalDetail（2000 字符）防大帧，宿主若提供「查看完整 diff」入口（VSCode overlay）
+     *  用本字段渲染全文。可选：带宽受限通道（SSE）可不附带。 */
+    fullDetail?: string;
 }
 
 /**
- * 审批决策（对标 Claude Code 的三选一）：
+ * 审批决策（对标 Claude Code 的三选一；I-4 扩出会话级记忆）：
  *  - 'allow-once'：仅本次放行，不记忆；
+ *  - 'allow-session'：放行并写会话级 allow 规则（permissions.addSessionPermissionRule，纯内存），
+ *    本会话内命中同作用域免审，会话结束即失效（对标 CC「本会话不再询问」）；
  *  - 'allow-always'：放行并把该工具写成持久 allow 规则（见 permissions.addPermissionRule），
  *    下次 checkPermission 直接命中免审；
  *  - 'deny'：拒绝。
  */
-export type ApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+export type ApprovalDecision = 'allow-once' | 'allow-session' | 'allow-always' | 'deny';
 
 // ============ P2-12 结构化提问（ask_question 工具的宿主钩子）============
 

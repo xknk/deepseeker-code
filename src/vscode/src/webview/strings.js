@@ -25,9 +25,9 @@ const ZH = {
   tbRootTitle: (p) => `项目根：${p}（点击切换）`,
   tbRootTitleNone: "未选择项目根（点击选择）",
   tbModeLabel: (m) => (m === "plan" ? "计划" : m === "auto" ? "自动" : "手动"),
-  tbRingTip: (used, win, pct, compactCount) =>
-    `上下文水位（估算口径）：${used.toLocaleString()} / ${win.toLocaleString()} tok（${pct}%）`
-    + `${compactCount ? ` · 已压缩 ${compactCount} 次` : ""} · 点击立即压缩 · 详情 /context`,
+  tbRingCardUsed: (used, win) => `${used.toLocaleString()} / ${win.toLocaleString()} tok`,
+  tbRingCardCompact: (n) => `已压缩 ${n} 次`,
+  tbRingCardHint: "点击立即压缩 · 详情 /context",
 
   // ———————— composer（cp*） ————————
   cpPlaceholder: "输入消息，/ 查看命令",
@@ -98,6 +98,7 @@ const ZH = {
 
   // ———————— modals（md*） ————————
   mdAllowOnce: "✅ 允许本次",
+  mdAllowSession: "🗓️ 本会话内允许",
   mdAllowAlways: "♻️ 总是允许",
   mdDeny: "🚫 拒绝",
   mdApprovalTitle: (name) => `🔐 操作审批 · ${name}`,
@@ -178,10 +179,11 @@ const ZH = {
   evDenied: (name) => `🚫 ${name} 被拒绝`,
   evVisionDown: (model) => `🖼 模型 ${model} 不支持图片，已自动降级为文本处理（已记住，后续消息直接按文本发送）`,
   evSubagent: (t) => `↳ 子agent ${t}`,
-  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText, auxText) =>
-    `💰 本次 ${rounds} 轮 · ${costText}${toolText ? ` · ${toolText}` : ""}${auxText ? ` · ${auxText}` : ""} · 缓存命中 ${hitPct}% · ${durText}${budgetTruncated ? " · 预算截断" : ""}`,
+  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText, auxText, subText) =>
+    `💰 本次 ${rounds} 轮 · ${costText}${toolText ? ` · ${toolText}` : ""}${auxText ? ` · ${auxText}` : ""}${subText ? ` · ${subText}` : ""} · 缓存命中 ${hitPct}% · ${durText}${budgetTruncated ? " · 预算截断" : ""}`,
   evReceiptWeb: (yuan) => `联网 ¥${yuan.toFixed(3)}`,
   evReceiptAux: (yuan) => `辅助 ¥${yuan.toFixed(3)}`,
+  evReceiptSub: (yuan) => `子任务 ¥${yuan.toFixed(3)}`,
   evTaskDone: (cmd) => `📧 后台任务完成（exit=0）：${cmd}`,
   evTaskKilled: (cmd) => `⏹ 后台任务已停止：${cmd}`,
   evTaskFail: (code, cmd) => `⚠️ 后台任务失败（exit=${code}）：${cmd}`,
@@ -239,9 +241,9 @@ const EN = {
   tbRootTitle: (p) => `Project root: ${p} (click to switch)`,
   tbRootTitleNone: "No project root selected (click to pick)",
   tbModeLabel: (m) => (m === "plan" ? "Plan" : m === "auto" ? "Auto" : "Manual"),
-  tbRingTip: (used, win, pct, compactCount) =>
-    `Context water level (estimated): ${used.toLocaleString()} / ${win.toLocaleString()} tok (${pct}%)`
-    + `${compactCount ? ` · compacted ${compactCount}×` : ""} · click to compact now · details /context`,
+  tbRingCardUsed: (used, win) => `${used.toLocaleString()} / ${win.toLocaleString()} tok`,
+  tbRingCardCompact: (n) => `compacted ${n}×`,
+  tbRingCardHint: "click to compact now · details /context",
 
   // ———————— composer ————————
   cpPlaceholder: "Type a message, / for commands",
@@ -312,6 +314,7 @@ const EN = {
 
   // ———————— modals ————————
   mdAllowOnce: "✅ Allow once",
+  mdAllowSession: "🗓️ Allow this session",
   mdAllowAlways: "♻️ Always allow",
   mdDeny: "🚫 Deny",
   mdApprovalTitle: (name) => `🔐 Approve action · ${name}`,
@@ -392,10 +395,11 @@ const EN = {
   evDenied: (name) => `🚫 ${name} denied`,
   evVisionDown: (model) => `🖼 Model ${model} doesn't support images; automatically downgraded to text this turn (remembered — later messages go as text directly)`,
   evSubagent: (t) => `↳ subagent ${t}`,
-  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText, auxText) =>
-    `💰 Run: ${rounds} turn${rounds > 1 ? "s" : ""} · ${costText}${toolText ? ` · ${toolText}` : ""}${auxText ? ` · ${auxText}` : ""} · cache hit ${hitPct}% · ${durText}${budgetTruncated ? " · budget-capped" : ""}`,
+  evReceipt: (rounds, costText, hitPct, durText, budgetTruncated, toolText, auxText, subText) =>
+    `💰 Run: ${rounds} turn${rounds > 1 ? "s" : ""} · ${costText}${toolText ? ` · ${toolText}` : ""}${auxText ? ` · ${auxText}` : ""}${subText ? ` · ${subText}` : ""} · cache hit ${hitPct}% · ${durText}${budgetTruncated ? " · budget-capped" : ""}`,
   evReceiptWeb: (yuan) => `web ¥${yuan.toFixed(3)}`,
   evReceiptAux: (yuan) => `aux ¥${yuan.toFixed(3)}`,
+  evReceiptSub: (yuan) => `subtasks ¥${yuan.toFixed(3)}`,
   evTaskDone: (cmd) => `📧 Background task finished (exit=0): ${cmd}`,
   evTaskKilled: (cmd) => `⏹ Background task stopped: ${cmd}`,
   evTaskFail: (code, cmd) => `⚠️ Background task failed (exit=${code}): ${cmd}`,

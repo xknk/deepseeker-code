@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.71
+
+Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第三批修复六项（2026-10-20）：CLI /undo、分类器可见性、会话级允许、子 agent 进度分行、结算单子任务花费、挂机解释器闸门——交互短板收口 + 两项实测答疑 + 架构不变式补钉，守门测试 kernel-audit-thirdbatch.test.ts 12 例 + core 全量 690 例绿，§8.0 五约束逐条核对无违反。
+
+- **CLI /undo 最小版（I-3）**：斜杠菜单新增 `/undo`（fork 与 usage 之间注册），直调 core `restoreLast` 与模型 `undo_restore` 工具同一恢复链路——LIFO 弹最近一条写操作记录回滚磁盘，再次执行沿反向记录回走（撤销撤销=可逆）；无可回退项给专门提示不抛错。
+- **分类器可见性（I-5）**：命令类走 LLM 安全分类器时全程可观测——调用前发「🔒 安全判定中…（最长 10s）」进度，返回后回报「放行/未放行」结论；文件类确定性快路径刻意零打扰（不发进度）。审批弹窗在分类器未放行转人工时，detail 追加 fail-closed 来由说明（不在自动放行范围 / 判 risky / 判定超时或异常），审批者不再对着莫名弹窗猜原因。
+- **审批新增「本会话内允许」（I-4）**：ApprovalDecision 从三态扩四态——allow-once / **allow-session（新）** / allow-always / deny。allow-session 经 `addSessionPermissionRule` 记内存级会话规则（同形调用本会话免审，重启即失效），与 allow-always（落项目 settings.json）之间补上「想放行一阵子但不想写盘」的中间档；CLI 弹窗选项、VSCode 按钮、serve /api/approve 白名单三端同步。
+- **子 agent 进度按 agent 分行（I-7）**：多 agent 并发时进度行不再互相踩——`subagent.progress` 事件带 `agentKey`（子会话 id，唯一）+ `name`（manifest 名），CLI/VSCode 各自维护 agentKey→行槽 Map，每 agent 一行独立更新、完成按 key 删行，渲染带 `⟨name⟩` 前缀可分辨。
+- **结算单并列展示子 run 花费（Q12）**：receipt 结算单新增 `subCostYuan` 段（CLI「· 子任务 ¥x」/ VSCode 同步）——展示账（`subCostYuanAcc` 由 reportCost 同源增量喂入）与计量账（`costYuanAcc` 每 run 自身）刻意分账，预算圈与 usageLog 口径零变化，无重复计数。
+- **挂机解释器×仓库脚本供应链闸门（N5，仅 batch 场景）**：`node ./scripts/x.js`、`python x.py`、裸 `tsc`/`make`/`cargo`/`go` 等「解释器直跑仓库内脚本」形态在挂机批处理默认拦截（与 npm 族同源的供应链风险，仓库作者代码=提交即执行）；交互场景零打扰（刻意不进 toolExecution 判定链，仍走分类器）；工单 `tools:` 加 `"interpreter"` 伪槽位即解锁。查询 flag（`node --version`）、内联代码（`python -c`）、外部程序绝对路径、包管理器族不误伤。
+- **完整 diff 透传（I-6，core+VSCode）**：审批 meta 新增 `fullDetail`（截断前全文），webHost 以 `opts.includeFullDetail` 显式开启（HTTP SSE 保持 2000 字符截断口径），VSCode in-process 接入——diff 视图以全文渲染，弹窗预览维持截断不变；CLI 侧延后。
+- **计划模式无提案提示（I-1）**：`/plan` 批准时若模型从未产出提案（plan==null），不再静默无响应，直接提示「本次计划模式未产生提案」。
+- **架构不变式补钉（P2-14 ①② + P2-11）**：① 计划模式两态工具表逐字节恒定（不裁表保前缀缓存，P0-A 执行层门禁语义用行为测试钉住）；② nudge ephemeral 硬约束端到端断言（续跑轮推理入参含 `⟦DSC:⟧` 尾部副本可达模型 + transcript 落盘零痕迹，压缩输入=真实消息数组故机制传递成立）；P2-11 `ToolCallContext` 14 个可选字段全部改 `T | undefined` 必填（构造漏字段=编译错误，替代手工逐字段纪律）。**P2-10 拆 processToolUse 评估后置**：~470 行安全链纯移动重构，与大批行为改动同车会叠加回归面，留独立重构批。
+
 ## 1.0.70
 
 Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第二批修复四项（2026-10-20）：子 agent 预算增量上报、计划拒绝熔断、窗口/校准按模型分维度、工具声明化收尾——守门测试 kernel-audit-secondbatch.test.ts 14 例 + core 全量 676 例绿，§8.0 五约束逐条核对无违反。

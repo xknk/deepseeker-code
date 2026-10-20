@@ -38,6 +38,7 @@ import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
 import { TopPanel } from "./components/TopPanel.tsx";
 import { inspectUsage, inspectContext, inspectPermissions, inspectMcp, inspectHooks, inspectDebug } from "@/observability/inspect.ts";
+import { restoreLast } from "@/tool/undo/restore.ts";
 
 const CWD = process.cwd();
 
@@ -215,6 +216,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "new": return S.cmdNew;
                 case "sessions": return S.cmdSessions;
                 case "fork": return S.cmdFork;
+                case "undo": return S.cmdUndo;
                 case "usage": return S.cmdUsage;
                 case "budget": return S.cmdBudget;
                 case "context": return S.cmdContext;
@@ -305,6 +307,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             case "/fork":
                 void state.openForkPicker();
                 return true;
+            case "/undo": {
+                // ★ I-3（内核审查报告第三批，2026-10-20）：CLI 文件恢复入口——B 方案快路径的安全叙事
+                //   依赖「放行即可回滚」，CLI 此前无恢复入口。/undo = restoreLast（恢复最近一次写操作，
+                //   LIFO 弹栈；重复执行沿反向备份记录逐步回走，含"撤销撤销"）。结果文案由 core 返回
+                //   （成功含恢复详情 + 反向备份 id，无可回退项有专门提示）。busy 时 onSubmit 统一拦截，
+                //   不存在与在途工具写盘的竞态。
+                const sid = state.sessionIdRef.current;
+                if (!sid) { state.pushInfo(S.undoNoSession); return true; }
+                state.pushInfo(await restoreLast(sid));
+                return true;
+            }
             case "/help":
                 state.pushInfo(S.helpText(modelDisplay, state.getThinkingLevel(), getLocale()));
                 return true;
@@ -510,7 +523,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     useInput((ch, key) => {
         if (key.ctrl && ch === "c") { exit(); return; }
         if (state.pendingApproval) {
-            const APPROVAL_DECISIONS = ['allow-once', 'allow-always', 'deny'] as const;
+            const APPROVAL_DECISIONS = ['allow-once', 'allow-session', 'allow-always', 'deny'] as const; // ★ I-4 四态
             if (key.upArrow) setSelectIdx((i) => (i - 1 + APPROVAL_DECISIONS.length) % APPROVAL_DECISIONS.length);
             else if (key.downArrow) setSelectIdx((i) => (i + 1) % APPROVAL_DECISIONS.length);
             else if (key.return) state.resolveApproval(APPROVAL_DECISIONS[selectIdxRef.current] ?? 'deny');

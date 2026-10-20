@@ -82,6 +82,13 @@ export type ToolCallOutcome = {
  * 每轮推理后由主循环/调度层构造一次，透传给本函数。逐字段比对 ToolContext，避免漏传
  * onUIEvent/requestApproval/requestQuestion/permissionMode（subagent 透传这些给子 agent toolCtx，漏传则审批死锁）。
  */
+/**
+ * ★ P2-11（内核审查报告第三批，2026-10-20，轻量落地）：宿主通道/运行期可选字段全部 required
+ * （类型含 undefined）。原「逐字段比对避免漏传」是手工纪律（toolScheduling 注释自承）——可选字段
+ * 下 runAgent 构造处漏写属性名编译器不报错，字段一多漂移必现（planWriteRejections/budgetCheck
+ * 两批各加一个即是信号）。required 化后：新增字段忘在构造处对齐 → TS「missing property」编译错，
+ * 手工纪律退役为编译期穷尽。值语义不变（`field: T | undefined`，消费点 `?.()` 照旧）。
+ */
 export type ToolCallContext = {
     sessionId: string;
     cwd: string;
@@ -89,36 +96,36 @@ export type ToolCallContext = {
     round: number;
     startTime: number;
     llmDecisionSource: TraceDecisionSource;
-    signal?: AbortSignal;
+    signal: AbortSignal | undefined;
     rawTools: any[];
     events: RunAgentEvents;
-    permissionMode?: PermissionMode;
+    permissionMode: PermissionMode | undefined;
     /** ★ P0-A 计划模式（runtime 档执行层门禁用）：计划期写工具在 processToolCall 拒绝，工具表不裁剪（保前缀缓存）。 */
-    planMode?: boolean;
-    onUIEvent?: (evt: UIEvent) => void;
-    requestApproval?: RequestApprovalFn;
-    requestQuestion?: RequestQuestionFn;
-    ideAction?: RequestIdeActionFn;
+    planMode: boolean | undefined;
+    onUIEvent: ((evt: UIEvent) => void) | undefined;
+    requestApproval: RequestApprovalFn | undefined;
+    requestQuestion: RequestQuestionFn | undefined;
+    ideAction: RequestIdeActionFn | undefined;
     keepRecentUnits: number;
     compactRatio: number;
     modelWindow: number;
     parentSystemPrompt: string;
     /** ★ P2-1 本时刻上下文用量估算（token，estReal 口径）：截断预算随窗口余量自适应收缩。
      *  每轮构造 toolCallCtx 时算一次（已含本轮 assistant，常数近似足够，不逐工具更新）；
-     *  缺省 undefined → 不缩放，截断行为逐字节不变（向后兼容）。 */
-    contextTokensEst?: number;
+     *  undefined → 不缩放，截断行为逐字节不变（向后兼容）。 */
+    contextTokensEst: number | undefined;
     /** ★ P3-8 run 级 read_file 读取追踪（runAgent 每 run 建一个 Map、逐轮传同一引用），见 ToolContext.readTracker。 */
-    readTracker?: Map<string, { mtimeMs: number; count: number }>;
+    readTracker: Map<string, { mtimeMs: number; count: number }> | undefined;
     /** ★ 子 run 成本回灌父累计器（成本信任链第二环 E1），见 ToolContext.reportCost。 */
-    reportCost?: (yuan: number) => void;
+    reportCost: ((yuan: number) => void) | undefined;
     /** ★ 按次计费工具成本上报（DeepSeek Search/Fetch），见 ToolContext.toolCostSink。 */
-    toolCostSink?: (yuan: number) => void;
+    toolCostSink: ((yuan: number) => void) | undefined;
     /** ★ 辅助模型用量上报（成本信任链 P0-2），见 ToolContext.onAuxUsage。 */
-    onAuxUsage?: AuxUsageReporter;
+    onAuxUsage: AuxUsageReporter | undefined;
     /** ★ P1-7 计划拒绝熔断：计划期非 SAFE 工具被拒时增量回调（每次 +1）；计数器与熔断判定在 runAgent。 */
-    planWriteRejections?: (delta: number) => void;
+    planWriteRejections: ((delta: number) => void) | undefined;
     /** ★ P1-5 子任务预算熔断探测，见 ToolContext.budgetCheck（经此透传给 runSubagent → 子 runAgent）。 */
-    budgetCheck?: () => boolean;
+    budgetCheck: (() => boolean) | undefined;
 };
 
 /**
@@ -235,6 +242,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const level = matchedTool.function.safetyLevel;
         let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
         let denied = false;
+        let autoGateAsked = false; // ★ I-5：auto 分类器未放行（'ask'）→ 审批 detail 补来由说明
         // ★ 改写型 PreToolUse（第二梯队 #3，开关开时的正确位置）：位于全部安全门禁之前——
         //   改写后的 args 才是被保护路径/权限规则/灾难命令/互斥锁/审批/undo 备份评估的对象
         //   （否则 hook 改写会绕过门禁，或用户批了 X 而 hook 已改成 Y）。deny 亦前置（省无谓审批
@@ -365,13 +373,17 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 { autoApproval: matchedTool.function.autoApproval, pathArgs: matchedTool.function.pathArgs, primaryArg: matchedTool.function.primaryArg, safetyLevel: matchedTool.function.safetyLevel, triggersUndo: matchedTool.function.triggersUndo });
             if (auto === 'allow') { needApproval = false; }
             else if (auto === 'deny') { denied = true; failResult(`❌ [auto] 内置高危清单拦截：[${calledName}] ${calledArgs?.path ?? ''}。`, 'permission'); }
-            // 'ask'（risky/不确定/超时/异常/未声明 autoApproval/工作区外）→ 不改 needApproval，落入下方 requestApproval 转人工
+            else { autoGateAsked = true; } // ★ I-5：'ask'（risky/不确定/超时/异常/未声明 autoApproval/工作区外）→ 落人工，审批 detail 补说明
         }
         if (needApproval && !denied) {
             const ra = matchedTool.function.requireApproval;
             let detail = `申请执行高危工具 [${calledName}]`;
             try { if (ra) detail = typeof ra === 'function' ? await ra(calledArgs, toolCtx) : ra; }
             catch (e: any) { denied = true; failResult(`❌ [审批描述生成异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`, 'permission'); }
+            // ★ I-5 分类器可见性（内核审查报告第三批，2026-10-20）：安全闸未自动放行的调用转人工时，
+            //   审批弹窗补一句来由说明——用户面对的不再是无解释的弹窗；配合 runAutoCheck 的
+            //   「安全判定中…」进度（分类器 10s 静默期间可见），静默停顿 → 有进度 → 有说明闭环。
+            if (autoGateAsked) detail += `\n（ℹ️ 说明：本调用未获自动放行——不在自动放行范围 / 安全分类器判 risky / 判定超时（分类器上限 10s）或异常，按 fail-closed 转人工审批。）`;
             if (!denied) {
                 let approved = false;
                 try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, calledArgs, matchedTool.function.primaryArg); }

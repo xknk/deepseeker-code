@@ -20,6 +20,7 @@ import path from "path";
 import { spawn } from "child_process";
 import { handleUnifiedChat } from "@/serve/chatProcessing.ts";
 import { agentTools } from "@/tool/index.ts";
+import { isInterpreterRepoScript } from "@/tool/autoPermission.ts";
 import { createWorktree, harvestDiff, type WorktreeHandle } from "@/tool/worktree/manager.ts";
 import { setSessionWorktree, clearSessionWorktree } from "@/tool/worktree/sessionRegistry.ts";
 import { killBackgroundTasksUnder, resolveWinShell } from "@/tool/registry/background.ts";
@@ -225,6 +226,36 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     const allowApproval = new Set([...BATCH_EDIT_TOOLS, ...unlocked]);
     const deniedTools: { tool: string; detail: string }[] = [];
 
+    // ★ N5 供应链闸门（内核审查报告第三批，2026-10-20，维护者拍板：仅 batch 场景纳入）：解释器直跑
+    //   仓库内脚本（node ./x.js / python x.py / 裸 tsc / make / cargo / go…）与 npm 族风险同源，历史上
+    //   只走分类器、判 SAFE 即放行——挂机无人值守即静默执行。交互场景有人工在场兜底，维持零打扰
+    //   （isInterpreterRepoScript 刻意不进 toolExecution 判定链）；此处包在 execute 外——只读免审/
+    //   分类器放行/审批放行最终都落 execute，全路径必经零漏。命中即拒并记 deniedTools；拒绝文案回模型
+    //   （可改道，但闸门一直在）。逃生门：工单 tools: 加伪槽位 "interpreter"（非真实工具，仅作为
+    //   授权标记被 unlocked 集合记住；混入 allowApproval 无害——解释器命令不走 requireApproval 文案）。
+    const wrapInterpreterGate = (x: any): any => {
+        const name = x?.function?.name;
+        if (name !== "run_command" && name !== "run_in_background") return x;
+        const innerExecute = x.function.execute.bind(x.function);
+        return {
+            ...x,
+            function: {
+                ...x.function,
+                execute: async (args: any, ctx: any) => {
+                    const cmd = typeof args?.command === "string" ? args.command : "";
+                    if (cmd && isInterpreterRepoScript(cmd) && !unlocked.has("interpreter")) {
+                        const why = `🚫 [batch 供应链闸门] 解释器直跑仓库内脚本已拦截：${cmd.slice(0, 120)}。执行仓库作者提交的代码与 npm 族同源风险，挂机场景默认拒绝；确需执行请在本工单 tools: 中加 "interpreter" 解锁。`;
+                        deniedTools.push({ tool: name, detail: why.replace(/\n+/g, " ").slice(0, 140) });
+                        emit(`🚫 [${task.id}] 拦截解释器脚本：${cmd.slice(0, 80)}`);
+                        return why;
+                    }
+                    return innerExecute(args, ctx);
+                },
+            },
+        };
+    };
+    const gatedSchemas = toolSchemas.map(wrapInterpreterGate);
+
     // worktree：改动隔离 + 产物载体（非 git 项目在此失败 → error 报告，继续下一任务）。
     // ★ stepId 用任务全局唯一 id（不用 "batch" 常量）：worktree 保留策略下分支常驻，而 manager 的
     //   分支名 = dsc-wt-<sessionId 前 8>-<stepId>，batch-* 会话前 8 位全是 "batch-20"——常量 stepId
@@ -291,7 +322,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                     if (evt.type === "run.receipt") receipt = evt;
                 },
                 budgetYuan: t.budgetYuan,
-                toolSchemas,
+                toolSchemas: gatedSchemas,
             },
         );
     } catch (e: any) {

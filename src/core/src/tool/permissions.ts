@@ -245,6 +245,19 @@ const resolveSettingsPath = (scope: 'global' | 'project'): string =>
         : path.join(process.cwd(), ".deepseeker-code", "settings.json");
 
 /**
+ * ★ I-4（内核审查报告第三批，2026-10-20）：会话级 allow 规则——只进内存、绝不落盘，会话结束随
+ *   进程消亡。对标 CC 审批「本会话内不再询问」：比 allow-once 省反复打断、比 allow-always（写
+ *   settings.json）轻一个量级的信任承诺。作用域规则仍经 buildScopedAllowRule 保守生成（同持久路径）。
+ * @returns true=已生效；false=非法格式（compileRule 内部已 warn）
+ */
+export const addSessionPermissionRule = (ruleStr: string, kind: 'allow' | 'deny' | 'ask' = 'allow'): boolean => {
+    const compiled = compileRule(ruleStr, 'runtime:addSessionPermissionRule(session)', kind);
+    if (!compiled) return false;
+    if (!rules[kind].some(r => r.raw === compiled.raw)) rules[kind].push(compiled);
+    return true;
+};
+
+/**
  * 运行期新增一条权限规则并持久化（对标 CC 审批"总是允许"→写 allowlist）。
  * 读改写 settings.json（保留其它顶层字段 hooks/mcpServers 等）+ 同步 push 进内存 rules（立即生效）。
  * @param scope   'global' | 'project'；project 在未信任目录下返回 false（不落盘，避免写了不生效的不一致）

@@ -20,6 +20,14 @@ import { renderSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./
 import { updateSlashMenu, updateAtMenu } from "./composer.js";
 
 // ———————— 事件分发（host → webview） ————————
+/** ★ I-7 多行槽清理：run 终结（final/error）时移除全部子 agent 进度行（final/error 共用）。 */
+function dropAllSubagentProgressRows() {
+  const m = state.subagentProgressKeys;
+  if (!m || m.size === 0) return;
+  for (const pk of m.values()) removeRow(pk);
+  m.clear();
+}
+
 function handleEvent(evt) {
 if (!evt || typeof evt !== "object") return;
 // ★ host 经 sink 发来的完整行（用户消息 / 回放 / meta），与 onMessage 顶层 row 逻辑一致
@@ -104,13 +112,13 @@ switch (evt.type) {
       case "final":
         closeStreaming();
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 压缩失败/中止终结路径：不留「压缩中」僵尸行
-        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同上：子 agent 进度瞬态行随 run 终结清理
+        dropAllSubagentProgressRows(); // ★ I-7 多行槽：run 终结清理全部子 agent 进度行
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 兜底归零：同步子 agent 必在 final 前收敛，防事件丢失胶囊卡死
         break;
       case "error": {
         closeStreaming();
         if (state.compactProgressKey != null) { removeRow(state.compactProgressKey); state.compactProgressKey = null; } // 同 final：错误终结时清理进度行
-        if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; } // 同 final：错误终结时清理子 agent 进度行
+        dropAllSubagentProgressRows(); // ★ I-7 多行槽：错误终结同款清理
         if (state.runningAgents) { state.runningAgents = 0; syncToolbar(); } // 同 final：错误终结时兜底归零
         appendRow({ key: nextKey(), kind: "system", text: S.evError(String(evt.message ?? S.evUnknownError)) });
         break;
@@ -167,6 +175,8 @@ switch (evt.type) {
           toolsId: String(evt.toolsId ?? ""),
           toolName: String(evt.toolName ?? ""),
           detail: String(evt.detail ?? ""),
+          // ★ I-6：截断前全文（VSCode in-process 链路附带；「查看完整 diff」overlay 优先用它渲染）
+          ...(typeof evt.fullDetail === "string" && evt.fullDetail ? { fullDetail: evt.fullDetail } : {}),
         };
         renderApproval();
         break;
@@ -184,21 +194,27 @@ switch (evt.type) {
         break;
       }
       case "subagent.progress": {
-        // ★ P3-7 子 agent 中间叙述（~1s 节流的最后完整行）：单行原位更新，done=true 清瞬态行。
-        //   复用 compact 行型（同款淡色斜体样式，P1-3 先例）；并发多子 agent 时单行槽 last-writer-wins。
+        // ★ P3-7 子 agent 中间叙述（~1s 节流的最后完整行）；★ I-7 每 agent 一行：
+        //   key=agentKey（子会话 id）→ 行 key 映射存 state.subagentProgressKeys，done 按 key 删行。
+        //   复用 compact 行型（同款淡色斜体样式，P1-3 先例）；行首带 manifest 名。
         closeStreaming();
+        const agentKey = typeof evt.agentKey === "string" && evt.agentKey ? evt.agentKey : "__default__";
+        if (!state.subagentProgressKeys) state.subagentProgressKeys = new Map();
         if (evt.done) {
-          if (state.subagentProgressKey != null) { removeRow(state.subagentProgressKey); state.subagentProgressKey = null; }
+          const pk = state.subagentProgressKeys.get(agentKey);
+          if (pk != null) { removeRow(pk); state.subagentProgressKeys.delete(agentKey); }
           break;
         }
         const ptext = String(evt.text ?? "").slice(0, 160);
         if (!ptext) break;
-        const pline = S.evSubagent(ptext);
-        if (state.subagentProgressKey != null && state.rowMap.has(state.subagentProgressKey)) {
-          updateRow(state.subagentProgressKey, { text: pline });
+        const agentName = typeof evt.name === "string" && evt.name ? `⟨${evt.name}⟩ ` : "";
+        const pline = S.evSubagent(`${agentName}${ptext}`);
+        const pk = state.subagentProgressKeys.get(agentKey);
+        if (pk != null && state.rowMap.has(pk)) {
+          updateRow(pk, { text: pline });
         } else {
           const pkey = nextKey();
-          state.subagentProgressKey = pkey;
+          state.subagentProgressKeys.set(agentKey, pkey);
           appendRow({ key: pkey, kind: "compact", text: pline });
         }
         break;
@@ -216,12 +232,15 @@ switch (evt.type) {
         const toolCost = typeof evt.toolCostYuan === "number" && evt.toolCostYuan > 0 ? evt.toolCostYuan : null;
         // 辅助模型花费（P0-2：压缩摘要+风险分类器，按 AUX 价目折算）：同款 >0 才拼段
         const auxCost = typeof evt.auxCostYuan === "number" && evt.auxCostYuan > 0 ? evt.auxCostYuan : null;
+        // 子 run 花费（Q12：父结算单口径不含子 run，此处并列补偿展示）：同款 >0 才拼段
+        const subCost = typeof evt.subCostYuan === "number" && evt.subCostYuan > 0 ? evt.subCostYuan : null;
         const tokTotal = (Number(evt.promptTokens) || 0) + (Number(evt.completionTokens) || 0);
         const tokText = tokTotal >= 10000 ? `${(tokTotal / 1000).toFixed(1)}k` : String(tokTotal);
         const costText = cost != null ? `¥${cost.toFixed(cost < 0.005 ? 4 : 3)}` : `${tokText} tok`;
         addInfo(S.evReceipt(rounds, costText, hitPct, durText, !!evt.budgetTruncated,
           toolCost != null ? S.evReceiptWeb(toolCost) : "",
-          auxCost != null ? S.evReceiptAux(auxCost) : ""));
+          auxCost != null ? S.evReceiptAux(auxCost) : "",
+          subCost != null ? S.evReceiptSub(subCost) : ""));
         break;
       }
       case "task.exit": {

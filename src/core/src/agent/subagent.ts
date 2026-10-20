@@ -281,9 +281,10 @@ export const runSubagent = async (
         let result: SubagentResult | undefined;
         // ★ P3-7 中间叙述透出：text.delta 经节流器取最后**完整**行转发 onUIEvent——
         //   长任务几分钟里用户不再只看「● N agent」计数器（静默被当卡死是 P1-3 同族问题）。
-        //   纯 UX 旁路：只读 e.type、不经手任何控制流，final 语义不变；并发多子 agent 时前端单行槽
-        //   last-writer-wins（进度行是瞬态提示，可接受）。
-        const progress = createProgressThrottler((line) => ctx.onUIEvent?.({ type: 'subagent.progress', text: line }));
+        //   纯 UX 旁路：只读 e.type、不经手任何控制流，final 语义不变。
+        //   ★ I-7（内核审查报告第三批，2026-10-20）：带 agentKey（子会话 id，唯一）+ name（manifest 名）
+        //   ——并发多子 agent 时前端按 key 各占一行（原单行槽 last-writer-wins 只见最后说话者）。
+        const progress = createProgressThrottler((line) => ctx.onUIEvent?.({ type: 'subagent.progress', text: line, agentKey: subSessionId, name: manifest?.name }));
         try {
             for await (const e of runAgent(subMessages, subOptions)) {
                 if (ctx.abortSignal?.aborted) {
@@ -308,7 +309,7 @@ export const runSubagent = async (
             result = { ok: false, output: failText(`[子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`), sessionId: subSessionId, manifestName: manifest?.name };
         } finally {
             // ★ P3-7：子 agent 结束（正常/中止/崩溃均走此）→ 通知前端清瞬态进度行
-            try { ctx.onUIEvent?.({ type: 'subagent.progress', text: "", done: true }); } catch { /* 纯 UX 旁路不击垮收尾 */ }
+            try { ctx.onUIEvent?.({ type: 'subagent.progress', text: "", done: true, agentKey: subSessionId }); } catch { /* 纯 UX 旁路不击垮收尾 */ }
             // ★ P1-8 SubagentStop：观察事件，best-effort（hook 异常不击垮子 agent）。output 截断防巨量回灌 hook
             if (result) {
                 await dispatch('SubagentStop', { ...startCtx, ok: result.ok, output: result.output.slice(0, 2000) }).catch((e: any) => console.warn(`⚠️ SubagentStop hook 异常（已忽略）: ${e?.message ?? e}`));

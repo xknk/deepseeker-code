@@ -13,7 +13,8 @@ import { addInfo } from "./rows.js";
 import { syncToolbar } from "./toolbar.js";
 
 // ———————— 审批条 ————————
-const APPROVAL_DECISIONS = ["allow-once", "allow-always", "deny"];
+// ★ I-4 四态：allow-session=会话级记忆（core 纯内存规则，不落盘，对标 CC「本会话不再询问」）
+const APPROVAL_DECISIONS = ["allow-once", "allow-session", "allow-always", "deny"];
 let approvalKeydownBound = false;
 /** 注册一次审批键盘导航（↑↓ 切换 / Enter 确认 / Esc 拒绝），首次渲染审批条时绑定。 */
 function bindApprovalKeydown() {
@@ -55,6 +56,7 @@ function renderApproval() {
   const sel = state.approvalSel ?? 0;
   const opts = [
     { d: "allow-once", cls: "ok", label: S.mdAllowOnce },
+    { d: "allow-session", cls: "ok", label: S.mdAllowSession },
     { d: "allow-always", cls: "warn", label: S.mdAllowAlways },
     { d: "deny", cls: "danger", label: S.mdDeny },
   ];
@@ -63,7 +65,7 @@ function renderApproval() {
   ).join("");
   // ★ edit_file：detail 含【减少】/【增加】结构 → 左右对比（红删绿增），其余工具维持纯文本
   const diffHtml = buildApprovalDiffHtml(p.detail, p.toolName);
-  setApprovalDiffSource(diffHtml ? { detail: p.detail, toolName: p.toolName } : null);
+  setApprovalDiffSource(diffHtml ? { detail: p.fullDetail ?? p.detail, toolName: p.toolName } : null); // ★ I-6：overlay 优先全文
   anchor.innerHTML = `
     <div class="modal approval">
       <div class="modal-title">${S.mdApprovalTitle(escapeHtml(p.toolName))}</div>

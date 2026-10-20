@@ -21,6 +21,8 @@ import type { RequestApprovalFn } from "./type.ts";
 export const createWebRequestApproval = (
     onUIEvent: ((evt: UIEvent) => void) | undefined,
     abortSignal?: AbortSignal,
+    /** ★ I-6：附带截断前全文（VSCode in-process 链路开；SSE Web 宿主维持 2000 截断防单帧过大，默认关） */
+    opts?: { includeFullDetail?: boolean },
 ): RequestApprovalFn => {
     return async (detail, meta) => {
         // 推送审批请求事件：sessionId 须原样带回，门锁据此做跨会话越权校验
@@ -30,6 +32,7 @@ export const createWebRequestApproval = (
             toolsId: meta.toolCallId,
             toolName: meta.toolName,
             detail,
+            ...(opts?.includeFullDetail && meta.fullDetail ? { fullDetail: meta.fullDetail } : {}),
         });
 
         // 动态引用 approvalGate（仅 Web 宿主依赖它；核心已解耦）

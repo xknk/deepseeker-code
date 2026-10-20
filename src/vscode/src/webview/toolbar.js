@@ -7,6 +7,7 @@
  */
 import { vscode, $, state } from "./state.js";
 import { S } from "./strings.js";
+import { escapeHtml } from "./markdown.js";
 import { toggleSessionsPanel, toggleForkPanel } from "./panels.js";
 import { setThinkVisible } from "./rows.js";
 
@@ -165,17 +166,60 @@ export function syncContextRing() {
   const ring = $("#ctx-ring");
   if (!ring) return;
   const cu = state.contextUsage;
-  if (!cu || !(cu.windowTokens > 0)) { ring.style.display = "none"; return; }
+  if (!cu || !(cu.windowTokens > 0)) { ring.style.display = "none"; hideRingCard(); return; }
   const fill = Math.max(0, Math.min(1, Number(cu.fillRate) || 0));
-  if (fill < RING_SHOW_AT) { ring.style.display = "none"; return; }
+  if (fill < RING_SHOW_AT) { ring.style.display = "none"; hideRingCard(); return; }
   ring.style.display = "";
   const arc = ring.querySelector(".ctx-ring-arc");
   if (arc) arc.style.strokeDasharray = `${fill * RING_CIRC} ${RING_CIRC}`;
   ring.classList.toggle("ok", fill < 0.7);
   ring.classList.toggle("warn", fill >= 0.7 && fill < 0.9);
   ring.classList.toggle("hot", fill >= 0.9);
-  ring.title = S.tbRingTip(Math.round(cu.usedTokens), Math.round(cu.windowTokens), Math.round(fill * 100), state.compactCount);
+  // 悬浮中水位更新（流式/压缩）→ 卡片原地重渲，防悬着看旧数
+  if (ringCardEl && ringCardEl.style.display !== "none") showRingCard();
 }
+
+// ★ 水位悬浮卡（对标 CC 悬浮百分比卡）：原生 title 出现慢（~1s 延迟）且单行干瘪——hover 环即出，
+//   大号百分比 + token 明细 + 压缩计数 + 操作提示。卡片 body 直挂 fixed 弹层（composer 内层
+//   overflow/z-index 复杂，body 级最稳）；pointer-events:none 纯展示——不截获 hover，移开即隐无闪现。
+let ringCardEl = null;
+const ringCard = () => {
+  if (ringCardEl) return ringCardEl;
+  ringCardEl = document.createElement("div");
+  ringCardEl.id = "ctx-ring-card";
+  ringCardEl.style.display = "none";
+  document.body.appendChild(ringCardEl);
+  return ringCardEl;
+};
+
+/** hover 环：按当前水位渲染悬浮卡并定位在环上方（顶部放不下改下方）。 */
+export const showRingCard = () => {
+  const ring = $("#ctx-ring");
+  if (!ring || ring.style.display === "none") return;
+  const cu = state.contextUsage;
+  if (!cu || !(cu.windowTokens > 0)) return;
+  const fill = Math.max(0, Math.min(1, Number(cu.fillRate) || 0));
+  const pct = Math.round(fill * 100);
+  const tone = fill >= 0.9 ? "hot" : fill >= 0.7 ? "warn" : "ok";
+  const el = ringCard();
+  el.className = `ctx-ring-card ${tone}`;
+  el.innerHTML =
+    `<div class="ctx-ring-card-pct">${pct}%</div>` +
+    `<div class="ctx-ring-card-sub">${escapeHtml(S.tbRingCardUsed(Math.round(cu.usedTokens), Math.round(cu.windowTokens)))}</div>` +
+    (state.compactCount ? `<div class="ctx-ring-card-sub">${escapeHtml(S.tbRingCardCompact(state.compactCount))}</div>` : "") +
+    `<div class="ctx-ring-card-hint">${escapeHtml(S.tbRingCardHint)}</div>`;
+  // 定位：水平对环居中（钳在视口内），垂直优先环上方 8px
+  el.style.display = "block";
+  const r = ring.getBoundingClientRect();
+  const left = Math.max(6, Math.min(window.innerWidth - el.offsetWidth - 6, r.left + r.width / 2 - el.offsetWidth / 2));
+  const above = r.top - el.offsetHeight - 8 >= 4;
+  el.style.left = `${left}px`;
+  el.style.top = `${above ? r.top - el.offsetHeight - 8 : r.bottom + 8}px`;
+};
+
+export const hideRingCard = () => {
+  if (ringCardEl) ringCardEl.style.display = "none";
+};
 
 /** 压缩发生：环上闪一次 + 环心短暂显示「×N」（N=会话级压缩计数）。环未显示（尚无水位数据）则只更新计数。 */
 export function flashCompactRing() {

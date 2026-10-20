@@ -135,9 +135,10 @@ export const createServer = () => {
     //   必须携带 sessionId 且与挂起时一致，门锁据此拦截跨会话越权审批。
     app.post("/api/approve", (req, res) => {
         const { sessionId, toolsId, approved } = (req.body || {}) as { sessionId?: string; toolsId?: string; approved?: ApprovalDecision };
-        const validDecisions: ApprovalDecision[] = ['allow-once', 'allow-always', 'deny'];
+        // ★ I-4 四态对齐：'allow-session' 在 guard.ts 落内存规则（serve 进程生存期≈会话），Web 前端暂无此按钮但协议先放行
+        const validDecisions: ApprovalDecision[] = ['allow-once', 'allow-session', 'allow-always', 'deny'];
         if (!isSafeSessionId(sessionId) || typeof toolsId !== "string" || approved == null || !validDecisions.includes(approved)) {
-            res.status(400).json({ ok: false, error: "需要 { sessionId: string, toolsId: string, approved: 'allow-once'|'allow-always'|'deny' }" });
+            res.status(400).json({ ok: false, error: "需要 { sessionId: string, toolsId: string, approved: 'allow-once'|'allow-session'|'allow-always'|'deny' }" });
             return;
         }
         const ok = resolveUserApprovalLock(sessionId, toolsId, approved);

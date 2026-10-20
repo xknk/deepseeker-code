@@ -11,7 +11,7 @@ import ignore from "ignore"; // 需要安装: npm install ignore
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ToolContext, ToolSafetyLevel } from "./type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
-import { addPermissionRule, buildScopedAllowRule } from "./permissions.ts";
+import { addPermissionRule, addSessionPermissionRule, buildScopedAllowRule } from "./permissions.ts";
 import { dispatch } from "./hooks.ts";
 import { getSessionWorktreeRoot } from "./worktree/sessionRegistry.ts";
 
@@ -463,12 +463,23 @@ export const requestApproval = async (
     // ★ P1-8 PermissionRequest：审批请求发出前，观察事件（审计/记录）。best-effort，不阻断审批流
     await dispatch('PermissionRequest', { sessionId: ctx.sessionId, cwd: ctx.cwd, toolName, toolCallId, detail: safeDetail, safetyLevel, args }).catch(() => { });
 
-    // ★ 三态决策：allow-once 仅本次 / allow-always 放行+写持久规则 / deny 拒绝
-    const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId });
+    // ★ 四态决策（I-4 扩会话级）：allow-once 仅本次 / allow-session 本会话内存规则 / allow-always 写持久规则 / deny 拒绝
+    //   ★ I-6：meta 附截断前全文（fullDetail）——宿主「查看完整 diff」入口用；SSE 宿主可不透传。
+    const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId, fullDetail: detail });
     const approved = decision !== 'deny';
 
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
+    } else if (decision === 'allow-session') {
+        // ★ I-4（内核审查报告第三批，2026-10-20）：会话级记忆——与 allow-always 同一套保守作用域
+        //   （buildScopedAllowRule），区别只在存储层：纯内存（addSessionPermissionRule）不落盘，
+        //   会话结束即失效。无法安全作用域时降级 allow-once（与持久路径同纪律）。
+        const ruleStr = buildScopedAllowRule(toolName, args, primaryArg);
+        if (ruleStr && addSessionPermissionRule(ruleStr)) {
+            console.log(`📌 [审批记忆] 本会话内免审：${ruleStr}（会话结束自动失效，不写配置文件）`);
+        } else {
+            console.log(`♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未记忆：无法安全生成作用域）`);
+        }
     } else if (decision === 'allow-always') {
         // ★ 持久化 allow 规则（M5 加固）：buildScopedAllowRule 返回保守作用域——命令类落精确串（run_command(npm test)）、
         //   路径类落顶层目录（edit_file(src/*)）；无法安全作用域（无主参数映射 / MCP / 缺值）时返回 null → 不持久化，

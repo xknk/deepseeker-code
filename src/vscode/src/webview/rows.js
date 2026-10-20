@@ -156,7 +156,7 @@ function buildRowEl(row) {
         wrap.innerHTML =
           `<div class="assistant-wrap">` +
           `<div class="assistant-head" title="${S.rwCollapseToggle}"><span class="assistant-caret">${collapsed ? "▸" : "▾"}</span>${escapeHtml(firstLine(row.text))}</div>` +
-          `<div class="assistant-content" style="${collapsed ? "display:none" : ""}">${html}</div>` +
+          `<div class="assistant-content assistant-body" style="${collapsed ? "display:none" : ""}">${html}</div>` +
           `</div>`;
         wrap.querySelector(".assistant-head")?.addEventListener("click", () => {
           row.collapsed = !row.collapsed;

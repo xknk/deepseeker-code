@@ -118,7 +118,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 预算累计器（成本信任链第二环 E1）：本 run 经济花费真值 = 自身各轮 usage 折算 + 子 run 经 reportCost
     //   回灌的花费。与 costYuanAcc（receipt/usageLog 落盘口径=run 自身）刻意分账——子 run 花费若并入落盘
     //   costYuan，读侧按 depth 拆分时会同笔钱计两次；预算是控制面，落盘是计量面，各记各的。
+    //   ★ P1-5 收尾（2026-10-20）起同时是子 run 成本中继（costRelay.flush）的基数：含下级 relay 回灌，
+    //   恰为「本 run 子树」完整口径——用自身三账做基数会把 depth≥2 孙代花费困在中继层以下，到不了根预算。
     let budgetSpentYuan = 0;
+    // ★ Q12（内核审查报告第三批，2026-10-20）：子 run 花费展示累计器——reportCost 回灌的增量在进预算圈
+    //   同时记一份，run.receipt 并列展示「子任务 ¥x」。与 costYuanAcc（落盘计量面=run 自身）仍分账：
+    //   只是展示层补偿（报告 Q12），usageLog/trace 口径不动，不产生双重计量。
+    let subCostYuanAcc = 0;
     // ★ 本 run 压缩计数（成本信任链第三环 H1，context.usage.compactCount 用）：经 ensureFitsWindow 的
     //   onUIEvent 旁路数 compact.done（不改 truncate 本体）；会话级累计由前端在 compact.done 消费处自加。
     let runCompactCount = 0;
@@ -233,8 +239,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //   一次性回灌——¥1 预算的父级派出 ¥3 子任务会全额烧完才被父轮边界发现。中继把累计总额转成
     //   只报正增量，两个 round.end + finally 三处 flush，父累计器逐轮更新，父轮边界 budgetCheck 随时熔断。
     const costRelay = createCostRelay(options.costSink);
-    /** 三账并总额（token + 按次工具 + 辅助模型）——预算口径的真金白银合计，flush 与收尾回灌共用。 */
-    const spentTotal = () => costYuanAcc + toolCostYuanAcc + auxCostYuanAcc;
     // ★ P1-5 子任务预算熔断探测：父级经 options.budgetCheck 注入（子 run 链式透传）；主 run 且设预算时
     //   自我武装（与轮边界硬截断同阈值 1.2×）——子任务（spawn_agent/run_workflow）经 toolCtx.budgetCheck
     //   拿到本闭包，每轮边界探测，父预算耗尽即收尾，不再等子任务全额烧完。
@@ -289,6 +293,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 stopReason = 'limit';
                 budgetTruncated = true;
                 yield { type: 'final', text: (lastContent || "") + `\n（💰 预算截断：本 run 已花费 ¥${budgetSpentYuan.toFixed(3)} / 预算 ¥${options.budgetYuan.toFixed(3)}。/budget 调整预算后回复"继续"即可接续。）` };
+                return;
+            }
+            // ★ P1-5 子任务预算熔断消费点（第五轮复核收尾，2026-10-20）：budgetCheck 闭包此前只被链式
+            //   透传（runAgent 自武装 → toolCallCtx → subOptions）、从未被调用——子 run 仍会全额烧完，
+            //   父级只能在自己下一轮边界才发现超支。此处每轮边界探测：命中即 stopReason='limit' 干净收尾，
+            //   final 文案随 spawn_agent 的工具结果回传父模型（父级可据此停止继续派生）。置于 depth=0 硬截断
+            //   块之后且显式 depth>0 门禁：主 run 预算截断走上方专属文案不受影响（即便宿主误传 budgetCheck
+            //   也不会被本分支截断）；inheritedBudgetCheck（含主 run 自武装闭包）仍经 toolCallCtx 下传孙代，链路不变。
+            if (depth > 0 && options.budgetCheck?.()) {
+                stopReason = 'limit';
+                yield { type: 'final', text: (lastContent || "") + `\n（💰 预算中止：父级预算已耗尽，本子任务在轮边界被熔断收尾，任务未完成。已完成进展如上；请勿重试或继续派生子任务。）` };
                 return;
             }
             // ★ inbox steering：回合边界认领运行中排队的补充输入。位于防失控上限/中止检查之后、round.start 之前——
@@ -406,7 +421,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
                 await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
                 emitContextUsage();
-                costRelay.flush(spentTotal()); // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器
+                // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器。flush 基数用 budgetSpentYuan
+                //   （自身三账 + 下级 relay 回灌，恰为子树完整口径）——若只报自身三账，depth≥2 的孙代
+                //   花费到不了根预算（第五轮复核发现，2026-10-20）。主 run 无 sink，flush 为 no-op。
+                costRelay.flush(budgetSpentYuan);
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
@@ -461,7 +479,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 readTracker, // ★ P3-8：run 级读取追踪（同一引用透传，跨轮累计）
                 // ★ 子 run 成本回灌（成本信任链第二环 E1）：runSubagent 经 toolCtx.reportCost 拿到闭包，
                 //   子 run 结束时把总花费记进本 run 预算累计器——父预算自动继承约束（子花费计入父 spent）。
-                reportCost: (yuan: number) => { if (Number.isFinite(yuan) && yuan > 0) budgetSpentYuan += yuan; },
+                reportCost: (yuan: number) => { if (Number.isFinite(yuan) && yuan > 0) { budgetSpentYuan += yuan; subCostYuanAcc += yuan; } },
                 // ★ 按次计费工具成本上报（DeepSeek Search/Fetch）：web 工具经 toolCtx.toolCostSink 拿到闭包，
                 //   成功调用后按次上报进本 run 累计器。
                 toolCostSink,
@@ -489,7 +507,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
             emitContextUsage();
-            costRelay.flush(spentTotal()); // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效）
+            // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效）。
+            //   基数= budgetSpentYuan（子树完整口径，含下级 relay），理由见上方无工具收尾处。
+            costRelay.flush(budgetSpentYuan);
             // ★ P1-7 计划拒绝熔断：连续 FORCE_AT（4）次计划期写工具被拒 → 强制收尾（模型未能产出方案，
             //   不陪空转烧轮数）。round.end 已写（本轮完整闭合），stopReason='limit' 与预算截断同枚举。
             //   转向 nudge 在 NUDGE_AT（2）次时已注入过一次（pickNudge 消费），给过机会仍不转向才熔断。
@@ -550,11 +570,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         // ★ 子 run 成本回灌（成本信任链第二环 E1 + 内核审查报告 P1-5）：本 runAgent 为子 run 时
         //   （options.costSink 已注入），收尾把余量补报给父累计器——各 round.end 已增量上报过，
         //   此处 flush 只补差额（中继幂等，重复上报零副作用）。旁路，绝不击垮收尾。
-        //   ★ 并账：token 花费 + 按次工具花费（toolCostYuanAcc）+ 辅助模型花费（auxCostYuanAcc，P0-2）
-        //   并入总额——任何一笔漏出预算圈，预算制就被那一类调用打穿。后两类与 costKnown 无关（单价恒定
-        //   或独立计价）。
+        //   ★ 基数= budgetSpentYuan（子树完整口径）：自身三账（token + 按次工具 + 辅助模型，P0-2 并账，
+        //   任何一笔漏出预算圈预算制就被那一类调用打穿）+ 下级 relay 回灌——只报自身三账会丢 depth≥2
+        //   的孙代花费（第五轮复核发现，2026-10-20）。主 run 无 sink 不受影响。
         try {
-            costRelay.flush(spentTotal());
+            costRelay.flush(budgetSpentYuan);
         } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
@@ -572,6 +592,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
                     toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（undefined 自动省略）
                     auxCostYuan: auxCostYuanAcc > 0 ? Math.round(auxCostYuanAcc * 1e6) / 1e6 : undefined, // 辅助模型花费（压缩摘要+风险分类器；undefined 自动省略）
+                    subCostYuan: subCostYuanAcc > 0 ? Math.round(subCostYuanAcc * 1e6) / 1e6 : undefined, // ★ Q12：子 run 花费并列展示（展示层补偿；undefined 自动省略）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
                 });

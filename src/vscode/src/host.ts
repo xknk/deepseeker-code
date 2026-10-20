@@ -304,7 +304,8 @@ export class ChatHost {
     const opts: HostOptions = {
       // ★ 异步宿主审批：core 发 approval_request 事件给前端，前端按钮 → resolveApproval() 解锁
       // （onUIEvent 形参为 core 具体事件类型，显式标注 any 以兼容宽松 sink）
-      requestApproval: autoApprove ? autoRequestApproval : createWebRequestApproval((evt: any) => this.sink(evt), ac.signal),
+      // ★ I-6：in-process postMessage 可承受大文本 → 附带截断前全文（webview「查看完整 diff」overlay 用）
+      requestApproval: autoApprove ? autoRequestApproval : createWebRequestApproval((evt: any) => this.sink(evt), ac.signal, { includeFullDetail: true }),
       requestQuestion: (req) => this.askQuestion(req),
       ideAction: (req) => this.callbacks.onIdeAction(req),
       onUIEvent: (evt: any) => this.sink(evt),

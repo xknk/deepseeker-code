@@ -10,7 +10,7 @@ import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
 import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs } from "./rows.js";
 import { toggleSessionsPanel, toggleForkPanel, toggleCheckpointsPanel } from "./panels.js";
-import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs } from "./toolbar.js";
+import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs, showRingCard, hideRingCard } from "./toolbar.js";
 import { toggleModelPicker, closeModelPicker } from "./modals.js";
 import { toggleActionPanel, closeActionPanel, bindComposerBridge } from "./actionPanel.js";
 
@@ -487,8 +487,12 @@ doSend();
 const btnFile = $("#btn-file");
 // 模型胶囊：toggle 语义——未开弹选择器（host 回环带最新候选），已开就地关闭
 $("#btn-model").addEventListener("click", () => toggleModelPicker());
-// ★ H1 手动压缩入口（对齐 CC「Click to compact now」）：点水位环立即压缩当前会话
-$("#ctx-ring").addEventListener("click", () => vscode.postMessage({ type: "compactNow" }));
+// ★ H1 手动压缩入口（对齐 CC「Click to compact now」）：点水位环立即压缩当前会话；
+//   hover 出水位悬浮卡（大号百分比），移开/点击即隐（点击后水位将变化，留旧卡会误导）
+const ctxRing = $("#ctx-ring");
+ctxRing.addEventListener("click", () => { hideRingCard(); vscode.postMessage({ type: "compactNow" }); });
+ctxRing.addEventListener("mouseenter", showRingCard);
+ctxRing.addEventListener("mouseleave", hideRingCard);
 const imageInput = $("#image-input");
 const attachMenu = $("#attach-menu");
 const closeAttachMenu = () => { if (attachMenu) attachMenu.style.display = "none"; };

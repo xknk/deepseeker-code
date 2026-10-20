@@ -54,7 +54,7 @@ roundSeq: 0,
 currentTurn: 0,
 turnHeaderBySeq: new Map(),
 compactProgressKey: null, // 压缩进度瞬态行 key（compact.progress 单行更新；compact.done/final/error 收敛删除）
-subagentProgressKey: null, // 子 agent 进度瞬态行 key（P3-7 subagent.progress 单行更新；done/final/error 收敛删除）
+subagentProgressKeys: new Map(), // ★ I-7 子 agent 进度行槽（agentKey→行 key，每 agent 一行；done 按 key 删、final/error 清全部）
 // ★ 成本信任链第三环 HUD（H1 水位环）：
 contextUsage: null, // 最近 context.usage 快照 {usedTokens,windowTokens,fillRate}（水位环数据源；null=尚无，环隐藏）
 compactCount: 0, // 会话级压缩次数（compact.done 消费处累加；环心「已压缩 N 次」闪显 + tooltip）

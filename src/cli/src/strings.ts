@@ -36,6 +36,8 @@ interface StringDict {
     planEditHint: string;
     /** 拒绝方案：留在计划模式继续迭代（对齐 Claude Code「No, keep planning」语义）。 */
     planKeepPlanning: string;
+    /** I-1：计划轮结束未产出方案（模型没调 exit_plan_mode），明确告知仍在计划模式（不再静默）。 */
+    planNoProposal: string;
     planEditEmpty: string;
     planAutoExecute: string;
     /** 输入框模式徽标：计划模式（Claude Code 同款紫色边框 + "plan mode on"）。 */
@@ -45,6 +47,8 @@ interface StringDict {
     approvalTitle: string;
     approvalPrompt: string;
     approvalAllow: string;
+    /** I-4：会话级记忆（本会话内免审，不落盘）。 */
+    approvalAllowSession: string;
     approvalAllowAlways: string;
     approvalDeny: string;
     errAborted: string;
@@ -106,6 +110,9 @@ interface StringDict {
     forkEmpty: string;
     forkDone: (id: string, roundNo: number) => string;
     forkFailed: (e: string) => string;
+    /** I-3 /undo 撤销最近一次文件改动（内核审查报告第三批） */
+    cmdUndo: string;
+    undoNoSession: string;
     /** /model 直输切换；/switch 选择器 */
     cmdSwitch: string;
     modelUsage: (current: string) => string;
@@ -185,6 +192,7 @@ const STRINGS: Record<Locale, StringDict> = {
         planEditTitle: "✏️ 编辑方案",
         planEditHint: "Enter 按此方案执行 · Esc 取消回到选项",
         planKeepPlanning: "✋ 已留在计划模式：继续输入补充要求，模型将修订方案后再次提交（/plan 可退出）。",
+        planNoProposal: "ℹ️ 本轮未收到方案（模型未提交 exit_plan_mode），仍在计划模式：可继续描述需求，或 /plan 关闭计划模式。",
         planEditEmpty: "方案不能为空",
         planAutoExecute: "⚡ 已进入自动执行：实现阶段工具将免审批直接运行。",
         inputBadgePlan: "plan mode on（只读调研 → 方案审批 → 实现）",
@@ -192,6 +200,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalTitle: "🔐 操作审批",
         approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
         approvalAllow: "允许本次",
+        approvalAllowSession: "本会话内允许（不落盘）",
         approvalAllowAlways: "总是允许（此项目）",
         approvalDeny: "拒绝",
         errAborted: "已中止当前轮。",
@@ -257,6 +266,8 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "（当前会话暂无可分叉的检查点）",
         forkDone: (id, roundNo) => `已从第 ${roundNo} 轮分叉 → 新会话 ${id}（已载入，后续对话写入新会话，原会话不变）`,
         forkFailed: (e) => `分叉失败：${e}`,
+        cmdUndo: "撤销最近一次文件改动（LIFO 逐步回走；回退前自动备份，可逆）",
+        undoNoSession: "当前没有活动会话，无可回退项。",
         modelUsage: (current) => `当前模型：${current || "默认（DEEP_SEEK_MODEL）"}\n用法：/model <模型id> 直输切换，或 /switch 弹出候选选择器`,
         modelPickerTitle: (current) => `🧠 选择模型（当前：${current || "默认"}）`,
         modelPickerPrompt: "↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id>）",
@@ -320,6 +331,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "/sessions  — 选择并载入历史会话（续接对话）",
             "/new       — 开启新会话（旧会话保留，/sessions 可找回）",
             "/fork      — 从当前会话的某轮回复处分叉出新会话",
+            "/undo      — 撤销最近一次文件改动（自动备份，可逆）",
             "/trust  — 管理已信任目录（项目级 hooks/skills 等仅在信任目录加载；CI 用 --trust 显式信任）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
         ].join("\n"),
@@ -358,6 +370,7 @@ const STRINGS: Record<Locale, StringDict> = {
         planEditTitle: "✏️ Edit plan",
         planEditHint: "Enter to implement with this plan · Esc back to options",
         planKeepPlanning: "✋ Staying in plan mode: add feedback and the plan will be revised and resubmitted (/plan to exit).",
+        planNoProposal: "ℹ️ No plan was proposed this turn (exit_plan_mode not called) — still in plan mode: keep describing the task, or /plan to exit.",
         planEditEmpty: "Plan cannot be empty",
         planAutoExecute: "⚡ Auto-run: implementation tools will execute without approval.",
         inputBadgePlan: "plan mode on (read-only research → approve → implement)",
@@ -365,6 +378,7 @@ const STRINGS: Record<Locale, StringDict> = {
         approvalTitle: "🔐 Action approval",
         approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
         approvalAllow: "Allow once",
+        approvalAllowSession: "Allow for this session (in-memory)",
         approvalAllowAlways: "Always allow (this project)",
         approvalDeny: "Deny",
         errAborted: "Aborted current turn.",
@@ -429,6 +443,8 @@ const STRINGS: Record<Locale, StringDict> = {
         forkEmpty: "(no checkpoints to fork from in this session)",
         forkDone: (id, roundNo) => `Forked from round ${roundNo} → new session ${id} (loaded; new messages go to the fork, source untouched)`,
         forkFailed: (e) => `Fork failed: ${e}`,
+        cmdUndo: "Undo the most recent file change (LIFO, repeatable; reverse-backed-up, reversible)",
+        undoNoSession: "No active session — nothing to undo.",
         modelUsage: (current) => `Current model: ${current || "default (DEEP_SEEK_MODEL)"}\nUsage: /model <model-id> to switch directly, or /switch for the picker`,
         modelPickerTitle: (current) => `🧠 Pick a model (current: ${current || "default"})`,
         modelPickerPrompt: "↑↓ pick · Enter switch · Esc cancel (any other model: /model <id>)",
@@ -492,6 +508,7 @@ const STRINGS: Record<Locale, StringDict> = {
             "/sessions  — Pick a past session to resume",
             "/new       — Start a new session (old ones remain via /sessions)",
             "/fork      — Fork the current session from a past round",
+            "/undo      — Undo the most recent file change (auto-backed-up, reversible)",
             "/trust  — Manage trusted dirs (project hooks/skills load only when trusted; CI uses --trust)",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
         ].join("\n"),
@@ -518,4 +535,4 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "usage", "budget", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "undo", "usage", "budget", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;

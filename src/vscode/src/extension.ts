@@ -584,7 +584,7 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
       break;
     case "approval": {
       const decision = msg.decision as string;
-      if (!["allow-once", "allow-always", "deny"].includes(decision)) return;
+      if (!["allow-once", "allow-session", "allow-always", "deny"].includes(decision)) return; // ★ I-4 四态
       h.resolveApproval(String(msg.sessionId ?? ""), String(msg.toolsId ?? ""), decision as never);
       break;
     }
