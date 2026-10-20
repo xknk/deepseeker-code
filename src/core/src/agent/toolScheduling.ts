@@ -67,13 +67,13 @@ export const scheduleToolCalls = async function* (
     //   flush 时立刻插——OpenAI 兼容端点要求 tool 结果紧随 assistant(tool_calls)，中间夹 user 消息会 400；
     //   注入点必须在 while 循环外（所有 tool 消息落定之后）。
     const pendingImages: NonNullable<ToolCallOutcome['imageAttachments']> = [];
-    // ★ 终结类工具（enter/exit_plan_mode）拦截返回前，为本条 assistant 消息中【其后】的并行 tool_call
+    // ★ 终结类工具（声明 terminal：plan_enter/plan_exit/generic）拦截返回前，为本条 assistant 消息中【其后】的并行 tool_call
     //   补占位 tool result，避免留下孤儿 tool_call_id——否则会话恢复重建上下文时 API 因配对缺失返回 400。
     //   （修复前依赖「终结工具必单独调用/排在末位」这一模型未保证的前提。）
     const fillRestPlaceholders = async (fromIdx: number) => {
         const tcs = assistantMessage.tool_calls!;
         for (let j = fromIdx + 1; j < tcs.length; j++) {
-            const ph = "（已跳过：终结类工具 enter/exit_plan_mode 之后的并行调用未执行）";
+            const ph = "（已跳过：终结类工具之后的并行调用未执行）";
             message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
             await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
         }
@@ -91,9 +91,12 @@ export const scheduleToolCalls = async function* (
     };
     const canParallelize = (name: string, args: any, parseFailed: boolean): boolean => {
         if (!parallelSafeToolsEnabled || parseFailed || signal?.aborted) return false;
-        if (name === 'exit_plan_mode' || name === 'enter_plan_mode' || name === 'ask_question') return false;
         const matched = rawTools.find((t: any) => t.function.name === name);
         if (!matched) return false;
+        // ★ P1-6 声明化：终结类（terminal 声明，调用即终结本轮）与显式 parallelizable:false（如 ask_question
+        //   阻塞等用户作答，并发会乱序）强制串行——原 exit/enter_plan_mode/ask_question 按名名单退役，改读声明。
+        if (matched.function.terminal) return false;
+        if (matched.function.parallelizable === false) return false;
         // ★ #8a 声明化：写工具（声明 triggersUndo）强制串行——屏障保证 undo 备份读到未改原文件
         //   （原 isUndoTrigger/MUTATION_TOOLS 名单退役，改读声明）
         if (matched.function.triggersUndo) return false;
@@ -177,9 +180,12 @@ export const scheduleToolCalls = async function* (
                 if (oc.terminal.kind === 'exit_plan_mode') {
                     yield { type: 'plan.proposed', plan: oc.terminal.plan || '' };
                     return { kind: 'terminal', terminalText: oc.terminal.plan || oc.resultForUser };
-                } else {
+                } else if (oc.terminal.kind === 'enter_plan_mode') {
                     yield { type: 'plan.enterRequested', reason: oc.terminal.reason || '' };
                     return { kind: 'terminal', terminalText: oc.terminal.reason ? `📋 模型请求进入计划模式：${oc.terminal.reason}` : oc.resultForUser };
+                } else {
+                    // ★ P1-6 generic 终结（terminal:true 声明）：结果只给用户，不再回喂模型续推（本轮到此为止）
+                    return { kind: 'terminal', terminalText: oc.resultForUser };
                 }
             }
             yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };

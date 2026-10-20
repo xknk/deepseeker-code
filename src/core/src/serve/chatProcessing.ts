@@ -9,7 +9,7 @@ import { UnifiedInboundMessage, UnifiedOutboundMessage } from "@/channels/unifie
 import { runAgent } from "@/agent/runAgent.ts";
 import { agentTools } from "@/tool/index.ts";
 import { sweepStaleAtomicTmp } from "@/tool/registry/fs.ts";
-import { appConfig } from "@/config/index.ts";
+import { appConfig, resolveModelWindow } from "@/config/index.ts";
 import { getOrCreateSessionId } from "@/session/store.ts"
 import { appendMessage } from "@/session/transcript.ts";
 import { buildContextMessages } from "@/session/content.ts";
@@ -192,7 +192,7 @@ export const handleUnifiedChat = async (
             cwd: process.cwd(),
             toolSchemas: opts?.toolSchemas ?? agentTools, // 宿主可按需裁剪（挂机批处理）；缺省全量，行为不变
             abortSignal,                        // ← 透传中止信号
-            modelWindow: appConfig.MAX_HISTORY_TOKENS,
+            modelWindow: resolveModelWindow(opts?.model), // ★ P1-4：窗口按本轮模型解析（MODEL_WINDOWS 表 / 全局回退）
             keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
             compactRatio: appConfig.COMPACT_RATIO,
             parentSystemPrompt: sysPrompt,

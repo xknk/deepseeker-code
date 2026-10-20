@@ -214,10 +214,12 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     emit(`▶ [${task.id}] ${t.title}`);
     emit(T.taskMeta(t.budgetYuan, timeoutMin, t.accept));
 
-    // 工具表裁剪：缺省禁高危（对模型不可见），工单 tools: 显式解锁
+    // 工具表裁剪：缺省禁高危（对模型不可见），工单 tools: 显式解锁。
+    // ★ P1-6 声明化：工具声明 batchAllowed:false 同样收权（与名单任一命中即拒），未声明者回退名单兜底。
     const unlocked = new Set(t.tools ?? []);
-    const denySchemas = new Set([...BATCH_DEFAULT_DENYLIST].filter((n) => !unlocked.has(n)));
-    const toolSchemas = agentTools.filter((x: any) => !denySchemas.has(x?.function?.name));
+    const toolSchemas = agentTools.filter((x: any) =>
+        unlocked.has(x?.function?.name)
+        || ((x?.function?.batchAllowed !== false) && !BATCH_DEFAULT_DENYLIST.has(x?.function?.name)));
 
     // 审批自动应答器：编辑类 ∪ 工单解锁 → allow-once；其余 deny + 记录（fail-closed，绝不无限等）
     const allowApproval = new Set([...BATCH_EDIT_TOOLS, ...unlocked]);

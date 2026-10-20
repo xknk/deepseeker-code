@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.70
+
+Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第二批修复四项（2026-10-20）：子 agent 预算增量上报、计划拒绝熔断、窗口/校准按模型分维度、工具声明化收尾——守门测试 kernel-audit-secondbatch.test.ts 14 例 + core 全量 676 例绿，§8.0 五约束逐条核对无违反。
+
+- **子 agent 预算增量上报（P1-5）**：子 run 烧的钱不再等 run 结束才一次性回灌——新增 `costRelay` 增量中继（只报正增量、幂等、六位小数舍入防浮点噪声），round.end×2 + finally 三处 `flush` 把 `costYuanAcc+toolCostYuanAcc+auxCostYuanAcc` 累计总额实时推给宿主 `costSink`；同时 `budgetCheck` 闭包三环贯通（runAgent 主 run 自武装「≥budgetYuan×1.2 即超」→ toolCallCtx → subagent subOptions，workflow subCtx spread 自动继承），子 run 在**轮边界**即时自检中止超支任务，挂机批处理的预算闸从此对子任务生效。
+- **计划拒绝熔断（P1-7）**：计划模式下模型反复尝试写工具被拒不再无限空转——只计非 SAFE 写工具的拒绝（ask_question 等交互类被拒不计），连续 2 次推一次 `⟦DSC:PLAN_REJECT⟧` 转向 nudge（引导转只读或 exit_plan_mode，每 run 至多一次不重复念经），连续 4 次在轮边界强制收尾（`stopReason='limit'`，文案给中止/批准/退出计划三条出路）。
+- **窗口/校准按模型维度（P1-4）**：新增 `MODEL_WINDOWS` 表 + `resolveModelWindow`，上下文窗口不再全体绑 `MAX_HISTORY_TOKENS` 一个值（三处在售模型刻意不填表，250K 甜点区产品决策不变；日后续接不同窗口模型填表即生效）；校准比 `calibRatio` 等按 `sessionId+modelId` 分键存取（`getCalibration`/`updateCalibration`），同会话换模型互不污染；盘上旧扁平字段作未命中兜底（旧会话不丢校准），写侧镜像回写扁平字段——fork 透传与旧读侧零改动继续工作。chatProcessing 主链 / compactSessionNow 手动压缩 / 子 agent manifest.model 三处接入。
+- **声明化收尾（P1-6）**：`CustomTool` 新增五声明字段——`terminal`（三态：`'plan_exit'`/`'plan_enter'`/`true`=结果只给用户并终结本轮）、`parallelizable`（显式 `false` 否决并行；未声明按 SAFE+同步自动推导，现有 SAFE 并行不受影响）、`argKind`（`'command'`/`'path'`/`'text'`）、`subagentAllowed`、`batchAllowed`。四处按名特判退役为「声明优先 / 名单兜底」：调度层并行排除与终结分流、执行层终结拦截与命令语义（scriptRunner/只读免审/灾难闸门）、子 agent 工具收权、挂机 batch 过滤。验收场景：新增声明 terminal 的测试工具不改任何名单即正确终结 + 后续调用补占位 + 强制串行——以后新增此类工具零名单维护。
+- **挂机 batch 过滤改读声明**：`batchRunner` 工具表过滤从「纯 denylist」改为「`batchAllowed !== false` 且不在 `BATCH_DEFAULT_DENYLIST`」，与子 agent 收权同一声明语义（fail-closed：未声明者仍按名单兜底拦截）。
+
 ## 1.0.69
 
 Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第一批修复五项（2026-10-20）：审批快路径确定性化、辅助模型花费入账闭环、流式重试文本治理、后台任务收权——报告 §8 第一批验收五判据全过，守门测试 kernel-audit-firstbatch.test.ts 22 例 + core 全量 662 例绿。

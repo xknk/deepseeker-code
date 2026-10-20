@@ -21,12 +21,15 @@ import { CustomTool } from "@/tool/index.ts";
 
 /**
  * exit_plan_mode 工具 schema。
- * 注意：它不是常规 CustomTool（无 execute/safetyLevel），runAgent 在工具执行循环中按名特殊拦截。
+ * 注意：它不是常规 CustomTool（无 execute/safetyLevel），调度层按 terminal 声明终结本轮（P1-6 声明化；
+ * 旧「按名特殊拦截」退化为未声明者兜底）。
  */
 export const exitPlanModeToolSchema = {
     type: "function",
     function: {
         name: "exit_plan_mode",
+        // ★ P1-6 终结声明：调用即提交方案并终结本轮（调度层发 plan.proposed，上层呈现审批）
+        terminal: 'plan_exit',
         description: "计划模式专用：完成只读调研、形成明确实现方案后调用本工具提交方案。提交后方案会呈现给用户审批；审批通过后才进入实现阶段（届时才允许修改文件/执行命令）。在计划模式下你只能读取与搜索，不能做任何修改。",
         parameters: {
             type: "object",
@@ -57,7 +60,7 @@ export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
 
 /**
  * enter_plan_mode 工具 schema：exit_plan_mode 的对偶入口，非计划模式下暴露给模型。
- * 模型判断任务复杂、需先规划时调用 → runAgent 按名拦截（不走常规 execute）→ 结束本轮 →
+ * 模型判断任务复杂、需先规划时调用 → 调度层按 terminal 声明终结本轮（P1-6 声明化）→
  * 上层据此翻转 planMode 并以只读重跑（filterToolsForPlanMode + PLAN_MODE_SYSTEM_HINT）。
  * 与 exit_plan_mode 同：非常规 CustomTool（无 execute/safetyLevel）。
  */
@@ -65,6 +68,8 @@ export const enterPlanModeToolSchema = {
     type: "function",
     function: {
         name: "enter_plan_mode",
+        // ★ P1-6 终结声明：调用即请求进入计划模式并终结本轮（调度层发 plan.enterRequested）
+        terminal: 'plan_enter',
         description: "自主进入计划模式：当任务是非平凡的实现任务（多文件改动、架构决策、不确定路径、高风险操作）时调用。调用后本轮结束并进入只读调研阶段——你只能读取与搜索，产出完整实现方案（要改哪些文件、怎么改、为何、风险）经用户审批后再实现。简单任务无需调用，直接实现。",
         parameters: {
             type: "object",

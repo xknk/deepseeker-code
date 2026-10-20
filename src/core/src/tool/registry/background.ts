@@ -255,6 +255,11 @@ export const backgroundTools: CustomTool[] = [
             name: "run_in_background",
             primaryArg: 'command',
             autoApproval: 'command',
+            // ★ P1-6 声明化：命令语义（灾难命令闸门/script-runner 供应链拦截按此识别；isSync:false 使其
+            //   不享受只读免审）；后台挂起不进子 agent（父收尾成孤儿）与挂机批处理（无人盯守）
+            argKind: 'command',
+            subagentAllowed: false,
+            batchAllowed: false,
             description: "在后台启动一个长时 shell 命令并立即返回 task_id，不阻塞后续推理。适用两类场景：① 长连接/常驻进程（dev server、watch、tail -f）——先起服务再继续干别的活；② 预计运行数分钟以上、无需实时盯看的有限长任务（全量测试 / 大构建 / 大体积安装——跑完用 get_background_output 带 wait_seconds 等结果，不要用前台 run_command 干等）。用 get_background_output 查日志与状态，stop_background_task 终止。",
             parameters: {
                 type: "object",

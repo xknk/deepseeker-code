@@ -62,6 +62,22 @@ const BUDGET_SOFT_TEXT = (spent: number, budget: number): string => {
     return `已花费 ¥${spent.toFixed(3)} / 预算 ¥${budget.toFixed(3)}（${pct}%）：请收敛收尾，不再展开新探索；若确需继续，用一段说明剩余工作后即止。`;
 };
 
+// —— 计划拒绝熔断（PLAN_REJECT，内核审查报告 P1-7）——
+//   病理：计划模式下写工具一律被声明拒绝（planAllowed=false），模型若不转向而反复重试写操作，
+//   只会空转烧到轮数上限。按「连续非 SAFE 写类工具被拒次数」熔断：NUDGE_AT 次注入转向 nudge
+//   （读工具继续调研 / 提交方案），FORCE_AT 次 → runAgent 轮边界强制收尾（模型未能产出方案，
+//   交回用户决策，不陪空转）。计数器在 runAgent（processToolCall 拒绝分支增量回传），本文件管文案与调度。
+const PLAN_REJECT_FENCE = "⟦DSC:PLAN_REJECT⟧";
+/** 连续被拒达此次数 → 注入一次转向 nudge（提示模型计划期不可写、给出出路）。 */
+export const PLAN_REJECT_NUDGE_AT = 2;
+/** 连续被拒达此次数 → runAgent 轮边界强制收尾（stopReason='limit'）。 */
+export const PLAN_REJECT_FORCE_AT = 4;
+const PLAN_REJECT_TEXT = (n: number): string =>
+    `计划模式下你调用写类工具已被拒绝 ${n} 次：计划模式只允许只读调研，写类操作须待方案经用户批准后才能执行，继续重试只会被再次拒绝。请停止写操作，改用只读工具（read_file / search_grep / web_fetch 等）继续完善调研，或整理已有发现，用 exit_plan_mode 提交实现方案。`;
+/** 强制收尾文案（runAgent 轮边界直接作为 final 输出，非 nudge——模型已无自决空间）。 */
+export const PLAN_REJECT_FORCE_FINAL_TEXT = (n: number): string =>
+    `已中止：计划模式下连续 ${n} 次写类工具调用被拒绝，模型未能产出实现方案。计划阶段到此为止，已查明的事实与调研记录保留在上下文中——你可以：①补充说明需求或放宽约束后重试；②让 agent 跳过计划模式直接实现（需自行确认风险）；③人工接手完成剩余调研。`;
+
 // —— 文案（集中于此，调措辞不动控制流）——
 const PHANTOM_TEXT = "你的上一条回复没有任何内容、也没有调用任何工具，但任务尚未完成。请继续推进（调用工具或给出实质回答）；若确实受阻、需要用户决策，用 ask_question 说明具体阻塞点。不要返回空回复。";
 const EARLY_FINAL_TEXT = (round: number): string =>
@@ -148,6 +164,10 @@ export const createNudgeScheduler = (opts: {
     pickNudge: (round: number) => NudgeMsg | null;
     interceptFinal: (finalText: string, round: number) => boolean;
     noteToolCall: (round: number, toolCalls?: any[]) => void;
+    /** P1-7 计划拒绝熔断：runAgent 在写工具被拒后回传累计次数；达 NUDGE_AT 设转向 nudge（下一轮消费）。 */
+    notePlanWriteRejected: (total: number) => void;
+    /** P1-7 已知的累计被拒次数（runAgent 据此对照 FORCE_AT 决定强制收尾）。 */
+    planWriteRejections: () => number;
 } => {
     const firstPrompt = opts.firstPrompt ?? "";
     const planMode = !!opts.planMode;
@@ -179,9 +199,15 @@ export const createNudgeScheduler = (opts: {
     let todoPending: NudgeMsg | null = null;
     // —— 预算 soft 提醒状态（per-run，成本信任链第二环）——
     let budgetSoftSent = false;                      // 本 run 是否已发过预算 soft（每 run 至多一次）
+    // —— 计划拒绝熔断状态（per-run，P1-7）——
+    let planRejectCount = 0;                         // 累计被拒次数（runAgent 增量后回传的累计值）
+    let planRejectNudged = false;                    // 转向 nudge 是否已发（每 run 一次，FORCE 之前给过机会）
+    let planRejectPending: NudgeMsg | null = null;
 
     return {
         pickNudge(round) {
+            // 最优先：计划写工具被拒的转向 nudge（P1-7）——模型正卡在被拒循环里，转向提示先于一切常规调度
+            if (planRejectPending) { const m = planRejectPending; planRejectPending = null; return m; }
             // 最高优先级：首轮对疑似非平凡实现任务引导「先规划」（仅一次，仅非计划模式）
             if (!planFirstSent && round === 1 && !planMode && looksComplex(firstPrompt)) {
                 planFirstSent = true;
@@ -315,6 +341,16 @@ export const createNudgeScheduler = (opts: {
                     continue;
                 }
             }
+        },
+        notePlanWriteRejected(total) {
+            planRejectCount = Math.max(planRejectCount, Math.floor(total) || 0);
+            if (!planRejectNudged && planRejectCount >= PLAN_REJECT_NUDGE_AT) {
+                planRejectNudged = true;
+                planRejectPending = { role: 'system', content: `${PLAN_REJECT_FENCE}\n${PLAN_REJECT_TEXT(planRejectCount)}` };
+            }
+        },
+        planWriteRejections() {
+            return planRejectCount;
         },
     };
 };

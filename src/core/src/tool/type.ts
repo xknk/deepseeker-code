@@ -138,6 +138,10 @@ export interface ToolContext {
     /** 辅助模型用量上报（成本信任链 P0-2）：auto 档风险分类器的 aux 调用经此回传 runAgent 计价入账
      *  （汇入 auxCostYuanAcc → receipt/usageLog + 预算累计器）。runAgent 构造 toolCtx 时注入 reportAuxUsage。 */
     onAuxUsage?: AuxUsageReporter;
+    /** ★ 子任务预算熔断探测（内核审查报告 P1-5）：父级注入的闭包，返回 true=父预算已耗尽、子任务应立即中止。
+     *  主 run 不设（自身熔断在轮边界自管）；spawn_agent/run_workflow 经 ToolContext → 子 runAgent options
+     *  透传，子 runAgent 在每轮边界探测，命中即 stopReason='limit' 收尾——父级不再等子 run 全额烧完才知道超支。 */
+    budgetCheck?: () => boolean;
 }
 
 
@@ -219,6 +223,44 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * 缺省 = 计划期拒绝（写工具 / 命令 / 后台任务等，现状语义）。
          */
         planAllowed?: boolean;
+
+        /**
+         * ★ 轮次终结声明（内核审查报告 P1-6 声明化收尾）：调用本工具即终结当前推理轮，调度层不把结果
+         *  喂回模型续推——这是「流程形态」属性，随工具声明走，不再按名字特判。
+         * - 'plan_exit'：终结并提交实现方案（exit_plan_mode 语义：调度层发 plan.proposed，上层审批）；
+         * - 'plan_enter'：终结并请求进入计划模式（enter_plan_mode 语义：调度层发 plan.enterRequested）；
+         * - true：通用终结——照常走全部门禁与 execute，结果只给用户不再续推（调度层 return terminal）。
+         * 缺省 = 非终结（结果回喂模型，现状语义）。
+         */
+        terminal?: boolean | 'plan_exit' | 'plan_enter';
+
+        /**
+         * ★ 并行放行声明（P1-6）：false = 显式否决并行、强制串行调度（如 ask_question 阻塞等用户作答，
+         *  与其它工具并发会乱序）。缺省不否决——canParallelize 按既有判据（SAFE 只读 + isSync 前台）自动推导。
+         */
+        parallelizable?: boolean;
+
+        /**
+         * ★ 参数语义声明（P1-6）：primaryArg 所指参数的语义类别，命令语义特判（命令拒绝清单 / 只读免审 /
+         *  看门狗降级）按此识别「命令执行器」，不再按名字匹配 run_command / run_in_background。
+         * - 'command'：primaryArg 是 shell 命令文本（run_command / run_in_background）；
+         * - 'path'：主参数是文件路径（read_file / edit_file 等，缺省语义）；
+         * - 'text'：主参数是自由文本。
+         * 缺省视为非命令类（现状语义）。
+         */
+        argKind?: 'command' | 'path' | 'text';
+
+        /**
+         * ★ 子代理放行声明（P1-6）：false = 子 agent（spawn_agent/run_workflow 的子 run）不可用。
+         * 缺省按宿主兜底名单（subagent.ts SUBAGENT_DENYLIST）判定——名单退化为未声明者的默认集合。
+         */
+        subagentAllowed?: boolean;
+
+        /**
+         * ★ 挂机批处理放行声明（P1-6）：false = 挂机 batch 工单（自动审批环境）不可用。
+         * 缺省按 CLI 宿主兜底名单（batchRunner BATCH_DEFAULT_DENYLIST）判定，同上退化逻辑。
+         */
+        batchAllowed?: boolean;
 
         /**
          * 声明式风险标记（仅在 safetyLevel 为 MUTATION 或 DANGER 时被执行层消费）

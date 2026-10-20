@@ -12,15 +12,16 @@
  *
  *  与 runAgent 的约定：messageArr[0] 为系统提示词、messageArr[1] 为滚动摘要槽、其余为活动消息。
  */
-import { appConfig } from "@/config/index.ts";
+import { appConfig, resolveModelWindow } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import { msgText, degradeImagesForAux, collapseToText } from "@/session/contentParts.ts";
 import { decayOldToolResults, buildContextMessages } from "@/session/content.ts";
 import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
 import { activeProvider } from "@/llm/model.ts";
+import { MODEL_NAME } from "@/llm/createModel.ts";
 import path from "path";
-import { getRollingState, setRollingState } from "@/session/store.ts";
+import { getRollingState, getCalibration, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
 import { ensureOptions, RunAgentEvents, AuxUsageReporter } from "./type.ts";
 import { UIEvent } from "@/observability/type.ts";
@@ -892,16 +893,18 @@ export const compactSessionNow = async (opts: {
         if (evt.type === 'compact.done') compacted = true;
         opts.onUIEvent?.(evt);
     };
-    // 校准系数用持久化 EMA（与 runAgent 启动同源），无历史回落 1.4；不入请求故 schema 常数不参与判定
-    const store = await getRollingState(opts.sessionId);
+    // 校准系数用持久化 EMA（与 runAgent 启动同源），无历史回落 1.4；不入请求故 schema 常数不参与判定。
+    // ★ P1-4：校准按模型维度取（getCalibration，与 runAgent 同键）；窗口按模型解析（MODEL_WINDOWS 表/全局回退）。
+    //   手动压缩无 run 上下文，模型取全局 MODEL_NAME（与全局 /model 语义一致；MODEL_WINDOWS 空表时二者同为回退值）。
+    const calib = await getCalibration(opts.sessionId, MODEL_NAME);
     await ensureFitsWindow({
         sessionId: opts.sessionId,
         depth: 0,
         messageArr: msgs,
-        modelWindow: appConfig.MAX_HISTORY_TOKENS,
+        modelWindow: resolveModelWindow(MODEL_NAME),
         keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
         compactRatio: appConfig.COMPACT_RATIO, // 兜底硬限照常派生；「必压」语义由 forceCompact 承担
-        correctionRatio: store.calibRatio ?? 1.4,
+        correctionRatio: calib.calibRatio ?? 1.4,
         forceCompact: true,
         compactTrigger: 'manual',
         events: opts.events ?? (async () => {}),

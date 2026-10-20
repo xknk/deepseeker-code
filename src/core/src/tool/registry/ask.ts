@@ -7,7 +7,7 @@
  *  机制：execute 调 ctx.requestQuestion（宿主钩子，与 requestApproval 同构：阻塞至用户作答）。
  *  未注入钩子时（headless / 未支持宿主）优雅降级——返回提示让模型改用纯文本提问，不阻断流程。
  *  不走审批网关（SAFE：提问本身无副作用）；isSync:true（阻塞至作答）。
- *  不参与 P0-1 并行调度（runAgent.canParallelize 已排除）——避免与审批模态并发弹窗。
+ *  不参与 P0-1 并行调度（parallelizable:false 声明否决，canParallelize 读声明）——避免与审批模态并发弹窗。
  */
 import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
 
@@ -17,6 +17,8 @@ export const askTools: CustomTool[] = [
         type: "function",
         function: {
             name: "ask_question",
+            // ★ P1-6 声明化：阻塞等用户作答，不参与并行调度（原 canParallelize 按名排除退役为声明否决）
+            parallelizable: false,
             description: [
                 "向用户提出多选问题并等待作答：技术方案二选一、路径取舍、范围确认等需用户拍板的决策或歧义澄清——勿用于能从代码/上下文自行确定的问题。",
                 "2-4 个选项（label + 可选 description）；multiSelect=true 多选（默认单选）。用户取消返回空选择（改用默认或重新提问）。",

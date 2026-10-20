@@ -19,7 +19,7 @@ import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
 import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
-import { getRollingState, updateCalibration } from "@/session/store.ts";
+import { getCalibration, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions, AuxUsageReporter } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
@@ -28,7 +28,8 @@ import { createRepeatBreaker } from "./repeatBreaker.ts";
 import { prepareToolsAndInjections } from "./systemInjections.ts";
 import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
-import { createNudgeScheduler } from "./agentNudges.ts";
+import { createNudgeScheduler, PLAN_REJECT_FORCE_AT, PLAN_REJECT_FORCE_FINAL_TEXT } from "./agentNudges.ts";
+import { createCostRelay } from "./costRelay.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
 import { calcCostYuan } from "@/config/prices.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
@@ -94,6 +95,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const keepRecentUnits = options.keepRecentUnits
     const compactRatio = options.compactRatio
     const parentSystemPrompt = options.parentSystemPrompt
+    // ★ 生效模型（P1-4 上移至此）：校准按模型维度分键读取/写回需要它，成本折价与 usageLog 同源共用
+    const effectiveModel = options.model?.trim() || MODEL_NAME;
     // ★ setup：工具表裁剪（planMode/env）+ schema 清洗 + 摘要槽 + fence 注入（locale/outputStyle/skills/
     //   agents/projectGuide/memory）。抽出到 systemInjections.ts；validationCtx 在其内部构造。
     //   fence 注入幂等、不动 message 下标——保 DeepSeek 隐式前缀缓存（P0-4）。
@@ -163,7 +166,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //   越低越早压（详见 truncate.ts 的 effectiveRatio）。message[0] 前缀稳定性（P0-4）不受影响。
     // ★ 跨 run 持久化：复用前一 run 攒的真实校准与缓存数据，避免每 run 从 1.4 重零
     //   （实测致实现 run 压缩判定滞后、更晚压缩）。详见 store.ts updateCalibration。
-    const persistedCalib = await getRollingState(sessionId);
+    //   ★ P1-4 按模型维度：会话切模型后各模型校准互不污染（getCalibration per-model 命中优先，
+    //   旧扁平字段兜底——P1-4 之前会话的盘上形状直接沿用）。
+    const persistedCalib = await getCalibration(sessionId, effectiveModel);
     let calibRatio = persistedCalib.calibRatio ?? 1.4;  // 回落 1.4（保守偏高，偏早压缩，安全侧）
     let lastRealPromptTokens = persistedCalib.lastRealPromptTokens;
     let lastCachedTokens = persistedCalib.lastCachedTokens;
@@ -179,7 +184,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     let usageSum: UsageSnapshot | undefined;
     // ★ 成本累计（成本信任链第一环 D2）：每轮真实 usage × 当时单价 O(1) 旁路累加（估算口径红线：绝不用 estimateTokens）。
     //   无价模型任一轮 → costKnown=false，收尾不发钱数（null 语义，绝不编数）；精度 6 位小数防浮点噪音。
-    const effectiveModel = options.model?.trim() || MODEL_NAME;
     let costYuanAcc = 0;
     let costKnown = true;
     const addUsage = (u?: UsageSnapshot) => {
@@ -225,6 +229,22 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         }
         try { options.onAuxUsage?.(usage, kind); } catch { /* 旁路观察者 */ }
     };
+    // ★ P1-5 子 run 增量上报（内核审查报告）：旧路径子 run 全程烧钱父级不知情，直到 run 结束 costSink
+    //   一次性回灌——¥1 预算的父级派出 ¥3 子任务会全额烧完才被父轮边界发现。中继把累计总额转成
+    //   只报正增量，两个 round.end + finally 三处 flush，父累计器逐轮更新，父轮边界 budgetCheck 随时熔断。
+    const costRelay = createCostRelay(options.costSink);
+    /** 三账并总额（token + 按次工具 + 辅助模型）——预算口径的真金白银合计，flush 与收尾回灌共用。 */
+    const spentTotal = () => costYuanAcc + toolCostYuanAcc + auxCostYuanAcc;
+    // ★ P1-5 子任务预算熔断探测：父级经 options.budgetCheck 注入（子 run 链式透传）；主 run 且设预算时
+    //   自我武装（与轮边界硬截断同阈值 1.2×）——子任务（spawn_agent/run_workflow）经 toolCtx.budgetCheck
+    //   拿到本闭包，每轮边界探测，父预算耗尽即收尾，不再等子任务全额烧完。
+    const inheritedBudgetCheck = options.budgetCheck
+        ?? (depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
+            ? () => budgetSpentYuan >= options.budgetYuan! * 1.2
+            : undefined);
+    // ★ P1-7 计划拒绝熔断计数器：计划期非 SAFE 写类工具被拒时由 processToolCall 增量回传（每次 +1）。
+    //   NUDGE_AT（2）次经 nudge 管线转向；FORCE_AT（4）次在轮边界强制收尾（见 completed 分支末尾）。
+    let planWriteRej = 0;
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
     const toolCounts: Record<string, number> = {};
@@ -386,6 +406,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
                 await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
                 emitContextUsage();
+                costRelay.flush(spentTotal()); // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
@@ -446,6 +467,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 toolCostSink,
                 // ★ P0-2：auto 档风险分类器（classifyToolRisk）的 aux usage 回传计价（见 reportAuxUsage 声明处）
                 onAuxUsage: reportAuxUsage,
+                // ★ P1-7 计划拒绝熔断：计划期非 SAFE 工具被拒增量回传（计数 + 通知 nudge 调度器发转向文案）
+                planWriteRejections: (delta: number) => { planWriteRej += delta; nudges.notePlanWriteRejected(planWriteRej); },
+                // ★ P1-5 子任务预算熔断：runSubagent 经 toolCtx.budgetCheck 拿到探测闭包，子 runAgent 每轮边界自检
+                budgetCheck: inheritedBudgetCheck,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
@@ -464,6 +489,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
             emitContextUsage();
+            costRelay.flush(spentTotal()); // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效）
+            // ★ P1-7 计划拒绝熔断：连续 FORCE_AT（4）次计划期写工具被拒 → 强制收尾（模型未能产出方案，
+            //   不陪空转烧轮数）。round.end 已写（本轮完整闭合），stopReason='limit' 与预算截断同枚举。
+            //   转向 nudge 在 NUDGE_AT（2）次时已注入过一次（pickNudge 消费），给过机会仍不转向才熔断。
+            if (options.planMode && planWriteRej >= PLAN_REJECT_FORCE_AT) {
+                stopReason = 'limit';
+                yield { type: 'final', text: PLAN_REJECT_FORCE_FINAL_TEXT(planWriteRej) };
+                return;
+            }
         }
     } catch (toolErr) {
         // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all
@@ -513,14 +547,14 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
-        // ★ 子 run 成本回灌（成本信任链第二环 E1）：本 runAgent 为子 run 时（options.costSink 已注入），
-        //   收尾把自身总花费报给父累计器——父下一轮边界预算检查即包含本子 run 花费。旁路，绝不击垮收尾。
+        // ★ 子 run 成本回灌（成本信任链第二环 E1 + 内核审查报告 P1-5）：本 runAgent 为子 run 时
+        //   （options.costSink 已注入），收尾把余量补报给父累计器——各 round.end 已增量上报过，
+        //   此处 flush 只补差额（中继幂等，重复上报零副作用）。旁路，绝不击垮收尾。
         //   ★ 并账：token 花费 + 按次工具花费（toolCostYuanAcc）+ 辅助模型花费（auxCostYuanAcc，P0-2）
         //   并入总额——任何一笔漏出预算圈，预算制就被那一类调用打穿。后两类与 costKnown 无关（单价恒定
-        //   或独立计价），total>0 即报。
+        //   或独立计价）。
         try {
-            const spentTotal = costYuanAcc + toolCostYuanAcc + auxCostYuanAcc;
-            if (options.costSink && spentTotal > 0) options.costSink(Math.round(spentTotal * 1e6) / 1e6);
+            costRelay.flush(spentTotal());
         } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
@@ -551,9 +585,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
         } catch (e) { console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
         // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
+        //   ★ P1-4 按 effectiveModel 分键写回（旧扁平字段镜像同步），切模型后各模型校准互不污染。
         //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
         try {
-            await updateCalibration(sessionId, { calibRatio, lastRealPromptTokens, lastCachedTokens });
+            await updateCalibration(sessionId, effectiveModel, { calibRatio, lastRealPromptTokens, lastCachedTokens });
         } catch (e) { console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
     }
 }

@@ -197,9 +197,10 @@ describe("derivePrefix / forkSession（会话分叉）", () => {
         const s = await buildSource();
         const lines = await readTranscriptLines(s);
         const lastLineId = (lines[lines.length - 1] as any).id;
-        // ★ setRollingState 只落 3 个核心字段；calibRatio 走 updateCalibration（与产线同路径）
+        // ★ setRollingState 只落 3 个核心字段；calibRatio 走 updateCalibration（与产线同路径）。
+        //   P1-4 起按模型分键写（此处用任一模型 id）；fork 透传走扁平镜像字段（fork.ts 旧形状直写不变）。
         await setRollingState(s, { rollingSummary: "OLD", archivedMessageCount: 0, consecutiveFailures: 0 });
-        await updateCalibration(s, { calibRatio: 1.7 });
+        await updateCalibration(s, "deepseek-flash", { calibRatio: 1.7 });
         const fork = await forkSession(s, lastLineId);
         assert.equal(fork.copiedLines, lines.length);
         assert.equal(fork.archivedMessageCount, 3, "state 派生自前缀内 compaction 事件（不信源 state）");

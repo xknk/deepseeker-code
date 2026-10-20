@@ -12,6 +12,7 @@
  *  - 深度 / manifest / 崩溃 / 中止 / 外层异常均以 ok:false + 错误串表达，调用方据此决定如何呈现与聚合。
  */
 import { runAgent } from "@/agent/runAgent.ts";
+import { resolveModelWindow } from "@/config/index.ts";
 import { buildContextMessages } from "@/session/content.ts";
 import { appendMessage, readTranscriptLines } from "@/session/transcript.ts";
 import { createUUID } from "@/common/index.ts";
@@ -28,10 +29,29 @@ import { ownerCanApprove } from "@/session/lineage.ts";
  * 审查报告 P1-8′，2026-10-20）。
  * 保留 read/edit/write（委派代码工作合理）；MUTATION/DANGER 仍各自走审批网关作为真正后盾。
  *
+ * ★ P1-6 声明化：名单退化为「未声明 subagentAllowed 者的默认收权集合」——工具显式声明
+ *   subagentAllowed:false 同样收权（新工具只声明不动名单），声明与名单任一命中即拒。
  * ★ 声明式子 Agent 的显式 tools 白名单会替代此黑名单（对标 Claude Code agents 的有意授权）；
  *   仅当未声明 tools（或缺省/空）时才回退此黑名单，保证现有 spawn_agent 行为不变。
  */
 export const SUBAGENT_DENYLIST = new Set(["run_command", "delete_path", "run_in_background"]);
+
+/**
+ * 子 agent 工具表收权（纯函数，供单测）：manifest.tools 白名单优先（显式授权替代 deny-list）；
+ * 未声明白名单时回退收权——工具声明 subagentAllowed:false 或命中 SUBAGENT_DENYLIST 均拒
+ * （P1-6：新增高危工具只带声明即被正确收权，漏声明由名单兜底，fail-closed 双保险）。
+ */
+export const filterToolsForSubagent = (allTools: CustomTool[], manifest?: { tools: string[] }): CustomTool[] => {
+    if (manifest && manifest.tools.length > 0) {
+        // P1-MCP dispatcher 兼容：manifest 声明 mcp__*（旧逐工具名）、mcp_call 或 mcp_list_tools 时，
+        //   一并授予两个恒定分发器工具（dispatcher 模式下全局表不再有 mcp__server__tool 独立名）。
+        const wantsMcp = manifest.tools.some(t => t === 'mcp_call' || t === 'mcp_list_tools' || t.startsWith('mcp__'));
+        return allTools.filter((t: any) => manifest.tools.includes(t.function.name)
+            || (wantsMcp && (t.function.name === 'mcp_call' || t.function.name === 'mcp_list_tools')));
+    }
+    return allTools.filter((t: any) =>
+        t.function.subagentAllowed !== false && !SUBAGENT_DENYLIST.has(t.function.name));
+};
 
 /** 单个子 agent 的派生规格（spawn_agent 与 run_workflow 的每个步骤均产出一个）。 */
 export interface SubagentSpec {
@@ -212,15 +232,9 @@ export const runSubagent = async (
         ...(resuming ? [RESUME_NOTE] : []),
     ].filter(Boolean).join("\n\n");
 
-    // ★ 工具表：manifest.tools 非空 → 显式 allowlist（替代 deny-list）；否则回退 deny-list（向后兼容）
-    //   P1-MCP dispatcher 兼容：manifest 声明 mcp__*（旧逐工具名）、mcp_call 或 mcp_list_tools 时，
-    //   一并授予两个恒定分发器工具（dispatcher 模式下全局表不再有 mcp__server__tool 独立名）。
+    // ★ 工具表：manifest.tools 非空 → 显式 allowlist（替代 deny-list）；否则回退收权过滤（声明 subagentAllowed:false / 名单兜底）。
     const allTools = getGlobalTools();
-    const wantsMcp = manifest?.tools.some(t => t === 'mcp_call' || t === 'mcp_list_tools' || t.startsWith('mcp__')) ?? false;
-    const toolSchemas = manifest && manifest.tools.length > 0
-        ? allTools.filter((t: any) => manifest.tools.includes(t.function.name)
-            || (wantsMcp && (t.function.name === 'mcp_call' || t.function.name === 'mcp_list_tools')))
-        : allTools.filter((t: any) => !SUBAGENT_DENYLIST.has(t.function.name));
+    const toolSchemas = filterToolsForSubagent(allTools, manifest);
 
     console.log(`${resuming ? "🔁 续跑" : "🐣 派生"}子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}][${subSessionId}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
 
@@ -241,7 +255,9 @@ export const runSubagent = async (
             cwd: ctx.cwd, // ★ 透传父级工作目录，子 agent 的 hook/工具相对路径与父级一致
             toolSchemas,
             abortSignal: ctx.abortSignal,
-            modelWindow: ctx.modelWindow,
+            // ★ P1-4：manifest.model 覆盖时窗口按该模型解析（MODEL_WINDOWS 表 / 全局回退）；
+            //   未覆盖（与父同模型）直接继承父窗口，行为不变。
+            modelWindow: manifest?.model ? resolveModelWindow(manifest.model) : ctx.modelWindow,
             depth: ctx.depth + 1,
             keepRecentUnits: ctx.keepRecentUnits,
             compactRatio: ctx.compactRatio,
@@ -254,6 +270,7 @@ export const runSubagent = async (
             noEarlyFinal: true, // ★ 子 agent final 是交付父级的汇报，EARLY_FINAL 误推一轮纯浪费；父可经续跑纠错
             model: manifest?.model, // ★ per-agent 模型覆盖；undefined 时 model.ts 回退全局 MODEL_NAME
             costSink: ctx.reportCost, // ★ 子 run 成本回灌父累计器（成本信任链第二环 E1）：父预算自动继承约束
+            budgetCheck: ctx.budgetCheck, // ★ P1-5 预算熔断链式透传：子 runAgent 轮边界探测父预算，超支即收尾（不等烧完）
         };
 
         // ★ P1-8 SubagentStart：子 agent 实际启动（观察事件；声明式名/深度/任务供 hook 记录/计量）

@@ -70,7 +70,9 @@ export type ToolCallOutcome = {
     resultForUser: string;
     ok: boolean;
     aborted?: boolean;
-    terminal?: { kind: 'exit_plan_mode' | 'enter_plan_mode'; plan?: string; reason?: string };
+    /** ★ P1-6 声明化终结：kind 随工具声明 terminal 分流（plan_exit→exit_plan_mode 语义 / plan_enter→enter_plan_mode
+     *  语义 / generic=通用终结：结果只给用户、不再回喂模型续推）。 */
+    terminal?: { kind: 'exit_plan_mode' | 'enter_plan_mode' | 'generic'; plan?: string; reason?: string };
     /** ★ read_image 附带图像（base64 只在此中转，不进 resultForModel 文本）——调度层注入 user 附件消息 */
     imageAttachments?: ToolExecuteResult['images'];
 };
@@ -113,6 +115,10 @@ export type ToolCallContext = {
     toolCostSink?: (yuan: number) => void;
     /** ★ 辅助模型用量上报（成本信任链 P0-2），见 ToolContext.onAuxUsage。 */
     onAuxUsage?: AuxUsageReporter;
+    /** ★ P1-7 计划拒绝熔断：计划期非 SAFE 工具被拒时增量回调（每次 +1）；计数器与熔断判定在 runAgent。 */
+    planWriteRejections?: (delta: number) => void;
+    /** ★ P1-5 子任务预算熔断探测，见 ToolContext.budgetCheck（经此透传给 runSubagent → 子 runAgent）。 */
+    budgetCheck?: () => boolean;
 };
 
 /**
@@ -145,7 +151,8 @@ export const scaleTruncBudget = (base: number, fill: number | undefined): number
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const { sessionId, depth, round, startTime, llmDecisionSource, signal, rawTools, events,
         permissionMode, planMode, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction,
-        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker, reportCost, toolCostSink, onAuxUsage } = ctx;
+        keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker, reportCost, toolCostSink, onAuxUsage,
+        planWriteRejections, budgetCheck } = ctx;
     let calledName = "";
     let calledArgs: any = {};
     let parseFailed = false;
@@ -155,13 +162,17 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         catch { parseFailed = true; }
         console.log(`🤖 模型请求调用工具: ${calledName}，参数:`, calledArgs);
     }
-    // ★ 终结类（优先于 abort：模型已提交的方案/进入请求应呈现给用户，不被中止吞掉——「计划先于执行」）
-    if (calledName === "exit_plan_mode") {
+    const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
+    // ★ P1-6 终结类声明化：流程形态（调用即终结本轮、结果不再回喂模型）随工具声明 terminal 走——
+    //   原 exit/enter_plan_mode 按名特判退役为未声明者兜底（两者已带声明；兜底防第三方注册表未同步时计划流程断裂）。
+    //   优先于 abort：模型已提交的方案/进入请求应呈现给用户，不被中止吞掉——「计划先于执行」。
+    const declaredTerminal = matchedTool?.function?.terminal;
+    if (declaredTerminal === 'plan_exit' || (!declaredTerminal && calledName === "exit_plan_mode")) {
         const plan = typeof calledArgs?.plan === "string" ? calledArgs.plan : "";
         const note = "✅ [计划模式] 实现方案已提交，等待用户审批后进入实现阶段。";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: true, terminal: { kind: 'exit_plan_mode', plan } };
     }
-    if (calledName === "enter_plan_mode") {
+    if (declaredTerminal === 'plan_enter' || (!declaredTerminal && calledName === "enter_plan_mode")) {
         // ★ P0-A runtime 档：工具表恒定后计划模式也暴露 enter_plan_mode——已在计划模式时不再作为终结信号
         //   （防「重复进入 → 上层翻转重跑」循环），以普通结果引导模型继续调研/提交方案。
         if (planMode) {
@@ -177,16 +188,19 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const placeholder = "（已中止，未执行）";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
     }
-    const matchedTool = rawTools.find((t: any) => t.function.name === calledName);
     // ★ P0-A 计划模式执行层门禁（runtime 档，默认）：工具表全会话恒定（systemInjections 两态统一
     //   appendPlanControlTools），计划期改由此处拒绝未声明 planAllowed 的工具——不发审批、不加锁、
     //   不进 hook 流水线，直接以结果文案引导模型转只读/提交方案（计划先于执行的语义不变）。
     //   ★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单退役，白名单改读工具声明 planAllowed（缺省 = 拒绝，
-    //   fail-closed）——matchedTool 匹配相应前移至本门禁之前。enter/exit_plan_mode 为终结类已在上方
-    //   拦截返回，此处保留显式豁免（双保险）。schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
+    //   fail-closed）——matchedTool 匹配相应前移至本门禁之前。计划控制终结类（含声明式 plan_enter/plan_exit）
+    //   已在上方拦截返回，此处保留显式豁免（双保险）。schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
     if (!parseFailed && planMode && appConfig.planEnforcement === 'runtime'
         && calledName !== 'enter_plan_mode' && calledName !== 'exit_plan_mode'
+        && declaredTerminal !== 'plan_enter' && declaredTerminal !== 'plan_exit'
         && matchedTool?.function?.planAllowed !== true) {
+        // ★ P1-7 计划拒绝熔断：只计「真写工具」的拒绝——matchedTool 存在且非 SAFE（ask_question 等SAFE 交互类
+        //   被拒属正常流程，不计；幻觉工具名 matchedTool 缺失，同样不计）。增量回传 runAgent 熔断。
+        if (matchedTool && matchedTool.function.safetyLevel !== ToolSafetyLevel.SAFE) planWriteRejections?.(1);
         const note = `❌ [计划模式] 当前为只读调研阶段，禁止 ${calledName}。完成方案请调 exit_plan_mode 提交，经用户审批后进入实现阶段。`;
         events({ sessionId, eventType: 'tool.validation.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round }, payload: { output: note } });
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: note, resultForUser: note, ok: false };
@@ -196,7 +210,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
     //   的回退（process.env.WORKSPACE_ROOT || process.cwd()）不同源——在 VSCode 多根重定向未 chdir / run_workflow
     //   worktree 子 agent 下，审批网关 isProtectedWrite(path, toolCtx.cwd) 与工具实际操作的根会指向不同目录。
     //   统一到 getActiveWorkspaceRoot() 消除错位（ToolCallContext.cwd 字段仍保留，供 subagent/runAgent 透传）。
-    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode, readTracker, reportCost, toolCostSink, onAuxUsage };
+    const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: calledName, message: m }), permissionMode, readTracker, reportCost, toolCostSink, onAuxUsage, budgetCheck };
     let result = "";
     // ★ #8b 结构化成败跟踪（替代 FAILED_PREFIXES 前缀嗅探 + explicitOk 手工短路）：
     //   默认 success；拒绝/熔断/解析失败/verifyResult FAILED 显式置 failed。文案只是呈现，成败看状态。
@@ -281,11 +295,16 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             else if (perm === 'allow') { needApproval = false; }
             else if (perm === 'ask') { needApproval = true; }
         } catch { perm = null; /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
-        // ★ 默认模式只读命令免审（P1-8）：仅 run_command、且用户未设显式权限规则（perm===null）时，
+        // ★ 命令语义判定（P1-6 声明化）：「命令执行器」改读工具声明 argKind==='command'，
+        //   原 run_command / run_in_background 按名特判退役（两者已带声明）。前台性看 isSync：
+        //   argKind='command' 且 isSync !== false 才是前台命令（run_in_background 后台工具不享受只读免审）。
+        const isCommandTool = matchedTool.function.argKind === 'command';
+        const isForegroundCommand = isCommandTool && matchedTool.function.isSync !== false;
+        // ★ 默认模式只读命令免审（P1-8）：仅前台命令工具、且用户未设显式权限规则（perm===null）时，
         //   对只读命令（git 只读子命令 / ls / tsc --noEmit 等无 shell 元字符的纯查看+验证类）直接免审，消除审批疲劳。
         //   安全：COMMAND_DENY 硬闸门（下方紧接判定）+ hasShellMetachars（isReadOnlyCommand 内）双闸兜底；
         //         收紧：permissions.ask/deny 优先级始终更高（perm!==null 时本判定不生效，用户可 opt-out）；
-        //         不含 run_in_background（后台任务持续运行，免审风险更高）；
+        //         不含后台命令工具（isSync:false，任务持续运行，免审风险更高）；
         //         npm/pnpm/npx/yarn「跑脚本」类被 scriptRunnerBlocked 单独拦下（供应链面，见下），不再免审。
         // ★ 供应链免审防绕过（P0 修复）：scriptRunnerBlocked 命令同时关闭只读免审（本判定）与 auto 分类器
         //   （下方 runAutoCheck）——package.json scripts 与 npx 未装包拉取是仓库作者的任意代码，
@@ -296,7 +315,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         //     同串命令会免审执行【另一个】package.json 的脚本（npm/pnpm 脚本解析以 cwd 下的 package.json 为准，
         //     投毒面与首次审批时看到的不是同一份）。故 script-runner 类命令显式 cwd ≠ 工作区根时视同未确认，
         //     重新审批一次（fail-closed；审批 detail 会带目录，用户知情）。非包管理器命令不受影响。
-        const cmdIsScriptRunner = (calledName === 'run_command' || calledName === 'run_in_background')
+        const cmdIsScriptRunner = isCommandTool
             && isScriptRunnerCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '');
         const argCwd = typeof calledArgs?.cwd === 'string' ? calledArgs.cwd.trim() : '';
         const samePath = (a: string, b: string): boolean => {
@@ -306,14 +325,14 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         const scriptRunnerCwdDrift = cmdIsScriptRunner && argCwd !== '' && !samePath(argCwd, toolCtx.cwd ?? process.cwd());
         const scriptRunnerBlocked = cmdIsScriptRunner && (perm === null || scriptRunnerCwdDrift);
         if (scriptRunnerCwdDrift) needApproval = true; // perm='allow' 已置 false → 漂移时强制拉回审批
-        if (perm === null && needApproval && !denied && !scriptRunnerBlocked && calledName === 'run_command'
+        if (perm === null && needApproval && !denied && !scriptRunnerBlocked && isForegroundCommand
             && isReadOnlyCommand(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
             needApproval = false;
         }
         // ★ P0-2 灾难命令硬闸门：与 needApproval / allow 规则解耦——堵住「裸 allow 规则让
         //   checkPermission='allow' 跳过 runAutoCheck（含 COMMAND_DENY）」的审批绕过路径。
-        //   即使用户 allow 了 run_command，rm -rf /、curl|sh、外传密钥等灾难命令仍硬拒。
-        if ((calledName === 'run_command' || calledName === 'run_in_background')
+        //   即使用户 allow 了命令工具，rm -rf /、curl|sh、外传密钥等灾难命令仍硬拒。
+        if (isCommandTool
             && matchCommandDeny(typeof calledArgs?.command === 'string' ? calledArgs.command : '')) {
             denied = true;
             failResult(`❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(calledArgs?.command ?? '').slice(0, 100)}`, 'permission');
@@ -467,6 +486,11 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             ? await writeSidecarArchive(sessionId, String(toolCall.id), postHookOverride)
             : undefined;
         resultForModel = truncateToolResult(postHookOverride, overrideBudget, overrideNote);
+    }
+    // ★ P1-6 通用终结声明（terminal:true）：照常走完全部门禁与 execute 后终结本轮——结果只给用户
+    //  （terminalText=resultForUser），调度层不再回喂模型续推。成败不改变终结性（提交即终结）。
+    if (declaredTerminal === true) {
+        return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok, imageAttachments, terminal: { kind: 'generic' } };
     }
     return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel, resultForUser, ok, imageAttachments };
 };

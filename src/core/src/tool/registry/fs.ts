@@ -730,6 +730,9 @@ export const fsTools: CustomTool[] = [
             triggersUndo: 'delete',
             autoApproval: 'file',
             primaryArg: 'path',
+            // ★ P1-6 声明化收权：递归删除不进子 agent（爆炸半径最大原语之一，SUBAGENT_DENYLIST 兜底同判）与挂机批处理
+            subagentAllowed: false,
+            batchAllowed: false,
             description: "从本地磁盘内永久删除一个指定的文件或者一整个文件夹目录。如果是目录，工具会自动执行深度递归强行销毁。此操作不可逆，请万分小心。",
             parameters: {
                 type: "object",

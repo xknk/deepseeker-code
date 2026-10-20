@@ -125,6 +125,29 @@ export const appConfig = {
     hookRewrite: process.env.DEEP_SEEK_HOOK_REWRITE !== "0",
 };
 
+// —— P1-4 按模型的上下文窗口（内核审查报告第二批） ——
+
+/**
+ * 各模型的**工作窗口**（token，压缩判定用）。内核审查报告 P1-4：MAX_HISTORY_TOKENS 是全局常量，
+ * 不随 /model 变化——切到小窗口模型时压缩偏晚（靠 API 400 兜底，一次失败请求 + 强制压缩），
+ * 切到大窗口模型时过早压缩（白击穿前缀缓存）。本表按模型 id 给出差异化工作窗口。
+ *
+ *  - 缺省（表外模型）保守回退 appConfig.MAX_HISTORY_TOKENS（= 现状行为，零回归）；
+ *  - 当前三款在售模型（SELECTABLE_MODELS）刻意**不填表**：MAX_HISTORY_TOKENS=250K 本就是针对
+ *    DeepSeek-V4（标称 1M）按编码甜点区裁定的产品决策（见上方 MAX_HISTORY_TOKENS 注释），
+ *    不是「未感知模型差异」——臆造差异化数字反而推翻已调好的甜点区；
+ *  - 日后接入窗口不同的模型（如 32K 轻量档），在此填 `"<modelId>": <tokens>` 即全局生效
+ *    （chatProcessing 主链路 / compactSessionNow 手动压缩 / 子 agent manifest.model 三处同源消费）。
+ */
+export const MODEL_WINDOWS: Record<string, number> = {};
+
+/** 解析指定模型的工作窗口：MODEL_WINDOWS 命中优先，未命中/未传模型回退全局 MAX_HISTORY_TOKENS。 */
+export const resolveModelWindow = (model?: string): number => {
+    const id = model?.trim();
+    const hit = id ? MODEL_WINDOWS[id] : undefined;
+    return typeof hit === "number" && hit > 0 ? hit : appConfig.MAX_HISTORY_TOKENS;
+};
+
 // —— 配置来源标注（第二梯队 #5 dump-config） ——
 
 /** 每个「值由环境变量参与决定」的 appConfig 字段 → 变量名（dump-config 来源标注 + 文档校对用）。

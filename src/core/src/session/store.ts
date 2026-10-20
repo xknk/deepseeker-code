@@ -217,7 +217,9 @@ export async function getRollingState(
         // 读取持久化的连续失败次数，若不存在则默认为 0
         consecutiveFailures:
             typeof (store as any).consecutiveFailures === "number" ? (store as any).consecutiveFailures : 0,
-        // ★ 跨 run 持久化的压缩校准状态（缺省 undefined，调用方按 ?? 回落默认）
+        // ★ 跨 run 持久化的压缩校准状态（缺省 undefined，调用方按 ?? 回落默认）。
+        //  P1-4 起这是「扁平镜像视图」：压缩主链路（runAgent/compactSessionNow）须走 getCalibration(sessionId, modelId)
+        //  按 per-model 分键读——切模型后各模型校准互不污染，扁平字段只是最近写入模型的镜像。
         calibRatio: typeof store.calibRatio === "number" ? store.calibRatio : undefined,
         lastRealPromptTokens: typeof store.lastRealPromptTokens === "number" ? store.lastRealPromptTokens : undefined,
         lastCachedTokens: typeof store.lastCachedTokens === "number" ? store.lastCachedTokens : undefined,
@@ -243,22 +245,77 @@ export async function setRollingState(
     });
 }
 
+/** 单模型维度的压缩校准快照（P1-4）：字段语义与 RollingState 扁平三字段一致。 */
+type CalibrationEntry = {
+    calibRatio?: number,
+    lastRealPromptTokens?: number,
+    lastCachedTokens?: number,
+}
+
+/**
+ * ★ P1-4 按模型维度取校准状态：store.calibByModel[modelId] 命中优先（新分键数据），
+ *  未命中回退旧扁平字段（P1-4 之前会话的盘上形状 / fork 派生直写）——同一会话切模型后
+ *  各模型的校准互不污染（32K 小窗与 250K 工作窗的 EMA 口径不可共用）。
+ *  纯函数：只读入参 store，不碰 IO / 锁。modelId 缺省视为直接要扁平视图。
+ */
+export const calibrationEntryFor = (store: any, modelId?: string): CalibrationEntry => {
+    if (modelId) {
+        const byModel = store?.calibByModel;
+        const hit = byModel && typeof byModel === "object" ? byModel[modelId] : undefined;
+        if (hit && typeof hit === "object") {
+            return {
+                calibRatio: typeof hit.calibRatio === "number" ? hit.calibRatio : undefined,
+                lastRealPromptTokens: typeof hit.lastRealPromptTokens === "number" ? hit.lastRealPromptTokens : undefined,
+                lastCachedTokens: typeof hit.lastCachedTokens === "number" ? hit.lastCachedTokens : undefined,
+            };
+        }
+    }
+    return {
+        calibRatio: typeof store?.calibRatio === "number" ? store.calibRatio : undefined,
+        lastRealPromptTokens: typeof store?.lastRealPromptTokens === "number" ? store.lastRealPromptTokens : undefined,
+        lastCachedTokens: typeof store?.lastCachedTokens === "number" ? store.lastCachedTokens : undefined,
+    };
+};
+
+/**
+ * 读取 sessionId × modelId 的压缩校准状态（P1-4 主消费入口：runAgent 启动 / compactSessionNow）。
+ * 分键规则见 calibrationEntryFor：per-model 命中优先，旧扁平字段兜底。
+ */
+export const getCalibration = async (sessionId: string, modelId?: string): Promise<CalibrationEntry> => {
+    const store = await readStore(sessionId);
+    return calibrationEntryFor(store, modelId);
+};
+
 /**
  * ★ 原子更新跨 run 压缩校准状态（calibRatio / lastRealPromptTokens / lastCachedTokens），不动 rollingSummary 等。
  *  runAgent 在 finally 末尾调用，让下一 run（续接/实现阶段）复用本 run 攒的真实校准与缓存命中率，
  *  避免 calibRatio 每 run 重置回 1.4。走 withStoreLock 与 setRollingState 串行，互不覆盖。
  *  仅写入传入的数值字段，undefined 跳过（保留 store 原值）。
+ *  ★ P1-4 按 modelId 分键写入 store.calibByModel；同时把该模型的最终值镜像回写旧扁平字段
+ *  （fork 派生 / 旧读侧直读 store.calibRatio 的语义不因分键而读空——扁平字段=「最近写入模型」的镜像）。
  */
 export const updateCalibration = async (
     sessionId: string,
+    modelId: string,
     calib: { calibRatio?: number; lastRealPromptTokens?: number; lastCachedTokens?: number },
 ): Promise<void> => {
     return withStoreLock(sessionId, async () => {
         const store = await readStore(sessionId);
         if (!store) return;
-        if (typeof calib.calibRatio === "number" && Number.isFinite(calib.calibRatio)) store.calibRatio = calib.calibRatio;
-        if (typeof calib.lastRealPromptTokens === "number") store.lastRealPromptTokens = calib.lastRealPromptTokens;
-        if (typeof calib.lastCachedTokens === "number") store.lastCachedTokens = calib.lastCachedTokens;
+        const id = modelId?.trim() || "default";
+        const byModel = store.calibByModel && typeof store.calibByModel === "object"
+            ? store.calibByModel
+            : (store.calibByModel = {} as Record<string, CalibrationEntry>);
+        const cur = byModel[id] && typeof byModel[id] === "object"
+            ? byModel[id]
+            : (byModel[id] = {} as CalibrationEntry);
+        if (typeof calib.calibRatio === "number" && Number.isFinite(calib.calibRatio)) cur.calibRatio = calib.calibRatio;
+        if (typeof calib.lastRealPromptTokens === "number") cur.lastRealPromptTokens = calib.lastRealPromptTokens;
+        if (typeof calib.lastCachedTokens === "number") cur.lastCachedTokens = calib.lastCachedTokens;
+        // 旧扁平字段镜像回写（= 最近写入模型的值），fork 透传与旧读侧语义保持
+        if (typeof cur.calibRatio === "number") store.calibRatio = cur.calibRatio;
+        if (typeof cur.lastRealPromptTokens === "number") store.lastRealPromptTokens = cur.lastRealPromptTokens;
+        if (typeof cur.lastCachedTokens === "number") store.lastCachedTokens = cur.lastCachedTokens;
         await writeStore(sessionId, store);
     });
 };

@@ -110,6 +110,10 @@ export interface RunAgentOptions {
      *  仅 runSubagent 经 ToolContext.reportCost 注入；主 run 不设。注意：只进父的预算累计器，
      *  不进父的 receipt/usageLog costYuan（后者按 run 自身 usage 落盘、读侧按 depth 拆分，避免双重计量）。 */
     costSink?: (yuan: number) => void,
+    /** ★ 子任务预算熔断探测（内核审查报告 P1-5）：父级注入的闭包，返回 true=父预算已耗尽。子 runAgent
+     *  在每轮边界探测，命中即 stopReason='limit' 收尾——不再等子任务全额烧完才由父级发现超支。
+     *  主 run 不设（自身熔断在轮边界自管）；runSubagent 经 ToolContext.budgetCheck 链式透传。 */
+    budgetCheck?: () => boolean,
     /** ★ 本轮用户输入原文（成本信任链 P0-1）：供 agentNudges 的 firstPrompt 判定用「当前轮」输入。
      *  由 serve/cli 宿主定型传入（serve 侧取 slash 展开且 hook 注入**之后**的 inbound.content，值可能含
      *  hook 注入文本——仅作 nudge 判定用，行为无害）；缺省回退「消息数组末尾最近一条
