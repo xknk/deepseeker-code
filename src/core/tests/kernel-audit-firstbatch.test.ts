@@ -67,7 +67,7 @@ const withProvider = async <T>(provider: any, fn: () => Promise<T>): Promise<T> 
 // —— P0-3 decl 夹具：逐字段镜像 registry 真实声明（fs.ts / background.ts），改声明须同步此处 ——
 const EDIT_DECL: AutoApprovalDecl = { autoApproval: "file", pathArgs: ["path"], primaryArg: "path", safetyLevel: ToolSafetyLevel.MUTATION, triggersUndo: "overwrite" };
 const DELETE_DECL: AutoApprovalDecl = { autoApproval: "file", pathArgs: ["path"], primaryArg: "path", safetyLevel: ToolSafetyLevel.DANGER, triggersUndo: "delete" };
-const MOVE_DECL: AutoApprovalDecl = { autoApproval: "file", pathArgs: ["source", "destination"], primaryArg: "src", safetyLevel: ToolSafetyLevel.MUTATION };
+const MOVE_DECL: AutoApprovalDecl = { autoApproval: "file", pathArgs: ["source", "destination"], primaryArg: "source", safetyLevel: ToolSafetyLevel.MUTATION };
 const CMD_DECL: AutoApprovalDecl = { autoApproval: "command", primaryArg: "command", safetyLevel: ToolSafetyLevel.DANGER };
 const ctxBase = { cwd: process.cwd() } as any;
 

@@ -247,7 +247,8 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *       `npm test; evil` 一并静默放行——shell 执行类工具的 allow-always 必须精确，杜绝 payload 空间。
  *       同命令带不同 flag/子命令的变体会重新审批（shell 工具的正确安全姿态）；用户若确需「一族命令免审」，
  *       可手动在 settings.json 写 run_command(npm test:*) 显式声明（globToRegex 仍支持 :*）。
- *   - 路径类（argKey=path/src）：顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
+ *   - 路径类（argKey=path）：顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
+ *     非 path 的路径类主参数（如 move_file 的 source）落到下方精确值分支——无 undo 兜底的工具不放大作用域；
  *   - 其余（url/query/pattern 等）：精确值；
  *   - 无主参数映射 / 缺值 / 非字符串 / 空串 → 返回 null（不可安全作用域 → 不持久化，降级 allow-once；
  *       旧版回退裸 ToolName 会把该工具【所有】后续调用静默放行，对 MCP/未映射的 DANGER 工具尤其危险）。
@@ -262,7 +263,9 @@ export const buildScopedAllowRule = (toolName: string, args: any, primaryArg?: s
         const cmd = val.trim();
         return cmd ? `${toolName}(${cmd})` : null; // 精确命令串：杜绝跨子命令 / 链式注入的静默放行
     }
-    if (argKey === 'path' || argKey === 'src') {
+    // ★ 第 17 项补丁（2026-10-21）：'src' 分支已退役——move_file 主参数改称 'source' 后，全仓再无
+    //   工具以 'src' 作主参数（gs 声明由 tool-declaration-drift 全表断言钉住），该分支成为死代码。
+    if (argKey === 'path') {
         // 规范化：反斜杠→正斜杠、去 ./ 前缀、去 Windows 盘符（D:），取顶层目录
         const norm = val.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[a-zA-Z]:/, '');
         const slashIdx = norm.indexOf('/');

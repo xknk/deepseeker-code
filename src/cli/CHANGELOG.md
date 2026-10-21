@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.59
+
+随 core 重打包（2026-10-21）：仅同步内核审查报告第 17 项（`move_file` 的 `primaryArg` 从误写的 `'src'` 改为真实参数名 `'source'`、`list_dir` 删除无对应参数的 `primaryArg:'path'`、`permissions.ts` 退役 `'src'` 死分支 + 全表声明防漂移守门）。**CLI 侧无代码改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：对 `move_file` 选「总是允许」从此真正生效，作用域为精确源路径）。
+
 ## 1.0.58
 
 DeepSeek Search & Fetch 接入（与 VSCode 端 1.0.68 同源）：web_search 缺省升级 DeepSeek 自家搜索后端（长摘要直出，`SEARCH_PROVIDER` 可切回 bing/tavily/ddg）；web_fetch 可选 `backend:"deepseek"`；按次成本（¥0.005/次）经 toolCostSink 进 receipt/usageLog/E1/E2，结算行加「联网 ¥x」段、挂机报告费用行同步聚合；`DEEP_SEEK_TOOL_COST=0` 关上报。守门测试 web-deepseek.test.ts 10 例（含 0 命中+site:带路径误用签名纠正模板——0 命中若带误用签名当场给「site: 只接域名」纠正示例，不再给「未找到相关结果」过强结论）。

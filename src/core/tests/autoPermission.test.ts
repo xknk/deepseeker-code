@@ -86,7 +86,7 @@ describe("runAutoCheck scope（default 档命令分类器下沉；#8a 声明化�
     it("#8a file 类围栏按声明 pathArgs 取参：destination 越界 → ask（确定性分支，不触达分类器）", async () => {
         // 测试不依赖模型：仅钉围栏确定性分支。move_file 声明 pathArgs:['source','destination']——
         // 双路径特判退役后由声明携带，destination 越界即 ask（进不了分类器）。
-        const dualDecl = { autoApproval: 'file' as const, pathArgs: ['source', 'destination'], primaryArg: 'src' };
+        const dualDecl = { autoApproval: 'file' as const, pathArgs: ['source', 'destination'], primaryArg: 'source' };
         assert.equal(await runAutoCheck("move_file", { source: "a.txt", destination: "../../evil" }, ctx, false, dualDecl), "ask");
     });
 });

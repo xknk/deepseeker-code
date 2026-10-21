@@ -506,7 +506,9 @@ export const fsTools: CustomTool[] = [
         function: {
             name: "list_dir",
             planAllowed: true,
-            primaryArg: 'path',
+            // ★ 第 17 项补丁（2026-10-21）：原声明 primaryArg:'path' 系漂移——本工具参数表只有 max_depth，
+            //   根本没有 path；且 SAFE 只读工具不走审批路径，allow-always 无意义。删除后由
+            //   tool-declaration-drift 的「声明 ⊆ parameters.properties」断言钉住。
             description: "扫描并精简列出当前项目的工作区目录树。本工具自动合并通用忽略规则与多层子目录级 .gitignore 规范。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
@@ -981,7 +983,13 @@ export const fsTools: CustomTool[] = [
             name: "move_file",
             // ★ #8a 策略声明：双路径都受保护路径硬规则检查（P0-3 洞的声明化收口；特判已退役）。
             //   刻意不声明 triggersUndo：move 语义可手动移回，维持「不在 Undo 回退范围」现状。
-            primaryArg: 'src',
+            // ★ 第 17 项补丁（2026-10-21）：主参数名原写 'src'，与本工具实际参数 source/destination 不符
+            //   → args['src'] 恒 undefined → buildScopedAllowRule 返回 null → 恒降级 allow-once，
+            //   用户点「总是允许」对 move_file 从不生效（安全侧 fail-closed 无风险，纯功能打折）。
+            //   改为 'source' 后走 buildScopedAllowRule 末尾的【精确值】兜底分支（规则 = move_file(<精确源路径>)），
+            //   刻意不并入 path 的顶层目录作用域（argKey === 'path' 分支）：move 无 undo 兜底（见上条），
+            //   作用域宁可窄——代价是该源路径逐次授权，move_file 非高频操作，可接受。
+            primaryArg: 'source',
             autoApproval: 'file',
             pathArgs: ['source', 'destination'],
             description: "移动或重命名文件/目录（同卷原子操作）。源不存在则失败；目标已存在则拒绝（防误覆盖，如需覆盖请先 delete_path 再 move_file）。自动创建目标父目录。⚠️ 本操作暂不在 Undo 回退范围内（不可撤销）。",

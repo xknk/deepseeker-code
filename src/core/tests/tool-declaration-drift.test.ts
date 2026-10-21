@@ -113,7 +113,44 @@ describe("工具策略声明化防漂移（#8a：新增工具只声明不动名�
         const outcome2 = await processToolCall(
             { id: 'call_drv_4', type: 'function', function: { name: 'fake_read_tool', arguments: '{"path":"note.md"}' } },
             { ...baseCtx, rawTools: [readOnlyTool] } as any);
-        assert.equal(outcome2.ok, true, "声明 planAllowed:true 的工具计划期可用");
-        assert.equal(outcome2.resultForModel, 'read ok');
-    });
-});
+                assert.equal(outcome2.ok, true, "声明 planAllowed:true 的工具计划期可用");
+                assert.equal(outcome2.resultForModel, 'read ok');
+            });
+
+            it("⑥ 全表防漂移：凡声明 primaryArg / pathArgs，必须真实存在于 parameters.properties（第 17 项补丁）", async () => {
+                // 背景：allow-always 作用域、分类器围栏、保护路径检查都按【声明】取 args[主参数]。
+                // 声明名与实际参数表不一致时取值为 undefined——buildScopedAllowRule 返回 null →「总是允许」静默降级
+                // allow-once（安全侧 fail-closed，但功能打折）；pathArgs 漂移则让围栏取不到参而空跑。
+                // 历史实例：list_dir 声明 primaryArg:'path'（参数表只有 max_depth）、move_file 声明 primaryArg:'src'
+                //（实际 source/destination）——两者均由本断言钉零。
+                const { agentTools } = await import("@/tool/index.ts");
+                // ★ 防空转假绿：聚合数组为空/导入失败时上面的循环一次不跑，drifts 恒空 → 断言恒过。
+                assert.ok((agentTools as any[]).length > 20, `agentTools 应已聚合全量工具（实际 ${(agentTools as any[]).length}）`);
+                // ★ 反向锚点：至少一个工具真在声明 primaryArg（同防假绿——全仓都漏声明时本断言也该叫）
+                assert.ok((agentTools as any[]).some((t) => t?.function?.primaryArg), "注册表应有工具声明 primaryArg");
+                const drifts: string[] = [];
+                for (const t of agentTools as any[]) {
+                    const f = t?.function;
+                    if (!f) continue;
+                    const props: Record<string, unknown> = f.parameters?.properties ?? {};
+                    const declared: Array<[string, string]> = [];
+                    if (f.primaryArg) declared.push(["primaryArg", f.primaryArg]);
+                    for (const p of (f.pathArgs ?? []) as string[]) declared.push(["pathArgs", p]);
+                    for (const [kind, key] of declared) {
+                        if (!(key in props)) {
+                            drifts.push(`${f.name}: ${kind}='${key}' 不在 parameters.properties [${Object.keys(props).join(", ")}]`);
+                        }
+                    }
+                }
+                assert.deepEqual(drifts, [],
+                    `声明与实际参数表漂移（会导致 allow-always 取值为 undefined 而永不生效）：\n${drifts.join("\n")}`);
+
+                    // ★ 第 17 项补丁的两处历史漂移，逐一钉死（防回潮）：
+                    const moveFile = (agentTools as any[]).find((t) => t?.function?.name === "move_file");
+                    assert.equal(moveFile?.function?.primaryArg, "source",
+                    "move_file 主参数必须为 source（原写 src 使 args['src'] 恒 undefined → 「总是允许」永不生效）");
+                    const listDir = (agentTools as any[]).find((t) => t?.function?.name === "list_dir");
+                    assert.equal(listDir?.function?.primaryArg, undefined,
+                    "list_dir 参数表只有 max_depth，不得声明 primaryArg（纯漂移；SAFE 只读工具亦不需 allow-always）");
+            });
+        });
