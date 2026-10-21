@@ -493,6 +493,28 @@ body {
   /* 320px 不可见区不挡点击：交互放行收敛到卡片/pill/徽标/贴图（下两条） */
   pointer-events: none;
 }
+/* ★ 不透明垫板（反馈：钉住态下滑过的内容从卡片里透出来与提问文字叠影穿模）：卡片遮挡此前
+   只靠 .user-bubble 自身背景一处——它同时是被 clip-path 裁剪的元素，底色又由主题变量混合而来
+   （body 自绘同变量时变量带 alpha 看不出来，一盖到滚动内容上就穿），任一环节失效即透字。
+   垫板与裁剪解耦（独立伪元素，双层同色背景把变量强制不透明化：上层变量、下层 #252526 兜底，
+   变量自带 alpha 也合成出不透明色，常规主题两 层合成=变量原色、渲染结果与此前逐像素一致），
+   只垫到卡片视觉底边（head+cardH，+1px 容亚像素缝，缝由渐变带 0% 实底段压住）；
+   卡片下方仍留给渐变带做溶入——行底透明、内容从卡片下滑过可见的语义不变。 */
+.row-user.stuck .user-block::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(var(--stuck-head-h) + var(--stuck-card-h) + 1px);
+  pointer-events: none;
+  background: var(--vscode-sideBar-background, #252526);
+  background: linear-gradient(
+      var(--vscode-sideBar-background, #252526),
+      var(--vscode-sideBar-background, #252526)
+    )
+    #252526;
+}
 .row-user.stuck .user-block:not(.has-time) {
   --stuck-head-h: 0px; /* 无时间行：卡片顶=块顶 */
 }
