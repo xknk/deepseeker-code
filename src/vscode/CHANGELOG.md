@@ -1,94 +1,17 @@
 # Changelog
-
-## 1.0.78
-
-修复守护轮改调工具后继跑请求 400（reasoning_content 未回传，2026-10-21 生产实证 + 探针复现）：收尾守护 nudge 轮模型改调工具（如补 todo_write）时，回复作为独立 assistant 落盘，历史出现相邻 assistant 且后者带 tool_calls——末条非 system 是 tool，出口剥离器误走宽松档全剥 reasoning_content，DeepSeek 按草稿续写严格档校验直接 400、run 以 error 终止。全历史仅一例，但恰好打在收尾安全网上，且该形状会持久化进会话文件——不修则受影响会话续聊可能反复 400。
-
-- **触发收严**：`stripHistoricalReasoning` 新增「相邻 assistant 且后者带 tool_calls」→ 整请求回退全量回传（与「末条非 system 是 assistant」同一退路）；纯文本相邻不触发（探针 W9 + 生产 31 对/23 会话零 400 实证），~25% 请求瘦身收益保留。
-- **探针增补**：reasoning-guard-probe.ts 加 W7（复现 400）/W8（修复后 200）/W9（文本相邻对照 200）三变体，顺带修旧导入（client 重构后 `model` → `getModel()`）。
-- **守门**：reasoning-strip.test.ts 14 例（+3：拆分工具轮单测放行、文本相邻照剥、出站请求体全量回传断言）；core 全量 706 例绿（subagent-resume-e2e 已知间歇 flake，单跑恒绿与本次无关）+ 三端 typecheck 绿。
-
-## 1.0.77
-
-修复历史会话列表跨项目串显（2026-10-21，多根工作区切根场景）：会话/trace/undo/worktree/用量本就按「项目隔离键」分目录存储，但该键在 core 加载期按当时目录算定一次——VSCode 里**切换项目根**后键不跟随，新会话仍落进最初项目的桶，历史面板于是把切换过的所有项目的对话混在一起显示。
-
-- **切根重导隔离键**：core 抽出纯函数 `deriveWorkspaceKey`（父目录-目录-路径哈希，含盘符大小写/分隔符归一），VSCode `applyProjectRoot` 切根成功后重导 `appConfig.userWorkspaceDir`——会话、trace、undo 备份、worktree、用量日志的按项目分桶全部跟随新主根。
-- **切根即开新会话**：selectProjectRoot 成功后走统一新会话入口（脏页签开新页签、旧对话原样保留可切回续接）——避免同一会话在两个项目的桶里各留半截、两边历史列表都被污染。多根文件访问面不变：沙箱仍放行窗口内所有项目文件夹，一个会话里跨项目改文件照旧（存储归主根桶）。
-- **会话盖章 projectRoot**：新建会话在 state.json 记录创建时的项目根绝对路径，listSessions 摘要透出（旧会话无此字段）——会话归属项目的兜底元信息，供诊断与未来跨桶工具用。
-- **多项目语义一句话**：不切根的多根同聊=会话归主根桶、历史在该项目下可见；显式切根=换项目上下文=新会话新桶；同一项目在不同窗口打开=同键同桶，历史共享。
-- **守门**：`workspace-key.test.ts` 5 例（键归一化/防碰撞、重导传播、盖章透出）；core 全量 693 例绿（3 例间歇 flake 两轮全量失败点漂移、涉事文件单跑恒绿，与本次改动无关）+ 三端 typecheck 绿 + CLI dist 重打。
-
-## 1.0.76
-
-webview 消息/代码块复制（2026-10-21，对标 Claude Code 消息 copy 形态）：assistant 回复与围栏代码块获得一键复制，纯 webview 层改动、宿主与内核零接触。
-
-- **代码块 copy**：`mdToHtml` 围栏代码块包 `.md-code` + 右上角 `⧉` 按钮（hover 显形，`.msg-undo` 同款悬浮出模式），消息流 / overlay 计划全文 / 审批计划条全域生效；点击行为 app.js **capture 阶段委托 + stopPropagation**——不冒泡进「正文点击放大 overlay」，且对流式 innerHTML 整块重建免疫。
-- **回复 copy**：assistant 行 hover 显形 `.msg-copy` 徽标，复制 `row.text` **原始 Markdown**（非渲染后文字）；流式中不挂，收尾 rebuildRow 自然生效；徽标挂 wrap 直接子层，与正文点击放大/折叠头互不牵连。区分口径=只有 agent 产出可复制（回复/代码），用户消息、工具行、状态行不配——过程性内容本就靠原生划选。
-- **复制保真修复**：`\n→<br/>` 收敛到围栏外段落——pre 段保留真实换行，`textContent` 读出的即原样代码（此前全局替换把代码内换行也转 `<br/>`，按 DOM 取文会丢换行）。渲染结果不变（`white-space: pre` 本就保留换行）。
-- **剪贴板原语**：`state.js` 新增 `copyText`（navigator.clipboard 优先，被拒降级 textarea+execCommand）+ `flashCopied`（✓ 反馈 1.2s，定时器挂元素防连点串帧）；文案入 strings.js 双语（rwCopyMsg / rwCopyCode）。
-- **验证**：真 bundle 断言（stub acquireVsCodeApi 后 esbuild 打包真 markdown.js：包裹与按钮 / pre 真换行 / 围栏外 br 与行内规则 / 转义往返 / GFM 表格全过）+ `npm run build` 绿 + typecheck 绿。
-
-## 1.0.75
-
-工具策略声明漂移收尾（2026-10-21，内核审查报告第 17 项）：修 `move_file` / `list_dir` 两处「声明名 ≠ 实际参数名」的漂移，并新增全表守门断言防回潮。
-
-- **`move_file` 的「总是允许」从不生效**：`primaryArg` 原写 `'src'`，而该工具参数名是 `source`/`destination`——`args['src']` 恒 `undefined` → `buildScopedAllowRule` 返回 null → 恒降级 allow-once，用户点「总是允许」下次照样弹窗（安全侧 fail-closed 无风险，纯功能打折）。改为 `'source'` 后落精确值作用域规则 `move_file(<精确源路径>)`，**刻意不放大到顶层目录**——move 无 undo 兜底，作用域宁窄；代价是该源路径逐次授权（move_file 非高频，可接受）。
-- **`list_dir` 删漂移声明**：原声明 `primaryArg:'path'`，但参数表只有 `max_depth`；SAFE 只读工具本不走审批路径，allow-always 无意义。
-- **`permissions.ts` 退役 `argKey==='src'` 死分支**：`'source'` 改称后全仓再无工具以 `'src'` 作主参数。
-- **守门**：`tool-declaration-drift.test.ts` 新增全表断言「凡声明 `primaryArg`/`pathArgs` 必须 ∈ `parameters.properties`」，另加防假绿两道（聚合数组非空、至少一个工具真声明主参数，防空转恒过）+ 回潮锚点两条；**已反向验证**——把旧声明改回去断言即红并精确报出漂移项。无行为变化项：审批弹窗、工具表、权限判定语义均不动（仅「总是允许」对 move_file 从失效变为生效，且作用域更窄）。core 全量 703 例绿 + 三端 typecheck 绿。
-
-## 1.0.74
-
-修复钉顶提问块穿模（2026-10-21）：滚动时钉在顶部的提问卡片，下方滑过的内容会从卡片里透出来与提问文字叠影。根因是卡片的不透明遮挡只靠气泡自身背景一处，而它同时是被 clip-path 裁剪的元素、底色又由主题变量混合而来（部分主题该变量自带 alpha，常态看不出来，一盖到滚动内容上就透字）。现改为**独立不透明垫板**（`::before` 伪元素，与裁剪解耦）+ **双层同色背景强制不透明化**（变量在上、#252526 兜底在下，变量带 alpha 也合成出不透明色）；只垫到卡片视觉底边，卡片下方仍留给渐变带做溶入过渡，常规主题渲染结果与此前逐像素一致。纯 CSS 改动，布局与滚动跟随语义零变化。
-
-## 1.0.73
-
-收尾回复治理·对标 CC 原则化（2026-10-21）：针对「每次结论都是长篇结题报告」——【回答形式】新增**说人话**（先讲效果再讲手段、术语跟白话解释）与**收尾自然简短**（结论一句 + 改动与验证要点、篇幅以说清为准，附长度参照示例；无硬性行数上限、无固定三段式——对标 Claude Code「短而精靠原则不靠模板」）；EARLY_FINAL / TOOL_DIGEST nudge 文案同步收紧（final 前最后一条 system 的 recency 位点，「简述成果」改为「简短自然总结、勿长篇报告」）。完成判据与四类收尾守护逻辑零改动（不削弱"必须真完成"约束）；nudge-scheduler 词表钉逐字未动；core 全量绿（secondbatch 1 例 IPC 反序列化为已知间歇 flake，单跑恒绿）+ 三端 typecheck 绿。根因：整套守护单向推"别停太早"、仅一句"收尾要短"，DS 完整性倾向放大为枚举式自证完成。
-
-## 1.0.72
-
-Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.6）第四批（收尾批）修复四项（2026-10-21）：allow-session 真会话级、CLI /rewind + /diff、CLI 审批完整内容展开、processToolCall 四阶段拆分——收口批：权限作用域补真、两条后置命令对标 Claude Code 形态、审批可看全文、安全链重构为纯移动。守门测试 kernel-audit-fourthbatch.test.ts 12 例 + core 全量 702 例绿 + 三端 typecheck 绿，§8.0 五约束逐条核对无违反。
-
-- **allow-session 真会话级（I-4，P3 修复）**：会话级规则从进程级单列表拆为 `Map<sessionId, 规则桶>`——`checkPermission` 增可选 sessionId 尾参（执行层与调度层并行判定均传），guard 入账带 `ctx.sessionId` 归桶；判定时桶与全局合并、优先序不变（deny > ask > allow，桶 deny 照样压过全局 allow）。会话结束等价路径清桶：CLI loadSession/newSession、VSCode setSessionId/deleteSession；桶容量上限 64（淘汰最旧）防 serve 常驻进程无界增长。零变化项：allow-once / allow-always / deny 与 CLI 单会话体感不动。守门含双会话隔离行为断言（A/B 互不可见、清桶失效），非仅结构扫描。
-- **CLI /rewind（I-3）**：斜杠菜单新增检查点回退选择器——`listUndoable` 列本会话可回退变更（路径 · 操作类型 · 相对时间，分页），选择后按 `restoreByUndoId` **选择性回退**（非仅 restoreLast 弹最新一条），成功/失败结果入会话流；新建文件（creation_marker）回退=删除。同款注册 `/diff`：按本 run 时间窗过滤 undo 记录，逐文件装配「改前备份 vs 当前磁盘」净变化红绿 diff（复用红绿基建；creation_marker 以空为改前全绿；备份已清理/文件不在盘等降级 note 行，不抛错）。双语文案 + /help 条目，命令表紧随 usage 注册（第三批守门形态不破坏）。
-- **CLI 审批完整内容展开（I-6，CLI 侧收口）**：CLI 审批桥补 `meta.fullDetail` 透传（core 侧 1.0.71 已附带、VSCode 已用），审批弹窗按 `f` 键展开截断前全文——同一套红绿解析管线，展开态不设折叠行数封顶、仅 400 行绝对上限防糊屏；无 fullDetail 的审批不显示提示。
-- **processToolCall 四阶段拆分（P2-10，纯移动重构）**：~470 行单函数拆为 `ToolCallState` 可变中间态 + 四阶段函数——`resolveEarlyOutcome`（终结/abort/计划门禁）→ `runSecurityGates`（安全链：hook→参数校验→保护路径→权限→命令语义→灾难闸→锁→分类器→人工审批→旧位 hook→undo 备份，顺序敏感）→ `executeTool`（执行+post-hooks）→ `finalizeOutcome`（脱敏→侧车→截断→outputFilter→终结分流）；processToolCall 收编为编排器。验收=既有测试与守门**零改动全绿** + 三端 typecheck——行为等价由旧守门逐条结构断言背书，不顺手改任何行为/文案。
-
-## 1.0.71
-
-Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第三批修复六项（2026-10-20）：CLI /undo、分类器可见性、会话级允许、子 agent 进度分行、结算单子任务花费、挂机解释器闸门——交互短板收口 + 两项实测答疑 + 架构不变式补钉，守门测试 kernel-audit-thirdbatch.test.ts 12 例 + core 全量 690 例绿，§8.0 五约束逐条核对无违反。
-
-- **CLI /undo 最小版（I-3）**：斜杠菜单新增 `/undo`（fork 与 usage 之间注册），直调 core `restoreLast` 与模型 `undo_restore` 工具同一恢复链路——LIFO 弹最近一条写操作记录回滚磁盘，再次执行沿反向记录回走（撤销撤销=可逆）；无可回退项给专门提示不抛错。
-- **分类器可见性（I-5）**：命令类走 LLM 安全分类器时全程可观测——调用前发「🔒 安全判定中…（最长 10s）」进度，返回后回报「放行/未放行」结论；文件类确定性快路径刻意零打扰（不发进度）。审批弹窗在分类器未放行转人工时，detail 追加 fail-closed 来由说明（不在自动放行范围 / 判 risky / 判定超时或异常），审批者不再对着莫名弹窗猜原因。
-- **审批新增「本会话内允许」（I-4）**：ApprovalDecision 从三态扩四态——allow-once / **allow-session（新）** / allow-always / deny。allow-session 经 `addSessionPermissionRule` 记内存级会话规则（同形调用本会话免审，重启即失效），与 allow-always（落项目 settings.json）之间补上「想放行一阵子但不想写盘」的中间档；CLI 弹窗选项、VSCode 按钮、serve /api/approve 白名单三端同步。
-- **子 agent 进度按 agent 分行（I-7）**：多 agent 并发时进度行不再互相踩——`subagent.progress` 事件带 `agentKey`（子会话 id，唯一）+ `name`（manifest 名），CLI/VSCode 各自维护 agentKey→行槽 Map，每 agent 一行独立更新、完成按 key 删行，渲染带 `⟨name⟩` 前缀可分辨。
-- **结算单并列展示子 run 花费（Q12）**：receipt 结算单新增 `subCostYuan` 段（CLI「· 子任务 ¥x」/ VSCode 同步）——展示账（`subCostYuanAcc` 由 reportCost 同源增量喂入）与计量账（`costYuanAcc` 每 run 自身）刻意分账，预算圈与 usageLog 口径零变化，无重复计数。
-- **挂机解释器×仓库脚本供应链闸门（N5，仅 batch 场景）**：`node ./scripts/x.js`、`python x.py`、裸 `tsc`/`make`/`cargo`/`go` 等「解释器直跑仓库内脚本」形态在挂机批处理默认拦截（与 npm 族同源的供应链风险，仓库作者代码=提交即执行）；交互场景零打扰（刻意不进 toolExecution 判定链，仍走分类器）；工单 `tools:` 加 `"interpreter"` 伪槽位即解锁。查询 flag（`node --version`）、内联代码（`python -c`）、外部程序绝对路径、包管理器族不误伤。
-- **完整 diff 透传（I-6，core+VSCode）**：审批 meta 新增 `fullDetail`（截断前全文），webHost 以 `opts.includeFullDetail` 显式开启（HTTP SSE 保持 2000 字符截断口径），VSCode in-process 接入——diff 视图以全文渲染，弹窗预览维持截断不变；CLI 侧延后。
-- **计划模式无提案提示（I-1）**：`/plan` 批准时若模型从未产出提案（plan==null），不再静默无响应，直接提示「本次计划模式未产生提案」。
-- **架构不变式补钉（P2-14 ①② + P2-11）**：① 计划模式两态工具表逐字节恒定（不裁表保前缀缓存，P0-A 执行层门禁语义用行为测试钉住）；② nudge ephemeral 硬约束端到端断言（续跑轮推理入参含 `⟦DSC:⟧` 尾部副本可达模型 + transcript 落盘零痕迹，压缩输入=真实消息数组故机制传递成立）；P2-11 `ToolCallContext` 14 个可选字段全部改 `T | undefined` 必填（构造漏字段=编译错误，替代手工逐字段纪律）。**P2-10 拆 processToolUse 评估后置**：~470 行安全链纯移动重构，与大批行为改动同车会叠加回归面，留独立重构批。
-
-## 1.0.70
-
-Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第二批修复四项（2026-10-20）：子 agent 预算增量上报、计划拒绝熔断、窗口/校准按模型分维度、工具声明化收尾——守门测试 kernel-audit-secondbatch.test.ts 14 例 + core 全量 676 例绿，§8.0 五约束逐条核对无违反。
-
-- **子 agent 预算增量上报（P1-5）**：子 run 烧的钱不再等 run 结束才一次性回灌——新增 `costRelay` 增量中继（只报正增量、幂等、六位小数舍入防浮点噪声），round.end×2 + finally 三处 `flush` 把 `costYuanAcc+toolCostYuanAcc+auxCostYuanAcc` 累计总额实时推给宿主 `costSink`；同时 `budgetCheck` 闭包三环贯通（runAgent 主 run 自武装「≥budgetYuan×1.2 即超」→ toolCallCtx → subagent subOptions，workflow subCtx spread 自动继承），子 run 在**轮边界**即时自检中止超支任务，挂机批处理的预算闸从此对子任务生效。
-- **计划拒绝熔断（P1-7）**：计划模式下模型反复尝试写工具被拒不再无限空转——只计非 SAFE 写工具的拒绝（ask_question 等交互类被拒不计），连续 2 次推一次 `⟦DSC:PLAN_REJECT⟧` 转向 nudge（引导转只读或 exit_plan_mode，每 run 至多一次不重复念经），连续 4 次在轮边界强制收尾（`stopReason='limit'`，文案给中止/批准/退出计划三条出路）。
-- **窗口/校准按模型维度（P1-4）**：新增 `MODEL_WINDOWS` 表 + `resolveModelWindow`，上下文窗口不再全体绑 `MAX_HISTORY_TOKENS` 一个值（三处在售模型刻意不填表，250K 甜点区产品决策不变；日后续接不同窗口模型填表即生效）；校准比 `calibRatio` 等按 `sessionId+modelId` 分键存取（`getCalibration`/`updateCalibration`），同会话换模型互不污染；盘上旧扁平字段作未命中兜底（旧会话不丢校准），写侧镜像回写扁平字段——fork 透传与旧读侧零改动继续工作。chatProcessing 主链 / compactSessionNow 手动压缩 / 子 agent manifest.model 三处接入。
-- **声明化收尾（P1-6）**：`CustomTool` 新增五声明字段——`terminal`（三态：`'plan_exit'`/`'plan_enter'`/`true`=结果只给用户并终结本轮）、`parallelizable`（显式 `false` 否决并行；未声明按 SAFE+同步自动推导，现有 SAFE 并行不受影响）、`argKind`（`'command'`/`'path'`/`'text'`）、`subagentAllowed`、`batchAllowed`。四处按名特判退役为「声明优先 / 名单兜底」：调度层并行排除与终结分流、执行层终结拦截与命令语义（scriptRunner/只读免审/灾难闸门）、子 agent 工具收权、挂机 batch 过滤。验收场景：新增声明 terminal 的测试工具不改任何名单即正确终结 + 后续调用补占位 + 强制串行——以后新增此类工具零名单维护。
-- **挂机 batch 过滤改读声明**：`batchRunner` 工具表过滤从「纯 denylist」改为「`batchAllowed !== false` 且不在 `BATCH_DEFAULT_DENYLIST`」，与子 agent 收权同一声明语义（fail-closed：未声明者仍按名单兜底拦截）。
-
 ## 1.0.69
 
-Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第一批修复五项（2026-10-20）：审批快路径确定性化、辅助模型花费入账闭环、流式重试文本治理、后台任务收权——报告 §8 第一批验收五判据全过，守门测试 kernel-audit-firstbatch.test.ts 22 例 + core 全量 662 例绿。
+线上 1.0.68 后的全部积累一次发布（本地曾以 1.0.69–1.0.78 十个版本迭代、均未上架；现按线上版本序列收敛重排为 1.0.69，十个细分条目全文见 git 历史）。core 全量 706 例绿 + 三端 typecheck 绿。
 
-- **firstPrompt 取「当前轮」输入（P0-1）**：新增 `resolveFirstPrompt`——宿主显式 `currentUserText`（serve/cli 定型传入）优先，缺省从消息数组**末尾**回退扫最近一条非空 user（旧实现 `find` 从头取首条），`depth!==0` 恒空串门禁保留（§8.0②：子 agent 工具表实有 enter_plan_mode，PLAN_FIRST 一调即被转终结信号提前收尾）。修复多轮病理：第 2 轮寒暄（"谢谢，先不用"）被当复杂首条 → 误注入 PLAN_FIRST + EARLY_FINAL 拦掉正常收尾。回归测试双向钉（寒暄零触发、复杂首条照常触发）。
-- **辅助模型花费入账（P0-2）**：压缩摘要与工具风险分类器烧的 AUX 模型钱不再漏账——`onAuxUsage` 回调按 §8.0④ 三处定义全链贯通（`ensureOptions` 压缩链 6 函数逐层透传 / `ToolContext`+`ToolCallContext` 分类链 / runAgent 单一累加器），一律按 `AUX_MODEL_NAME` 价目折算（复用主模型单价=金额直接错）；无价/零花费缺失不计、不阻断。`auxCostYuan` 进预算圈（超限熔断把 aux 钱也算上）、receipt 结算单与 usageLog（无调用自动省略），CLI 结算行 / VSCode 事件行 / 挂机报告三端显「辅助 ¥x」。
-- **400 降级压缩补漏**（实施后残留点）：streamInference 的 context_length 降级路径也调 `ensureFitsWindow`，初版漏接 onAuxUsage——已透传并入守门断言（主循环压缩与降级压缩同一本账）。
-- **文件类审批二元化（P0-3，裁定 B 方案）**：`autoApproval='file'` 改纯确定性判定——工作区围栏 + 敏感文件 deny 清单照旧，其后三条件快路径（`safetyLevel!==DANGER && triggersUndo∈{overwrite,create}`，缺一不可，§8.0①）命中 → allow；其余（delete_path 的 DANGER、move_file 无 undo 兜底）恒 ask 转人工。**LLM 分类器对文件类整体退出**（分类器调用次数=0 进测试断言，不只验放行结果）；刻意不做「!triggersUndo → 分类器」回落（那会让 delete_path 漏进分类器）。快路径放行同样触发执行层 beforeMutationBackup（凡改必可回退，结构断言钉住备份门与审批解耦）。命令/aggressive 类照旧走分类器。注释同步：PermissionMode 两档语义澄清（快路径 default 亦生效，两档差异仅 aggressive/MCP 作用域）。
-- **text.reset 宿主消费矩阵（N1）**：流式重试前 core 发的 text.reset 此前 CLI/webview/挂机三宿主漏消费，重试文本会拼在旧残影后——CLI 新增 case 按 §8.0③ 清干净（取消 pending flushTimer + 清 text/thinking buffer + 清流式行文本，重试从行原点重写）；webview/挂机消费点核验，四触点矩阵测试钉住。
-- **run_in_background 收权（P1-8′）**：进 `SUBAGENT_DENYLIST`（父 run 收尾时后台任务成孤儿）与 `BATCH_DEFAULT_DENYLIST`（挂机 detached 进程无人观测）；工单 `tools:` 显式解锁语义不变（§8.0⑤：应答器放行集=编辑类∪解锁，无需动应答器）。
-- **结算与台账修正（N4 顺手项）**：batch 子 run 花费聚合改 `__sub__` 前缀归拢（旧精确等值把子 run 花费全漏掉）；store.ts trace 文件名注释纠偏（`__sub__` 一律截到首段主会话 id、子 run 与主 run 共写同一 trace 文件系有意设计）。
+- **Agent 内核审查报告四批修复**：P0 firstPrompt 取当前轮 / 辅助模型花费入账 / 文件类二元快路径；子 agent 预算增量上报（costRelay 增量中继 + budgetCheck 闭包三环贯通，轮边界即时中止超支子任务）；计划拒绝熔断（2 次转向 nudge / 4 次强制收尾）；窗口/校准按模型维度（MODEL_WINDOWS + per-model 校准分键）；工具声明化收尾（CustomTool 五声明字段，四处按名特判退役为声明优先+名单兜底）；allow-session 真会话级（Map<sessionId,规则桶> 容量 64 + 双会话隔离守门）；processToolCall 四阶段纯移动拆分（安全链 9 环节顺序零变化）。
+- **CLI 后置命令**：/undo（restoreLast 同链路 LIFO 可逆）、/rewind（listUndoable 分页 + restoreByUndoId 选择性回退，creation_marker 回退=删新建）、/diff（本 run 时间窗 undo 记录 vs 磁盘净变化红绿汇总）、审批按 f 展开截断前全文（meta.fullDetail 透传，400 行绝对上限）。
+- **审批与可见性**：审批四态（allow-once / allow-session / allow-always / deny）CLI/VSCode/serve 三端同步；命令安全分类器全程可观测（判定中进度 + 结论回报 + fail-closed 来由入审批 detail）；子 agent 进度按 agentKey 分行互不踩；结算单并列展示子任务花费（展示账/计量账分账零重复计数）。
+- **挂机批处理**：batch 工具过滤改读声明（batchAllowed 优先、fail-closed 兜底）；解释器×仓库脚本供应链闸门（node/python/裸构建工具直跑仓库内脚本默认拦截，工单 tools: 加 interpreter 伪槽位解锁，交互链零打扰）。
+- **收尾回复治理**：【回答形式】新增说人话（先效果后手段、术语跟白话）与收尾自然简短（原则化对标 Claude Code，无硬模板/行数上限）；EARLY_FINAL/TOOL_DIGEST nudge 文案收紧，完成判据与四类收尾守护逻辑零改动。
+- **工具声明漂移收尾（审查报告第 17 项）**：move_file primaryArg 'src'→'source'（「总是允许」从不生效→生效，作用域宁窄不放大）；list_dir 删幽灵主参数；permissions.ts 退役 'src' 死分支；tool-declaration-drift.test.ts 全表断言 + 防假绿 + 回潮锚点（反向验证过）。
+- **守护轮 400 修复（reasoning_content）**：收尾 nudge 轮模型改调工具 → 历史出现「相邻 assistant 且后者带 tool_calls」，出口剥离器误走宽松档全剥思考记录被 DS 严格档 400、run 以 error 终止；stripHistoricalReasoning 新增该形状判定回退全量回传（纯文本相邻不触发，~25% 瘦身收益保留；探针 W7/W8/W9 真实 API 实证 + 守门 14 例）。
+- **多根工作区隔离键**：deriveWorkspaceKey 纯函数 + VSCode 切根后重导隔离键（会话/trace/undo/worktree/用量五桶跟随新主根）；切根即开新会话（旧对话保留可切回续接）；会话 state.json 盖章 projectRoot——修历史面板跨项目串显。
+- **webview 交互**：assistant 回复与围栏代码块一键复制（复制原始 Markdown 保真、capture 委托与点击放大互不干扰、剪贴板降级原语 + ✓ 反馈）；钉顶提问块穿模修复（独立不透明垫板 + 双层背景，纯 CSS）。
 
 ## 1.0.68
 

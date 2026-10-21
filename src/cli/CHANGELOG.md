@@ -2,7 +2,7 @@
 
 ## 1.0.59
 
-随 core 重打包（2026-10-21）：仅同步内核审查报告第 17 项（`move_file` 的 `primaryArg` 从误写的 `'src'` 改为真实参数名 `'source'`、`list_dir` 删除无对应参数的 `primaryArg:'path'`、`permissions.ts` 退役 `'src'` 死分支 + 全表声明防漂移守门）。**CLI 侧无代码改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：对 `move_file` 选「总是允许」从此真正生效，作用域为精确源路径）。
+随 core 重打包（2026-10-21）：同步内核审查报告第 17 项（`move_file` 的 `primaryArg` 从误写的 `'src'` 改为真实参数名 `'source'`、`list_dir` 删除无对应参数的 `primaryArg:'path'`、`permissions.ts` 退役 `'src'` 死分支 + 全表声明防漂移守门）+ 守护轮 reasoning_content 400 修复（收尾 nudge 轮改调工具的「相邻 assistant」形状误走宽松档被 DS 严格档拒 400）+ 工作区隔离键切根重导 / 会话盖章 projectRoot 等 core 侧修复。**CLI 自身代码无改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：对 `move_file` 选「总是允许」从此真正生效，作用域为精确源路径；曾命中 400 的会话续聊恢复正常）。
 
 ## 1.0.58
 
