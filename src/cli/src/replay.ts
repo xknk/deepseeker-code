@@ -9,6 +9,7 @@
  */
 import type { TraceBase, Todo } from "@/observability/type.ts";
 import { isEventLine } from "@/session/transcript.ts";
+import type { RunDiffFile } from "./diffSummary.ts";
 
 /** 一行转录（线性消息流）。 */
 export type ChatRow =
@@ -37,7 +38,9 @@ export type ChatRow =
     /** 压缩进度瞬态行（P1-3 防误中止）：多批压缩期间「正在压缩 n/N」；恒留动态区随进度更新，
      *  完成时由 compact.done 收敛替换（行删除）。UI 事件实时行，不落盘不回放。 */
     | { id: number; kind: "compact-progress"; done: number; total: number }
-    | { id: number; kind: "subagent-progress"; text: string };
+    | { id: number; kind: "subagent-progress"; text: string }
+    /** ★ I-3 第四批 /diff：本 run 文件改动红绿汇总行（已完成快照，进 Static；数据见 diffSummary.ts）。 */
+    | { id: number; kind: "diff-summary"; title: string; files: RunDiffFile[] };
 
 /**
  * 从转录行重建可渲染行（user/assistant/tool/thinking），供 --resume 挂载回放与 /sessions 载入复用。

@@ -471,11 +471,12 @@ export const requestApproval = async (
     if (!approved) {
         ctx.onUIEvent?.({ type: "tool.denied", toolsId: toolCallId, toolName });
     } else if (decision === 'allow-session') {
-        // ★ I-4（内核审查报告第三批，2026-10-20）：会话级记忆——与 allow-always 同一套保守作用域
-        //   （buildScopedAllowRule），区别只在存储层：纯内存（addSessionPermissionRule）不落盘，
-        //   会话结束即失效。无法安全作用域时降级 allow-once（与持久路径同纪律）。
+        // ★ I-4（内核审查报告第三批，2026-10-20；第四批 2026-10-21 真会话级）：会话级记忆——与 allow-always
+        //   同一套保守作用域（buildScopedAllowRule），区别只在存储层：纯内存（addSessionPermissionRule
+        //   入 ctx.sessionId 专属桶）不落盘，会话切换/进程退出即失效，且进程内其它会话不可见。
+        //   无法安全作用域时降级 allow-once（与持久路径同纪律）。
         const ruleStr = buildScopedAllowRule(toolName, args, primaryArg);
-        if (ruleStr && addSessionPermissionRule(ruleStr)) {
+        if (ruleStr && addSessionPermissionRule(ruleStr, 'allow', ctx.sessionId)) {
             console.log(`📌 [审批记忆] 本会话内免审：${ruleStr}（会话结束自动失效，不写配置文件）`);
         } else {
             console.log(`♻️ [审批] ${toolName} 本次放行${safetyLevel ? ` (${safetyLevel})` : ''}（未记忆：无法安全生成作用域）`);

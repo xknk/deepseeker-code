@@ -48,6 +48,35 @@ let rules: PermissionRules = { allow: [], deny: [], ask: [] };
 // 未信任时 addPermissionRule('project', ...) 降级不落盘——重启后信任闸门会挡掉项目级配置，写了也不一致。
 let trustedProject = false;
 
+// ★ I-4 第四批（内核审查报告收尾批，2026-10-21）：会话级规则桶——按 sessionId 隔离，修复第三批
+//   「allow-session 实为进程级」残留：serve 进程承载多会话时，会话 A 的会话规则不得对会话 B 生效。
+//   容量上限防 serve 常驻进程下 Map 无界增长（每桶规则本就个位数；显式清空走宿主会话切换等价路径
+//   ——chatProcessing 的 SessionEnd hook 是每轮请求末派发，不是会话终点，不可作清桶点）。
+const sessionBuckets = new Map<string, PermissionRules>();
+const SESSION_BUCKET_CAP = 64;
+
+/** 取（或建）会话桶；桶满时按插入序淘汰最旧会话（Map 迭代序=插入序）。 */
+const bucketFor = (sessionId: string): PermissionRules => {
+    let bucket = sessionBuckets.get(sessionId);
+    if (!bucket) {
+        if (sessionBuckets.size >= SESSION_BUCKET_CAP) {
+            const oldest = sessionBuckets.keys().next().value;
+            if (oldest !== undefined) sessionBuckets.delete(oldest);
+        }
+        bucket = { allow: [], deny: [], ask: [] };
+        sessionBuckets.set(sessionId, bucket);
+    }
+    return bucket;
+};
+
+/**
+ * 清空指定会话的会话级规则桶（宿主会话切换/删除等「会话结束等价路径」调用，防跨会话残留）。
+ * 不存在的桶静默幂等。
+ */
+export const clearSessionPermissionRules = (sessionId: string): void => {
+    sessionBuckets.delete(sessionId);
+};
+
 /**
  * glob→regex 缓存。语义对标 Claude Code 的 Bash 权限规则：
  *  - `X:*`（前缀语法）：匹配 X，或 X 后跟「单词边界 + 任意内容」。如 `npm test:*` 命中 `npm test`、`npm test:unit`、`npm test --watch`。
@@ -158,9 +187,11 @@ const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg
 /**
  * 启动期加载权限规则（供 serve/index.ts 调用）。
  * 无配置 / 加载失败均静默跳过（空规则集 → 所有 checkPermission 返回 null，走默认审批流），绝不阻断启动。
+ * 同时复位会话桶（重启即全清，与「会话级规则纯内存、重启失效」的承诺一致）。
  */
 export const initPermissions = async (includeProject: boolean): Promise<void> => {
     trustedProject = includeProject;
+    sessionBuckets.clear();
     try {
         rules = await readPermissionConfig(includeProject);
         const total = rules.allow.length + rules.deny.length + rules.ask.length;
@@ -178,13 +209,19 @@ export const initPermissions = async (includeProject: boolean): Promise<void> =>
  * 优先级：deny > ask > allow；都未命中返回 null（走 safetyLevel 默认）。
  * @param primaryArg 工具声明的主参数名（CustomTool.function.primaryArg，#8a 声明化透传）；
  *   缺省 = 带作用域规则退化为按裸名匹配（未登记工具的现状语义）。
- * 任何异常一律返回 null（fail-safe：降级为默认审批流，绝不阻断工具执行）。
+ * @param sessionId 可选尾参（★ I-4 第四批）：传入时全局规则与该会话桶合并裁决——同类规则拼接后仍按
+ *   deny > ask > allow 短路，会话桶里的 ask/deny 不会被全局 allow 掩盖，反之亦然；缺省只查全局
+ *   （旧行为逐字节不变）。任何异常一律返回 null（fail-safe：降级为默认审批流，绝不阻断工具执行）。
  */
-export const checkPermission = (toolName: string, args: any, primaryArg?: string): PermissionVerdict => {
+export const checkPermission = (toolName: string, args: any, primaryArg?: string, sessionId?: string): PermissionVerdict => {
     try {
-        for (const r of rules.deny) if (ruleMatches(r, toolName, args, primaryArg)) return 'deny';
-        for (const r of rules.ask) if (ruleMatches(r, toolName, args, primaryArg)) return 'ask';
-        for (const r of rules.allow) if (ruleMatches(r, toolName, args, primaryArg)) return 'allow';
+        const bucket = sessionId ? sessionBuckets.get(sessionId) : undefined;
+        const deny = bucket ? [...rules.deny, ...bucket.deny] : rules.deny;
+        const ask = bucket ? [...rules.ask, ...bucket.ask] : rules.ask;
+        const allow = bucket ? [...rules.allow, ...bucket.allow] : rules.allow;
+        for (const r of deny) if (ruleMatches(r, toolName, args, primaryArg)) return 'deny';
+        for (const r of ask) if (ruleMatches(r, toolName, args, primaryArg)) return 'ask';
+        for (const r of allow) if (ruleMatches(r, toolName, args, primaryArg)) return 'allow';
         return null;
     } catch {
         return null;
@@ -245,15 +282,19 @@ const resolveSettingsPath = (scope: 'global' | 'project'): string =>
         : path.join(process.cwd(), ".deepseeker-code", "settings.json");
 
 /**
- * ★ I-4（内核审查报告第三批，2026-10-20）：会话级 allow 规则——只进内存、绝不落盘，会话结束随
- *   进程消亡。对标 CC 审批「本会话内不再询问」：比 allow-once 省反复打断、比 allow-always（写
+ * ★ I-4（内核审查报告第三批，2026-10-20；第四批 2026-10-21 修真会话级）：会话级规则——只进内存、
+ *   绝不落盘。对标 CC 审批「本会话内不再询问」：比 allow-once 省反复打断、比 allow-always（写
  *   settings.json）轻一个量级的信任承诺。作用域规则仍经 buildScopedAllowRule 保守生成（同持久路径）。
+ * @param sessionId 可选尾参：传入 → 入该会话桶（进程内按会话隔离，clearSessionPermissionRules /
+ *   initPermissions / 容量上限三种途径失效）；缺省 → 入全局 rules（遗留直调兼容，行为同第三批——
+ *   生产链路 guard.ts 恒带 ctx.sessionId，此分支仅供旧测试/脚本直调不破）。
  * @returns true=已生效；false=非法格式（compileRule 内部已 warn）
  */
-export const addSessionPermissionRule = (ruleStr: string, kind: 'allow' | 'deny' | 'ask' = 'allow'): boolean => {
+export const addSessionPermissionRule = (ruleStr: string, kind: 'allow' | 'deny' | 'ask' = 'allow', sessionId?: string): boolean => {
     const compiled = compileRule(ruleStr, 'runtime:addSessionPermissionRule(session)', kind);
     if (!compiled) return false;
-    if (!rules[kind].some(r => r.raw === compiled.raw)) rules[kind].push(compiled);
+    const target = sessionId ? bucketFor(sessionId) : rules;
+    if (!target[kind].some(r => r.raw === compiled.raw)) target[kind].push(compiled);
     return true;
 };
 

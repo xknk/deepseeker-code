@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.72
+
+Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.6）第四批（收尾批）修复四项（2026-10-21）：allow-session 真会话级、CLI /rewind + /diff、CLI 审批完整内容展开、processToolCall 四阶段拆分——收口批：权限作用域补真、两条后置命令对标 Claude Code 形态、审批可看全文、安全链重构为纯移动。守门测试 kernel-audit-fourthbatch.test.ts 12 例 + core 全量 702 例绿 + 三端 typecheck 绿，§8.0 五约束逐条核对无违反。
+
+- **allow-session 真会话级（I-4，P3 修复）**：会话级规则从进程级单列表拆为 `Map<sessionId, 规则桶>`——`checkPermission` 增可选 sessionId 尾参（执行层与调度层并行判定均传），guard 入账带 `ctx.sessionId` 归桶；判定时桶与全局合并、优先序不变（deny > ask > allow，桶 deny 照样压过全局 allow）。会话结束等价路径清桶：CLI loadSession/newSession、VSCode setSessionId/deleteSession；桶容量上限 64（淘汰最旧）防 serve 常驻进程无界增长。零变化项：allow-once / allow-always / deny 与 CLI 单会话体感不动。守门含双会话隔离行为断言（A/B 互不可见、清桶失效），非仅结构扫描。
+- **CLI /rewind（I-3）**：斜杠菜单新增检查点回退选择器——`listUndoable` 列本会话可回退变更（路径 · 操作类型 · 相对时间，分页），选择后按 `restoreByUndoId` **选择性回退**（非仅 restoreLast 弹最新一条），成功/失败结果入会话流；新建文件（creation_marker）回退=删除。同款注册 `/diff`：按本 run 时间窗过滤 undo 记录，逐文件装配「改前备份 vs 当前磁盘」净变化红绿 diff（复用红绿基建；creation_marker 以空为改前全绿；备份已清理/文件不在盘等降级 note 行，不抛错）。双语文案 + /help 条目，命令表紧随 usage 注册（第三批守门形态不破坏）。
+- **CLI 审批完整内容展开（I-6，CLI 侧收口）**：CLI 审批桥补 `meta.fullDetail` 透传（core 侧 1.0.71 已附带、VSCode 已用），审批弹窗按 `f` 键展开截断前全文——同一套红绿解析管线，展开态不设折叠行数封顶、仅 400 行绝对上限防糊屏；无 fullDetail 的审批不显示提示。
+- **processToolCall 四阶段拆分（P2-10，纯移动重构）**：~470 行单函数拆为 `ToolCallState` 可变中间态 + 四阶段函数——`resolveEarlyOutcome`（终结/abort/计划门禁）→ `runSecurityGates`（安全链：hook→参数校验→保护路径→权限→命令语义→灾难闸→锁→分类器→人工审批→旧位 hook→undo 备份，顺序敏感）→ `executeTool`（执行+post-hooks）→ `finalizeOutcome`（脱敏→侧车→截断→outputFilter→终结分流）；processToolCall 收编为编排器。验收=既有测试与守门**零改动全绿** + 三端 typecheck——行为等价由旧守门逐条结构断言背书，不顺手改任何行为/文案。
+
 ## 1.0.71
 
 Agent 内核审查报告（.ai-docs/Agent内核审查报告.md v3.3）第三批修复六项（2026-10-20）：CLI /undo、分类器可见性、会话级允许、子 agent 进度分行、结算单子任务花费、挂机解释器闸门——交互短板收口 + 两项实测答疑 + 架构不变式补钉，守门测试 kernel-audit-thirdbatch.test.ts 12 例 + core 全量 690 例绿，§8.0 五约束逐条核对无违反。

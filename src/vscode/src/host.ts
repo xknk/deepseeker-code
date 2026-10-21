@@ -16,6 +16,7 @@ import { pushSessionInbox } from "@/agent/inbox.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { getOrCreateSessionId, listSessions, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
+import { clearSessionPermissionRules } from "@/tool/permissions.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
 import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
 import { forkSession, listForkAnchors as deriveForkAnchors, type ForkAnchor } from "@/session/fork.ts";
@@ -495,8 +496,12 @@ export class ChatHost {
     this.callbacks.sink({ type: "replayDone" });
   }
 
-  /** 更新活动会话 id 并持久化（重载后可恢复，杜绝碎片化新会话）。 */
+  /** 更新活动会话 id 并持久化（重载后可恢复，杜绝碎片化新会话）。
+   *  ★ I-4 第四批：单一切换咽喉——切出即清旧会话的 allow-session 规则桶（会话结束等价路径，
+   *  「会话结束自动失效」承诺在多会话宿主成立；同 id 重入幂等无感）。 */
   private setSessionId(id: string | null): void {
+    const prev = this.sessionId;
+    if (prev && prev !== id) clearSessionPermissionRules(prev);
     this.sessionId = id;
     this.callbacks.setPersistedSessionId?.(id);
   }
@@ -603,9 +608,11 @@ export class ChatHost {
     await persistRenameSession(id, title);
   }
 
-  /** 删除会话：递归删文件夹；若删的正是当前活动会话则置空 + 清屏，避免下次 submit 复活同 id 空会话。 */
+  /** 删除会话：递归删文件夹；若删的正是当前活动会话则置空 + 清屏，避免下次 submit 复活同 id 空会话。
+   *  ★ I-4 第四批：删除即会话终点，顺手清其 allow-session 桶（setSessionId 只覆盖「切出」路径）。 */
   async deleteSession(id: string): Promise<void> {
     await persistDeleteSession(id);
+    clearSessionPermissionRules(id);
     if (this.sessionId === id) {
       this.setSessionId(null);
       this.callbacks.onSessionReset();

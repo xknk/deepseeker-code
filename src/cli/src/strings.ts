@@ -113,6 +113,18 @@ interface StringDict {
     /** I-3 /undo 撤销最近一次文件改动（内核审查报告第三批） */
     cmdUndo: string;
     undoNoSession: string;
+    /** I-3 第四批 /rewind 按检查点选择回退 + /diff 本 run 改动红绿汇总 */
+    cmdRewind: string;
+    rewindTitle: string;
+    rewindPrompt: string;
+    rewindNoSession: string;
+    rewindEmpty: string;
+    rewindFail: (e: string) => string;
+    cmdDiff: string;
+    diffTitle: string;
+    diffEmpty: string;
+    /** I-6 第四批 审批弹窗「查看完整内容」展开（fullDetail 透传后出现） */
+    approvalFullHint: string;
     /** /model 直输切换；/switch 选择器 */
     cmdSwitch: string;
     modelUsage: (current: string) => string;
@@ -199,6 +211,7 @@ const STRINGS: Record<Locale, StringDict> = {
         inputBadgeAuto: "auto-accept edits on",
         approvalTitle: "🔐 操作审批",
         approvalPrompt: "↑↓ 选择后 Enter（Esc 拒绝）：允许本次 / 总是允许（写持久规则）/ 拒绝。",
+        approvalFullHint: "（按 f 查看/收起完整内容）",
         approvalAllow: "允许本次",
         approvalAllowSession: "本会话内允许（不落盘）",
         approvalAllowAlways: "总是允许（此项目）",
@@ -268,6 +281,15 @@ const STRINGS: Record<Locale, StringDict> = {
         forkFailed: (e) => `分叉失败：${e}`,
         cmdUndo: "撤销最近一次文件改动（LIFO 逐步回走；回退前自动备份，可逆）",
         undoNoSession: "当前没有活动会话，无可回退项。",
+        cmdRewind: "按检查点选择回退文件改动（↑↓ 选择，Enter 回退）",
+        rewindTitle: "⏪ 回退文件改动（↑↓ 选择 · Enter 回退 · Esc 取消）",
+        rewindPrompt: "↑↓ 选择 · Enter 回退 · Esc 取消",
+        rewindNoSession: "当前没有活动会话，无可回退项。",
+        rewindEmpty: "当前会话没有可回退的文件改动。",
+        rewindFail: (e) => `回退失败：${e}`,
+        cmdDiff: "本 run 文件改动红绿汇总（备份 vs 当前磁盘的净变化）",
+        diffTitle: "📄 本 run 文件改动汇总",
+        diffEmpty: "本 run 没有文件改动记录（改完一轮后再试 /diff）。",
         modelUsage: (current) => `当前模型：${current || "默认（DEEP_SEEK_MODEL）"}\n用法：/model <模型id> 直输切换，或 /switch 弹出候选选择器`,
         modelPickerTitle: (current) => `🧠 选择模型（当前：${current || "默认"}）`,
         modelPickerPrompt: "↑↓ 选择 · Enter 切换 · Esc 取消（其它模型：/model <模型id>）",
@@ -332,6 +354,8 @@ const STRINGS: Record<Locale, StringDict> = {
             "/new       — 开启新会话（旧会话保留，/sessions 可找回）",
             "/fork      — 从当前会话的某轮回复处分叉出新会话",
             "/undo      — 撤销最近一次文件改动（自动备份，可逆）",
+            "/rewind    — 按检查点选择回退文件改动（↑↓ 选择）",
+            "/diff      — 本 run 文件改动红绿汇总",
             "/trust  — 管理已信任目录（项目级 hooks/skills 等仅在信任目录加载；CI 用 --trust 显式信任）",
             "Ctrl+C 退出 · Esc 中止/清输入 · Ctrl+G 中止 · Ctrl+T 展开/收起思考",
         ].join("\n"),
@@ -377,6 +401,7 @@ const STRINGS: Record<Locale, StringDict> = {
         inputBadgeAuto: "auto-accept edits on",
         approvalTitle: "🔐 Action approval",
         approvalPrompt: "↑↓ then Enter (Esc to deny): allow once / always allow (persist rule) / deny.",
+        approvalFullHint: "(f to view/collapse full content)",
         approvalAllow: "Allow once",
         approvalAllowSession: "Allow for this session (in-memory)",
         approvalAllowAlways: "Always allow (this project)",
@@ -445,6 +470,15 @@ const STRINGS: Record<Locale, StringDict> = {
         forkFailed: (e) => `Fork failed: ${e}`,
         cmdUndo: "Undo the most recent file change (LIFO, repeatable; reverse-backed-up, reversible)",
         undoNoSession: "No active session — nothing to undo.",
+        cmdRewind: "Rewind file changes — pick a checkpoint from the list",
+        rewindTitle: "⏪ Rewind file changes (↑↓ select · Enter rewind · Esc cancel)",
+        rewindPrompt: "↑↓ select · Enter rewind · Esc cancel",
+        rewindNoSession: "No active session — nothing to rewind.",
+        rewindEmpty: "No rewindable file changes in this session.",
+        rewindFail: (e) => `Rewind failed: ${e}`,
+        cmdDiff: "Red/green summary of file changes in this run (backup vs current disk)",
+        diffTitle: "📄 File changes in this run",
+        diffEmpty: "No file changes recorded in this run (try /diff after a turn with edits).",
         modelUsage: (current) => `Current model: ${current || "default (DEEP_SEEK_MODEL)"}\nUsage: /model <model-id> to switch directly, or /switch for the picker`,
         modelPickerTitle: (current) => `🧠 Pick a model (current: ${current || "default"})`,
         modelPickerPrompt: "↑↓ pick · Enter switch · Esc cancel (any other model: /model <id>)",
@@ -509,6 +543,8 @@ const STRINGS: Record<Locale, StringDict> = {
             "/new       — Start a new session (old ones remain via /sessions)",
             "/fork      — Fork the current session from a past round",
             "/undo      — Undo the most recent file change (auto-backed-up, reversible)",
+            "/rewind    — Rewind file changes — pick a checkpoint from the list",
+            "/diff      — Red/green summary of file changes in this run",
             "/trust  — Manage trusted dirs (project hooks/skills load only when trusted; CI uses --trust)",
             "Ctrl+C exit · Esc abort/clear input · Ctrl+G abort · Ctrl+T toggle thinking",
         ].join("\n"),
@@ -535,4 +571,6 @@ export const S: StringDict = new Proxy({} as StringDict, {
 });
 
 /** 本地斜杠命令名（name 是命令键不翻译；描述在渲染时用 S.cmdXxx 现取）。 */
-export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "undo", "usage", "budget", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;
+// ★ I-3 第四批：rewind/diff 注册在 usage 之后（undo 族紧邻观测命令；第三方守门按「fork,undo,usage」
+//   前缀断言，插入点选其后不破既有闸门）。
+export const LOCAL_COMMAND_NAMES = ["help", "status", "plan", "auto", "model", "switch", "thinking", "lang", "output-style", "new", "sessions", "fork", "undo", "usage", "rewind", "diff", "budget", "context", "permissions", "mcp", "hooks", "trust", "debug", "clear", "exit"] as const;

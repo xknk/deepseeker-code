@@ -33,6 +33,8 @@ import { PlanEditor } from "./components/PlanEditor.tsx";
 import { SessionPicker } from "./components/SessionPicker.tsx";
 import { ForkPicker } from "./components/ForkPicker.tsx";
 import { ModelPicker } from "./components/ModelPicker.tsx";
+import { RewindPicker } from "./components/RewindPicker.tsx";
+import { DiffSummaryCard } from "./components/DiffSummaryCard.tsx";
 import { SlashMenu, type MenuEntry } from "./components/SlashMenu.tsx";
 import { MultilineInput } from "./components/MultilineInput.tsx";
 import { StatusStrip } from "./components/StatusStrip.tsx";
@@ -46,6 +48,7 @@ const CWD = process.cwd();
 const RowView = ({ row, wrapW, streamTail, showThinking }: { row: ChatRow; wrapW: number; streamTail?: number; showThinking?: boolean }): React.ReactElement => {
     if (row.kind === "todos") return <TodosPanel todos={row.todos} wrapW={wrapW} />;
     if (row.kind === "tool") return <ToolCard toolName={row.toolName} args={row.args} result={row.result} ok={row.ok} status={row.status} progress={row.progress} wrapW={wrapW} />;
+    if (row.kind === "diff-summary") return <DiffSummaryCard title={row.title} files={row.files} wrapW={wrapW} />;
     if (row.kind === "thinking") return <ThinkingBlock streaming={row.streaming ?? false} startedAt={row.startedAt} durationMs={row.durationMs} tokens={row.tokens} text={row.text} expanded={showThinking} wrapW={wrapW} />;
     // ★ 每轮对话（user 提问）前加淡色横线，视觉分隔各轮，便于在长对话中定位（user 提问 + assistant 回复 = 一个轮次单元）
     if (row.kind === "user") {
@@ -108,6 +111,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     const [planEditing, setPlanEditing] = useState(false);
     const [planDraft, setPlanDraft] = useState("");
     const [planCursor, setPlanCursor] = useState(0);
+    /** ★ I-6 审批「查看完整内容」展开态（f 切换；模态开合时重置，见下方 effect）。 */
+    const [approvalFull, setApprovalFull] = useState(false);
     /** P2-12 提问模态：qCursor=选项光标（0..n-1 选项，n=Other 自由输入行），qChecked=多选已勾选项集合。 */
     const [qCursor, setQCursor] = useState(0);
     const [qChecked, setQChecked] = useState<Set<number>>(new Set());
@@ -218,6 +223,8 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 case "fork": return S.cmdFork;
                 case "undo": return S.cmdUndo;
                 case "usage": return S.cmdUsage;
+                case "rewind": return S.cmdRewind;
+                case "diff": return S.cmdDiff;
                 case "budget": return S.cmdBudget;
                 case "context": return S.cmdContext;
                 case "permissions": return S.cmdPermissions;
@@ -244,7 +251,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         return menuEntries.filter((c) => c.name.toLowerCase().startsWith(q));
     }, [input, menuEntries]);
 
-    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null || state.pendingModel != null;
+    const menuActive = state.pendingApproval != null || state.pendingQuestion != null || state.pendingPlan != null || state.pendingSessions != null || state.pendingFork != null || state.pendingModel != null || state.pendingRewind != null;
     /** 底部「生成中」行动画时钟：120ms 一帧 braille + 1s 粒度秒表。
      *  仅 busy 且无模态时走 setInterval 逐帧重绘——模态打开时动态区必须零额外重绘（治闪屏，
      *  见 cli-render-flicker 记忆）。起点存 ref：模态开合停/启帧但秒表连续；帧取自 Date.now()
@@ -272,7 +279,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
     //   Tab 补全后输参数（如 /thinking max）。仅模态打开时才禁用输入。
     const inputActive = !menuActive;
 
-    useEffect(() => { setSelectIdx(0); setPlanEditing(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, state.pendingModel, slashVisible, filteredCommands.length]);
+    useEffect(() => { setSelectIdx(0); setPlanEditing(false); setApprovalFull(false); }, [state.pendingApproval, state.pendingQuestion, state.pendingPlan, state.pendingSessions, state.pendingFork, state.pendingModel, state.pendingRewind, slashVisible, filteredCommands.length]);
     // ★ 提问模态打开/切换时重置光标、已勾选与 Other 编辑态
     useEffect(() => { setQCursor(0); setQChecked(new Set()); setQEditing(false); setQDraft(""); setQDraftCursor(0); }, [state.pendingQuestion]);
     // ★ 模型选择器打开时初始定位到当前模型所在行（不在清单则落 0）
@@ -318,6 +325,14 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                 state.pushInfo(await restoreLast(sid));
                 return true;
             }
+            case "/rewind":
+                // ★ I-3 第四批：按检查点选择回退——listUndoable 列表 → 选择器 → restoreByUndoId 选择性 restore
+                void state.openRewindPicker();
+                return true;
+            case "/diff":
+                // ★ I-3 第四批：本 run 改动红绿汇总（最早备份 vs 当前磁盘净变化，进 Static 消息流）
+                void state.openDiff();
+                return true;
             case "/help":
                 state.pushInfo(S.helpText(modelDisplay, state.getThinkingLevel(), getLocale()));
                 return true;
@@ -524,6 +539,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
         if (key.ctrl && ch === "c") { exit(); return; }
         if (state.pendingApproval) {
             const APPROVAL_DECISIONS = ['allow-once', 'allow-session', 'allow-always', 'deny'] as const; // ★ I-4 四态
+            if (ch === "f" || ch === "F") { setApprovalFull((v) => !v); return; } // ★ I-6：查看/收起完整内容
             if (key.upArrow) setSelectIdx((i) => (i - 1 + APPROVAL_DECISIONS.length) % APPROVAL_DECISIONS.length);
             else if (key.downArrow) setSelectIdx((i) => (i + 1) % APPROVAL_DECISIONS.length);
             else if (key.return) state.resolveApproval(APPROVAL_DECISIONS[selectIdxRef.current] ?? 'deny');
@@ -612,6 +628,17 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
             else if (key.escape || (key.ctrl && ch === "g")) state.resolveModel(null);
             return;
         }
+        if (state.pendingRewind) {
+            const list = state.pendingRewind.records;
+            if (key.upArrow) setSelectIdx((i) => (i - 1 + list.length) % list.length);
+            else if (key.downArrow) setSelectIdx((i) => (i + 1) % list.length);
+            else if (key.return) {
+                const sel = list[Math.min(selectIdxRef.current, list.length - 1)];
+                state.resolveRewind(sel?.undoId ?? null);
+            }
+            else if (key.escape || (key.ctrl && ch === "g")) state.resolveRewind(null);
+            return;
+        }
         if (key.ctrl && ch === "t") { state.toggleShowThinking(); return; }
         if (key.ctrl && ch === "g") { state.abortCurrent(); return; }
         if (slashVisible) {
@@ -671,7 +698,7 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
 
                 <Box flexDirection="column" paddingX={1} flexShrink={0}>
                     {state.pendingApproval ? (
-                        <ApprovalModal toolName={state.pendingApproval.toolName} detail={state.pendingApproval.detail} selectedIndex={selectIdx} wrapW={wrapW} />
+                        <ApprovalModal toolName={state.pendingApproval.toolName} detail={state.pendingApproval.detail} fullDetail={state.pendingApproval.fullDetail} expanded={approvalFull} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {state.pendingQuestion ? (
                         <QuestionModal
@@ -708,6 +735,9 @@ export const App = ({ resumeSessionId, initialPlanMode, initialAutoMode, initial
                     ) : null}
                     {state.pendingModel ? (
                         <ModelPicker models={state.pendingModel.models} currentModel={modelDisplay} selectedIndex={selectIdx} wrapW={wrapW} />
+                    ) : null}
+                    {state.pendingRewind ? (
+                        <RewindPicker records={state.pendingRewind.records} selectedIndex={selectIdx} wrapW={wrapW} />
                     ) : null}
                     {slashVisible ? (
                         <SlashMenu entries={filteredCommands} selectedIndex={selectIdx} cols={cols} />

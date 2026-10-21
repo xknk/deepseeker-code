@@ -103,7 +103,8 @@ export const scheduleToolCalls = async function* (
         if (matched.function.safetyLevel !== ToolSafetyLevel.SAFE) return false;
         if (matched.function.isSync === false) return false;
         try {
-            const perm = checkPermission(name, args, matched.function.primaryArg);
+            // ★ I-4 第四批：尾参传 sessionId——会话桶 ask/deny 与全局规则同口径参与并行化判定
+            const perm = checkPermission(name, args, matched.function.primaryArg, sessionId);
             if (perm === 'ask' || perm === 'deny') return false;
         } catch { return false; }
         return true;

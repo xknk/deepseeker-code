@@ -10,13 +10,14 @@ import type { RequestApprovalFn, ApprovalDecision, RequestQuestionFn, QuestionRe
 
 /**
  * 构造 CLI 宿主审批钩子。
- * @param askApproval (detail, toolName) => Promise<ApprovalDecision>：由 UI 提供，弹审批模态并返回用户三态选择。
+ * @param askApproval (detail, toolName, fullDetail?) => Promise<ApprovalDecision>：由 UI 提供，弹审批模态并返回用户三态选择。
+ *   ★ I-6 第四批：fullDetail（截断前全文，core guard meta 已附带）一并透传——CLI 审批弹窗「查看完整内容」展开用。
  * @returns RequestApprovalFn，注入 RunAgentOptions.requestApproval。
  */
 export const createCliRequestApproval = (
-    askApproval: (detail: string, toolName: string) => Promise<ApprovalDecision>,
+    askApproval: (detail: string, toolName: string, fullDetail?: string) => Promise<ApprovalDecision>,
 ): RequestApprovalFn => {
-    return async (detail, meta) => askApproval(detail, meta.toolName);
+    return async (detail, meta) => askApproval(detail, meta.toolName, meta.fullDetail);
 };
 
 /**

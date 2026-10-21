@@ -22,6 +22,10 @@ import type { ApprovalDecision, ApprovalMeta, QuestionRequest, QuestionAnswer } 
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT, SELECTABLE_MODELS } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
+import { clearSessionPermissionRules } from "@/tool/permissions.ts";
+import { listUndoable, restoreByUndoId } from "@/tool/undo/restore.ts";
+import { buildRunDiff } from "./diffSummary.ts";
+import type { UndoRecord } from "@/tool/undo/type.ts";
 import { createCliRequestApproval, createCliRequestQuestion } from "./cliHost.ts";
 import { writePrefs } from "./prefs.ts";
 import { S, getLocale } from "./strings.ts";
@@ -31,8 +35,8 @@ import { buildReplayRows, type ChatRow } from "./replay.ts";
 /** 一行转录（线性消息流）。定义在纯模块 replay.ts（便于脱离 React/Ink 单测）。 */
 export type { ChatRow } from "./replay.ts";
 
-/** 待审批请求（模态驱动）。 */
-export type PendingApproval = { detail: string; toolName: string; resolve: (v: ApprovalDecision) => void };
+/** 待审批请求（模态驱动）。★ I-6 第四批：fullDetail=截断前全文（core guard meta 透传），供「查看完整内容」展开。 */
+export type PendingApproval = { detail: string; toolName: string; fullDetail?: string; resolve: (v: ApprovalDecision) => void };
 /** P2-12 待答提问：ask_question 工具 → requestQuestion → 弹模态 → resolveQuestion 回传选择。 */
 export type PendingQuestion = { req: QuestionRequest; resolve: (a: QuestionAnswer) => void };
 /** 计划审批决策：accept=执行（plan 缺省=原方案，带 plan=编辑后方案；autoExecute=实现阶段免审批）；
@@ -48,6 +52,8 @@ export type PendingSessions = { sessions: SessionSummary[]; resolve: (id: string
 export type PendingFork = { anchors: ForkAnchor[]; resolve: (anchor: ForkAnchor | null) => void };
 /** 待选择的模型（/model 选择器，内置候选清单）。resolve(null)=取消。 */
 export type PendingModel = { models: string[]; resolve: (model: string | null) => void };
+/** 待选择的回退记录（★ I-3 第四批 /rewind 选择器）。resolve(null)=取消。 */
+export type PendingRewind = { records: UndoRecord[]; resolve: (undoId: string | null) => void };
 
 /** 流式缓冲 flush 间隔：过小易闪屏（动态区高频重绘），过大跟手略迟。
  *  120ms≈8fps：在 Windows Terminal 上进一步减闪（帧数较 80ms 再降约 33%），流式文本/打字延迟仍可接受。
@@ -89,6 +95,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const [pendingSessions, setPendingSessions] = useState<PendingSessions | null>(null);
     const [pendingFork, setPendingFork] = useState<PendingFork | null>(null);
     const [pendingModel, setPendingModel] = useState<PendingModel | null>(null);
+    const [pendingRewind, setPendingRewind] = useState<PendingRewind | null>(null);
 
     const nextId = useRef(1);
     const assistantStreamingId = useRef<number | null>(null);
@@ -131,6 +138,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     const lastRunCacheHitRef = useRef<number | undefined>(undefined);
     /** 最近一次上下文水位快照（context.usage 事件最后值，statusline context 键用，成本信任链 H3）。 */
     const contextUsageRef = useRef<{ used_tokens: number; window_tokens: number; fill_rate: number } | undefined>(undefined);
+    /** ★ I-3 第四批 /diff 的「本 run」边界：最近一次 submit 发起时刻（ms）。run 内工具写盘的 undo 记录
+     *  时间戳 ≥ 此值即归入本 run；0=本进程尚未发起过 run（/diff 提示无记录）。 */
+    const lastSubmitAtRef = useRef<number>(0);
     /** 压缩进度瞬态行 id（compact.progress 单行更新；compact.done/final/error 时收敛删除，P1-3 防误中止）。 */
     const compactProgressIdRef = useRef<number | null>(null);
     /** 删除压缩进度瞬态行（完成收敛 / 压缩失败 / run 终结共用）。 */
@@ -543,8 +553,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     }, [closeStreaming, flush, scheduleFlush, pushInfo]);
 
     // —— 工具审批（RequestApprovalFn → Ink 模态） ——
-    const askApproval = useCallback((detail: string, toolName: string): Promise<ApprovalDecision> =>
-        new Promise<ApprovalDecision>((resolve) => setPendingApproval({ detail, toolName, resolve })), []);
+    // ★ I-6 第四批：fullDetail（截断前全文）随 meta 透传进模态，「查看完整内容」展开用
+    const askApproval = useCallback((detail: string, toolName: string, fullDetail?: string): Promise<ApprovalDecision> =>
+        new Promise<ApprovalDecision>((resolve) => setPendingApproval({ detail, toolName, fullDetail, resolve })), []);
     const resolveApproval = useCallback((v: ApprovalDecision) => {
         setPendingApproval((prev) => { prev?.resolve(v); return null; });
     }, []);
@@ -553,7 +564,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
      *  防 prompt 注入借道自动执行跑任意命令。deny 规则/环境断言/verifyResult/受保护路径均先于此生效。 */
     const autoRequestApproval = useCallback(async (_detail: string, meta: ApprovalMeta): Promise<ApprovalDecision> => {
         const t = findTool(meta.toolName);
-        if (!t || t.function.safetyLevel === ToolSafetyLevel.DANGER) return askApproval(_detail, meta.toolName);
+        if (!t || t.function.safetyLevel === ToolSafetyLevel.DANGER) return askApproval(_detail, meta.toolName, meta.fullDetail);
         return 'allow-once';
     }, [askApproval]);
 
@@ -690,6 +701,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         //   （否则顶部 `if(busy) return` 会吞掉后续所有输入 → "卡住后再次对话无任何输出"）。
         setBusy(true);
         const myGen = ++turnGenRef.current;
+        lastSubmitAtRef.current = Date.now(); // ★ I-3 /diff 的「本 run」边界戳
         try {
             // 首轮解析并固化 sessionId（跨轮复用，使 transcript/上下文累积）
             if (sessionIdRef.current == null) {
@@ -778,8 +790,11 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     }, [flush]);
 
     // —— 历史会话载入（/sessions 选择器） ——
-    /** 载入指定会话：切换 sessionId + 清屏 + 回放转录，后续 submit 即续接此会话。 */
+    /** 载入指定会话：切换 sessionId + 清屏 + 回放转录，后续 submit 即续接此会话。
+     *  ★ I-4 第四批：切出即清旧会话的 allow-session 规则桶（会话结束等价路径——「会话结束自动失效」）。 */
     const loadSession = useCallback(async (id: string) => {
+        const prev = sessionIdRef.current;
+        if (prev && prev !== id) clearSessionPermissionRules(prev);
         sessionIdRef.current = id;
         lastRunCostRef.current = undefined; // 会话切换：结算单累计随之清零（跨会话花费看 /usage，不串账）
         sessionCostRef.current = undefined;
@@ -809,6 +824,9 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
     /** /new：显式新建 sessionId（不能只置 null——`--continue` 启动时 initialSessionId 有值，
      *  下轮 getOrCreateSessionId(initialSessionId) 会粘回旧会话）+ 清屏；旧会话文件不动，/sessions 可找回。 */
     const newSession = useCallback(async () => {
+        // ★ I-4 第四批：同 loadSession——旧会话的会话级 allow 桶随切换清空
+        const prev = sessionIdRef.current;
+        if (prev) clearSessionPermissionRules(prev);
         sessionIdRef.current = await getOrCreateSessionId(undefined);
         lastRunCostRef.current = undefined; // 同 loadSession：结算单累计随会话清零
         sessionCostRef.current = undefined;
@@ -862,6 +880,45 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         }
         return picked;
     }, [pushInfo, setModelOverride]);
+
+    // —— 回退选择器（★ I-3 第四批 /rewind，对标 VSCode 检查点回滚面板与 CC 形态） ——
+    /** 关闭回退选择器并回传结果（null=取消）。 */
+    const resolveRewind = useCallback((undoId: string | null) => {
+        setPendingRewind((prev) => { prev?.resolve(undoId); return null; });
+    }, []);
+    /** 唤出 /rewind 选择器：列当前会话未回退的文件改动（listUndoable，新→旧）→ 用户选定 →
+     *  restoreByUndoId 选择性回退该检查点（非仅 restoreLast；与模型 undo_restore 同一恢复链路，
+     *  含反向备份可逆）。结果文案由 core 返回（成功/已回退过/找不到各有专门提示），busy 由 onSubmit 统一拦截。 */
+    const openRewindPicker = useCallback(async () => {
+        const sid = sessionIdRef.current;
+        if (!sid) { pushInfo(S.rewindNoSession); return; }
+        let records: UndoRecord[] = [];
+        try { records = await listUndoable(sid); } catch { /* 读失败按无可回退处理 */ }
+        if (records.length === 0) { pushInfo(S.rewindEmpty); return; }
+        const picked = await new Promise<string | null>((resolve) => setPendingRewind({ records, resolve }));
+        if (!picked) return;
+        try {
+            pushInfo(await restoreByUndoId(picked, sid));
+        } catch (e: any) {
+            pushInfo(S.rewindFail(e?.message ?? String(e)));
+        }
+    }, [pushInfo]);
+
+    /** /diff：本 run 文件改动红绿汇总（★ I-3 第四批）。取 lastSubmitAtRef 之后、未回退的 undo 记录，
+     *  经 buildRunDiff 装配「最早备份 vs 当前磁盘」净变化 diff 行，以 diff-summary 行推入消息流（进 Static）。 */
+    const openDiff = useCallback(async () => {
+        const sid = sessionIdRef.current;
+        const sinceMs = lastSubmitAtRef.current;
+        if (!sid || !sinceMs) { pushInfo(S.diffEmpty); return; }
+        let records: UndoRecord[] = [];
+        try { records = await listUndoable(sid); } catch { /* 读失败按无改动处理 */ }
+        const sinceIso = new Date(sinceMs).toISOString();
+        const runRecords = records.filter((r) => (r.timestamp || "") >= sinceIso);
+        if (runRecords.length === 0) { pushInfo(S.diffEmpty); return; }
+        const files = await buildRunDiff(sid, runRecords);
+        if (files.length === 0) { pushInfo(S.diffEmpty); return; }
+        setRows((prev) => [...prev, { id: newRowId(), kind: "diff-summary" as const, title: S.diffTitle, files }]);
+    }, [pushInfo]);
     /** /plan 切换计划模式（影响下一次 submit 是否走两阶段）。 */
     const setPlanMode = useCallback((on: boolean) => { planModeRef.current = on; }, []);
     const getPlanMode = useCallback(() => planModeRef.current, []);
@@ -887,7 +944,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
 
     return {
         // 状态
-        rows, busy, aborting, runningAgents, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel,
+        rows, busy, aborting, runningAgents, showThinkingText, pendingApproval, pendingQuestion, pendingPlan, pendingSessions, pendingFork, pendingModel, pendingRewind,
         sessionIdRef,
         // 动作
         submit, queueInput, abortCurrent, pushUser, pushInfo, pushEvent, runBangCommand,
@@ -896,7 +953,7 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
         setThinkingLevel, getThinkingLevel, setOutputStyle, getOutputStyle, getArchivedSummary,
         getLastRunCostYuan, getSessionCostYuan, setBudgetYuan, getBudgetYuan, getLastRunCacheHitRate, getLastContextUsage,
         openSessionPicker, resolveSession, loadSession, openForkPicker, resolveFork, newSession,
-        openModelPicker, resolveModel,
+        openModelPicker, resolveModel, openRewindPicker, resolveRewind, openDiff,
     };
 };
 
