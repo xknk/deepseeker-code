@@ -91,6 +91,38 @@ describe("stripHistoricalReasoning（出口剥离历史思考记录）", () => {
         assert.equal(out[0], m, "无思考字段 → 原对象透传（不产生多余拷贝）");
     });
 
+    it("★ 相邻 assistant 且后者带 tool_calls（守护轮改调工具形状）→ 整请求回退全量回传（严格档）", () => {
+        // 协议实证（2026-10-21 生产 c7025cab 末轮 400 + 探针 W7 复现 / W8 修复验证）：nudge（egress 改写
+        // user）轮模型改调工具 → 回复作为独立 assistant 落盘 → [.., A(正文草稿), A(tool_calls), tool]。
+        // 末条非 system 是 tool，旧判定误走剥离分支，DS 按草稿续写严格校验全剥即 400 —— 必须整体放行。
+        const splitTurn: any = {
+            role: "assistant", content: null, reasoning_content: "补个 todo 再收尾",
+            tool_calls: [{ id: "call_2", type: "function", function: { name: "todo_write", arguments: '{"todos":[]}' } }],
+        };
+        const msgs = [
+            ...makeMsgs(),
+            { role: "assistant", content: "结论草稿", reasoning_content: "草稿思考" },
+            splitTurn,
+            { role: "tool", tool_call_id: "call_2", content: "✅ 已更新" },
+        ];
+        const out = stripHistoricalReasoning(msgs);
+        assert.equal(out, msgs, "拆分工具轮形状 → 原数组返回（全量回传）");
+        assert.equal((out[2] as any).reasoning_content, "先想一下再动手", "历史 assistant 思考字段保留");
+        assert.equal((out[5] as any).reasoning_content, "补个 todo 再收尾", "拆分轮思考字段保留");
+    });
+
+    it("相邻 assistant 纯文本 + user 结尾 → 照常剥离（宽松档；生产 31 对/23 会话零 400 实证 + 探针 W9）", () => {
+        const msgs = [
+            ...makeMsgs(),
+            { role: "assistant", content: "草稿", reasoning_content: "草稿思考" },
+            { role: "assistant", content: "补充", reasoning_content: "补充思考" },
+            { role: "user", content: "继续" },
+        ];
+        const out = stripHistoricalReasoning(msgs);
+        assert.ok(!("reasoning_content" in out[2]) && !("reasoning_content" in out[4]) && !("reasoning_content" in out[5]),
+            "文本相邻不触发严格档，瘦身收益保留");
+    });
+
     it("★ 请求以 assistant 结尾（守护轮续写形状）→ 整请求回退全量回传（严格档）", () => {
         // 协议实证（scripts/reasoning-guard-probe.ts）：最后一条【非 system】消息是 assistant 时，
         // 任何一条 assistant 缺 reasoning_content 即 400（混合态也炸），全带才 200 —— 剥离器必须整体放行。
@@ -165,6 +197,22 @@ describe("出站请求体剥离（streamChat 流式 / summarize 非流式）", (
         assert.equal((wire[2] as any).reasoning_content, "先想一下再动手", "严格档：历史思考保留");
         const draft = wire[wire.length - 2] as any;
         assert.equal(draft.reasoning_content, "草稿思考", "严格档：草稿思考保留");
+    });
+
+    it("★ streamChat 拆分工具轮形状：出站保持全量回传（生产 400 修复）", async () => {
+        const splitShaped = [
+            ...makeMsgs(),
+            { role: "assistant", content: "草稿", reasoning_content: "草稿思考" },
+            {
+                role: "assistant", content: null, reasoning_content: "补个 todo 再收尾",
+                tool_calls: [{ id: "call_2", type: "function", function: { name: "todo_write", arguments: '{"todos":[]}' } }],
+            },
+            { role: "tool", tool_call_id: "call_2", content: "✅ 已更新" },
+        ];
+        await driveStream(splitShaped);
+        const wire = lastBody.messages;
+        assert.equal((wire[2] as any).reasoning_content, "先想一下再动手", "严格档：历史思考保留");
+        assert.equal((wire[5] as any).reasoning_content, "补个 todo 再收尾", "严格档：拆分轮思考保留");
     });
 
     it("★ streamInference 守护轮（nudge 跟在 assistant 草稿后）：nudge 改写为 user → 宽松档", async () => {

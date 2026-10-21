@@ -2,7 +2,9 @@
  * @file vscode/src/webview/markdown.js
  * @description 零依赖 markdown/文本渲染工具（从 app.js 拆出，2026-09-16 防腐化拆分）：
  *  escapeHtml / 围栏代码块 + GFM 表格 + 行内规则的 mdToHtml / 摘要截断 truncate / 工具参数提示 argHint。
+ *  mdToHtml 产出的代码块自带 .md-copy 按钮（i18n 文案经 strings.js 的 S 取词——本模块唯一的非纯依赖）。
  */
+import { S } from "./strings.js";
 
 export const escapeHtml = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -50,12 +52,16 @@ const mdInline = (seg) => {
 export const mdToHtml = (src) => {
   if (!src) return "";
   let h = escapeHtml(src);
-  h = h.replace(/```([a-z0-9_-]*)\n([\s\S]*?)```/g, (_m, _lang, code) => `<pre><code>${code.trim()}</code></pre>`);
-  // 围栏外段落才喂 markdown 规则——围栏内是代码原样（此前列表/标题/引用规则会漏进代码块加 bullet/加粗）
-  h = h.split(/(<pre><code>[\s\S]*?<\/code><\/pre>)/g)
-    .map((seg) => (seg.startsWith("<pre><code>") ? seg : mdInline(seg)))
+  // 围栏代码块包一层 .md-code + 右上角复制按钮（点击行为全局委托在 app.js；title 渲染时经 S 取词，/lang 重渲染即跟随）
+  h = h.replace(
+    /```([a-z0-9_-]*)\n([\s\S]*?)```/g,
+    (_m, _lang, code) => `<div class="md-code"><button type="button" class="md-copy" title="${S.rwCopyCode}">⧉</button><pre><code>${code.trim()}</code></pre></div>`
+  );
+  // 围栏外段落才喂 markdown 规则——围栏内是代码原样（此前列表/标题/引用规则会漏进代码块加 bullet/加粗）；
+  // \n→<br/> 同样只喂围栏外：pre 段保留真实换行（pre 自带保留换行语义），复制走 textContent 才是原样代码
+  h = h.split(/(<div class="md-code">[\s\S]*?<\/div>)/g)
+    .map((seg) => (seg.startsWith('<div class="md-code">') ? seg : mdInline(seg).replace(/\n/g, "<br/>")))
     .join("");
-  h = h.replace(/\n/g, "<br/>");
   return h;
 };
 

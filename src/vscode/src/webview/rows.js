@@ -5,7 +5,7 @@
  *  flush、轮次折叠头、任务清单面板、空态、初始化错误横幅、贴图 chip。
  *  流式缓冲（textBuf/thinkBuf/progressBuf）与消费它们的 flush 同模块——缓冲生命周期不跨模块泄漏。
  */
-import { vscode, $, state, nextKey } from "./state.js";
+import { vscode, $, state, nextKey, copyText, flashCopied } from "./state.js";
 import { S } from "./strings.js";
 import { escapeHtml, mdToHtml, truncate, argHint } from "./markdown.js";
 import { EDIT_TOOL_NAMES, buildDiffHtml, openDiffOverlay } from "./diff.js";
@@ -172,6 +172,20 @@ function buildRowEl(row) {
         }
       } else {
         wrap.innerHTML = `<div class="assistant-body">${html}${row.streaming ? '<span class="cursor">▊</span>' : ""}</div>`;
+      }
+      // ★ 消息级复制原文（对标 CC 消息 copy）：hover 行显形；流式中不挂，收尾 rebuildRow 后自然生效。
+      //   徽标是 wrap 直接子元素（不在 .assistant-content 子树内），点它不会触发正文点击放大。
+      if (!row.streaming) {
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "msg-copy";
+        copy.title = S.rwCopyMsg;
+        copy.textContent = "⧉";
+        copy.addEventListener("click", (e) => {
+          e.stopPropagation();
+          flashCopied(copy, copyText(row.text || ""));
+        });
+        wrap.appendChild(copy);
       }
       break;
     }

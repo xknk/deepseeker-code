@@ -22,7 +22,8 @@ const STREAM_IDLE_TIMEOUT_MS = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_
 /**
  * 历史轮 reasoning_content 剥离（DS API 出口单点，默认开；env DEEP_SEEK_REASONING_PASSTHROUGH=1 还原全量回传）。
  *  ★ 协议探针（2026-09-10，scripts/reasoning-passthrough-probe.ts 9 条 + reasoning-guard-probe.ts 6 变体
- *    真实请求）：校验分两档——user/tool 结尾宽松（剥/全剥/混合都 200），assistant 结尾严格（见函数内注释）。
+ *    真实请求；2026-10-21 增补 W7/W8/W9 三变体）：校验分两档——user/tool 结尾宽松（剥/全剥/混合都 200），
+ *    assistant 结尾严格（见函数内注释）；例外：相邻 assistant 且后者带 tool_calls 也触发严格档（同见函数内注释）。
  *    官方「必须完整回传否则 400」文档描述的是严格档；旧 selftest 400 案底 = 历史丢 reasoning 的续写形状，
  *    与严格档吻合（并非服务端放宽）。
  *  收益（scripts/reasoning-share.ts，123 真实会话取证）：历史思考记录占请求 ~25%；窗口瘦身 → 压缩更晚
@@ -41,11 +42,20 @@ export const stripHistoricalReasoning = (messages: Msg[]): Msg[] => {
     //   （官方「必须完整回传」文档指的就是这个场景）。其余形状（末条非 system 为 user/tool，正常轮）
     //   → 宽松校验，全剥 200。
     //   ⇒ 守护轮形状整请求回退全量回传（旧行为，生产长期验证过），正常轮保持全剥。
+    // ★ 增补（2026-10-21 生产 c7025cab 末轮 400 实证 + 探针 W7/W8/W9 复现验证）：【相邻 assistant 且
+    //   后者带 tool_calls】同样触发严格档——nudge（egress 已改写 user）轮模型改调工具时，回复作为独立
+    //   assistant 落盘，历史出现 [.., A(正文草稿), A(tool_calls), tool(结果)]：末条非 system 是 tool，
+    //   旧判定误走剥离分支，DS 仍按草稿续写严格校验，全剥即 400。纯文本相邻【不】触发（W9 + 生产
+    //   31 对/23 会话零 400 实证），照走剥离保住 ~25% 请求瘦身收益。
     let lastNonSystem: any = null;
     for (let i = messages.length - 1; i >= 0; i--) {
         if ((messages[i] as any)?.role !== "system") { lastNonSystem = messages[i]; break; }
     }
-    if (lastNonSystem?.role === "assistant") return messages;
+    const hasSplitToolTurn = messages.some((m, i) =>
+        i > 0 && (m as any)?.role === "assistant"
+        && (messages[i - 1] as any)?.role === "assistant"
+        && Array.isArray((m as any).tool_calls) && ((m as any).tool_calls as unknown[]).length > 0);
+    if (lastNonSystem?.role === "assistant" || hasSplitToolTurn) return messages;
     return messages.map((m) => {
         const wire = m as any;
         if (wire?.role !== "assistant" || typeof wire.reasoning_content !== "string") return m;

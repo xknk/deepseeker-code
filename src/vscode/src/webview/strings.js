@@ -171,6 +171,8 @@ const ZH = {
   rwTodos: "任务",
   rwRemoveImg: "移除图片",
   rwRemoveRef: "移除引用",
+  rwCopyMsg: "复制回复原文（Markdown）",
+  rwCopyCode: "复制代码",
 
   // ———————— events（ev*） ————————
   evPlanEnter: (reason) => `📋 模型请求进入计划模式${reason ? `：${reason}` : ""}`,
@@ -387,6 +389,8 @@ const EN = {
   rwTodos: "Tasks",
   rwRemoveImg: "Remove image",
   rwRemoveRef: "Remove reference",
+  rwCopyMsg: "Copy message as markdown",
+  rwCopyCode: "Copy code",
 
   // ———————— events ————————
   evPlanEnter: (reason) => `📋 Model requested plan mode${reason ? `: ${reason}` : ""}`,

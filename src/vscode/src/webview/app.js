@@ -20,7 +20,7 @@
  *    innerHTML 会连带摧毁先前收编进来的浮层锚点（approval-anchor/sessions/fork/checkpoints 面板），
  *    重建序列必须逐一复活并恢复草稿、待发 chip、阻塞中的审批/提问/方案条。
  */
-import { vscode, $, state } from "./state.js";
+import { vscode, $, state, copyText, flashCopied } from "./state.js";
 import { buildEmptyState, updateEmptyState, appendImagePreview, appendRefChip, renderTodos, rebuildRow } from "./rows.js";
 import { buildSessionsPanel, buildForkPanel, buildCheckpointsPanel } from "./panels.js";
 import { buildToolbar, syncToolbar, syncContextRing } from "./toolbar.js";
@@ -36,6 +36,21 @@ buildToolbar();
 buildComposer();
 syncToolbar();
 vscode.postMessage({ type: "ready" });
+
+// ———————— 代码块复制（mdToHtml 产出 .md-copy，消息流/浮层/计划条全域委托） ————————
+// ★ capture 阶段拦截 + stopPropagation：点击只复制，不冒泡进「正文点击放大 overlay」
+//   （rows.js assistant-content / modals.js plan-text 的 bubble 监听在传播后段，此处拦得来得及）。
+//   委托而非逐块绑监听：流式期间正文 innerHTML 整块重建（rows.js 流式 flush），委托对重建免疫。
+document.addEventListener(
+  "click",
+  (e) => {
+    const btn = e.target instanceof Element ? e.target.closest(".md-copy") : null;
+    if (!btn) return;
+    e.stopPropagation();
+    flashCopied(btn, copyText(btn.parentElement?.querySelector("pre")?.textContent ?? ""));
+  },
+  true
+);
 
 // ———————— /lang 语言切换重建（composer.js /lang 分支与 events.js state 快照两路都派发本事件） ————————
 window.addEventListener("ds-locale", () => {

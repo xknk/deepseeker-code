@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.78
+
+修复守护轮改调工具后继跑请求 400（reasoning_content 未回传，2026-10-21 生产实证 + 探针复现）：收尾守护 nudge 轮模型改调工具（如补 todo_write）时，回复作为独立 assistant 落盘，历史出现相邻 assistant 且后者带 tool_calls——末条非 system 是 tool，出口剥离器误走宽松档全剥 reasoning_content，DeepSeek 按草稿续写严格档校验直接 400、run 以 error 终止。全历史仅一例，但恰好打在收尾安全网上，且该形状会持久化进会话文件——不修则受影响会话续聊可能反复 400。
+
+- **触发收严**：`stripHistoricalReasoning` 新增「相邻 assistant 且后者带 tool_calls」→ 整请求回退全量回传（与「末条非 system 是 assistant」同一退路）；纯文本相邻不触发（探针 W9 + 生产 31 对/23 会话零 400 实证），~25% 请求瘦身收益保留。
+- **探针增补**：reasoning-guard-probe.ts 加 W7（复现 400）/W8（修复后 200）/W9（文本相邻对照 200）三变体，顺带修旧导入（client 重构后 `model` → `getModel()`）。
+- **守门**：reasoning-strip.test.ts 14 例（+3：拆分工具轮单测放行、文本相邻照剥、出站请求体全量回传断言）；core 全量 706 例绿（subagent-resume-e2e 已知间歇 flake，单跑恒绿与本次无关）+ 三端 typecheck 绿。
+
+## 1.0.77
+
+修复历史会话列表跨项目串显（2026-10-21，多根工作区切根场景）：会话/trace/undo/worktree/用量本就按「项目隔离键」分目录存储，但该键在 core 加载期按当时目录算定一次——VSCode 里**切换项目根**后键不跟随，新会话仍落进最初项目的桶，历史面板于是把切换过的所有项目的对话混在一起显示。
+
+- **切根重导隔离键**：core 抽出纯函数 `deriveWorkspaceKey`（父目录-目录-路径哈希，含盘符大小写/分隔符归一），VSCode `applyProjectRoot` 切根成功后重导 `appConfig.userWorkspaceDir`——会话、trace、undo 备份、worktree、用量日志的按项目分桶全部跟随新主根。
+- **切根即开新会话**：selectProjectRoot 成功后走统一新会话入口（脏页签开新页签、旧对话原样保留可切回续接）——避免同一会话在两个项目的桶里各留半截、两边历史列表都被污染。多根文件访问面不变：沙箱仍放行窗口内所有项目文件夹，一个会话里跨项目改文件照旧（存储归主根桶）。
+- **会话盖章 projectRoot**：新建会话在 state.json 记录创建时的项目根绝对路径，listSessions 摘要透出（旧会话无此字段）——会话归属项目的兜底元信息，供诊断与未来跨桶工具用。
+- **多项目语义一句话**：不切根的多根同聊=会话归主根桶、历史在该项目下可见；显式切根=换项目上下文=新会话新桶；同一项目在不同窗口打开=同键同桶，历史共享。
+- **守门**：`workspace-key.test.ts` 5 例（键归一化/防碰撞、重导传播、盖章透出）；core 全量 693 例绿（3 例间歇 flake 两轮全量失败点漂移、涉事文件单跑恒绿，与本次改动无关）+ 三端 typecheck 绿 + CLI dist 重打。
+
+## 1.0.76
+
+webview 消息/代码块复制（2026-10-21，对标 Claude Code 消息 copy 形态）：assistant 回复与围栏代码块获得一键复制，纯 webview 层改动、宿主与内核零接触。
+
+- **代码块 copy**：`mdToHtml` 围栏代码块包 `.md-code` + 右上角 `⧉` 按钮（hover 显形，`.msg-undo` 同款悬浮出模式），消息流 / overlay 计划全文 / 审批计划条全域生效；点击行为 app.js **capture 阶段委托 + stopPropagation**——不冒泡进「正文点击放大 overlay」，且对流式 innerHTML 整块重建免疫。
+- **回复 copy**：assistant 行 hover 显形 `.msg-copy` 徽标，复制 `row.text` **原始 Markdown**（非渲染后文字）；流式中不挂，收尾 rebuildRow 自然生效；徽标挂 wrap 直接子层，与正文点击放大/折叠头互不牵连。区分口径=只有 agent 产出可复制（回复/代码），用户消息、工具行、状态行不配——过程性内容本就靠原生划选。
+- **复制保真修复**：`\n→<br/>` 收敛到围栏外段落——pre 段保留真实换行，`textContent` 读出的即原样代码（此前全局替换把代码内换行也转 `<br/>`，按 DOM 取文会丢换行）。渲染结果不变（`white-space: pre` 本就保留换行）。
+- **剪贴板原语**：`state.js` 新增 `copyText`（navigator.clipboard 优先，被拒降级 textarea+execCommand）+ `flashCopied`（✓ 反馈 1.2s，定时器挂元素防连点串帧）；文案入 strings.js 双语（rwCopyMsg / rwCopyCode）。
+- **验证**：真 bundle 断言（stub acquireVsCodeApi 后 esbuild 打包真 markdown.js：包裹与按钮 / pre 真换行 / 围栏外 br 与行内规则 / 转义往返 / GFM 表格全过）+ `npm run build` 绿 + typecheck 绿。
+
 ## 1.0.75
 
 工具策略声明漂移收尾（2026-10-21，内核审查报告第 17 项）：修 `move_file` / `list_dir` 两处「声明名 ≠ 实际参数名」的漂移，并新增全表守门断言防回潮。

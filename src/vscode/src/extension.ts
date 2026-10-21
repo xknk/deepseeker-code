@@ -107,6 +107,10 @@ let context0: vscode.ExtensionContext | null = null;
  *    selectProjectRoot 可显式切换。core 文件沙箱（getActiveWorkspaceRoot 实时读 env）据此跟随。 */
 let workspaceRoot: string | null = null;
 
+/** 存储隔离键重导钩子（activate 第 4 步 core config 加载后注入）：applyProjectRoot 切根时调用。
+ *  会话/trace/undo/worktree/用量的按项目分桶键（appConfig.userWorkspaceDir）跟随新主根。 */
+let rekeyWorkspaceStorage: ((root: string) => void) | null = null;
+
 /**
  * 解析主根：优先「活动编辑器所属工作区文件夹」（activate 时若用户正看着某项目，就以其为主根），
  * 回退 folder[0]。返回 null 表示无任何打开的文件夹。
@@ -140,6 +144,10 @@ const applyProjectRoot = (root: string): boolean => {
   }
   workspaceRoot = root;
   process.env.WORKSPACE_ROOT = root;
+  // ★ 存储隔离键跟随切根（2026-10-21）：会话/trace/undo/worktree/用量按 userWorkspaceDir 分桶，
+  //   该键在 core config 模块加载期按当时 cwd 算定——切根不重导，新会话仍落旧桶，历史列表跨项目串显。
+  //   activate 首次调用于 core import 之前（钩子未注入=无需重导，IIFE 按已 chdir 的 cwd 算对）。
+  rekeyWorkspaceStorage?.(root);
   return true;
 };
 
@@ -892,7 +900,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
   // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }, { appConfig: coreAppConfig, deriveWorkspaceKey }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
@@ -901,7 +909,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     import("@/observability/inspect.ts"),
     import("@/outputStyles/registry.ts"),
     import("@/llm/createModel.ts"),
+    import("@/config/index.ts"),
   ]);
+  // ★ 存储隔离键重导钩子注入（applyProjectRoot 切根时把分桶键跟随新主根，见该函数注释）
+  rekeyWorkspaceStorage = (root: string) => {
+    coreAppConfig.userWorkspaceDir = deriveWorkspaceKey(root);
+  };
   // 观测/命令目录函数提升为模块级（handleMessage 是模块级函数，webview 的 /usage 等命令要用）
   inspectUsage = inspect.inspectUsage;
   inspectContext = inspect.inspectContext;
@@ -964,7 +977,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!picked) return;
       if (applyProjectRoot(picked.description!)) {
         void context.workspaceState.update("deepseekerCode.activeProjectRoot", picked.description);
+        // ★ 切根=换项目上下文（2026-10-21）：开新会话——旧对话整体留在旧项目的分桶里（切回可从历史续接），
+        //   不换则会话在两个项目桶各留半截，两边历史列表都被污染。多根文件访问面不变：沙箱仍全可见，
+        //   跨项目同聊照旧（存储归主根桶）。脏页签开新页签（旧现场原样保留），空白页签原地复用。
         const t = revealTab(context);
+        void startNewSession(context, t);
         postState(t);
         void vscode.window.showInformationMessage(envT("rootSwitched")(picked.label));
       }

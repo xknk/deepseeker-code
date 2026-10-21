@@ -14,6 +14,24 @@ import { createUUID } from "@/common/index.ts";
 const _DataDir = process.env.DEEPSEEKER_CODE_DATA_DIR
     ? path.resolve(process.env.DEEPSEEKER_CODE_DATA_DIR)
     : path.join(os.homedir(), ".deepseeker-code");
+/**
+ * 工作区隔离键推导：<父目录>-<目录>-<sha256(规范化绝对路径)前8位>。
+ * ★ 抽成纯函数导出（2026-10-21）：VSCode 运行期切换主根（selectProjectRoot）时必须重导
+ *   appConfig.userWorkspaceDir，否则会话/trace/undo/worktree/用量的按项目分桶仍落在
+ *   「core 模块加载时那个根」的桶里——多根工作区切根后历史列表跨项目串显的根因。
+ * 规范化：反斜杠→正斜杠 + 盘符大写 + resolve 折叠（防碰撞哈希以规范化路径为基准，同项目不同写法同键）。
+ */
+export const deriveWorkspaceKey = (dir: string): string => {
+    let cwd = path.resolve(dir).replace(/\\/g, '/');
+    if (/^[a-z]:/i.test(cwd)) {
+        cwd = cwd.charAt(0).toUpperCase() + cwd.slice(1); // 盘符首字母顶格大写（如 C:/）
+    }
+    const currentFolder = path.basename(cwd);
+    const parentFolder = path.basename(path.dirname(cwd));
+    const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 8);
+    return `${parentFolder}-${currentFolder}-${hash}`;
+};
+
 /** 全局应用配置单例（详见各字段行内注释）。 */
 export const appConfig = {
     dataDir: _DataDir,
@@ -42,23 +60,7 @@ export const appConfig = {
      *  env RUN_COMMAND_AUTO_BG_MS 覆盖。勿把 IDLE 调到高于 DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS
      *  （空闲分支到期会产出降级消息喂流，不会饿死 collectToolResult 的 idle 熔断）。 */
     runCommandAutoBgMs: Number(process.env.RUN_COMMAND_AUTO_BG_MS) || 120_000,
-    userWorkspaceDir: (() => {
-        // 1. 获取当前 Node.js 的规范化绝对工作目录
-        let cwd = process.cwd().replace(/\\/g, '/'); // 强行把 Windows 的反斜杠 \ 换成正斜杠 / 
-        // 2. 【核心防御】：解决 Windows 盘符大小写不一致导致的缓存失效 Bug
-        // Node.js 拿到的 process.cwd() 可能是小写 c:/，但编译器报错日志吐出的可能是大写 C:/
-        if (/^[a-z]:/i.test(cwd)) {
-            cwd = cwd.charAt(0).toUpperCase() + cwd.slice(1); // 强行将盘符首字母顶格大写（如 C:/）
-        }
-        // 3. 拿到当前目录名（例如: core）与父目录名（例如: src），作为人类可读前缀
-        const currentFolder = path.basename(cwd);
-        const parentFolder = path.basename(path.dirname(cwd));
-        // 4. ★ 防碰撞：仅凭「父-子」两层目录名做隔离键会碰撞（D:/a/src/core 与 E:/b/src/core
-        //    都映射成 src-core，session/trace 会串）。追加规范化完整绝对路径的 sha256 短哈希，
-        //    既保留可读前缀，又对不同绝对路径产生不同键，彻底消除跨项目串扰。
-        const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 8);
-        return `${parentFolder}-${currentFolder}-${hash}`;
-    })(),
+    userWorkspaceDir: deriveWorkspaceKey(process.cwd()),
     traceRetentionDays: 7,
     /** Undo（文件回退）总开关：false 时跳过所有写前备份，紧急降级用。 */
     undoEnabled: true,

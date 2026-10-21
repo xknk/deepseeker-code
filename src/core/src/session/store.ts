@@ -151,6 +151,9 @@ export const getOrCreateSessionId = async (sessionId: string | undefined): Promi
                 archivedMessageCount: 0, // 总条数消息
                 rollingSummary: "", // 滚动总结摘要
                 consecutiveFailures: 0, // 失败消息
+                // ★ 项目根盖章（2026-10-21）：记录会话归属项目，会话按项目分桶外的兜底元信息——
+                //   多根工作区切根修复后分桶键即跟随项目，此章供诊断/未来跨桶工具用（旧会话无此字段）。
+                projectRoot: process.cwd(),
             };
         // ★ 兑现"创建即落盘"契约：新建身份时持久化带元信息的空条目（旧实现遗漏，导致 createAt 等元信息丢失）。
         if (!isPersisted) {
@@ -351,6 +354,8 @@ export type SessionSummary = {
     messageCount: number;
     /** 首条 user 消息预览（已折叠空白、截断）。 */
     preview: string;
+    /** 创建时的项目根绝对路径（getOrCreateSessionId 建档盖章；旧会话无此字段 → undefined）。 */
+    projectRoot?: string;
 };
 
 /**
@@ -416,6 +421,7 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
             updatedAt,
             messageCount,
             preview: preview.slice(0, 80),
+            projectRoot: typeof state?.projectRoot === "string" ? state.projectRoot : undefined,
         });
     }
     // 按 updatedAt 降序（最新在前）；无时间者沉底

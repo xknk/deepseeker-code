@@ -12,9 +12,12 @@
  *   W3 以 assistant 草稿 + 尾部 system nudge 结尾（= 守护轮原形状，预期复现 400）
  *   W4 同 W3 但草稿保留 reasoning（混合态：历史剥、末条留）
  *   W5 以 assistant 工具轮（content:null+tool_calls，剥）结尾——区分「纯正文草稿」与「工具轮」
+ *   W7 全剥 + [A(正文草稿), A(工具轮), tool] 结尾（2026-10-21 生产 400 形状复现：nudge 轮模型改调工具）
+ *   W8 全带 + 同形状（修复后行为 = stripHistoricalReasoning 对该形状整体放行）
+ *   W9 全剥 + [A(正文), A(正文2)] + user 结尾（文本相邻安全性取证：生产 31 对零 400）
  *  运行：npx tsx --tsconfig src/core/tsconfig.json scripts/reasoning-guard-probe.ts
  */
-import { model } from "@/llm/providers/deepseek/client.ts";
+import { getModel } from "@/llm/providers/deepseek/client.ts";
 
 const apiKey = process.env.DEEP_SEEK_API_KEY;
 if (!apiKey) {
@@ -47,6 +50,13 @@ const NUDGE = { role: "system", content: "⟦DSC:EARLY_FINAL⟧\n你上一步似
 
 const USER_TURN = { role: "user", content: "继续，把缺点 1 展开讲讲。" };
 
+// 2026-10-21 生产 400 形状零件：nudge（egress 已改写 user）轮模型改调工具 → 独立 assistant 落盘
+const SPLIT_TOOL_TURN = {
+    role: "assistant", content: null,
+    tool_calls: [{ id: "call_2", type: "function", function: { name: "todo_write", arguments: '{"todos":[{"content":"收尾","status":"done"}]}' } }],
+};
+const SPLIT_TOOL_RESULT = { role: "tool", tool_call_id: "call_2", content: "✅ [todo_write] 任务清单已更新" };
+
 /** 全带版历史：工具轮 assistant 补回 reasoning_content（严格档 W6 用） */
 const mkAllKept = (): any[] => {
     const h = [...history];
@@ -67,6 +77,20 @@ const variants: { name: string; messages: any[] }[] = [
     { name: "W4 历史剥 + 草稿留 reasoning + 尾部 system nudge（混合态）", messages: [...history.slice(0, 4), mkDraft(true), NUDGE] },
     { name: "W5 全剥 + 以 assistant 工具轮结尾", messages: [...history.slice(0, 4)] },
     { name: "W6 全带 + 草稿留 reasoning + 尾部 system nudge（守护轮全带 = 修复后守护轮行为）", messages: [...mkAllKept().slice(0, 4), mkDraft(true), NUDGE] },
+    { name: "W7 全剥 + [A(草稿), A(工具轮), tool]（生产 400 形状复现）", messages: [...history.slice(0, 5), SPLIT_TOOL_TURN, SPLIT_TOOL_RESULT] },
+    {
+        name: "W8 全带 + [A(草稿), A(工具轮), tool]（修复后行为）", messages: (() => {
+            const h = mkAllKept();
+            return [...h.slice(0, 4), { ...h[4], reasoning_content: THINK }, { ...SPLIT_TOOL_TURN, reasoning_content: THINK }, SPLIT_TOOL_RESULT];
+        })(),
+    },
+    {
+        name: "W9 全剥 + [A(草稿), A(正文2)] + user 结尾（文本相邻对照）", messages: [
+            ...history.slice(0, 5),
+            { role: "assistant", content: "补充说明：缺点按性价比重排如下。" + "展开。".repeat(80) },
+            USER_TURN,
+        ],
+    },
 ];
 
 const tools = [{
@@ -76,12 +100,19 @@ const tools = [{
         description: "读取文件",
         parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
+}, {
+    type: "function",
+    function: {
+        name: "todo_write",
+        description: "更新任务清单",
+        parameters: { type: "object", properties: { todos: { type: "array" } }, required: ["todos"] },
+    },
 }];
 
 for (const v of variants) {
     process.stdout.write(`▶ ${v.name} ... `);
     try {
-        const resp: any = await model.chat.completions.create({
+        const resp: any = await getModel().chat.completions.create({
             messages: v.messages,
             model: modelName,
             tools,

@@ -63,3 +63,42 @@ compactCount: 0, // 会话级压缩次数（compact.done 消费处累加；环�
 /** row key 发放器（单调递增，整个 webview 生命周期唯一）。 */
 let seq = 0;
 export const nextKey = () => `k${++seq}`;
+
+// ———————— 剪贴板 ————————
+/** 复制文本进剪贴板：navigator.clipboard 优先（点击手势内可用），被拒/不可用退 textarea+execCommand。 */
+export const copyText = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+    return ok;
+  }
+};
+
+/** 复制成功反馈：按钮短暂变 ✓（定时器挂元素上，连点重置不串）；失败静默（双路都拒属异常环境）。 */
+export const flashCopied = (btn, copied) => {
+  Promise.resolve(copied).then((ok) => {
+    if (!ok) return;
+    btn.textContent = "✓";
+    btn.classList.add("copied");
+    clearTimeout(btn._copiedT);
+    btn._copiedT = setTimeout(() => {
+      btn.textContent = "⧉";
+      btn.classList.remove("copied");
+    }, 1200);
+  });
+};
