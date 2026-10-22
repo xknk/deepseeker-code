@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.60
+
+随 core 重打包（2026-10-22）：携带 Agent 内核打磨 A/B 两批（与 VSCode 端 1.0.70 同源）——runLedger 成本账本收拢（runAgent 六个跨轮账目状态 + 子 run 成本中继收拢为每 run 一实例的闭包模块，纯结构收拢零控制流变化，runAgent 净瘦身 62 行；预算硬线 1.2× 单点化为 BUDGET_HARD_LIMIT_RATIO；结算单金额/usage.jsonl 行/预算截断文案经回放驱动对照与改前逐字节同形）+ 成功路径 [DSC-DIAG] 日志治理（streamInference 每轮统计行与 trace 事件全量重复，长会话纯刷屏，删除；错误路径保留并改写为「❌ 推理失败（round N）」风格，run 死因 stdout 可观测性不丢）。**CLI 自身代码无改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：长会话不再每轮刷诊断统计行，失败时 stdout 直显死因）。
+
 ## 1.0.59
 
 随 core 重打包（2026-10-21）：同步内核审查报告第 17 项（`move_file` 的 `primaryArg` 从误写的 `'src'` 改为真实参数名 `'source'`、`list_dir` 删除无对应参数的 `primaryArg:'path'`、`permissions.ts` 退役 `'src'` 死分支 + 全表声明防漂移守门）+ 守护轮 reasoning_content 400 修复（收尾 nudge 轮改调工具的「相邻 assistant」形状误走宽松档被 DS 严格档拒 400）+ 工作区隔离键切根重导 / 会话盖章 projectRoot 等 core 侧修复。**CLI 自身代码无改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：对 `move_file` 选「总是允许」从此真正生效，作用域为精确源路径；曾命中 400 的会话续聊恢复正常）。
