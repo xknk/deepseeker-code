@@ -343,7 +343,6 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             },
             payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
         });
-        console.log(`[DSC-DIAG] streamInference round ${round} 完成: content=${contentBuf.length}chars reasoning=${reasoningBuf.length}chars toolCalls=${toolCallsBuf.size}`);
         // ★ 带出本轮真实 usage（prompt_tokens/cached_tokens）：供 runAgent 维护「估算校准系数」
         //   （修正 estimateTokens 对代码/CJK 的系统性低估）与「缓存命中率」（缓存感知压缩决策）。
         //   仅 completed 路径有；aborted/error 不带，调用方按 undefined 处理（回落保守默认）。
@@ -360,7 +359,7 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             metadata: { depth, decisionSource: llmDecisionSource, ok: false, durationMs: performance.now() - startTime, attempt: round },
             payload: { input: msgText(message[message.length - 1].content), output: err.message },   // ★ 多模态：文本视图
         });
-        console.log(`[DSC-DIAG] streamInference round ${round} ═══ ERROR: ${err.message}`);
+        console.error(`❌ 推理失败（round ${round}）：${err.message}`);
         return { kind: 'error', error: err };
     }
 };
