@@ -163,9 +163,10 @@ describe("内核审查报告第三批守门", () => {
     // ==================== Q12 结算单子 run 花费 ====================
     describe("Q12 run.receipt 并列展示子 run 花费", () => {
         it("结构扫描：core 发字段 + CLI/VSCode 双端渲染消费", () => {
-            const ra = readRepo("src/agent/runAgent.ts");
-            assert.match(ra, /subCostYuanAcc \+= yuan/, "reportCost 回灌须同时记展示账（与预算圈并账、与落盘 costYuanAcc 分账）");
-            assert.match(ra, /subCostYuan: subCostYuanAcc > 0/, "receipt 事件须带 subCostYuan（>0 才发，undefined 自动省略）");
+            // 打磨计划 B 批（2026-10-22）等价改写：子账入账与 receipt 发字段移入 runLedger.ts，扫描目标随迁（正则与意图不变）
+            const rl = readRepo("src/agent/runLedger.ts");
+            assert.match(rl, /subCostYuanAcc \+= yuan/, "reportCost 回灌须同时记展示账（与预算圈并账、与落盘 costYuanAcc 分账）");
+            assert.match(rl, /subCostYuan: subCostYuanAcc > 0/, "receipt 事件须带 subCostYuan（>0 才发，undefined 自动省略）");
             const cli = readRepo("../cli/src/useChatState.ts");
             assert.match(cli, /subCostYuan/, "CLI 渲染须消费 subCostYuan");
             assert.match(cli, /子任务 ¥/, "CLI 结算行须有子任务段");

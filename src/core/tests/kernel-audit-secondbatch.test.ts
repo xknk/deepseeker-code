@@ -193,7 +193,8 @@ describe("内核审查报告第二批守门", () => {
             assert.match(readRepo("src/agent/type.ts"), /budgetCheck\?: \(\) => boolean/, "RunAgentOptions 须声明 budgetCheck");
             assert.match(ra, /const inheritedBudgetCheck = options\.budgetCheck/, "主 run 自武装（已有注入优先）");
             assert.match(ra, /budgetCheck: inheritedBudgetCheck/, "toolCallCtx 须注入 budgetCheck（runSubagent 经 toolCtx 拿闭包）");
-            const flushCount = (ra.match(/costRelay\.flush\(budgetSpentYuan\)/g) ?? []).length;
+            // 打磨计划 B 批（2026-10-22）等价改写：中继收拢进 runLedger.flushRelay（基数钉子移到 run-ledger.test.ts），计数语义不变（保持 >=，勿收紧为 ===）
+            const flushCount = (ra.match(/ledger\.flushRelay\(\)/g) ?? []).length;
             assert.ok(flushCount >= 3, `round.end×2 + finally 共 3 处增量 flush，实得 ${flushCount}`);
             assert.ok(!/costRelay\.flush\(spentTotal/.test(ra),
                 "flush 基数须为 budgetSpentYuan（子树完整口径）——自身三账会把 depth≥2 孙代花费困在中继层以下");

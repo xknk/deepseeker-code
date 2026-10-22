@@ -1,4 +1,14 @@
 # Changelog
+## 1.0.70
+
+Agent 内核打磨（runAgent 主循环 + 四协作模块走查后两批收拢）：成本账本收拢成 runLedger 模块（主项）+ [DSC-DIAG] 日志治理。core 全量 729 例绿（711 基线 + 18 新增）+ 三端 typecheck 绿；改前/改后以回放驱动对照：结算单金额、usage.jsonl 落盘行、预算截断 final 文案逐字节同形（剔除时间戳类易变字段）。
+
+- **成本账本收拢（runLedger）**：runAgent 平铺的六个跨轮账目状态（主模型 token 账 / 按次工具账 / 辅助模型账 / 子 run 展示账 / 预算圈 / 用量合计）+ 子 run 成本中继收拢为每 run 一实例的 runLedger 闭包模块——分账/并账关系、flush 基数=子树完整口径（防 depth≥2 孙代花费困在中继层以下）、精度红线（入账点裸浮点累加、快照输出点才六位舍入，防 1.2× 截断轮次漂移）由代码结构与文件头单一论证钉死；纯结构收拢零控制流变化，runAgent 净瘦身 62 行。
+- **预算硬线单点化**：1.2× 硬截断倍率提为 BUDGET_HARD_LIMIT_RATIO 常量，子任务自武装探测与轮边界硬截断共用同一判定（overHardLimit，>= 语义与改前逐字节等价）；预算圈武装条件在调用处收窄（仅主 run 且 >0，保留 != null 判定链）。
+- **校准 EMA 权重常量化**：历史 0.6 / 新观测 0.4 提为 CALIB_EMA_KEEP / CALIB_EMA_NEW 文件顶常量。
+- **新守门**：run-ledger.test.ts 18 例——分/并账矩阵（五笔入账各进正确落盘账且全部进预算圈、子账绝不进 usageLog 防双重计量）、入账守卫（NaN/0/负数/Infinity 忽略，防 NaN 毒化预算圈致硬截断静默失效）、观察者转发（usage 缺省仍转发 + 抛错被吞）、无价模型 costYuan=null 不编数、硬线 >= 边界、中继幂等 + depth=2 子树口径模拟、结构断言（中继基数钉在预算圈变量 + budgetYuan 调用处收窄）；既有内核审查守门等价改写 2 处（flush 计数换 ledger.flushRelay 目标、子账扫描随迁 runLedger.ts，意图不减）。
+- **日志治理**：删除 streamInference 成功路径 [DSC-DIAG] 行（与 trace llm.response 事件全量重复 + stdout 刷屏）；错误路径保留但改写为 console.error ❌ 风格（stdout 对「run 为什么死了」的可观测性保留）。
+
 ## 1.0.69
 
 线上 1.0.68 后的全部积累一次发布（本地曾以 1.0.69–1.0.78 十个版本迭代、均未上架；现按线上版本序列收敛重排为 1.0.69，十个细分条目全文见 git 历史）。core 全量 706 例绿 + 三端 typecheck 绿。

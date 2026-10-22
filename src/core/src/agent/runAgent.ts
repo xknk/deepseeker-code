@@ -14,14 +14,14 @@
  *  产出：通过 AsyncGenerator<AgentEvent> 向上层 yield 流程事件；通过 options.events 回传埋点。
  */
 import OpenAI from "openai";
-import { appendMessage, appendMessages, appendEvent, UsageSnapshot } from "@/session/transcript.ts";
+import { appendMessage, appendMessages, appendEvent } from "@/session/transcript.ts";
 import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
 import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
 import { getCalibration, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
-import { AgentEvent, RunAgentOptions, AuxUsageReporter } from "./type.ts";
+import { AgentEvent, RunAgentOptions } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { ToolCallContext } from "./toolExecution.ts";
 import { createRepeatBreaker } from "./repeatBreaker.ts";
@@ -29,11 +29,13 @@ import { prepareToolsAndInjections } from "./systemInjections.ts";
 import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
 import { createNudgeScheduler, PLAN_REJECT_FORCE_AT, PLAN_REJECT_FORCE_FINAL_TEXT } from "./agentNudges.ts";
-import { createCostRelay } from "./costRelay.ts";
+import { createRunLedger } from "./runLedger.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
-import { calcCostYuan } from "@/config/prices.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
-import { AUX_MODEL_NAME } from "@/llm/providers/deepseek/client.ts";
+
+// ★ 估算校准 EMA 权重（打磨计划 C 项提为常量）：历史 0.6 / 新观测 0.4——平滑单轮抖动（消费点见主循环校准处）。
+const CALIB_EMA_KEEP = 0.6;
+const CALIB_EMA_NEW = 0.4;
 
 // ============ 主流程 ============
 /**
@@ -115,16 +117,19 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 首轮 PLAN_FIRST nudge 入参：「当前轮」user prompt（仅顶层 agent；subagent 不引导自主进计划模式）+ 当前 planMode。
     //   looksComplex 命中即在首轮注入「先调 enter_plan_mode 规划」引导，配合 systemPrompt 强提示扭转从不进计划模式的问题。
     const firstPrompt = resolveFirstPrompt(message, options);
-    // ★ 预算累计器（成本信任链第二环 E1）：本 run 经济花费真值 = 自身各轮 usage 折算 + 子 run 经 reportCost
-    //   回灌的花费。与 costYuanAcc（receipt/usageLog 落盘口径=run 自身）刻意分账——子 run 花费若并入落盘
-    //   costYuan，读侧按 depth 拆分时会同笔钱计两次；预算是控制面，落盘是计量面，各记各的。
-    //   ★ P1-5 收尾（2026-10-20）起同时是子 run 成本中继（costRelay.flush）的基数：含下级 relay 回灌，
-    //   恰为「本 run 子树」完整口径——用自身三账做基数会把 depth≥2 孙代花费困在中继层以下，到不了根预算。
-    let budgetSpentYuan = 0;
-    // ★ Q12（内核审查报告第三批，2026-10-20）：子 run 花费展示累计器——reportCost 回灌的增量在进预算圈
-    //   同时记一份，run.receipt 并列展示「子任务 ¥x」。与 costYuanAcc（落盘计量面=run 自身）仍分账：
-    //   只是展示层补偿（报告 Q12），usageLog/trace 口径不动，不产生双重计量。
-    let subCostYuanAcc = 0;
+    // ★ 成本账本（成本信任链 D2/E1/E2/P0-2/P1-5/Q12 全部账目）：五本账 + 预算圈 + 子 run 成本中继收拢于
+    //   runLedger.ts（分账/并账关系、flush 基数=子树完整口径、精度红线论证见其文件头）。预算仅主 run 且
+    //   >0 时武装——工厂拿不到 depth，调用处收窄（保留 != null 链，NaN/undefined 边界与改前逐字节同判）。
+    const ledger = createRunLedger({
+        model: effectiveModel,
+        budgetYuan: depth === 0 && options.budgetYuan != null && options.budgetYuan > 0 ? options.budgetYuan : undefined,
+        costSink: options.costSink,
+        onAuxUsage: options.onAuxUsage,
+    });
+    // 别名锚点：ensureFitsWindow / streamInference / toolCallCtx 三注入点 + 守门断言（kernel-audit-firstbatch:199）共用，勿删
+    const reportAuxUsage = ledger.reportAuxUsage;
+    // ★ 按次计费工具成本 sink（DeepSeek Search/Fetch）：DEEP_SEEK_TOOL_COST=0 回退开关留在编排层（环境开关不入账本）。
+    const toolCostSink = process.env.DEEP_SEEK_TOOL_COST === "0" ? undefined : ledger.addToolCost;
     // ★ 本 run 压缩计数（成本信任链第三环 H1，context.usage.compactCount 用）：经 ensureFitsWindow 的
     //   onUIEvent 旁路数 compact.done（不改 truncate 本体）；会话级累计由前端在 compact.done 消费处自加。
     let runCompactCount = 0;
@@ -138,9 +143,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         planMode: !!options.planMode,
         noEarlyFinal: !!options.noEarlyFinal,
         getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
-        getBudgetStatus: depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
-            ? () => ({ spent: budgetSpentYuan, budget: options.budgetYuan! })
-            : undefined,
+        getBudgetStatus: ledger.getBudgetStatus, // ★ E2 预算 soft 读数（闭包在账本内 O(1) 读数；未武装返回 null，管线自判）
     });
     // ★ P3-8 run 级 read_file 读取追踪（path → mtime + 次数）：本 run 内重复读同一文件时结果头标
     //   「第 N 次读取 · 内容未变更/已变更」，让模型自决是否还需重读。每 run 一个 Map、逐轮传同一引用；
@@ -185,67 +188,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 事件日志化：run 边界事件行直接落盘（不经 AgentEvent 通道——subagent abort 时 break 出 for-await，
     //   generator return 的 finally 不能 yield，AgentEvent 送不出去；直接落盘同时自动覆盖主/子会话，
     //   且不污染 SSE/UI 事件流）。appendEvent 内部查开关，关闭时 no-op。
-    // 本 run 用量累计（run.end 永久计量；trace 侧 3 天自动清理，transcript 永久留存互补）
-    // （runId 已上移至函数头部：埋点包装层注入 metadata.runId 与事件行同源）
-    let usageSum: UsageSnapshot | undefined;
-    // ★ 成本累计（成本信任链第一环 D2）：每轮真实 usage × 当时单价 O(1) 旁路累加（估算口径红线：绝不用 estimateTokens）。
-    //   无价模型任一轮 → costKnown=false，收尾不发钱数（null 语义，绝不编数）；精度 6 位小数防浮点噪音。
-    let costYuanAcc = 0;
-    let costKnown = true;
-    const addUsage = (u?: UsageSnapshot) => {
-        if (!u) return;
-        usageSum = {
-            prompt_tokens: (usageSum?.prompt_tokens ?? 0) + (u.prompt_tokens ?? 0),
-            completion_tokens: (usageSum?.completion_tokens ?? 0) + (u.completion_tokens ?? 0),
-            total_tokens: (usageSum?.total_tokens ?? 0) + (u.total_tokens ?? 0),
-            cached_tokens: (usageSum?.cached_tokens ?? 0) + (u.cached_tokens ?? 0),
-        };
-        const cost = calcCostYuan(effectiveModel, { promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens, cachedTokens: u.cached_tokens });
-        if (cost == null) costKnown = false;
-        else {
-            costYuanAcc += cost;
-            budgetSpentYuan += cost; // 预算累计器同轮入账（落盘/预算分账，见上方声明处注释）
-        }
-    };
-    // ★ 按次计费工具成本累计（DeepSeek Search/Fetch 接入）：web 工具成功调用后经 toolCostSink 上报当次
-    //   花费（半分钱级）。与 costYuanAcc（token 口径）分账落盘（receipt/usageLog 各带 toolCostYuan 字段），
-    //   但同轮并入预算累计器——按次花费同为真金白银，不入 E2 预算圈则预算制被搜索调用打穿。
-    //   DEEP_SEEK_TOOL_COST=0 回退开关：不注入 sink（成本链异常时保结算单/预算零污染）。
-    let toolCostYuanAcc = 0;
-    const addToolCost = (yuan: number) => {
-        if (!Number.isFinite(yuan) || yuan <= 0) return;
-        toolCostYuanAcc += yuan;
-        budgetSpentYuan += yuan; // E2 预算圈同轮入账（落盘分账、预算并账）
-    };
-    const toolCostSink = process.env.DEEP_SEEK_TOOL_COST === "0" ? undefined : addToolCost;
-    // ★ 辅助模型成本累计（成本信任链 P0-2，2026-10-20）：压缩摘要（kind='compact'）与风险分类器
-    //   （kind='classify'）的 aux 调用按 AUX_MODEL_NAME 当时单价折算入账。与 costYuanAcc（主模型 token 口径）、
-    //   toolCostYuanAcc（按次计费）三账并立、独立落盘（receipt.auxCostYuan / usageLog.auxCostYuan），
-    //   但同轮并入预算累计器——辅助调用同为真金白银，不入 E2 圈则预算被压缩/分类调用打穿。
-    //   容错：usage 缺省（流式无统计）或 AUX 无价（calcCostYuan=null）→ 不计、不阻断；宿主注入的
-    //   options.onAuxUsage 作为旁路观察者在计价后转发（观察者抛错绝不击垮主链路）。
-    let auxCostYuanAcc = 0;
-    const reportAuxUsage: AuxUsageReporter = (usage, kind) => {
-        if (usage) {
-            const cost = calcCostYuan(AUX_MODEL_NAME, { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, cachedTokens: usage.cached_tokens });
-            if (cost != null && Number.isFinite(cost) && cost > 0) {
-                auxCostYuanAcc += cost;
-                budgetSpentYuan += cost; // E2 预算圈同轮入账（落盘分账、预算并账）
-            }
-        }
-        try { options.onAuxUsage?.(usage, kind); } catch { /* 旁路观察者 */ }
-    };
-    // ★ P1-5 子 run 增量上报（内核审查报告）：旧路径子 run 全程烧钱父级不知情，直到 run 结束 costSink
-    //   一次性回灌——¥1 预算的父级派出 ¥3 子任务会全额烧完才被父轮边界发现。中继把累计总额转成
-    //   只报正增量，两个 round.end + finally 三处 flush，父累计器逐轮更新，父轮边界 budgetCheck 随时熔断。
-    const costRelay = createCostRelay(options.costSink);
     // ★ P1-5 子任务预算熔断探测：父级经 options.budgetCheck 注入（子 run 链式透传）；主 run 且设预算时
-    //   自我武装（与轮边界硬截断同阈值 1.2×）——子任务（spawn_agent/run_workflow）经 toolCtx.budgetCheck
-    //   拿到本闭包，每轮边界探测，父预算耗尽即收尾，不再等子任务全额烧完。
+    //   自我武装（闭包= ledger.overHardLimit，与轮边界硬截断同阈值同读数）——子任务（spawn_agent/
+    //   run_workflow）经 toolCtx.budgetCheck 每轮边界探测，父预算耗尽即收尾，不再等子任务全额烧完。
     const inheritedBudgetCheck = options.budgetCheck
-        ?? (depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
-            ? () => budgetSpentYuan >= options.budgetYuan! * 1.2
-            : undefined);
+        ?? (depth === 0 ? ledger.overHardLimit : undefined);
     // ★ P1-7 计划拒绝熔断计数器：计划期非 SAFE 写类工具被拒时由 processToolCall 增量回传（每次 +1）。
     //   NUDGE_AT（2）次经 nudge 管线转向；FORCE_AT（4）次在轮边界强制收尾（见 completed 分支末尾）。
     let planWriteRej = 0;
@@ -288,11 +235,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   stopReason 复用 'limit'（usageLog 已有枚举）；仅主 run（子 run 花费经 reportCost 计入父累计器，
             //   由父统一执行）。soft 与 hard 间隔一整轮：触顶轮先收到 soft 文案，下一轮边界仍超 120% 才截——
             //   极端场景（soft 槽位被更高优 pending 占用而花费一轮穿顶）直接截断也是预算语义内的正确行为。
-            if (depth === 0 && options.budgetYuan != null && options.budgetYuan > 0
-                && budgetSpentYuan >= options.budgetYuan * 1.2) {
+            if (depth === 0 && ledger.overHardLimit()) {
+                const snap = ledger.budgetSnapshot()!; // 硬线命中蕴含已武装（depth=0 且 budget>0），必非 null
                 stopReason = 'limit';
                 budgetTruncated = true;
-                yield { type: 'final', text: (lastContent || "") + `\n（💰 预算截断：本 run 已花费 ¥${budgetSpentYuan.toFixed(3)} / 预算 ¥${options.budgetYuan.toFixed(3)}。/budget 调整预算后回复"继续"即可接续。）` };
+                yield { type: 'final', text: (lastContent || "") + `\n（💰 预算截断：本 run 已花费 ¥${snap.spent.toFixed(3)} / 预算 ¥${snap.budget.toFixed(3)}。/budget 调整预算后回复"继续"即可接续。）` };
                 return;
             }
             // ★ P1-5 子任务预算熔断消费点（第五轮复核收尾，2026-10-20）：budgetCheck 闭包此前只被链式
@@ -392,12 +339,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 const estAtInfer = estimateTokens(message) + toolsTokens;
                 if (estAtInfer > 1000) {
                     const observed = infResult.usage.prompt_tokens / estAtInfer;
-                    calibRatio = calibRatio * 0.6 + observed * 0.4;
+                    calibRatio = calibRatio * CALIB_EMA_KEEP + observed * CALIB_EMA_NEW;
                 }
                 lastRealPromptTokens = infResult.usage.prompt_tokens;
                 lastCachedTokens = infResult.usage.cached_tokens;
             }
-            addUsage(infResult.usage); // completed 轮用量累计进 run.end（事件日志化）
+            ledger.addUsage(infResult.usage); // completed 轮用量累计进 run.end（事件日志化）
             // assistantMessage 已由 streamInference 委托 provider.buildAssistantMessage 构造完成（含厂商扩展字段，
             //   如 DeepSeek 的 reasoning_content）。此处整体落盘 + ...spread 透传，杜绝手工列举字段名漏挂——
             //   落盘保留 reasoning_content（UI 思考展示 / recall 依赖）；API 回传侧由 provider 出口的
@@ -421,10 +368,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
                 await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
                 emitContextUsage();
-                // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器。flush 基数用 budgetSpentYuan
-                //   （自身三账 + 下级 relay 回灌，恰为子树完整口径）——若只报自身三账，depth≥2 的孙代
-                //   花费到不了根预算（第五轮复核发现，2026-10-20）。主 run 无 sink，flush 为 no-op。
-                costRelay.flush(budgetSpentYuan);
+                // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（基数=预算圈子树完整口径，论证统一见 runLedger.ts 文件头）。主 run 无 sink，flush 为 no-op。
+                ledger.flushRelay();
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
                 // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
                 //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
@@ -477,9 +422,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   进上下文 → 下一轮立刻压缩」被釜底抽薪；口径与 ensureFitsWindow/nudge 闭包同公式。
                 contextTokensEst: Math.round(estimateTokens(message) * calibRatio + toolsTokens),
                 readTracker, // ★ P3-8：run 级读取追踪（同一引用透传，跨轮累计）
-                // ★ 子 run 成本回灌（成本信任链第二环 E1）：runSubagent 经 toolCtx.reportCost 拿到闭包，
-                //   子 run 结束时把总花费记进本 run 预算累计器——父预算自动继承约束（子花费计入父 spent）。
-                reportCost: (yuan: number) => { if (Number.isFinite(yuan) && yuan > 0) { budgetSpentYuan += yuan; subCostYuanAcc += yuan; } },
+                // ★ 子 run 成本回灌（成本信任链第二环 E1）：runSubagent 经 toolCtx.reportCost 把子 run 花费
+                //   记进账本预算圈 + 展示账——父预算自动继承约束（守卫与分账语义在 runLedger.reportSubCost）。
+                reportCost: ledger.reportSubCost,
                 // ★ 按次计费工具成本上报（DeepSeek Search/Fetch）：web 工具经 toolCtx.toolCostSink 拿到闭包，
                 //   成功调用后按次上报进本 run 累计器。
                 toolCostSink,
@@ -507,9 +452,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
             emitContextUsage();
-            // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效）。
-            //   基数= budgetSpentYuan（子树完整口径，含下级 relay），理由见上方无工具收尾处。
-            costRelay.flush(budgetSpentYuan);
+            // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效；基数口径见 runLedger.ts 文件头）。
+            ledger.flushRelay();
             // ★ P1-7 计划拒绝熔断：连续 FORCE_AT（4）次计划期写工具被拒 → 强制收尾（模型未能产出方案，
             //   不陪空转烧轮数）。round.end 已写（本轮完整闭合），stopReason='limit' 与预算截断同枚举。
             //   转向 nudge 在 NUDGE_AT（2）次时已注入过一次（pickNudge 消费），给过机会仍不转向才熔断。
@@ -543,12 +487,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         //   AgentEvent 通道送不出去）；stopReason 与 Stop hook 同口径（signal.aborted 覆盖推断）。
         //   放 Stop hook / updateCalibration 之前：run 边界元数据先于旁路持久化。
         try {
-            await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: usageSum });
+            await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
         } catch { /* appendEvent 已内部吞错，双保险 */ }
         // ★ 使用日志落盘（路线 #6 真实使用数据回路）：每 run 一行（轮数/token/工具分布/停止原因），
         //   按月分片纯本地留存、绝不上报；recordUsageRun 内部全容错，此处 fire-and-forget 再包一层——
         //   旁路计量绝不击垮收尾链路（与 Stop hook / updateCalibration 同级）。
         try {
+            const us = ledger.usageSummary();
             void recordUsageRun({
                 v: 1,
                 ts: new Date().toISOString(),
@@ -557,42 +502,35 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 stopReason: signal?.aborted ? 'aborted' : stopReason,
                 rounds: round,
                 durationMs: Math.round(performance.now() - startTime),
-                promptTokens: usageSum?.prompt_tokens,
-                completionTokens: usageSum?.completion_tokens,
-                totalTokens: usageSum?.total_tokens,
-                cachedTokens: usageSum?.cached_tokens,
-                costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : undefined,
-                toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（Search/Fetch）
-                auxCostYuan: auxCostYuanAcc > 0 ? Math.round(auxCostYuanAcc * 1e6) / 1e6 : undefined, // 辅助模型花费（压缩摘要+风险分类器，P0-2）
+                promptTokens: us?.prompt_tokens,
+                completionTokens: us?.completion_tokens,
+                totalTokens: us?.total_tokens,
+                cachedTokens: us?.cached_tokens,
+                ...ledger.usageLogFields(), // costYuan/toolCostYuan/auxCostYuan（口径与舍入在 runLedger）
                 tools: toolCounts,
             });
         } catch { /* recordUsageRun 已内部吞错，双保险 */ }
-        // ★ 子 run 成本回灌（成本信任链第二环 E1 + 内核审查报告 P1-5）：本 runAgent 为子 run 时
-        //   （options.costSink 已注入），收尾把余量补报给父累计器——各 round.end 已增量上报过，
-        //   此处 flush 只补差额（中继幂等，重复上报零副作用）。旁路，绝不击垮收尾。
-        //   ★ 基数= budgetSpentYuan（子树完整口径）：自身三账（token + 按次工具 + 辅助模型，P0-2 并账，
-        //   任何一笔漏出预算圈预算制就被那一类调用打穿）+ 下级 relay 回灌——只报自身三账会丢 depth≥2
-        //   的孙代花费（第五轮复核发现，2026-10-20）。主 run 无 sink 不受影响。
+        // ★ 子 run 成本回灌（E1 + P1-5）：本 runAgent 为子 run 时（options.costSink 已注入），收尾补报余量
+        //   给父累计器——各 round.end 已增量上报过，此处 flush 只补差额（中继幂等）。基数=预算圈子树完整
+        //   口径（含下级 relay 回灌），论证统一见 runLedger.ts 文件头。旁路，绝不击垮收尾。
         try {
-            costRelay.flush(budgetSpentYuan);
+            ledger.flushRelay();
         } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
-        //   且 onUIEvent 出口存在；usageSum 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
+        //   且 onUIEvent 出口存在；ledger.usageSummary() 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
         //   事件行先例），经 onUIEvent 直发；旁路 UI 绝不击垮收尾链路。
         try {
-            if (depth === 0 && options.onUIEvent && usageSum) {
-                const prompt = usageSum.prompt_tokens ?? 0;
+            const us = ledger.usageSummary();
+            if (depth === 0 && options.onUIEvent && us) {
+                const prompt = us.prompt_tokens ?? 0;
                 options.onUIEvent({
                     type: 'run.receipt',
                     rounds: round,
                     promptTokens: prompt,
-                    completionTokens: usageSum.completion_tokens ?? 0,
-                    cachedTokens: usageSum.cached_tokens ?? 0,
-                    cacheHitRate: prompt > 0 ? (usageSum.cached_tokens ?? 0) / prompt : 0,
-                    costYuan: costKnown ? Math.round(costYuanAcc * 1e6) / 1e6 : null,
-                    toolCostYuan: toolCostYuanAcc > 0 ? Math.round(toolCostYuanAcc * 1e6) / 1e6 : undefined, // 按次计费工具花费（undefined 自动省略）
-                    auxCostYuan: auxCostYuanAcc > 0 ? Math.round(auxCostYuanAcc * 1e6) / 1e6 : undefined, // 辅助模型花费（压缩摘要+风险分类器；undefined 自动省略）
-                    subCostYuan: subCostYuanAcc > 0 ? Math.round(subCostYuanAcc * 1e6) / 1e6 : undefined, // ★ Q12：子 run 花费并列展示（展示层补偿；undefined 自动省略）
+                    completionTokens: us.completion_tokens ?? 0,
+                    cachedTokens: us.cached_tokens ?? 0,
+                    cacheHitRate: prompt > 0 ? (us.cached_tokens ?? 0) / prompt : 0,
+                    ...ledger.receiptFields(), // costYuan(null=无价)/toolCostYuan/auxCostYuan/subCostYuan（口径与舍入在 runLedger）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
                 });

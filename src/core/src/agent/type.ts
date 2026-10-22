@@ -43,7 +43,7 @@ export type PermissionMode = "default" | "auto";
 /**
  * 辅助模型（AUX_MODEL_NAME）用量上报回调（成本信任链 P0-2）：压缩摘要（kind='compact'）与
  * 风险分类器（kind='classify'）的 aux 调用经此回传 runAgent，按 AUX_MODEL_NAME 单价折算汇入
- * auxCostYuanAcc → receipt/usageLog 落盘 + 预算累计器。usage 缺省时回调仍触发，计价侧容错跳过
+ * 账本辅助账（runLedger）→ receipt/usageLog 落盘 + 预算圈。usage 缺省时回调仍触发，计价侧容错跳过
  * （缺失不计、不阻断）。单价取 run 当时 AUX 价目表；无价（calcCostYuan=null）同样跳过。
  */
 export type AuxUsageReporter = (
@@ -120,7 +120,7 @@ export interface RunAgentOptions {
      *  非空 user 文本」（多轮对话下等价于本轮输入，修复旧实现 find 从头取首条导致的 PLAN_FIRST 误触发）。 */
     currentUserText?: string,
     /** 辅助模型用量上报（成本信任链 P0-2）：runAgent 注入给压缩摘要与工具分类器的回调，
-     *  按 AUX_MODEL_NAME 计价汇入 auxCostYuanAcc（receipt.auxCostYuan / usageLog / 预算累计器）。 */
+     *  按 AUX_MODEL_NAME 计价汇入账本辅助账（runLedger：receipt.auxCostYuan / usageLog / 预算圈）。 */
     onAuxUsage?: AuxUsageReporter,
 }
 

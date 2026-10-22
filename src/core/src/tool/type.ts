@@ -131,12 +131,12 @@ export interface ToolContext {
      *  父在轮边界预算检查时天然包含子 run 花费（父预算自动继承约束）。runAgent 构造 toolCtx 时注入。 */
     reportCost?: (yuan: number) => void;
     /** 按次计费工具成本上报（DeepSeek Search/Fetch 接入）：web_search/web_fetch 等按次计费后端在
-     *  成功调用后经此上报当次花费（元），runAgent 汇入 run 级 toolCostYuanAcc → receipt/usageLog 落盘
+     *  成功调用后经此上报当次花费（元），runAgent 汇入 run 级账本工具账（runLedger）→ receipt/usageLog 落盘
      *  并并入预算累计器（E2 圈）。命名呼应 reportCost（E1）。DEEP_SEEK_TOOL_COST=0 时 runAgent 不注入
      *  （回退开关：成本链异常时保结算单不脏）。 */
     toolCostSink?: (yuan: number) => void;
     /** 辅助模型用量上报（成本信任链 P0-2）：auto 档风险分类器的 aux 调用经此回传 runAgent 计价入账
-     *  （汇入 auxCostYuanAcc → receipt/usageLog + 预算累计器）。runAgent 构造 toolCtx 时注入 reportAuxUsage。 */
+     *  （汇入账本辅助账（runLedger）→ receipt/usageLog + 预算圈）。runAgent 构造 toolCtx 时注入 reportAuxUsage。 */
     onAuxUsage?: AuxUsageReporter;
     /** ★ 子任务预算熔断探测（内核审查报告 P1-5）：父级注入的闭包，返回 true=父预算已耗尽、子任务应立即中止。
      *  主 run 不设（自身熔断在轮边界自管）；spawn_agent/run_workflow 经 ToolContext → 子 runAgent options
