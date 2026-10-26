@@ -63,7 +63,7 @@ export const MODEL_PRICES: Record<string, TieredPrice> = {
 };
 
 /** 价格表（含峰谷时段定义）核实日期——过期提示与「换价须重核」红线的锚点。 */
-export const PRICES_VERIFIED_AT = "2026-10-19";
+export const PRICES_VERIFIED_AT = "2026-10-26";
 
 /** 过期提示门槛（天）：超过即 /usage 显「价格表 N 天未复核」——过期必须可见，不静默错钱。 */
 export const PRICES_STALE_DAYS = 30;
