@@ -603,7 +603,13 @@ const processToolCallInner = async (toolCall: any, ctx: ToolCallContext): Promis
         state.calledName = toolCall.function.name;
         try { state.calledArgs = JSON.parse(toolCall.function.arguments || "{}"); }
         catch { state.parseFailed = true; }
-        console.log(`🤖 模型请求调用工具: ${state.calledName}，参数:`, state.calledArgs);
+        // ★ E 批（§5）日志截断：write 类工具参数（content 全文）动辄数万字符纯刷屏（长会话 stdout 主要噪声源）。
+        //   默认 >200 字符截断；DSC_DEBUG_TOOL_ARGS=1 恢复全量（排查参数类问题时用）。
+        const argsLog = JSON.stringify(state.calledArgs) ?? "";
+        const argsPreview = process.env.DSC_DEBUG_TOOL_ARGS === '1'
+            ? argsLog
+            : argsLog.length > 200 ? argsLog.slice(0, 200) + `…（共 ${argsLog.length} 字符）` : argsLog;
+        console.log(`🤖 模型请求调用工具: ${state.calledName}，参数: ${argsPreview}`);
     }
     state.matchedTool = ctx.rawTools.find((t: any) => t.function.name === state.calledName);
     // 终结类（plan_enter/plan_exit）/ abort / 计划模式门禁：任一命中即提前返回 outcome

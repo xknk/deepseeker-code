@@ -171,11 +171,15 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         //   单层化防 15 次放大），本层是唯一重试通道，预算 2→3（1+3=4 次尝试，对齐原 SDK 侧 5 次的量级）。
         const MAX_API_RETRIES = 3;
         let apiRetries = 0;
+        // ★ C 批（§3）重试计数解耦：idle 重试原共用外层 for 的 streamAttempt——API 重试 continue 也使其
+        //   +1，「先限流再卡流」的组合下 idle 预算被挤占（吃两次 429 后 stall 直接 error，与上方注释承诺
+        //   相反）。改为独立计数，形态与 apiRetries 对齐（不新增抽象）；控制流/退避/text.reset/清缓冲不变。
+        let idleRetries = 0;
         // ★ 本轮是否已做过「上下文超长强制压缩」降级：最多降级一次，二次仍超长交外层 catch 优雅收尾
         let compactedThisRound = false;
         // ★ 本轮是否已做过「视觉自学习降级」：乐观直发图片被端点拒绝时折叠为文本占位重试，同样最多一次
         let visionDegradedThisRound = false;
-        for (let streamAttempt = 0; ; streamAttempt++) {
+        for (;;) {
             try {
                 // ★ 消费标准化 ProviderStreamChunk（provider 已把 DeepSeek/OpenAI delta+usage 映射好）。
                 //   reasoning_content 字段名不再出现于此（provider 内映射为 kind:'reasoning'）。
@@ -218,11 +222,12 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                 // ★ P1-1 放开门控：只要重试预算未耗尽就重试。「已拼出完整 tool_call 则不重试（避免重复执行
                 //   已敲定的工具）」的旧理由不成立——工具执行严格发生在 streamInference 返回之后，缓冲区里的
                 //   tool_call 只是解析好的文本、零副作用；不重试只会让 run 以「发生错误」死亡（一次全量 re-prefill）。
-                if (isIdleTimeout && streamAttempt < MAX_STREAM_RETRIES) {
+                if (isIdleTimeout && idleRetries < MAX_STREAM_RETRIES) {
+                    idleRetries++;
                     // ★ 重试前若已向前端推过文本/思考，发 text.reset 让前端丢弃这部分（重试会重新生成，避免重复显示）
                     if (!noOutputYet) yield { type: 'text.reset' };
                     const stallShape = noOutputYet ? '，尚无输出' : hasCompleteToolCall ? '，已有完整 tool_call（流尾部 stall）' : '，tool_call 未流完';
-                    console.warn(`⚠️ 流式 stall（idle 超时${stallShape}），第 ${streamAttempt + 1}/${MAX_STREAM_RETRIES} 次重试...`);
+                    console.warn(`⚠️ 流式 stall（idle 超时${stallShape}），第 ${idleRetries}/${MAX_STREAM_RETRIES} 次重试...`);
                     contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
                     continue;
                 }
