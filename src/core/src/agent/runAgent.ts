@@ -434,6 +434,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 planWriteRejections: (delta: number) => { planWriteRej += delta; nudges.notePlanWriteRejected(planWriteRej); },
                 // ★ P1-5 子任务预算熔断：runSubagent 经 toolCtx.budgetCheck 拿到探测闭包，子 runAgent 每轮边界自检
                 budgetCheck: inheritedBudgetCheck,
+                // ★ A 批批级预算：主循环不设（undefined）；仅并行批 ≥2 时由调度层浅拷贝下发（R4/R5：
+                //   required 字段，构造处显式对齐，漏写即 tsc 打红）
+                batchBudgetChars: undefined,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。

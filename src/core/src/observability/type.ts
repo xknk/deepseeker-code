@@ -35,6 +35,7 @@ export type TraceEventType =
     | "tool.repeat_break"       // 重复熔断：连续多轮完全相同的工具调用被系统主动中止（非用户拒绝）
     | "tool.validation.failed"  // 校验失败：工具入参不符合定义（Schema 校验失败）
     | "tool.failed"            // 工具执行失败：工具执行过程中发生错误
+    | "tool.batch.budget"      // A 批并行批批级预算校准埋点：批大小/批上限/每工具上限 + 实际注入字符数与 token 增量（§1.4-6，密度校准数据源）
     | "user.aborted"           // 会话开始：用户发起请求，系统初始化
     | "approval_request"        // 审批请求：需要用户手动审批的操作
     | "tool_guard_block"        //工具
@@ -62,6 +63,9 @@ export interface TraceBase {
         attempt?: number;   // 重试次数
         round?: number; // 运行次数
         model?: string; // 生效模型 id（llm.request/llm.response 埋点）：跨模型对账/按模型折算费用用
+        batchSize?: number;         // A 批 tool.batch.budget：并行批去重后执行数
+        batchCapChars?: number;     // A 批 tool.batch.budget：批级输出字符上限
+        perToolCapChars?: number;   // A 批 tool.batch.budget：分摊到每工具的字符上限
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {
