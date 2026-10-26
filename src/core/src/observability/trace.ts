@@ -52,6 +52,87 @@ let lastSizeCleanupAt = 0;
  * 防止高频并发 append 在触发条件下，同时起多个清理协程导致重复全量扫描
  */
 let cleanupInProgress = false;
+
+// ==================== 📦 D 批（§4.2）：同会话有序批量落盘 ====================
+/**
+ * 批量 flush 的行数阈值：同会话攒满 50 行即一次 appendFile（长任务数百次 open/close → 数次）。
+ */
+const TRACE_BATCH_LINES = 50;
+/**
+ * 批量 flush 的时间阈值（毫秒）：距上次入队 200ms 内必有一次落盘（unref 定时器驱动）。
+ * 丢尾窗口从毫秒级放大到 ~200ms——由「错误类事件即时 flush」兜底黑匣子尾巴（§4.2-5）。
+ */
+const TRACE_BATCH_MS = 200;
+/** 同会话有序缓冲：sessionId → 攒行（JSONL 行，已带换行符）。 */
+const traceBuf = new Map<string, string[]>();
+/** 每会话一个 200ms 定时器（unref，不阻止进程退出）；flush 时清除。 */
+const traceTimers = new Map<string, NodeJS.Timeout>();
+/** 清理触发计数（§4.3-7 验收探针：每批至多一次）。 */
+let cleanupTriggerCount = 0;
+/**
+ * 测试探针（§4.3-7）：水位与清理计数的只读视图，勿用于业务逻辑。
+ */
+export const traceBatchTestHooks = {
+    get workspaceTraceBytes(): number { return workspaceTraceBytes; },
+    get cleanupTriggerCount(): number { return cleanupTriggerCount; },
+};
+
+/**
+ * 错误/终态事件 → 不等阈值立即落盘（黑匣子尾巴，§4.2-5）。
+ * ★ 用 ok===false 判据而非事件名清单（§4.2-5 v1.2 教训）：新增失败事件只要带 ok:false 就自动覆盖，
+ *   不会漂移。天然排除 tool.execute.start（无 ok 字段）与 tool.execute.end（恒 ok:true——与 tool.failed
+ *   是互斥双事件）。三枚举是「无 ok 字段的失败/终态」兜底；2026-10-26 全量 20 处 emit 点逐点核验
+ *   （含 A/B 批新增 tool.batch.budget[ok:true]/tool.failed[ok:false]）无漏网。
+ */
+const needImmediateFlush = (ev: TraceBase): boolean =>
+    ev.metadata?.ok === false                       // tool.failed / llm.error / tool.validation.failed
+    || ev.eventType === 'user.aborted'              // 用户中止：异常收尾
+    || ev.eventType === 'tool.repeat_break'         // 重复熔断
+    || ev.eventType === 'session.end';              // 会话终态
+
+/** 200ms 兜底定时器：unref 保证不阻止进程退出（退出前的尾巴由 runAgent finally 的显式 drain 负责）。 */
+const scheduleTraceTimer = (sessionId: string): void => {
+    if (traceTimers.has(sessionId)) return;
+    const t = setTimeout(() => {
+        traceTimers.delete(sessionId);
+        void flushTraceBuffer(sessionId);
+    }, TRACE_BATCH_MS);
+    t.unref?.();
+    traceTimers.set(sessionId, t);
+};
+
+/**
+ * 显式 drain（§4.2-3）：把缓冲中的行落盘。runAgent 的 finally 在 run.end 事件之后调用一次，
+ * 保证 run 收尾不丢尾。幂等：空队直接跳过，重复调用不重复写。
+ * @param sessionId 只 flush 该会话；缺省 flush 全部会话（子 run 与主 run 共文件，一并收尾）。
+ */
+export const flushTraceBuffer = async (sessionId?: string): Promise<void> => {
+    const ids = sessionId !== undefined ? [sessionId] : [...traceBuf.keys()];
+    for (const id of ids) {
+        const arr = traceBuf.get(id);
+        if (!arr || arr.length === 0) { traceBuf.delete(id); continue; }
+        // ★ swap-and-clear：先摘队列再写盘——写盘期间新事件进新队列不丢，重复调用不重复写（幂等）
+        traceBuf.set(id, []);
+        const timer = traceTimers.get(id);
+        if (timer) { clearTimeout(timer); traceTimers.delete(id); }
+        try {
+            const joined = arr.join("");
+            const p = await getTraceStorePath(id);
+            await fs.appendFile(p, joined, "utf-8");
+            // ★ 水位/清理联动搬到 flush 点（§4.2-6）：按批一次累加（Buffer.byteLength 一次算），
+            //   清理每批至多触发一次——不再「事件入队时偷偷累加/触发」与真实落盘时机脱钩
+            if (workspaceTraceBytes < 0) {
+                workspaceTraceBytes = await getDirBytes(getTracePath());
+            }
+            workspaceTraceBytes += Buffer.byteLength(joined, "utf-8");
+            cleanupTriggerCount++;
+            void maybeCleanupAfterAppend(id);
+        } catch (error) {
+            // 落盘失败只告警并丢弃该批（§4.2-7）：旁路绝不击垮主链路，也不无限重试
+            console.warn("⚠️ [Trace] 批量落盘失败，丢弃该批（不影响主业务）:", error);
+        }
+    }
+};
 /**
  * 进程级单次加载磁盘冷时钟（只读一次，之后全部走内存，绝不污染每次写入的热路径）
  * 进程重启后 clockLoaded=false，会自动从磁盘恢复上次清理时间
@@ -90,6 +171,12 @@ export async function emitTrace(
             ...base.metadata || {},
         }
     };
+    // ★ D 批（§4.2-4）payload 截断：大文本快照 >2000 截断带标记（盲区如实声明）。
+    //   排查工具结果时以 transcript / 会话文件为准，trace 只当索引；TRACE_PAYLOAD_MAX_CHARS 可临时放大。
+    if (event.payload) {
+        if (typeof event.payload.input === "string") event.payload.input = truncateTracePayload(event.payload.input);
+        if (typeof event.payload.output === "string") event.payload.output = truncateTracePayload(event.payload.output);
+    }
     // 可观测性日志是「旁路资产」，绝不允许自身的落盘异常把主业务链路拖崩
     try {
         await appendTraceEvent(event);
@@ -98,28 +185,40 @@ export async function emitTrace(
     }
 }
 
+// ==================== ✂️ D 批（§4.2-4）：payload 截断 ====================
+/** 单字段截断上限：TRACE_PAYLOAD_MAX_CHARS 环境变量可放大（排查时临时放开，无需改码）。 */
+const tracePayloadMaxChars = (): number => Number(process.env.TRACE_PAYLOAD_MAX_CHARS) || 2000;
+/** 超 2000 截断 + 显式标记（被截了多少、共多少——盲区如实声明，§4.2-4）。 */
+const truncateTracePayload = (s: string): string => {
+    const max = tracePayloadMaxChars();
+    return s.length > max
+        ? s.slice(0, max) + `…[trace 截断 ${s.length - max} 字符（共 ${s.length} 字符）]`
+        : s;
+};
+
 /**
- * @description: 高性能日志流追加引擎（单通道 Append，拒绝双重 Stringify 乱码）
+ * @description: 高性能日志追加引擎（D 批 §4.2-1/2/5 改批量缓冲形态）：
+ *  只做「一次序列化 + 入队」；攒满 50 行 / 200ms 定时器 / 错误类事件即时 三条 flush 路径，
+ *  实际 appendFile 统一发生在 flushTraceBuffer（同会话 FIFO，一次 join 一次写）。
  */
 export async function appendTraceEvent(event: TraceBase): Promise<void> {
-    // 1. 动态索取大一统的不断流物理路径（必须传入当前事件的 mainTraceId）
-    const p = await getTraceStorePath(event.sessionId);
-
-    // 2. 【核心修复】：拒绝原代码中的双重序列化！只执行一次标准序列化，并在屁股后面带上换行符 \n [INDEX]
-    // 彻底杜绝了因落盘带有转义符导致的 JSONL 物理乱码 Bug
+    // 只执行一次标准序列化，行尾带换行符 \n（JSONL 物理形态与改前逐字节一致）
     const line = JSON.stringify(event) + "\n";
+    const arr = traceBuf.get(event.sessionId);
+    if (arr) arr.push(line); else traceBuf.set(event.sessionId, [line]);
 
-    // 3. 采用最高效的 fs.appendFile 增量流式追加，0.1毫秒内闪电落盘，性能极其强悍 [INDEX]
-    await fs.appendFile(p, line, "utf-8");
-
-    // 4. 实时累加工作区字节水位：首次写入顺手初始化基准值，之后永不 readdir/stat [INDEX]
-    if (workspaceTraceBytes < 0) {
-        workspaceTraceBytes = await getDirBytes(getTracePath());
+    // 错误/终态事件（黑匣子尾巴）：不等阈值立即落盘（§4.2-5）
+    if (needImmediateFlush(event)) {
+        await flushTraceBuffer(event.sessionId);
+        return;
     }
-    workspaceTraceBytes += Buffer.byteLength(line, "utf-8");
-
-    // 5. 扔给独立的全局物理冷时钟，开启后台无感垃圾回收（fire-and-forget，绝不阻塞当前事件返回） [INDEX]
-    void maybeCleanupAfterAppend(event.sessionId);
+    // 行数阈值：攒满即刷
+    if ((traceBuf.get(event.sessionId)?.length ?? 0) >= TRACE_BATCH_LINES) {
+        await flushTraceBuffer(event.sessionId);
+        return;
+    }
+    // 200ms 兜底定时器（unref，不阻止进程退出）
+    scheduleTraceTimer(event.sessionId);
 }
 
 /**
