@@ -15,7 +15,7 @@ DeepSeeker-Code 的定位是 **单人本地 AI coding 工具**，由 DeepSeek �
 ## 开发规则
 
 - **优先使用箭头函数**（`const fn = (...) => {...}`），减少 `function` 关键字和 `class` 的使用频率。仅当确实需要 hoisting、`this` 绑定或构造函数语义时才用 `function`/`class`；对象方法可用简写（`execute(args){}`，不算 `function` 关键字）。
-- **单测 stdout 已 ASCII 化预载**（`tests/ascii-stdout.mjs`，npm test 自动注入）：node:test v22 的帧管道缺陷（nodejs/node#64061，v22 无上游修复）下，测试/被测代码往 stdout 写非 ASCII 会让全量并发随机挂整文件；预载把 stdout 中文转 `\uXXXX`（stderr 不动）。上游修复进 v22 后可退役。
+- **单测 stdout 已 ASCII 化预载**（`tests/ascii-stdout.mjs`，npm test 自动注入）：node:test v22 的帧管道缺陷（nodejs/node#64061，v22 无上游修复）下，测试/被测代码往 stdout 写非 ASCII 会让全量并发随机挂整文件；预载把 stdout 中文转 `\uXXXX`（stderr 不动；仅 string chunk，含中文 Buffer 仍会触发——当前无此用法）。上游修复进 v22 后可退役（挂账见 `.ai-docs/后续路线.md`）。
 
 ## 运行与调试
 
