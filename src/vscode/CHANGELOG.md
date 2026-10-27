@@ -1,37 +1,14 @@
 # Changelog
-## 1.0.74
-
-webview 钉顶提问卡重构：钉住态大片空白根治（零布局占位卡）。esbuild 构建绿 + 产物字面量核验。
-
-- **钉住态空白根治**：长提问（贴日志类，气泡 320px 封顶）滚到顶被钉住时，钉住态视觉钳到 ~2 行、行盒却保留 320px 布局高度——钳掉的 ~254px 悬空成大片空白，后随内容要再滚完这段才接上来，每轮长提问滚动必现（用户反馈实锤）。行盒退出钉顶（自然流全高气泡随内容滚走），钉顶提醒改由行前 height:0 的 sticky 占位（.pin-holder）悬挂卡片克隆接管——钉住与否都不占布局、不动 scrollHeight，「滚动 ⇄ 布局」彻底解耦，空白由构造消失；inline 阅读长提问（320px 块内自滚）与钉住卡观感（渐隐/垫板/钳高/展开 pill/↺ 徽标）全部原样保留。
-- **钉住判定随迁**：syncStuckRows 改按「真行顶边已越过容器顶（严格小于+半像素容差）」给占位打 .stuck——行顶=容器顶时不打标，杜绝会话顶端 scrollTop=0 处卡片与完整气泡同屏重影；turn 折叠/行删除/行重建三路同步占位显隐与内容（防折叠轮钉卡探出、孤儿卡错钉、克隆内容滞留）。
-
-## 1.0.73
-
-get_background_output 阻塞等待上限与调度层熔断相撞修复（wait_seconds 上限 120s→90s）+ 守门。core 全量 755 例绿 + typecheck 绿。
-
-- **wait 上限压到熔断线下**：wait_seconds 钳制上限 120s 与调度层工具熔断（toolResultCollect 默认 120s）同时钟响——wait≥115s 的调用不可能正常返回：真实结果（状态+日志快照）在熔断瞬间已就绪却被丢弃，换成「可能 hang」超时文案，模型据此原样重试、再熔断，一轮空烧 2–4 分钟（会话历史 7 连挂实锤，其中 4 次为同参数重试；wait=90 的调用 4/4 正常返回）。钳制改 90s 留 30s 余量；schema 文案同步改写，写明用法：预计更久就传 90，返回仍 running 就再调一次接着等，只看日志就省略。
-- **新守门**：clampWaitSeconds 纯函数钳制矩阵（负数/缺省归 0、>90 一律钳 90、120 旧默认值必被钳下）+ 阻塞等待行为锁（sleep 2 任务 wait 15 → 退出即醒返回 exited 快照、不等满 wait；生命周期监听挂在首 yield 后续体，测试须并发驱动 generator——已知坑的直接测试形态）。
-
-## 1.0.72
-
-run_command 中止退出码语义收敛 + 中止链路集成守门测试（新增 tool-abort-integration.test.ts）+ 嵌套围栏渲染修复。两中止测试文件 16 例绿 + core typecheck 绿 + webview 围栏回归 10 例绿。
-
-- **中止退出码归一（abortedByUser）**：spawn 移除 signal 选项（2026-10-27 修「■ 终止无效」）后，killTree 杀灭进程的 close 码非确定（Win taskkill 常回传 1）——「用户中止」与「命令自己失败退出 1」混淆，verifyResult 的 -1 专用提示失效。onAbort 先置 abortedByUser 再杀树，close 恒归一 ⟦DSC_EXIT:-1⟧：中止哨兵恢复确定性，与命令自身失败可区分（background-degrade abort 回归旧断言不动即绿）。
-- **中止链路集成守门（新测试）**：贯穿 scheduleToolCalls → processToolCall → run_command（真 spawn）的中途 abort 断言——提前结束（≪命令时长）+ tool.end ok=false + 失败哨兵回填恒为 ⟦DSC_EXIT:-1⟧；覆盖单进程回归基线与 tsx 多层进程树生产挂死形状（旧代码该形状管道被孤儿攥住、close 永不触发挂到 20s timeout）。
-- **嵌套围栏渲染修复（webview + CLI）**：模型用 4+ 反引号包整份可复制文档（交接汇总等，内部再嵌 ``` 代码块）时，旧懒匹配在第一个内层 ``` 就误收栏——一份完整文档被切成多个代码块 + 裸文本散段，「渲染一半信息」。两端围栏解析统一改 CommonMark 规则（闭栏反引号数 ≥ 开栏才算闭合，短栏是块内嵌套代码），整份文档复原为单个可复制代码块；webview mdToHtml 10 例回归全绿 + CLI typecheck 绿。
-
 ## 1.0.71
 
-Agent 并行工具批与可观测性优化（六批次落地方案 §1–§5/§6.1）：并行批批级预算 + 异常隔离 + 重试计数解耦 + trace 批量落盘。core 全量 748 例绿（736 基线 + 17 新增守门）+ 三端 typecheck 绿 + 任务级 evals 21 题真 API 对照（19/21 pass，两个「回退」复跑证实为单发噪声：同代码树 4 次 2 过 2 挂；总轮数 101 vs 基线 103）。
+两天修复总包（相对线上 1.0.70 的全部增量）：Agent 并行工具批与可观测性六批次 + 四项用户可感知修复。core 全量 755 例绿 + core/cli typecheck 绿。
 
-- **并行批批级上下文预算（A 批）**：并行批（去重后 ≥2 工具）按「距压缩阈值剩余窗口」50% 设批级输出字符上限、按批均分，治 read_file 128K × 并行 N 个一次注入十余万 token 直击压缩阈值——目标是降压缩触发频率（越阈仍由 ensureFitsWindow 兜底）；单工具/串行路径截断行为逐字节不变；窗口将满收敛到 12K 保底不压碎片；CHAR_PER_TOKEN=4 系 CJK 密集偏松危险侧（注释钉明方向性），配 tool.batch.budget 校准埋点（批大小/上限/实际注入字符/token 增量）以真实分布校准。
-- **并行批异常隔离（B 批）**：processToolCall 顶层包装——未预期异常收敛成 ok:false 隔离 outcome（文案明确「已隔离，其他工具结果不受影响」+ 参数截断预览留线索 + tool.failed 埋点照发），不再炸整批留孤儿 tool_calls；不吞 abort（aborted 原样上抛调度层）。
-- **重试计数解耦（C 批）**：idle stall 重试原共用外层 streamAttempt、被 429/5xx 重试挤占（先限流再卡流直接 error 终结整轮），改独立 idleRetries 计数（预算 2 不变）；守门用内联桩 provider 回放「429×2→stall→成功」混合序列。
-- **trace 批量落盘（D 批）**：appendTraceEvent 改同会话有序缓冲（50 行/200ms unref 定时器批量 flush，runAgent finally 显式 drain 幂等不丢尾）；payload 超 2000 字符截断带「截断 N/共 X」标记（TRACE_PAYLOAD_MAX_CHARS 可放大）；**错误类事件即时落盘**（ok===false 判据 + user.aborted/tool.repeat_break/session.end 三枚举，黑匣子尾巴不丢——20 处 emit 点逐点核验）；字节水位/自适应清理搬到 flush 点按批联动。
-- **顺手修复**：collectToolResult 的 Promise.race 清理移入 finally——工具 promise 拒绝时 120s 安全网定时器泄漏挂住进程退出（新守门测试对照实验暴露：含抛错工具滞留 122s→2s）。
-- **工具调用日志截断（E 批）**：模型请求调用工具的参数打印 >200 字符截断带「共 N 字符」（write 类 content 全文纯刷屏），DSC_DEBUG_TOOL_ARGS=1 恢复全量。
-- **子 agent 汇报要求（F2 批）**：子系统词两分支尾部统一追加【汇报要求】（一屏内：已完成/改动点/验证结果/未完成项，不复述过程与工具输出，父级经 resume 追问）。
+- **并行批批级上下文预算（A）**：并行批按「距压缩阈值剩余窗口」50% 设批级输出上限、按批均分，治 read_file 128K × 并行 N 个一次注入十余万 token 直击压缩阈值——降压缩触发频率省 token；单工具/串行路径截断行为逐字节不变；tool.batch.budget 校准埋点随包（真实分布 ≥50 批后回调 CHAR_PER_TOKEN）。
+- **异常隔离（B）+ 重试解耦（C）+ trace 治理（D）+ 日志截断（E）+ 子 agent 一屏汇报（F2）**：单个工具未预期异常收敛成隔离 outcome，不再炸整批留孤儿 tool_calls；idle/API 重试计数解耦（限流不再吃掉 stall 预算）；trace 批量落盘 + 超长截断 + 错误即时 flush（黑匣子尾巴不丢）；工具调用日志 >200 字符截断（DSC_DEBUG_TOOL_ARGS 还原全量）；顺手修 collectToolResult 定时器泄漏（promise 拒绝时挂住进程退出 122s→2s）。
+- **run_command 中止语义收敛**：「■ 终止无效」根治——abort 不再只杀最外层（孙进程攥住继承管道令 close 永不触发），killTree 整树剿灭 + 中止退出码恒归一 ⟦DSC_EXIT:-1⟧（与命令自身失败可区分，verifyResult -1 专用提示生效）；新增中止链路集成守门（单进程基线 + tsx 多层进程树生产挂死形状）。
+- **后台等待不再空转**：get_background_output wait_seconds 上限 120s→90s——旧上限与调度层 120s 工具熔断同时钟响，wait 调用真实结果被超时文案吞掉、模型原样重试再熔断（会话历史 7 连挂实锤，每轮空烧 2–4 分钟）；schema 文案同步改写：预计更久就传 90，返回仍 running 再调一次接着等。
+- **嵌套围栏渲染修复（webview + CLI）**：4+ 反引号包整份可复制文档（交接汇总等）不再被内层 ``` 误切碎成散段——闭栏反引号数 ≥ 开栏才算闭合（CommonMark），未闭合到 EOF 回落纯文本。
+- **webview 钉顶提问卡空白根治**：钉住态行盒退出布局、改零高 sticky 占位卡悬挂卡片克隆——钉住与否都不占布局、不动 scrollHeight，~254px 悬空空白由构造消失；钉住判定/折叠/重建三路同步随迁。
 
 ## 1.0.70
 
