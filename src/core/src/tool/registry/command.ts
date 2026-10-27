@@ -134,7 +134,13 @@ export const commandTools: CustomTool[] = [
                         cwd,
                         detached: !isWin, // 非 Win 下支持整个进程组独立
                         env: scrubCommandEnv(), // ★ 剔除 agent 自身凭证（LLM key / 服务端 token / 搜索 key），防 LLM 经 env/printenv 读取外泄
-                        signal: ctx?.abortSignal,
+                        // ★ 中止唯一出口 = 下方 onAbort→killTree（2026-10-27 修「■ 终止无效」）：
+                        //   勿把 signal 交给 spawn——Node 内部 abort 监听先于 onAbort 触发，TerminateProcess
+                        //   只杀最外层进程；随后 killTree 的 taskkill /T 对已死根「找不到进程」直接失败，
+                        //   孙进程（tsx 的 esbuild、node --test 的每文件子进程）存活并持有继承的 stdout 管道，
+                        //   close 永不触发 → 工具永不结束（多层进程树命令下点终止永远转圈）。
+                        //   根存活时 taskkill /T 才能整树剿灭；进入工具时已 aborted 由上方前置检查拦截，
+                        //   pre-check 与 addEventListener 之间全同步无 await，无竞态窗口。
                     });
                 } catch (e: any) {
                     yield toolFailure(`[启动失败]：spawn 抛出异常（signal 已中止或命令非法）: ${e?.message ?? e}`).content;
@@ -146,6 +152,9 @@ export const commandTools: CustomTool[] = [
                 const queue: string[] = [];
                 let settled = false;
                 let exitCode: number | null = null;
+                // ★ 中止归一标记：onAbort 先置位再杀树，close 凭它把杀灭退出码归一为 -1（killTree 的
+                //   taskkill 回传码非确定、常为 1，不归一则「用户中止」与「命令自己失败退出 1」混淆）
+                let abortedByUser = false;
                 
                 // 专门负责唤醒 await 的控制器
                 let resolveWaiter: (() => void) | null = null;
@@ -207,7 +216,9 @@ export const commandTools: CustomTool[] = [
                 proc.on("close", (code: number | null) => {
                     // ★ H-1 修复：用 ??= 保留 error 事件已写入的 -1；code=null（被信号杀死/spawn 失败）按 -1 处理。
                     //   旧实现 exitCode = code ?? 0 无条件覆盖，会把 spawn ENOENT（error 置 -1 → close 置 null）误判为成功退出 0。
-                    exitCode ??= code == null ? -1 : code;
+                    //   ★ 中止归一（2026-10-27）：killTree 杀灭的 close 码非确定（Win taskkill 常回传 1），
+                    //     abortedByUser 恒映射 -1，verifyResult 的 -1 专用提示（进程被杀）随之生效。
+                    exitCode ??= abortedByUser ? -1 : (code == null ? -1 : code);
                     // flush 编码解码器末尾残留的多字节序列（GBK/UTF-8 stream 模式可能留尾字节，不 flush 会丢最后一个字符）
                     if (decoder) queue.push(decoder.decode());
                     queue.push(pendingUtf8.decode());
@@ -218,7 +229,7 @@ export const commandTools: CustomTool[] = [
                 // 💡 优化 4：【强力杀死防御】防止长连接子服务脱离控制变成孤儿后台
                 // ★ 跨平台进程树终止（复用 background.ts 的 killTree）：
                 //   Win 走 taskkill /T /F 连孙进程一并杀，非 Win 向负 PID 发信号杀整个进程组
-                const onAbort = () => { void killTree(proc); };
+                const onAbort = () => { abortedByUser = true; void killTree(proc); };
                 ctx?.abortSignal?.addEventListener("abort", onAbort);
 
                 // ★ 空闲看门狗阈值：60s 内既无新输出也未退出 → 判定常驻/挂起，转后台。env 可调（测试用）。
@@ -270,8 +281,9 @@ export const commandTools: CustomTool[] = [
                     if (degraded) {
                         // ★ 自动转后台收编：seed = 已 drain 全文 + 未 drain 队列（模型不丢任何字节，get_background_output
                         //   可见全史，环形缓冲自动封顶）。收编后进程由后台注册表接管（get/stop/宿主退出清理）。
-                        //   注意：spawn 时绑定的 ctx.abortSignal 无法摘除——run 中止仍会杀掉收编进程（与原生
-                        //   run_in_background 的跨 run 存活语义不同，v1 取舍）；注册表侧 bookkeeping 由 lifecycle 标记 killed。
+                        //   注意：run 中止仍会杀掉收编进程（与原生 run_in_background 的跨 run 存活语义不同，v1
+                        //   取舍）——击杀经 lifecycle 自注册的 onAbort→killTree（signal 仍随 opts 传入），
+                        //   不再依赖 spawn 的 signal 绑定（其只杀最外层、留孤儿攥管道，见 spawn 处注释）。
                         const taskId = adoptRunningProcess(
                             proc,
                             { command: args.command, cwd, sessionId: ctx?.sessionId, signal: ctx?.abortSignal, onExit: makeTaskExitNotifier(ctx) },
