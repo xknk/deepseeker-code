@@ -6,7 +6,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "cd src/core && node --import tsx --test tests/*.test.ts",
+    "test": "cd src/core && node --import tsx --import ./tests/ascii-stdout.mjs --test tests/*.test.ts",
     "typecheck": "tsc -p src/core/tsconfig.json && tsc -p src/cli/tsconfig.json",
     "evals:task": "tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/task.eval.ts",
     "evals:compaction": "tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/compaction.eval.ts",
