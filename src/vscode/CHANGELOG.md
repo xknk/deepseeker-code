@@ -1,4 +1,12 @@
 # Changelog
+## 1.0.72
+
+run_command 中止退出码语义收敛 + 中止链路集成守门测试（新增 tool-abort-integration.test.ts）+ 嵌套围栏渲染修复。两中止测试文件 16 例绿 + core typecheck 绿 + webview 围栏回归 10 例绿。
+
+- **中止退出码归一（abortedByUser）**：spawn 移除 signal 选项（2026-10-27 修「■ 终止无效」）后，killTree 杀灭进程的 close 码非确定（Win taskkill 常回传 1）——「用户中止」与「命令自己失败退出 1」混淆，verifyResult 的 -1 专用提示失效。onAbort 先置 abortedByUser 再杀树，close 恒归一 ⟦DSC_EXIT:-1⟧：中止哨兵恢复确定性，与命令自身失败可区分（background-degrade abort 回归旧断言不动即绿）。
+- **中止链路集成守门（新测试）**：贯穿 scheduleToolCalls → processToolCall → run_command（真 spawn）的中途 abort 断言——提前结束（≪命令时长）+ tool.end ok=false + 失败哨兵回填恒为 ⟦DSC_EXIT:-1⟧；覆盖单进程回归基线与 tsx 多层进程树生产挂死形状（旧代码该形状管道被孤儿攥住、close 永不触发挂到 20s timeout）。
+- **嵌套围栏渲染修复（webview + CLI）**：模型用 4+ 反引号包整份可复制文档（交接汇总等，内部再嵌 ``` 代码块）时，旧懒匹配在第一个内层 ``` 就误收栏——一份完整文档被切成多个代码块 + 裸文本散段，「渲染一半信息」。两端围栏解析统一改 CommonMark 规则（闭栏反引号数 ≥ 开栏才算闭合，短栏是块内嵌套代码），整份文档复原为单个可复制代码块；webview mdToHtml 10 例回归全绿 + CLI typecheck 绿。
+
 ## 1.0.71
 
 Agent 并行工具批与可观测性优化（六批次落地方案 §1–§5/§6.1）：并行批批级预算 + 异常隔离 + 重试计数解耦 + trace 批量落盘。core 全量 748 例绿（736 基线 + 17 新增守门）+ 三端 typecheck 绿 + 任务级 evals 21 题真 API 对照（19/21 pass，两个「回退」复跑证实为单发噪声：同代码树 4 次 2 过 2 挂；总轮数 101 vs 基线 103）。
