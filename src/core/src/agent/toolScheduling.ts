@@ -15,6 +15,7 @@ import { AgentEvent } from "./type.ts";
 import { processToolCall, ToolCallContext, ToolCallOutcome } from "./toolExecution.ts";
 import { appendMessage, appendMessages } from "@/session/transcript.ts";
 import { buildImageFollowUpParts } from "@/session/contentParts.ts";
+import { estimateTokens } from "@/session/contextCore.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
 import { checkPermission } from "@/tool/permissions.ts";
@@ -46,6 +47,42 @@ export const dedupeSameRoundCalls = (tcs: any[]): { batch: any[]; plan: Array<{ 
         else { firstBySig.set(sig, tc); batch.push(tc); plan.push({ tc }); }
     }
     return { batch, plan };
+};
+
+// ==================== A 批：并行批批级上下文预算（方案 §1.2） ====================
+/** 批级输出字符保底下限：窗口将满时仍给的预算（不把结果压成碎片——此场景压缩本就该触发，只止损）。 */
+export const BATCH_MIN_CHARS = 12_000;
+/** 批级预算占「距压缩阈值剩余窗口」的比例：0.5 打折，给 CHAR_PER_TOKEN 的系数误差留余量（R1）。 */
+export const BATCH_WINDOW_SHARE = 0.5;
+/** token→字符换算系数（1 token ≈ 4 字符）。
+ *  ★ 方向说明（v1.1 修正）：本系数是「每 token 能装多少字符」的**乐观上界**，不是保守下界。
+ *    - 代码 / JSON / 英文：实测 3–4 字符/token → 预算 2×剩余token 字符，实际注入 ≈ 剩余窗口的
+ *      0.5–0.67 倍，**偏紧，安全**；
+ *    - CJK 密集内容（中文注释/markdown/日志）：仅 1–1.5 字符/token → 同样字符数耗 2.7–4 倍 token，
+ *      实际注入可达剩余窗口的 1.3–2 倍，**偏松，是危险侧**。
+ *    故本预算**不是硬保证**，必须靠 fill 缩放（scaleTruncBudget）叠加兜底，并用 tool.batch.budget
+ *    埋点（§1.4-6）以真实分布校准本系数。read_file 主输出是代码/路径（代码场景成立），但 command 类
+ *    工具的中文日志会落在偏松侧。
+ *  ★ 首次挖样（2026-10-27，trace 全量检索）：真实工具结果（代码/路径/中文日志混合）密度
+ *    2.67–3.55 chars/token（聚合 2.90，n=4 可用批）——落在偏松侧预期内。远低于 §1.4-6 的
+ *    ≥50 批门槛，**不足以校准**，维持 4 不动；继续随使用量累积，达标后再回调。 */
+export const CHAR_PER_TOKEN = 4;
+
+/**
+ * A 批批级预算（纯函数，供单测）：占「距压缩阈值的剩余窗口」的一半，最低 BATCH_MIN_CHARS，
+ * 按去重后的执行数分摊。仅并行批且批内工具数 ≥ 2 时由调度层调用；单工具 / 串行路径不设
+ * （batchBudgetChars=undefined），截断行为与改前逐字节一致（R2）。
+ * 目标边界（勿读成保证）：降频非消灭——CJK 密集批内容仍可能越阈，由 ensureFitsWindow / 超长降级兜底。
+ */
+export const computeBatchBudget = (
+    modelWindow: number,
+    compactRatio: number,
+    contextTokensEst: number | undefined,
+    batchSize: number,
+): { batchCapChars: number; perToolCapChars: number } => {
+    const budgetTokensLeft = Math.max(0, modelWindow * compactRatio - (contextTokensEst ?? 0));
+    const batchCapChars = Math.max(BATCH_MIN_CHARS, Math.floor(budgetTokensLeft * CHAR_PER_TOKEN * BATCH_WINDOW_SHARE));
+    return { batchCapChars, perToolCapChars: Math.floor(batchCapChars / batchSize) };
 };
 
 /**
@@ -139,8 +176,18 @@ export const scheduleToolCalls = async function* (
                 const bp = parseTc(p.tc);
                 yield { type: 'tool.start', toolCallId: p.tc.id, toolName: bp.name, args: bp.args };
             }
+            // ★ A 批批级预算：仅并行批且去重后批内工具数 ≥ 2 时启用（§1.2）——单工具 / 串行路径不设
+            //   （undefined），截断行为与改前逐字节一致（R2 硬约束）。
+            const budget = batch.length >= 2
+                ? computeBatchBudget(ctx.modelWindow, ctx.compactRatio, ctx.contextTokensEst, batch.length)
+                : undefined;
+            // 校准埋点基线（§1.4-6）：批前原始 estimateTokens（密度=Δtoken/Δchar 须用未乘 calibRatio 的
+            // 原始口径；contextTokensEst 已校准，只用于预算计算）。仅批级预算启用时多扫这一次。
+            const tokensBefore = budget ? estimateTokens(message) : 0;
+            // ★ R4：并发批共享同一个 ctx——浅拷贝下发批级预算，禁止改原对象。
+            const batchCtx: ToolCallContext = budget ? { ...ctx, batchBudgetChars: budget.perToolCapChars } : ctx;
             // 并发执行（仅去重后的首个集合）
-            const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc, ctx)));
+            const outcomes = await Promise.all(batch.map((btc) => processToolCall(btc, batchCtx)));
             const outcomeByTc = new Map<any, ToolCallOutcome>();
             batch.forEach((btc, i) => outcomeByTc.set(btc, outcomes[i]));
             // 串行 flush（请求序；重复项复用首个结果并前缀标注，不重复执行）。P2-2：transcript 攒批一次落盘
@@ -165,6 +212,32 @@ export const scheduleToolCalls = async function* (
                 if (oc.aborted) abortedDuringTools = true;
             }
             await appendMessages(sessionId, batchEntries);
+            // ★ A 批校准埋点（§1.4-6）：真实「字符→token」密度分布的唯一数据源——§9 据此反算密度校准
+            //   CHAR_PER_TOKEN / BATCH_WINDOW_SHARE（样本 ≥50 批；无此闭环系数只是拍脑袋常数）。
+            //   各工具实际注入字符数 = 截断后 resultForModel.length（去重首集合口径，重复项复用不计）。
+            //   旁路埋点：自身异常绝不击垮调度。
+            if (budget) {
+                try {
+                    const tokensAfter = estimateTokens(message);
+                    ctx.events({
+                        sessionId,
+                        eventType: 'tool.batch.budget',
+                        metadata: {
+                            depth: ctx.depth, decisionSource: ctx.llmDecisionSource, ok: true,
+                            durationMs: performance.now() - ctx.startTime, round: ctx.round,
+                            batchSize: batch.length,
+                            batchCapChars: budget.batchCapChars,
+                            perToolCapChars: budget.perToolCapChars,
+                        },
+                        payload: {
+                            output: JSON.stringify({
+                                injectedChars: batch.map((btc) => outcomeByTc.get(btc)?.resultForModel.length ?? 0),
+                                tokensBefore, tokensAfter, tokensDelta: tokensAfter - tokensBefore,
+                            }),
+                        },
+                    });
+                } catch { /* 埋点失败不影响调度 */ }
+            }
         } else {
             // 串行分支（屏障工具 / 开关关 / 终结类 / 后台 / parseFailed / unknown / ask / deny）
             yield { type: 'tool.start', toolCallId: tc.id, toolName: pname, args: pargs };

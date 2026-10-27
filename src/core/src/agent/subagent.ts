@@ -206,6 +206,9 @@ export const runSubagent = async (
     //   system 里导致每个子 run 的 sysHash 互不相同，同批并行派生首轮前缀在 system 即分叉、DS 端首轮恒
     //   0%（实测 20 子 run × ~15k 全价 miss，占当日成本 ~3/4）；挪后同 manifest 的兄弟派生 system 逐字节
     //   一致可互相命中首轮前缀，续跑（RESUME_NOTE 同步挪出）首轮也能命中首跑写入的历史前缀。
+    // ★ F2（§6.1）汇报要求：两分支模板尾部统一追加（常量保证逐字节一致）。措辞定稿一次上——
+    //   子系统词是子 agent 前缀缓存的一部分，每次微调 = 所有声明式模板全价 re-prefill 一次。
+    const SUBAGENT_REPORT_REQ = `【汇报要求】最终汇报控制在一屏内：已完成/改动点（文件路径）/验证结果/未完成项。不要复述过程与工具输出——父级可直接经 resume 追问细节。`;
     const subSystem = (manifest
         ? [
             `# 子 Agent 身份：${manifest.name}`,
@@ -214,6 +217,7 @@ export const runSubagent = async (
             `当前所处的任务执行嵌套深度: Depth ${ctx.depth + 1} / ${MAX_AGENT_DEPTH}`,
             `\n# 【继承的全局代码规范】`,
             parentSystemPrompt,
+            SUBAGENT_REPORT_REQ,
         ].filter(Boolean).join("\n")
         : [
             `# 任务上下文`,
@@ -222,6 +226,7 @@ export const runSubagent = async (
             `你直接共享并操作本地文件系统。当你对文件全量写入或局部修改时，必须确保操作的绝对精准。完成指定子任务后，请使用最终的文本总结向父级 Agent 交付结果。`,
             `\n# 【继承的全局代码规范】`,
             parentSystemPrompt,
+            SUBAGENT_REPORT_REQ,
         ].join("\n"));
 
     // ★ per-spawn 可变注入（角色/任务/续跑说明）并入首条 user 消息，不进 system（缓存友好，见上）

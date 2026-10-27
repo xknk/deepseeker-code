@@ -49,14 +49,46 @@ const mdInline = (seg) => {
   return h;
 };
 
+// 围栏代码块解析（CommonMark：闭栏反引号数 ≥ 开栏才算闭合）：逐行扫描取代此前的 ```...``` 懒匹配正则——
+// 懒匹配撞上块内第一个 ``` 就误收栏，模型用 4+ 反引号包整份可复制文档（内部再嵌 ``` 块）时，
+// 一份完整围栏被切成多个 pre + 裸文本散段（截图实锤：交接文档前半进孤块、报错段漏成正文）。
+// 未闭合到 EOF 时按旧表现还原为纯文本（流式中收栏未到，等收栏后整体成形）。
+const mdFences = (seg) => {
+  const lines = seg.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const open = lines[i].match(/^\s*(`{3,})([a-z0-9_-]*)\s*$/);
+    if (!open) {
+      out.push(lines[i]);
+      continue;
+    }
+    const body = [];
+    let close = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const mark = lines[j].match(/^\s*(`{3,})\s*$/);
+      if (mark && mark[1].length >= open[1].length) {
+        close = j;
+        break;
+      }
+      body.push(lines[j]);
+    }
+    if (close < 0) {
+      out.push(lines[i], ...body);
+      return out.join("\n");
+    }
+    out.push(
+      `<div class="md-code"><button type="button" class="md-copy" title="${S.rwCopyCode}">⧉</button><pre><code>${body.join("\n").trim()}</code></pre></div>`
+    );
+    i = close;
+  }
+  return out.join("\n");
+};
+
 export const mdToHtml = (src) => {
   if (!src) return "";
   let h = escapeHtml(src);
   // 围栏代码块包一层 .md-code + 右上角复制按钮（点击行为全局委托在 app.js；title 渲染时经 S 取词，/lang 重渲染即跟随）
-  h = h.replace(
-    /```([a-z0-9_-]*)\n([\s\S]*?)```/g,
-    (_m, _lang, code) => `<div class="md-code"><button type="button" class="md-copy" title="${S.rwCopyCode}">⧉</button><pre><code>${code.trim()}</code></pre></div>`
-  );
+  h = mdFences(h);
   // 围栏外段落才喂 markdown 规则——围栏内是代码原样（此前列表/标题/引用规则会漏进代码块加 bullet/加粗）；
   // \n→<br/> 同样只喂围栏外：pre 段保留真实换行（pre 自带保留换行语义），复制走 textContent 才是原样代码
   h = h.split(/(<div class="md-code">[\s\S]*?<\/div>)/g)

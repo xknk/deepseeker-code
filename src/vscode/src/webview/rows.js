@@ -32,27 +32,31 @@ function scrollToBottom(instant = false) {
   syncStuckRows();
 }
 
-// ★ 提问块钉顶渐隐（stuck 类）：sticky 是纯视觉偏移，CSS 无从知晓「已钉住」——滚动时打标，
-//   钉住后块底出现渐变过渡（.stuck::after）、通栏负 margin、气泡蜕壳，内容滑过时溶入底色而非
-//   被生硬切边（CC 同款观感）。只读 rect 不写 scrollTop，与贴底跟随互不干扰；scrollToBottom
-//   （回放落底/跟随跳底）也刷新一遍，防重建行后类状态滞留。
+// ★ 提问块钉顶卡片（pin-holder + stuck 类）：真行不参与钉顶——它是自然流全高气泡（贴日志类
+//   输入块内自滚至 320px），若行盒自己 sticky+钉住态视觉钳高，钳掉的 ~254px 布局高度在钉住态
+//   悬空成大片空白，后随内容要再滚完这段才接上来（2026-10 用户反馈实锤）。改为每个 user 行前
+//   挂一个 height:0 的 sticky 占位（.pin-holder，见 ensurePinHolder），卡片克隆悬挂其上——
+//   钉住与否都不占布局、不动 scrollHeight，「滚动 ⇄ 布局」彻底解耦。滚动时给占位打 .stuck，
+//   钉住判定=真行顶边已越过容器顶（严格小于 + 半像素容差；行顶=容器顶时不打，否则会话顶端
+//   scrollTop=0 处卡片与完整气泡同屏重影）。只读 rect 不写 scrollTop，与贴底跟随互不干扰；
+//   scrollToBottom（回放落底/跟随跳底）也刷新一遍，防重建行后类状态滞留。
 const syncStuckRows = () => {
   const el = messagesEl();
   if (!el) return;
   // ★ 判定基准=滚动容器 #messages 自身顶边，绝非视口 0（历史 bug：旧判定 rect.top<=1 是视口坐标，
   //   而 #toolbar 恒在 #messages 上方（~35px），真钉住的行 top≈35 恒不≤1——.stuck 自 1.0.86 引入
-  //   起从未打上过，渐变/通栏/蜕壳全部从未渲染，连续四版「没生效」反馈同根因）。
-  //   sticky 钉住时行顶边恰好=容器顶边（padding-top 已为 0），+1 容亚像素误差。
+  //   起从未打上过，渐变/钳高全部从未渲染，连续四版「没生效」反馈同根因）。
   const base = el.getBoundingClientRect().top;
-  for (const r of el.querySelectorAll(".row-user")) {
-    r.classList.toggle("stuck", r.getBoundingClientRect().top <= base + 1);
+  for (const h of el.querySelectorAll(".pin-holder")) {
+    const row = h.nextElementSibling; // 占位恒紧贴其行（ensurePinHolder 保证），钉住状态取自行
+    const pinned = !!row && row.getBoundingClientRect().top < base - 0.5;
+    h.classList.toggle("stuck", pinned);
   }
 };
 messagesEl().addEventListener("scroll", () => requestAnimationFrame(syncStuckRows), { passive: true });
-// ★ 兜底重刷：rebuildRow（整行 replaceWith）/turn 折叠/回放重建都会把 .stuck 连带抹掉，
-//   且 DOM 变更不触发 scroll 事件——只靠滚动打标的话，重建后钉住块退回「生硬切边+侧边距」
-//   老观感直到下次滚动。监听 childList 兜底（本函数只切 class，不产生 childList 变更，无回环），
-//   rAF 合并同帧成批变更，一帧至多一次布局读。
+// ★ 兜底重刷：rebuildRow（整行 replaceWith）/turn 折叠/回放重建都会变更行几何但不触发 scroll
+//   事件——只靠滚动打标的话，钉住态滞留/缺失直到下次滚动。监听 childList 兜底（本函数只切
+//   class，不产生 childList 变更，无回环），rAF 合并同帧成批变更，一帧至多一次布局读。
 new MutationObserver(() => requestAnimationFrame(syncStuckRows)).observe(messagesEl(), { childList: true, subtree: true });
 
 // ★ 贴底跟随原语（先测后改）：stickNow 必须在 DOM 变更【前】测，stickTo 在变更【后】落（一律 instant）。
@@ -74,6 +78,59 @@ const fmtTime = (iso) => {
 //   沿用 isLongAssistant 的 5 行/300 字门槛会漏掉「被截断却不给入口」的 3~4 行消息（实测踩坑）
 const isLongUser = (t) => { const s = t || ""; return s.split("\n").length > 2 || s.length > 300; };
 
+// ★ 用户输入块构建（真行与钉卡克隆共用，见 ensurePinHolder）：时间戳 + 气泡 + 展开 pill + ↺ 徽标。
+//   附件缩略图不在此——它挂在行级（wrap），钉卡只克隆块级内容（钉住态视觉本就钳在 ~2 行）。
+const buildUserBlockEl = (row) => {
+  const block = document.createElement("div");
+  // ★ CC 同款输入块：圆角边框盒子（撤掉 CLI `> ` 前缀——盒子本身就是「这是你说的」的视觉标识）；
+  //   纯图片行不渲染空盒子。.user-block 是 ↺ 徽标的定位基准。
+  // ★ 时间戳（对标 CC 卡片右上角 9:25 AM）：卡片上方右侧淡显 HH:MM，随卡片一起钉住；缺 ts 不渲染。
+  const t = row.ts ? fmtTime(row.ts) : "";
+  const time = t ? `<span class="user-time">${t}</span>` : "";
+  const bubble = row.text ? `<div class="user-bubble">${escapeHtml(row.text)}</div>` : "";
+  block.className = `user-block${t ? " has-time" : ""}`;
+  block.innerHTML = `${time}${bubble}`;
+  // ★ 超过 2 行的提问（isLongUser，与钉住态钳高对齐）点击气泡 → 全屏浮层读全文；
+  //   更短的提问不挂——点击只用于选词复制。选中文本时放过（与 assistant-content 同款守卫）。
+  //   卡片右下角附「展开」pill（对标 CC Show more）：滚动条隐藏后，截断末行+pill 是「还有更多」的可见凭证。
+  const bubbleEl = block.querySelector(".user-bubble");
+  if (bubbleEl && isLongUser(row.text)) {
+    bubbleEl.classList.add("expandable");
+    const openFull = () => {
+      if (window.getSelection()?.toString()) return;
+      openDiffOverlay(S.rwUserOriginal, `<div class="plan-overlay-content" style="white-space:pre-wrap">${escapeHtml(row.text)}</div>`);
+    };
+    bubbleEl.addEventListener("click", openFull);
+    const more = document.createElement("span");
+    more.className = "user-more";
+    more.textContent = S.rwMore;
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openFull();
+    });
+    block.appendChild(more);
+  }
+  // ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形——点击回滚到此消息
+  //   发送前（host 侧对话+文件 modal 照常弹），原文回填输入框可改写重发；无检查点的行不渲染。
+  if (row.cpId) {
+    const undo = document.createElement("button");
+    undo.className = "msg-undo";
+    undo.title = S.rwUndoTitle;
+    undo.innerHTML = '<span class="codicon codicon-discard"></span>';
+    undo.addEventListener("click", () => {
+      const inp = document.querySelector("#input");
+      if (inp && row.text) {
+        inp.value = row.text;
+        inp.dispatchEvent(new Event("input")); // 复用输入监听做 autoGrow/slash 菜单刷新
+        inp.focus();
+      }
+      vscode.postMessage({ type: "rewindToCheckpoint", id: row.cpId });
+    });
+    block.appendChild(undo);
+  }
+  return block;
+};
+
 function buildRowEl(row) {
   const wrap = document.createElement("div");
   wrap.className = `row row-${row.kind}`;
@@ -81,35 +138,7 @@ function buildRowEl(row) {
 
   switch (row.kind) {
     case "user": {
-      // ★ CC 同款输入块：圆角边框盒子（撤掉 CLI `> ` 前缀——盒子本身就是「这是你说的」的视觉标识）；
-      //   纯图片行不渲染空盒子。.user-block 是 ↺ 徽标的定位基准。
-      // ★ 时间戳（对标 CC 卡片右上角 9:25 AM）：卡片上方右侧淡显 HH:MM，随卡片一起钉住；缺 ts 不渲染。
-      const t = row.ts ? fmtTime(row.ts) : "";
-      const time = t ? `<span class="user-time">${t}</span>` : "";
-      const bubble = row.text ? `<div class="user-bubble">${escapeHtml(row.text)}</div>` : "";
-      // has-time 类是 ↺ 徽标的换位开关：CSS 靠它把徽标从「越行顶 -9px」收到时间线右端（钉住态行顶=
-      // 滚动容器顶，负偏移部分被 overflow 裁掉——徽标「看不见」的根因），比 :has() 兼容面更稳
-      wrap.innerHTML = `<div class="user-block${t ? " has-time" : ""}">${time}${bubble}</div>`;
-      // ★ 超过 2 行的提问（isLongUser，与钉住态钳高对齐）点击气泡 → 全屏浮层读全文；
-      //   更短的提问不挂——点击只用于选词复制。选中文本时放过（与 assistant-content 同款守卫）。
-      //   卡片右下角附「展开」pill（对标 CC Show more）：滚动条隐藏后，截断末行+pill 是「还有更多」的可见凭证。
-      const bubbleEl = wrap.querySelector(".user-bubble");
-      if (bubbleEl && isLongUser(row.text)) {
-        bubbleEl.classList.add("expandable");
-        const openFull = () => {
-          if (window.getSelection()?.toString()) return;
-          openDiffOverlay(S.rwUserOriginal, `<div class="plan-overlay-content" style="white-space:pre-wrap">${escapeHtml(row.text)}</div>`);
-        };
-        bubbleEl.addEventListener("click", openFull);
-        const more = document.createElement("span");
-        more.className = "user-more";
-        more.textContent = S.rwMore;
-        more.addEventListener("click", (e) => {
-          e.stopPropagation();
-          openFull();
-        });
-        wrap.querySelector(".user-block")?.appendChild(more);
-      }
+      wrap.appendChild(buildUserBlockEl(row));
       // ★ 多模态：随行缩略图（实时回显与历史回放同构；dataURL 直出，CSP img-src data: 已放行）
       const atts = Array.isArray(row.attachments) ? row.attachments : [];
       if (atts.length) {
@@ -124,24 +153,6 @@ function buildRowEl(row) {
           box.appendChild(img);
         }
         wrap.appendChild(box);
-      }
-      // ★ 逐消息撤回（对标 CC 消息级 ↺）：徽标贴输入块右上角，hover 该行显形——点击回滚到此消息
-      //   发送前（host 侧对话+文件 modal 照常弹），原文回填输入框可改写重发；无检查点的行不渲染。
-      if (row.cpId) {
-        const undo = document.createElement("button");
-        undo.className = "msg-undo";
-        undo.title = S.rwUndoTitle;
-        undo.innerHTML = '<span class="codicon codicon-discard"></span>';
-        undo.addEventListener("click", () => {
-          const inp = document.querySelector("#input");
-          if (inp && row.text) {
-            inp.value = row.text;
-            inp.dispatchEvent(new Event("input")); // 复用输入监听做 autoGrow/slash 菜单刷新
-            inp.focus();
-          }
-          vscode.postMessage({ type: "rewindToCheckpoint", id: row.cpId });
-        });
-        wrap.querySelector(".user-block")?.appendChild(undo);
       }
       break;
     }
@@ -310,7 +321,28 @@ function rebuildRow(row) {
     const fresh = buildRowEl(row);
     el.replaceWith(fresh);
   }
+  ensurePinHolder(row); // 钉卡克隆随行重灌（ts/检查点等变更同步进卡片）
 }
+
+// ★ 钉卡占位（零布局占位设计见 syncStuckRows 注）：每个 user 行前挂 height:0 的 sticky 占位，
+//   卡片=行内 .user-block 克隆（时间行+气泡+展开 pill+↺ 徽标，与真行同一构建器保证同源）。
+//   占位恒紧贴其行（adjacency 在重建/插入两路都保持），钉住判定由 syncStuckRows 按行顶测。
+const ensurePinHolder = (row) => {
+  if (row.kind !== "user") return;
+  const el = messagesEl().querySelector(`[data-key="${CSS.escape(row.key)}"]`);
+  if (!el) return;
+  let holder = messagesEl().querySelector(`[data-pin-for="${CSS.escape(String(row.key))}"]`);
+  if (holder && holder.nextElementSibling !== el) holder.remove(); // 邻接被破坏（不应发生）：弃旧重建防孤儿卡错钉
+  if (!holder || !holder.isConnected) {
+    holder = document.createElement("div");
+    holder.className = "pin-holder row-user"; // 携带 row-user：整套卡片视觉规则（渐隐/垫板/钳高）原样复用
+    holder.dataset.pinFor = String(row.key);
+    el.before(holder);
+  }
+  holder.replaceChildren(buildUserBlockEl(row));
+  // 归属 turn 已折叠 → 卡随行隐藏（appendRow 折叠续写与 toggleTurn 展开收起两路都经此对齐）
+  holder.style.display = el.style.display === "none" ? "none" : "";
+};
 
 // ★ 开启新一轮对话 turn：插可折叠头（seq + user 摘要），后续行归入此 turn。
 //   由 appendRow 在 user 行入栈时统一调用——覆盖实时 / 回放 / 所有 row 入口，无需各入口重复处理。
@@ -334,7 +366,12 @@ function toggleTurn(seq) {
     const r = state.rowMap.get(k);
     if (r && r.turn === seq && r.kind !== "turnHeader") {
       const el = messagesEl().querySelector(`[data-key="${CSS.escape(k)}"]`);
-      if (el) el.style.display = hide ? "none" : "";
+      if (el) {
+        el.style.display = hide ? "none" : "";
+        // user 行的钉卡占位随行同步显隐（折叠的 turn 滚过顶端时不许钉卡探出来）
+        const holder = messagesEl().querySelector(`[data-pin-for="${CSS.escape(k)}"]`);
+        if (holder) holder.style.display = el.style.display;
+      }
     }
   }
   if (!hide) stickTo(stick);
@@ -381,6 +418,7 @@ function appendRow(row) {
     wrap.style.display = "none";
   }
   messagesEl().insertBefore(wrap, thinkRowEl?.isConnected ? thinkRowEl : null); // 思考行存在则插它前面（恒为末行）
+  ensurePinHolder(row); // user 行挂钉卡占位（其他 kind 直接返回）
   stickTo(stick); // 回放中不逐条跟随（stickNow/stick 均含回放抑制），replayDone 统一落底
   updateEmptyState();
 }
@@ -400,6 +438,7 @@ function removeRow(key) {
   state.rowMap.delete(key);
   state.order = state.order.filter((k) => k !== key);
   messagesEl().querySelector(`[data-key="${CSS.escape(String(key))}"]`)?.remove();
+  messagesEl().querySelector(`[data-pin-for="${CSS.escape(String(key))}"]`)?.remove(); // 钉卡占位随行清理，防孤儿卡
   updateEmptyState();
 }
 

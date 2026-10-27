@@ -36,4 +36,4 @@ const ANSI_RESET = String.fromCharCode(27) + "[0m";
 const cleaned = microcompactTextContent(`${ANSI_RED}red${ANSI_RESET}\n\n\n\n\nb`);
 assert.ok(!cleaned.includes(String.fromCharCode(27)), "ANSI 仍剥离");
 assert.ok(!cleaned.includes("\n\n\n"), "空行仍折叠");
-console.log("✅ 冒烟通过：缩进保真 / 注释保留 / ANSI·空行压缩仍生效");
+console.log("[smoke-ok] indent fidelity / comment keep / ANSI+blank-line compaction active");

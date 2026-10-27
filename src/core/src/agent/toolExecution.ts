@@ -126,6 +126,12 @@ export type ToolCallContext = {
     planWriteRejections: ((delta: number) => void) | undefined;
     /** ★ P1-5 子任务预算熔断探测，见 ToolContext.budgetCheck（经此透传给 runSubagent → 子 runAgent）。 */
     budgetCheck: (() => boolean) | undefined;
+    /** ★ A 批批级输出字符上限（仅并行批且批内工具数 ≥ 2 时由调度层分摊下发）：
+     *  finalizeOutcome 取 min(工具自身 maxOutputCharacters, 本值) 后再走 fill 缩放。
+     *  undefined = 不设批级上限（单工具 / 串行 / 去重复用路径），截断行为与改前逐字节一致。
+     *  read_file 单次 128K × 并行 N 个无总量控制会一次注入十余万 token 直击压缩阈值——本字段把
+     *  「距压缩阈值的剩余窗口」按批分摊，目标是降低压缩触发频率（降频非消灭，越阈由 ensureFitsWindow 兜底）。 */
+    batchBudgetChars: number | undefined;
 };
 
 /**
@@ -483,7 +489,11 @@ const finalizeOutcome = async (ctx: ToolCallContext, toolCall: any, state: ToolC
     //   判定条件仍是「截断条件」的超集（microcompact 只缩不涨），『截断必命中侧车』不变量保持；若顺序颠倒
     //   （先按旧预算判侧车、再按新预算截断）会出现「截了却没存档」的信息丢失。
     const fill = contextTokensEst !== undefined && modelWindow > 0 ? contextTokensEst / modelWindow : undefined;
-    const truncBudget = scaleTruncBudget(matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS, fill);
+    // ★ A 批批级预算（§1.2）：并行批 ≥2 时调度层下发的 per-tool 字符上限——与工具自身声明取 min 后
+    //   再走 fill 缩放。undefined（单工具 / 串行 / 去重复用路径）→ 与改前逐字节一致（R2 硬约束）。
+    const baseBudget = matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS;
+    const capped = ctx.batchBudgetChars !== undefined ? Math.min(baseBudget, ctx.batchBudgetChars) : baseBudget;
+    const truncBudget = scaleTruncBudget(capped, fill);
     // ★ 侧车原文存档（recall 配套）：此处 result 已脱敏、尚未截断——transcript 落盘的是截断后视图，
     //   被去中间的原文若不另存将无处可寻。仅在确会触发截断时落盘（缓存定位、非真相源；recall 的
     //   with_full 按需取回）。判定条件是“原始长度超预算”的超集（microcompact 只缩不涨，故截断必命中
@@ -515,8 +525,8 @@ const finalizeOutcome = async (ctx: ToolCallContext, toolCall: any, state: ToolC
     //   recall 语义不变）。
     if (state.postHookOverride !== undefined) {
         console.log(`✏️ [Post-hook] [${calledName}] 模型视图结果已被 hook 改写`);
-        // ★ P2-1：override 与主截断同尺度（同一 fill），先算 scaled 预算再判侧车（顺序红线同上）
-        const overrideBudget = scaleTruncBudget(matchedTool?.function?.maxOutputCharacters ?? appConfig.MAX_TOOL_RESULT_CHARS, fill);
+        // ★ P2-1：override 与主截断同尺度（同一 fill、同一 capped 预算），先算 scaled 预算再判侧车（顺序红线同上）
+        const overrideBudget = scaleTruncBudget(capped, fill);
         const overrideNote = state.postHookOverride.length > overrideBudget
             ? await writeSidecarArchive(sessionId, String(toolCall.id), state.postHookOverride)
             : undefined;
@@ -532,7 +542,47 @@ const finalizeOutcome = async (ctx: ToolCallContext, toolCall: any, state: ToolC
 };
 
 /**
- * P2-10（内核审查报告第四批，2026-10-21）拆分后主入口：单个 tool_call 的完整处理
+ * B 批（并行批异常隔离）：参数预览——异常路径保留「模型当时传了什么」的线索，
+ * 又不能让日志/事件爆字符。极小本地函数，勿引外部依赖。
+ */
+const previewArgs = (raw: string | undefined, max: number): string | undefined =>
+    raw === undefined ? undefined : raw.length > max ? raw.slice(0, max) + `…（共 ${raw.length} 字符）` : raw;
+
+/**
+ * B 批（并行批异常隔离）顶层保护：processToolCallInner 的安全链各阶段大多自带 try/catch，但仍有
+ * 未包裹的 await（finalizeOutcome 内 IO 分支等）——Promise.all 下任一条 reject 会炸掉整批结果，
+ * 已落盘的 tool_calls 留下孤儿。此处把未预期异常收敛成失败 outcome（与串行路径「工具执行失败」
+ * 语义一致），同批其他工具结果不受影响。R6/R7：不吞 abort（aborted 原样上抛给调度层 aborted 分支）、
+ * ok:false + 文案明确「已隔离」、tool.failed 埋点照发（埋点自身再包一层，防 mock/旁路异常破坏隔离）。
+ */
+export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
+    try {
+        return await processToolCallInner(toolCall, ctx);
+    } catch (e: any) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`❌ 工具调用处理异常（已隔离，不影响同批其他工具）: ${msg}`);
+        try {
+            ctx.events({
+                sessionId: ctx.sessionId, eventType: 'tool.failed',
+                metadata: { depth: ctx.depth, decisionSource: ctx.llmDecisionSource, durationMs: performance.now() - ctx.startTime, round: ctx.round, tools_id: toolCall?.id ?? "", toolName: toolCall?.function?.name ?? "unknown", toolSource: 'builtin', ok: false, attempt: ctx.round, errorCategory: 'runtime' },
+                payload: { output: `工具执行异常：${msg}` },
+            });
+        } catch { /* 埋点失败不影响隔离 outcome */ }
+        return {
+            toolCallId: toolCall?.id ?? "",
+            calledName: toolCall?.function?.name ?? "unknown",
+            calledArgs: { _preview: previewArgs(toolCall?.function?.arguments, 300) },  // ★ 保留参数上下文（截断预览）：否则 tool.failed 排查时看不到模型当时传了什么
+            resultForModel: `工具执行异常：${msg}（本调用已隔离，其他工具结果不受影响）`,
+            resultForUser: `❌ 工具执行异常：${msg}`,
+            ok: false,
+            aborted: ctx.signal?.aborted ? true : undefined,   // ★ 不吞 abort
+        };
+    }
+};
+
+/**
+ * P2-10（内核审查报告第四批，2026-10-21）拆分后主入口（B 批起更名 processToolCallInner，逻辑零变化，
+ * 由上方 processToolCall 顶层包装提供并行批异常隔离）：单个 tool_call 的完整处理
  *   （解析→终结/abort 判定→匹配→权限→锁→审批→pre-hook→undo 备份→execute→verify→post-hook→
  *   脱敏→截断→outputFilter）。
  *   纯函数——不 yield / 不 message.push / 不 appendMessage（副作用统一由调度层 flush），便于并发 Promise.all。
@@ -543,7 +593,7 @@ const finalizeOutcome = async (ctx: ToolCallContext, toolCall: any, state: ToolC
  * @param ctx     运行期上下文（见 ToolCallContext）
  * @returns 处理结果（纯数据），调度层据此 flush
  */
-export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
+const processToolCallInner = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
     const state: ToolCallState = {
         calledName: "", calledArgs: {}, parseFailed: false, matchedTool: undefined,
         result: "", resultStatus: "success", errorCategory: undefined, denied: false,
@@ -553,7 +603,13 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
         state.calledName = toolCall.function.name;
         try { state.calledArgs = JSON.parse(toolCall.function.arguments || "{}"); }
         catch { state.parseFailed = true; }
-        console.log(`🤖 模型请求调用工具: ${state.calledName}，参数:`, state.calledArgs);
+        // ★ E 批（§5）日志截断：write 类工具参数（content 全文）动辄数万字符纯刷屏（长会话 stdout 主要噪声源）。
+        //   默认 >200 字符截断；DSC_DEBUG_TOOL_ARGS=1 恢复全量（排查参数类问题时用）。
+        const argsLog = JSON.stringify(state.calledArgs) ?? "";
+        const argsPreview = process.env.DSC_DEBUG_TOOL_ARGS === '1'
+            ? argsLog
+            : argsLog.length > 200 ? argsLog.slice(0, 200) + `…（共 ${argsLog.length} 字符）` : argsLog;
+        console.log(`🤖 模型请求调用工具: ${state.calledName}，参数: ${argsPreview}`);
     }
     state.matchedTool = ctx.rawTools.find((t: any) => t.function.name === state.calledName);
     // 终结类（plan_enter/plan_exit）/ abort / 计划模式门禁：任一命中即提前返回 outcome

@@ -105,6 +105,7 @@ const makeScheduleCtx = (rawTools: any[]): any => ({
     compactRatio: 0.72,
     modelWindow: 250000,
     parentSystemPrompt: "SYS",
+    batchBudgetChars: undefined, // ★ A 批：required 字段显式对齐（单工具/串行语义 = 不设批级上限）
 });
 
 const tc = (id: string, name: string): any =>

@@ -63,7 +63,13 @@ type Block =
   | { kind: "fence"; lines: string[] }
   | { kind: "table"; header: string[]; rows: string[][] };
 
-const isFenceMark = (l: string): boolean => /^\s*```/.test(l);
+// 围栏标记行的反引号数（不足 3 返 0）。bareOnly=真仅认纯 ``` 行——闭栏不许带语言串（CommonMark）；
+// 闭栏长度 ≥ 开栏才算闭合，短栏是块内嵌套代码：模型用 4+ 反引号包整份可复制文档（内部再嵌 ``` 块）时，
+// 旧「任意 ``` 行即翻转」会把一份完整围栏切成多个代码块 + 散段（与 webview mdToHtml 同坑同修）。
+const fenceLen = (l: string, bareOnly: boolean): number => {
+  const m = l.match(/^\s*(`{3,})([a-z0-9_-]*)\s*$/);
+  return m && (!bareOnly || !m[2]) ? m[1].length : 0;
+};
 const isMdRow = (l: string): boolean => l.includes("|");
 const isMdSep = (l: string): boolean => /^[ \t|:-]+$/.test(l) && l.includes("-") && l.includes("|");
 const mdCells = (l: string): string[] =>
@@ -75,10 +81,11 @@ const parseBlocks = (text: string): Block[] => {
   const blocks: Block[] = [];
   let i = 0;
   while (i < src.length) {
-    if (isFenceMark(src[i])) {
+    const openLen = fenceLen(src[i], false);
+    if (openLen) {
       const body: string[] = [];
       i++;
-      while (i < src.length && !isFenceMark(src[i])) body.push(src[i++]);
+      while (i < src.length && fenceLen(src[i], true) < openLen) body.push(src[i++]);
       if (i < src.length) i++; // 消费闭合 ```
       blocks.push({ kind: "fence", lines: body });
       continue;

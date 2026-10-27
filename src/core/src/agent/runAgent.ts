@@ -31,6 +31,7 @@ import { streamInference, InferenceResult } from "./streamInference.ts";
 import { createNudgeScheduler, PLAN_REJECT_FORCE_AT, PLAN_REJECT_FORCE_FINAL_TEXT } from "./agentNudges.ts";
 import { createRunLedger } from "./runLedger.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
+import { flushTraceBuffer } from "@/observability/trace.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
 
 // ★ 估算校准 EMA 权重（打磨计划 C 项提为常量）：历史 0.6 / 新观测 0.4——平滑单轮抖动（消费点见主循环校准处）。
@@ -434,6 +435,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 planWriteRejections: (delta: number) => { planWriteRej += delta; nudges.notePlanWriteRejected(planWriteRej); },
                 // ★ P1-5 子任务预算熔断：runSubagent 经 toolCtx.budgetCheck 拿到探测闭包，子 runAgent 每轮边界自检
                 budgetCheck: inheritedBudgetCheck,
+                // ★ A 批批级预算：主循环不设（undefined）；仅并行批 ≥2 时由调度层浅拷贝下发（R4/R5：
+                //   required 字段，构造处显式对齐，漏写即 tsc 打红）
+                batchBudgetChars: undefined,
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
@@ -489,6 +493,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         try {
             await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
         } catch { /* appendEvent 已内部吞错，双保险 */ }
+        // ★ D 批（§4.2-3）显式 drain：trace 批量缓冲收尾不丢尾——200ms 窗口内的普通事件尾巴在此落盘
+        //   （错误类事件已即时落盘，§4.2-5；无参 flush 全部会话，子 run 共文件一并收尾）。与 appendEvent 同级容错。
+        try {
+            await flushTraceBuffer();
+        } catch { /* flushTraceBuffer 内部已逐会话容错，双保险 */ }
         // ★ 使用日志落盘（路线 #6 真实使用数据回路）：每 run 一行（轮数/token/工具分布/停止原因），
         //   按月分片纯本地留存、绝不上报；recordUsageRun 内部全容错，此处 fire-and-forget 再包一层——
         //   旁路计量绝不击垮收尾链路（与 Stop hook / updateCalibration 同级）。

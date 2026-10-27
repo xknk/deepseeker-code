@@ -37,15 +37,21 @@ export const collectToolResult = async (
         const idleMs = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
         while (true) {
             let timer: NodeJS.Timeout | undefined;
-            const outcome = await Promise.race<
-                { timedOut: true } | { timedOut: false; step: IteratorResult<string> }
-            >([
-                ret.next().then((step) => ({ timedOut: false as const, step })),
-                new Promise<{ timedOut: true }>((resolve) => {
-                    timer = setTimeout(() => resolve({ timedOut: true }), idleMs);
-                }),
-            ]);
-            if (timer) clearTimeout(timer);
+            let outcome: { timedOut: true } | { timedOut: false; step: IteratorResult<string> };
+            try {
+                outcome = await Promise.race<
+                    { timedOut: true } | { timedOut: false; step: IteratorResult<string> }
+                >([
+                    ret.next().then((step) => ({ timedOut: false as const, step })),
+                    new Promise<{ timedOut: true }>((resolve) => {
+                        timer = setTimeout(() => resolve({ timedOut: true }), idleMs);
+                    }),
+                ]);
+            } finally {
+                // ★ 清理必须在 finally：ret.next() 拒绝时 race 直接抛出，裸写在 race 后会被跳过，
+                //   定时器泄漏把进程退出拖满 idleMs（B 批隔离守门测试实测暴露）
+                if (timer) clearTimeout(timer);
+            }
             if (outcome.timedOut) {
                 full += `\n\n[⏳ 工具流式输出 idle 超时（${Math.round(idleMs / 1000)}s 无新块），已熔断返回已收集内容]`;
                 try { await ret.return(undefined); } catch { /* 尽力释放 generator（触发其 finally 清理资源） */ }
@@ -72,25 +78,32 @@ export const collectToolResult = async (
     const timeoutMs = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
-    const raced = await Promise.race<{
-        kind: 'ok'; value: string | ToolExecuteResult;
-    } | {
-        kind: 'timeout';
-    } | {
-        kind: 'abort';
-    }>([
-        Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: v })),
-        new Promise<{ kind: 'timeout' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs); }),
-        ...(signal ? [new Promise<{ kind: 'abort' }>((resolve) => {
-            onAbort = () => resolve({ kind: 'abort' });
-            signal.addEventListener('abort', onAbort, { once: true });
-        })] : []),
-    ]);
-    if (timer) clearTimeout(timer);
-    // ★ 监听器清理：race 以 ok/timeout 收尾时监听器仍挂在 signal 上——每次工具调用漏挂一个，
-    //   长会话缓慢累积（AbortSignal 是 EventTarget，超过阈值 Node 不告警）。对照 backgroundTool.ts
-    //   finalize 的解绑写法；{once:true} 只保证 abort 时触发后移除，不触发就永久滞留。
-    if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+    let raced: { kind: 'ok'; value: string | ToolExecuteResult; } | { kind: 'timeout'; } | { kind: 'abort'; };
+    try {
+        raced = await Promise.race<{
+            kind: 'ok'; value: string | ToolExecuteResult;
+        } | {
+            kind: 'timeout';
+        } | {
+            kind: 'abort';
+        }>([
+            Promise.resolve(ret).then((v) => ({ kind: 'ok' as const, value: v })),
+            new Promise<{ kind: 'timeout' }>((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs); }),
+            ...(signal ? [new Promise<{ kind: 'abort' }>((resolve) => {
+                onAbort = () => resolve({ kind: 'abort' });
+                signal.addEventListener('abort', onAbort, { once: true });
+            })] : []),
+        ]);
+    } finally {
+        // ★ 清理必须在 finally：工具 promise 拒绝时 race 直接抛出（走 executeTool catch → failResult），
+        //   裸写在 race 后的清理被整体跳过——120s 定时器泄漏挂住进程退出（B 批隔离守门测试实测暴露），
+        //   abort 监听器也随之漏挂（aborted 信号源上每个抛错工具留一个）。
+        if (timer) clearTimeout(timer);
+        // ★ 监听器清理：race 以 ok/timeout 收尾时监听器仍挂在 signal 上——每次工具调用漏挂一个，
+        //   长会话缓慢累积（AbortSignal 是 EventTarget，超过阈值 Node 不告警）。对照 backgroundTool.ts
+        //   finalize 的解绑写法；{once:true} 只保证 abort 时触发后移除，不触发就永久滞留。
+        if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+    }
     if (raced.kind === 'timeout') {
         return { content: `[⏳ 工具执行超时（${Math.round(timeoutMs / 1000)}s 未返回），已熔断跳过。该工具可能 hang 或不响应中止信号。]`, status: 'failed', errorCategory: 'runtime' };
     }

@@ -13,7 +13,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { commandTools } from "@/tool/registry/command.ts";
-import { backgroundTools, resolveWinShell } from "@/tool/registry/background.ts";
+import { backgroundTools, resolveWinShell, clampWaitSeconds, BG_WAIT_SECONDS_CAP } from "@/tool/registry/background.ts";
 import { appConfig } from "@/config/index.ts";
 import { claimSessionInbox } from "@/agent/inbox.ts";
 import { ToolContext, ToolExecutionResultStatus, type ToolExecuteResult } from "@/tool/type.ts";
@@ -231,5 +231,35 @@ describe("run_command 自动转后台（auto-degrade）", () => {
         assert.equal(inbox.length, 1, "非零退出应 pushSessionInbox（下轮模型可见）");
         assert.match(inbox[0]!, /后台任务失败/);
         assert.match(inbox[0]!, /get_background_output/);
+    });
+});
+
+describe("get_background_output wait 钳制（须低于调度层熔断 120s）", () => {
+    it("clampWaitSeconds：负数/缺省归 0，>90 一律钳到 90——120s 旧上限与熔断同时钟响，wait 调用必被超时吞掉真实结果（会话历史 7 连挂实锤）", () => {
+        assert.equal(BG_WAIT_SECONDS_CAP, 90);
+        assert.equal(clampWaitSeconds(undefined), 0);
+        assert.equal(clampWaitSeconds(-5), 0);
+        assert.equal(clampWaitSeconds(0), 0);
+        assert.equal(clampWaitSeconds(30), 30);
+        assert.equal(clampWaitSeconds(90), 90);
+        assert.equal(clampWaitSeconds(120), 90, "旧默认值 120 必须被钳下——熔断线 120s 会先响");
+        assert.equal(clampWaitSeconds(999), 90);
+    });
+
+    needShell("阻塞等待语义：running 任务等到退出返回 exited 快照（退出即醒，不等满 wait）", async () => {
+        const ctx = makeCtx();
+        const gen = runBg.function.execute({ command: "sleep 2" }, ctx) as AsyncGenerator<string>;
+        const first = await gen.next();
+        const taskId = extractTaskId(String(first.value))!;
+        // ★ 生命周期监听挂在首 yield 之后的续体里（execute 内 await attachTaskLifecycle）——
+        //   必须并发驱动 generator，close 监听才注册、status 才翻转（本文件已知坑的直接测试形态）
+        const settled = drain(gen);
+        const t0 = Date.now();
+        const st = (await getBg.function.execute({ task_id: taskId, wait_seconds: 15 }, ctx)) as string;
+        const dt = Date.now() - t0;
+        assert.match(st, /状态: exited/, `应等到退出后返回，实为：${st.slice(0, 120)}`);
+        assert.ok(dt >= 1_200, `应真等待而非立即返回（实耗 ${dt}ms）`);
+        assert.ok(dt < 14_000, `应退出即醒、不等满 wait（实耗 ${dt}ms）`);
+        await settled; // 收尾（任务已退出，此处即返）
     });
 });

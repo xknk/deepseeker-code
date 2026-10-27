@@ -248,6 +248,13 @@ export const adoptRunningProcess = (
     return task.taskId;
 };
 
+/** get_background_output 的 wait_seconds 钳制上限（90s）：必须留在调度层工具熔断（toolResultCollect
+ *  默认 120s）之下——旧上限 120s 与熔断同时钟响，wait 调用的真实结果必被超时文案吞掉，模型见
+ *  「可能 hang」后原样重试再熔断（2026-10-27 会话历史 7 连挂实锤；wait=90 的调用 4/4 正常返回）。 */
+export const BG_WAIT_SECONDS_CAP = 90;
+export const clampWaitSeconds = (v: number | undefined): number =>
+    Math.min(Math.max(0, Math.floor(v ?? 0)), BG_WAIT_SECONDS_CAP);
+
 export const backgroundTools: CustomTool[] = [
     {
         type: "function",
@@ -343,13 +350,13 @@ export const backgroundTools: CustomTool[] = [
         type: "function",
         function: {
             name: "get_background_output",
-            description: "查看指定后台任务的最近输出日志与运行状态（running/exited/killed + 退出码）。纯读，免审批。用于确认 dev server 是否启动成功、查看报错等。等长任务（构建/测试）跑完：带 wait_seconds 阻塞等待任务退出后再返回（仍在跑则等到超时返回当前状态）——用它等，不要不带 wait 反复轮询查询。",
+            description: "查看指定后台任务的最近输出日志与运行状态（running/exited/killed + 退出码）。纯读，免审批。用于确认 dev server 是否启动成功、查看报错等。等长任务（构建/测试）跑完：带 wait_seconds 阻塞等待任务退出后再返回（仍在跑则等满 wait_seconds 返回当前快照）——用它等，不要不带 wait 反复轮询查询。",
             parameters: {
                 type: "object",
                 properties: {
                     task_id: { type: "string", description: "后台任务的 task_id（run_in_background 返回，或 run_command 超时自动转后台返回）" },
                     tail_lines: { type: "number", description: "只返回最后 N 行日志（默认 50，避免一次灌入过多）" },
-                    wait_seconds: { type: "number", description: "阻塞等待任务退出（或到达此时长）后再返回，上限 120 秒；任务已在跑且需要等结果时使用，不需要等就省略" }
+                    wait_seconds: { type: "number", description: "阻塞等待任务退出（或到达此时长）后再返回，上限 90 秒——须低于调度层 120s 工具熔断线，更长的 wait 会被熔断、真实结果被丢弃换成超时文案。预计更久就传 90，返回仍 running 就再调一次接着等；只看当前日志就省略此参数" }
                 },
                 required: ["task_id"]
             },
@@ -365,7 +372,7 @@ export const backgroundTools: CustomTool[] = [
                 //   唤醒条件只看「退出」不看「有新输出」——chatty 构建/常驻 server 持续吐日志，按新输出
                 //   唤醒会把长等待打散成秒级返回、退化回忙轮询；要看中途日志直接不带 wait 查快照。
                 //   500ms 步进查内存 status，零开销；repeatBreaker 对带 wait 的调用豁免重复检测（见 agent/repeatBreaker.ts）。
-                const waitMs = Math.min(Math.max(0, args.wait_seconds ?? 0), 120) * 1000;
+                const waitMs = clampWaitSeconds(args.wait_seconds) * 1000;
                 if (waitMs > 0 && task.status === "running") {
                     const deadline = Date.now() + waitMs;
                     while (task.status === "running" && Date.now() < deadline && !ctx?.abortSignal?.aborted) {
