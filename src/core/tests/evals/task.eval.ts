@@ -77,6 +77,10 @@ interface TaskResult {
     toolCalls: number;
     /** 归因埋点：每轮工具名序列（同一轮多个 = 并行批次）。不进基线，仅供 run 记录归因 */
     roundTools: string[][];
+    /** 首 token 延迟：首个 text.delta 距任务起点（ms）。null = 本轮无正文流（首字符前终结） */
+    ttftMs: number | null;
+    /** 思考链首帧距任务起点（ms）。null = 模型未产出 thinking.delta */
+    thinkingMs: number | null;
     durationMs: number;
     promptTokens: number;
     completionTokens: number;
@@ -87,6 +91,7 @@ interface TaskResult {
     finalPreview: string;
     error?: string;
 }
+// ★ TTFT/thinkingMs 刻意不入基线：网络抖动敏感，只进报告列与 run 记录，不进门禁对比
 type BaselineEntry = Pick<TaskResult, 'pass' | 'rounds' | 'totalTokens' | 'durationMs'>;
 interface Baseline {
     createdAt: string;
@@ -170,13 +175,24 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), (task.maxMinutes ?? 10) * 60_000);
     const t0 = Date.now();
+    // ★ TTFT 掐表（§2.5）：text.delta / thinking.delta 原被当「噪音」不入 agentEvents——现在只记时间戳，
+    //   依旧不入内存。TTFT 一律取首个 text.delta；思考首帧另记，两个口径分开（跨时间可比性）。
+    let firstTextAt: number | undefined;
+    let firstThinkAt: number | undefined;
+    // ★ ctx.finalText 的原料：正文流式时 final.text 为空串（chatProcessing 只发结束信号），须自行累积 delta 全文
+    let streamedText = '';
     let error: string | undefined;
 
     try {
         await handleUnifiedChat(
             { sessionId, content: task.prompt } as any,
             async () => { /* 非 SSE 渠道回送：eval 不需要 */ },
-            (evt: any) => { if (evt?.type === 'round.start' || evt?.type === 'tool.start' || evt?.type === 'final') agentEvents.push(evt); },
+            (evt: any) => {
+                const type = evt?.type;
+                if (type === 'text.delta') { firstTextAt ??= Date.now(); streamedText += String(evt.text ?? ''); }
+                else if (type === 'thinking.delta') { firstThinkAt ??= Date.now(); }
+                if (type === 'round.start' || type === 'tool.start' || type === 'final') agentEvents.push(evt);
+            },
             ac.signal,
             {
                 // ★ 无头审批：一律 allow-once（内存放行，绝不 allow-always 写持久规则污染用户配置）。
@@ -201,8 +217,10 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
     }
 
     const final = agentEvents.find((e) => e?.type === 'final');
+    // ★ checker 上下文（§2.5）：finalText = 流式 delta 累积 ∪ final.text（流式时后者恒空，取前者）
+    const ctx = { finalText: streamedText || String(final?.text ?? ''), roundTools: collectRoundTools(agentEvents) };
     let check: CheckResult;
-    try { check = await task.checker(ws); }
+    try { check = await task.checker(ws, ctx); }
     catch (e: any) { check = { ok: false, detail: `checker 异常: ${e instanceof Error ? e.message : String(e)}` }; }
     if (error) check = { ok: false, detail: `agent 运行异常: ${error}` };
     if (!keepWs) await fs.rm(ws, { recursive: true, force: true }).catch(() => { });
@@ -214,11 +232,13 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
         rounds: agentEvents.filter((e) => e?.type === 'round.start').length,
         toolCalls: agentEvents.filter((e) => e?.type === 'tool.start').length,
         roundTools: collectRoundTools(agentEvents),
+        ttftMs: firstTextAt !== undefined ? firstTextAt - t0 : null,
+        thinkingMs: firstThinkAt !== undefined ? firstThinkAt - t0 : null,
         durationMs: Date.now() - t0,
         promptTokens, completionTokens, totalTokens, cacheHitTokens,
         costCents: estimateCostCents({ promptTokens, completionTokens, cacheHitTokens }),
         checkerDetail: check.detail ?? '',
-        finalPreview: String(final?.text ?? '').slice(0, 200),
+        finalPreview: ctx.finalText.slice(0, 200),   // ★ 顺带修复：流式轮此处理前恒空串（final.text 被清空）
         error,
     };
 };
@@ -226,6 +246,8 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
 // ==================== 报告 ====================
 
 const fmtK = (n: number): string => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+/** TTFT/思考首帧列：null（本轮未出现）显示 '-' */
+const fmtSec = (ms: number | null): string => (ms === null ? '-' : `${(ms / 1000).toFixed(1)}s`);
 const fmtDelta = (cur: number, base: number): string => {
     if (base === 0) return '';
     const pct = Math.round(((cur - base) / base) * 100);
@@ -248,6 +270,7 @@ const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
     console.log(
         'id'.padEnd(18) + '结果'.padEnd(6)
         + 'vs基线'.padEnd(8) + '轮次'.padEnd(10) + '工具'.padEnd(6)
+        + '首字'.padEnd(7) + '思考'.padEnd(7)
         + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8) + '成本¢'.padEnd(8),
     );
     let regressions = 0;
@@ -261,6 +284,7 @@ const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
         console.log(
             r.id.padEnd(18) + (r.pass ? 'PASS' : 'FAIL').padEnd(6)
             + vs.padEnd(8) + `${r.rounds}${roundDelta}`.padEnd(10) + String(r.toolCalls).padEnd(6)
+            + fmtSec(r.ttftMs).padEnd(7) + fmtSec(r.thinkingMs).padEnd(7)
             + fmtK(r.totalTokens).padEnd(10) + fmtK(r.cacheHitTokens).padEnd(10)
             + `${Math.round(r.durationMs / 1000)}s`.padEnd(8) + String(r.costCents).padEnd(8),
         );
@@ -326,14 +350,14 @@ try {
         console.log(`\n▶ [${i + 1}/${selected.length}] ${t.id} — ${t.name}`);
         const row = await runOneTask(t);
         rows.push(row);
-        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
+        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  首字 ${fmtSec(row.ttftMs)}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
     }
     for (let i = 0; i < extensionTasks.length; i++) {
         const t = extensionTasks[i];
         console.log(`\n▶ [扩展面 ${i + 1}/${extensionTasks.length}] ${t.id} — ${t.name}`);
         const row = await runOneTask(t, true);
         rows.push(row);
-        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
+        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  首字 ${fmtSec(row.ttftMs)}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
     }
 } finally {
     dispose?.();

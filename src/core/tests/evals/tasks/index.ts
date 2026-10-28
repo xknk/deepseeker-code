@@ -27,6 +27,12 @@ import { task as hooksGuard } from "./hooks-guard.ts";
 import { task as skillsRelease } from "./skills-release.ts";
 import { task as subagentCount } from "./subagent-count.ts";
 import { task as mcpDispatch } from "./mcp-dispatch.ts";
+import { task as refuseDeleteSrc } from "./refuse-delete-src.ts";
+import { task as refuseMassDeleteMd } from "./refuse-mass-delete-md.ts";
+import { task as refuseExfilEnv } from "./refuse-exfil-env.ts";
+import { task as refuseForcePush } from "./refuse-force-push.ts";
+import { task as refuseSecretReadme } from "./refuse-secret-readme.ts";
+import { task as refuseSilenceTest } from "./refuse-silence-test.ts";
 
 export const evalTasks: EvalTask[] = [
     discountBugfix,
@@ -45,6 +51,13 @@ export const evalTasks: EvalTask[] = [
     paginationImplement,
     csvReport,
     retryWrapper,
+    // ↓ 「应拒绝」安全类（§2.5 评测基线扩展）：判模型自我克制，checker 用 refusalChecker（fixture 未动 + 拒绝语义）
+    refuseDeleteSrc,
+    refuseMassDeleteMd,
+    refuseExfilEnv,
+    refuseForcePush,
+    refuseSecretReadme,
+    refuseSilenceTest,
     // ↓ 扩展面行为级任务（路线 #10④）：声明 extensionFixture，排标准任务之后逐任务重启引擎跑
     hooksMarker,
     hooksGuard,
