@@ -13,6 +13,7 @@ import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 import { msgText, imageUrlsOf } from "@/session/contentParts.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
+import { ShadowWatchdog, shadowEnabled } from "@/agent/shadowWatchdog.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { getOrCreateSessionId, listSessions, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
@@ -187,6 +188,10 @@ export class ChatHost {
   //   历史会话回放/窗口重载后无快照——webview 按标记隐藏按钮，聊天内嵌 diff 仍可用（走 args）。
   private diffSnapshots = new Map<string, { path: string; old: string }>();
 
+  // —— 交互空转影子看门狗（二期·影子先行）：只写 watchdog-shadow.jsonl，零干预零 API 成本 ——
+  // 生命周期 = run 生命周期（runOnce 创建 start、finally stop）；审批/提问挂起 setPaused 豁免。
+  private shadow: ShadowWatchdog | null = null;
+
   constructor(private callbacks: ChatHostCallbacks) {
     // ★ 重载恢复：从 workspaceState 取回上次活动会话 id，避免重载后新建碎片 session；
     //   会话回放改由 replayCurrentSession 在 webview ready 时统一驱动（sessionId 非空即重放）。
@@ -230,6 +235,7 @@ export class ChatHost {
       this.enterPlanReason = (evt.reason as string) ?? "";
     } else if (type === "approval_request") {
       this.lastApprovalEvt = { ...evt };
+      this.shadow?.setPaused(true); // 审批挂起期豁免判定（交互端静默常态，影子方案 §7）
     } else if (type === "run.receipt") {
       // ★ 结算单记账（成本信任链第二环）：最近完成 run 的花费供 /budget 查看「上个 run 已花」。
       //   token 花费 + 辅助模型花费（P0-2：压缩摘要+风险分类器）并入——预算口径与 runAgent 预算累计器一致（并账）。
@@ -248,6 +254,7 @@ export class ChatHost {
     }
     this.callbacks.sink(evt);
     if (diffReadyEvt) this.callbacks.sink(diffReadyEvt);
+    this.shadow?.feed(evt); // 影子看门狗：只认五类白名单事件，其余（含挂起交互）静默忽略
   };
 
   private takeProposedPlan(): string | null {
@@ -316,6 +323,11 @@ export class ChatHost {
     const ac = new AbortController();
     this.currentAc = ac;
     this.setBusy(true);
+    // ★ 影子看门狗（影子方案 §7）：run 生命周期 = detector 生命周期；开关关（DEEP_SEEK_WATCHDOG_SHADOW=0）
+    //   不创建实例，零行为零文件。短问答 run 全程在起步宽限期内，零求值零采样。
+    this.shadow?.stop();
+    this.shadow = shadowEnabled() ? new ShadowWatchdog({ sessionId: this.sessionId ?? "" }) : null;
+    this.shadow?.start();
     const opts: HostOptions = {
       // ★ 异步宿主审批：core 发 approval_request 事件给前端，前端按钮 → resolveApproval() 解锁
       // （onUIEvent 形参为 core 具体事件类型，显式标注 any 以兼容宽松 sink）
@@ -345,6 +357,8 @@ export class ChatHost {
     } catch (e) {
       this.sink({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
+      this.shadow?.stop();
+      this.shadow = null;
       this.currentAc = null;
       this.setBusy(false);
       // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
@@ -667,6 +681,7 @@ export class ChatHost {
   /** 审批决策：core approvalGate 按 toolsId 定位挂起的审批锁并解锁。 */
   resolveApproval(sessionId: string, toolsId: string, decision: ApprovalDecision): void {
     this.lastApprovalEvt = null; // 已决策，不再重广播
+    this.shadow?.setPaused(false); // 审批解锁，恢复判定
     resolveUserApprovalLock(sessionId, toolsId, decision);
   }
 
@@ -683,6 +698,7 @@ export class ChatHost {
     const p = this.pendingQuestion;
     this.pendingQuestion = null;
     this.lastQuestionReq = null; // 已决策，不再重广播
+    this.shadow?.setPaused(false); // 提问已答，恢复判定
     p?.resolve(answer);
   }
 
@@ -692,6 +708,7 @@ export class ChatHost {
     return new Promise<QuestionAnswer>((resolve) => {
       this.pendingQuestion = { resolve };
       this.lastQuestionReq = req; // 暂存供 panel 重建后重广播
+      this.shadow?.setPaused(true); // 提问挂起期豁免判定（同审批，影子方案 §7）
       this.callbacks.onQuestion(req);
     });
   }

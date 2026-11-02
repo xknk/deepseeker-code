@@ -66,6 +66,19 @@ test("数字字段校验：budget-yuan / timeout-min 非正数拒绝", () => {
     assert.equal(parseBatchTicket("---\naccept: t\ntimeout-min: 0\n---\n正文").ok, false);
 });
 
+test("retry 字段（看门狗带证据重试）：缺省 undefined；0-3 合法；越界/非整数拒绝（双倍烧钱口子须封顶）", () => {
+    assert.equal(parseBatchTicket("---\naccept: t\n---\n正文").ok && (parseBatchTicket("---\naccept: t\n---\n正文") as any).ticket.retry, undefined);
+    const r1 = parseBatchTicket("---\naccept: t\nretry: 1\n---\n正文");
+    assert.equal(r1.ok && (r1 as any).ticket.retry, 1);
+    const r0 = parseBatchTicket("---\naccept: t\nretry: 0\n---\n正文");
+    assert.equal(r0.ok && (r0 as any).ticket.retry, 0);
+    for (const bad of ["4", "-1", "1.5", "abc"]) {
+        const r = parseBatchTicket(`---\naccept: t\nretry: ${bad}\n---\n正文`);
+        assert.equal(r.ok, false, `retry: ${bad} 应拒绝`);
+        if (!r.ok) assert.match(r.error, /retry/);
+    }
+});
+
 test("tools 为空拒绝（要么删行要么列名）；无 frontmatter / 空正文拒绝", () => {
     assert.equal(parseBatchTicket("---\naccept: t\ntools: , ,\n---\n正文").ok, false);
     assert.equal(parseBatchTicket("没有 frontmatter 的工单").ok, false);

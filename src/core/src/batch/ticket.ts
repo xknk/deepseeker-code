@@ -10,6 +10,7 @@
  *                                检出、无 node_modules——验收依赖环境时先装依赖。非零退出=任务失败不烧钱）
  *  budget-yuan: 0.5            ← 可选（本任务花费上限，元；缺省不限）
  *  timeout-min: 30             ← 可选（缺省 30）
+ *  retry: 1                    ← 可选（缺省 0）：被 batch 看门狗终止后带证据重试的次数上限（0-3；双倍烧钱口子，默认关）
  *  tools: run_command          ← 可选（显式解锁高危工具，缺省禁 run_command/delete_path，同 SUBAGENT_DENYLIST）
  *  ---
  *  任务描述正文（Markdown）…
@@ -31,6 +32,8 @@ export interface BatchTicket {
     budgetYuan?: number;
     /** agent 阶段超时（分钟）；缺省 30。 */
     timeoutMin?: number;
+    /** 被 batch 看门狗终止后带证据重试的次数上限（0-3）；缺省 0 = 杀即终态（§6.1，默认关）。 */
+    retry?: number;
     /** 显式解锁的高危工具名清单；缺省空（run_command/delete_path 对模型不可见）。 */
     tools?: string[];
     /** 任务正文（Markdown，喂给 agent 的 user 消息）。 */
@@ -48,6 +51,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         noAccept: "frontmatter 缺 accept（验收命令）。挂机任务必须带可执行验收，缺验收拒绝入队。",
         badBudget: (v: string) => `budget-yuan 非法（"${v}"）：须为正数（元）。`,
         badTimeout: (v: string) => `timeout-min 非法（"${v}"）：须为正整数（分钟）。`,
+        badRetry: (v: string) => `retry 非法（"${v}"）：须为 0-3 的整数（看门狗终止后带证据重试次数；缺省 0=不重试）。`,
         badTools: 'tools 为空：要么删掉该行（用缺省禁用清单），要么列工具名（逗号分隔）。',
         emptyBody: "任务正文为空：frontmatter 之后应写任务描述。",
         untitled: "(未命名任务)",
@@ -58,6 +62,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         noAccept: "Frontmatter is missing `accept` (acceptance command). Batch tasks must carry an executable acceptance check — rejected without one.",
         badBudget: (v: string) => `Invalid budget-yuan ("${v}"): must be a positive number (yuan).`,
         badTimeout: (v: string) => `Invalid timeout-min ("${v}"): must be a positive integer (minutes).`,
+        badRetry: (v: string) => `Invalid retry ("${v}"): must be an integer 0-3 (evidence-carrying retries after a watchdog kill; default 0 = no retry).`,
         badTools: "Empty tools: either remove the line (use the default denylist) or list tool names (comma-separated).",
         emptyBody: "Empty task body: write the task description after the frontmatter.",
         untitled: "(untitled task)",
@@ -118,6 +123,12 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
         if (n === null) return { ok: false, error: ticketMsg(locale, "badTimeout")(fm["timeout-min"]) };
         timeoutMin = n;
     }
+    let retry: number | undefined;
+    if (fm["retry"] !== undefined) {
+        const n = Number(fm["retry"].trim());
+        if (!Number.isInteger(n) || n < 0 || n > 3) return { ok: false, error: ticketMsg(locale, "badRetry")(fm["retry"]) };
+        retry = n;
+    }
     const tools = fm["tools"] !== undefined ? parseToolsValue(fm["tools"]) : undefined;
     if (tools && tools.length === 0) return { ok: false, error: ticketMsg(locale, "badTools") };
     const setup = (fm["setup"] ?? "").trim() || undefined; // 任意非空串即 shell 命令，无需校验形态
@@ -126,7 +137,7 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
     if (!body) return { ok: false, error: ticketMsg(locale, "emptyBody") };
 
     const title = (fm["title"] ?? "").trim() || body.split(/\r?\n/).find((l) => l.trim())?.slice(0, 40) || ticketMsg(locale, "untitled");
-    return { ok: true, ticket: { title, accept, setup, budgetYuan, timeoutMin, tools: tools && tools.length > 0 ? tools : undefined, body } };
+    return { ok: true, ticket: { title, accept, setup, budgetYuan, timeoutMin, retry, tools: tools && tools.length > 0 ? tools : undefined, body } };
 };
 
 /** 便捷读取：读文件并解析（入队用）。 */

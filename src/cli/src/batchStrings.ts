@@ -8,8 +8,8 @@
  */
 import type { Locale } from "@/common/index.ts";
 
-/** 任务终态（batchRunner 与词表共用；setup-failed/timeout/error 不跑验收，其余必跑验收定 passed/accept-failed）。 */
-export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected";
+/** 任务终态（batchRunner 与词表共用；setup-failed/timeout/error/watchdog-killed 不跑验收，其余必跑验收定 passed/accept-failed）。 */
+export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed";
 
 const ZH = {
     // —— batchAdmin（add / list / clean / help） ——
@@ -28,6 +28,7 @@ const ZH = {
   setup: pnpm install   # 可选：agent 前在 worktree 内备环境（干净检出无 node_modules，验收依赖环境时先装）
   budget-yuan: 0.5      # 可选：本任务花费上限（元）
   timeout-min: 30       # 可选：agent 阶段超时（分钟，缺省 30）
+  retry: 1              # 可选：被看门狗终止后带证据重试次数（0-3，缺省 0=杀即终态）
   tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path）
   ---
   任务描述正文（Markdown）…
@@ -55,6 +56,10 @@ const ZH = {
     wtCreateFail: (e: string) => `创建 worktree 失败（需要主工作区是 git 仓库）：${e}`,
     agentErrorLine: (id: string, err: string) => `💥 [${id}] agent 异常：${err}`,
     timeoutLine: (id: string, min: number) => `⏱️ [${id}] 超时（${min}min），截断收尾（验收不跑）`,
+    wdNudgeNote: (id: string, level: number) => `🐕 [${id}] watchdog nudge-${level} 已注入收件箱（纠偏提示）`,
+    wdKillNote: (id: string, why: string) => `🐕 [${id}] watchdog 终止：${why}`,
+    wdRetryNote: (id: string, round: number) => `🔁 [${id}] watchdog 带证据重试：第 ${round} 轮（同 worktree 续跑，剩余预算续用）`,
+    wdBudgetStopNote: (id: string) => `🐕 [${id}] 重试已跳过：预算跨轮累计已耗尽`,
     acceptLine: (passed: boolean, id: string, code: number | null) => `${passed ? "✅" : "❌"} [${id}] 验收 exit ${code}`,
     acceptKilledSuffix: "（超时被杀）",
     timeoutAbort: (min: number) => `任务超时（${min} 分钟）`,
@@ -77,6 +82,7 @@ const ZH = {
         error: "💥 agent 异常",
         "setup-failed": "🛠️ 环境准备失败",
         rejected: "🚫 工单被拒",
+        "watchdog-killed": "🐕 看门狗终止",
     })[s],
 
     // —— 验收命令执行（输出嵌入报告） ——
@@ -119,6 +125,18 @@ const ZH = {
     diffH: "## Diff 摘要（worktree 相对基座，未提交，待人工处置）",
     diffNote: (branch: string, p: string) => `改动在独立 worktree（分支 \`${branch}\`，路径 ${p}）。处置：检查满意 → 在 worktree 内 commit 并合回主仓；丢弃 → 删除该 worktree 目录 + \`git worktree prune\` + \`git branch -D <分支>\`。`,
     diffNone: "（无）",
+
+    // —— 看门狗（进展感知）报告段与进度行 ——
+    wdH: "## 看门狗（进展感知）",
+    wdRecord: (s: string) => `- ${s}`,
+    wdSuspicionRec: (s: string) => `嫌疑记录（未达动作线）：${s}`,
+    wdVerdictRec: (verdict: string, evidence: string) => `裁决 ${verdict}：${evidence || "（无证据）"}`,
+    wdNudgeRec: (level: number, text: string) => `nudge-${level} 已注入收件箱：${text}`,
+    wdHealthRec: (s: string) => `健康信号短路（跳过裁决）：${s}`,
+    wdAuxFailRec: () => `二层裁决调用失败，降级 normal（看门狗自身故障不误杀）`,
+    wdKillRec: (verdict: string, evidence: string) => `⛔ 终止：${verdict} — ${evidence}`,
+    wdAtKillRec: (round: number, costYuan: string) => `终止时刻：轮 ${round} · ¥${costYuan}`,
+    wdRetryRec: (n: number) => `带证据重试：共 ${n + 1} 轮（同 worktree 续跑，证据见各轮记录）`,
 };
 
 const EN: typeof ZH = {
@@ -137,6 +155,7 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
   setup: pnpm install   # optional: prep env inside the worktree before the agent (fresh checkout has no node_modules)
   budget-yuan: 0.5      # optional: per-task cost cap (yuan)
   timeout-min: 30       # optional: agent-phase timeout (minutes, default 30)
+  retry: 1              # optional: evidence-carrying retries after a watchdog kill (0-3, default 0 = kill is final)
   tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default)
 ---
 
@@ -164,6 +183,10 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     wtCreateFail: (e) => `Failed to create worktree (the main workspace must be a git repo): ${e}`,
     agentErrorLine: (id, err) => `💥 [${id}] agent error: ${err}`,
     timeoutLine: (id, min) => `⏱️ [${id}] Timed out (${min}min); wrapped up truncated (acceptance skipped)`,
+    wdNudgeNote: (id, level) => `🐕 [${id}] watchdog nudge-${level} injected into the inbox (course correction)`,
+    wdKillNote: (id, why) => `🐕 [${id}] watchdog killed: ${why}`,
+    wdRetryNote: (id, round) => `🔁 [${id}] watchdog evidence-carrying retry: round ${round} (same worktree, remaining budget carried over)`,
+    wdBudgetStopNote: (id) => `🐕 [${id}] retry skipped: cumulative budget exhausted across rounds`,
     acceptLine: (passed, id, code) => `${passed ? "✅" : "❌"} [${id}] acceptance exit ${code}`,
     acceptKilledSuffix: " (killed on timeout)",
     timeoutAbort: (min) => `Task timed out (${min} minutes)`,
@@ -185,6 +208,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
         error: "💥 agent error",
         "setup-failed": "🛠️ setup failed",
         rejected: "🚫 ticket rejected",
+        "watchdog-killed": "🐕 watchdog killed",
     })[s],
 
     spawnFail: (e) => `Spawn failed: ${e}`,
@@ -224,6 +248,17 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     diffH: "## Diff summary (worktree vs base, uncommitted, awaiting manual handling)",
     diffNote: (branch, p) => `Changes live in an isolated worktree (branch \`${branch}\`, path ${p}). To keep: commit inside the worktree and merge back. To discard: delete the worktree directory + \`git worktree prune\` + \`git branch -D <branch>\`.`,
     diffNone: "(none)",
+
+    wdH: "## Watchdog (progress-aware)",
+    wdRecord: (s) => `- ${s}`,
+    wdSuspicionRec: (s) => `Suspicion logged (below action line): ${s}`,
+    wdVerdictRec: (verdict, evidence) => `Verdict ${verdict}: ${evidence || "(no evidence)"}`,
+    wdNudgeRec: (level, text) => `nudge-${level} injected into the inbox: ${text}`,
+    wdHealthRec: (s) => `Health signal short-circuit (adjudication skipped): ${s}`,
+    wdAuxFailRec: () => `Level-2 adjudication call failed; degraded to normal (a broken watchdog must not become a false-kill weapon)`,
+    wdKillRec: (verdict, evidence) => `⛔ Killed: ${verdict} — ${evidence}`,
+    wdAtKillRec: (round, costYuan) => `At kill time: round ${round} · ¥${costYuan}`,
+    wdRetryRec: (n) => `Evidence-carrying retries: ${n + 1} rounds total (same worktree; per-round evidence above)`,
 };
 
 const DICT: Record<Locale, typeof ZH> = { zh: ZH, en: EN };

@@ -33,6 +33,11 @@ import { parseBatchTicket } from "@/batch/ticket.ts";
 import { acquireRunLock, releaseRunLock, takeNextTicket, finishTicket } from "@/batch/queue.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
+import {
+    BatchWatchdog, buildRetryTaskContent, sharedBudgetYuan, RETRY_MAX,
+    type WatchdogKillInfo, type WatchdogRecord, type WatchdogSnapshot,
+} from "./batchWatchdog.ts";
+import { pushSessionInbox } from "@/agent/inbox.ts";
 
 // ============ 白名单与缺省禁用（审批自动应答器的判定表） ============
 
@@ -139,12 +144,39 @@ const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
 
 // ============ 报告生成 ============
 
-const buildReport = (args: {
+/** 看门狗证据链 → 报告行（方案 §7：证据链是硬要求——用户早上复核时能独立判断杀得对不对）。 */
+const buildWatchdogLines = (snaps: WatchdogSnapshot[], costYuan: number | null): string[] | null => {
+    if (snaps.length === 0) return null;
+    const T = batchT(getLocale());
+    const render = (r: WatchdogRecord): string => {
+        switch (r.kind) {
+            case "suspicion": return T.wdSuspicionRec(r.text ?? "");
+            case "verdict": return T.wdVerdictRec(r.verdict ?? "", r.evidence ?? "");
+            case "nudge": return T.wdNudgeRec(r.level ?? 0, r.text ?? "");
+            case "health": return T.wdHealthRec(r.text ?? "");
+            case "aux-fail": return T.wdAuxFailRec();
+            case "kill": return T.wdKillRec(r.verdict ?? "", r.evidence ?? "");
+        }
+    };
+    const lines: string[] = [];
+    for (const snap of snaps) {
+        lines.push(...snap.records.map(render));
+        if (snap.kill) lines.push(T.wdAtKillRec(snap.roundsAtKill, costYuan !== null ? costYuan.toFixed(4) : "-"));
+    }
+    if (snaps.length > 1) lines.push(T.wdRetryRec(snaps.length - 1));
+    return lines;
+};
+
+
+/** 导出供守门测试直接渲染验证（纯函数，无 IO）。 */
+export const buildReport = (args: {
     id: string; ticket: BatchTicket; status: TaskStatus; budgetTruncated: boolean;
     cost: SessionCost; receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
     finalText: string; accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null;
     deniedTools: { tool: string; detail: string }[]; diff: string; wt: WorktreeHandle | null;
     errorMessage?: string;
+    /** 看门狗证据链（方案 §7：触发规则/verdict/evidence/nudge 记录/终止时刻轮数与花费/重试轮次）。 */
+    watchdogLines?: string[];
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
     const T = batchT(getLocale());
@@ -167,7 +199,7 @@ ${T.statusEntry(`${T.statusLabel(status)}${budgetNote}`)}
 ${T.costEntry(T.costSummary(cost))}
 ${T.receiptEntry(receipt ? T.receiptLine(receipt) : T.noReceipt)}
 ${args.errorMessage ? T.errorEntry(args.errorMessage) : ""}
-${T.taskH}
+${args.watchdogLines?.length ? `${T.wdH}\n\n${args.watchdogLines.map(T.wdRecord).join("\n")}\n\n` : ""}${T.taskH}
 
 ${ticket.body}
 
@@ -273,82 +305,153 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         emit(`💥 [${task.id}] ${msg}`);
         return { status: "error", cost, budgetTruncated: false };
     }
-    setSessionWorktree(sessionId, wt);
-
-    // ★ 环境 setup（可选，2026-10-16 首跑教训）：worktree 是干净检出（无 node_modules 等），验收命令
-    //   依赖环境时先在此备好（复用验收执行器：同 shell 形态/凭证剔除/超时护栏/输出尾部截取）。
-    //   setup 失败 → 任务直接失败，不进 agent 阶段（跑了也过不了验收，白烧钱）。
-    if (t.setup) {
-        emit(T.setupLine(t.setup));
-        const s = await runAcceptCommand(t.setup, wt.path);
-        if (s.code !== 0 || s.timedOut) {
-            const msg = `${T.setupFail(t.setup, s.code)}${s.timedOut ? T.acceptTimeoutSuffix : ""}\n\n\`\`\`\n${s.output}\n\`\`\``;
-            await killBackgroundTasksUnder(wt.path).catch(() => { });
-            const cost = await collectSessionCost(sessionId);
-            await finishTicket(task.id, buildReport({
-                id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
-                finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
-            }));
-            emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
-            return { status: "setup-failed", cost, budgetTruncated: false };
-        }
-    }
-
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
+    // ============ agent 阶段（看门狗装配 + 可选带证据重试循环，方案 §3/§6/§6.1） ============
+    // 每轮独立 ac/timer（timeout-min 每轮重计）；watchdog 逐轮新建（宽限/阶梯/采样序列各自归零），
+    // 证据链快照跨轮累计进 wdSnapshots。工单 retry 字段（默认 0）控制被杀后的带证据重试轮数。
+    const watchdogEnabled = process.env.DEEP_SEEK_BATCH_WATCHDOG !== "0";
+    const wdSnapshots: WatchdogSnapshot[] = [];
+    const maxRounds = 1 + Math.min(Math.max(0, Math.floor(t.retry ?? 0)), RETRY_MAX);
+    let content = t.body;
+    let roundBudget = t.budgetYuan;
     let receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
     // ★ final 全文自采：handleUnifiedChat 的契约是「正文已流式推过 delta 时 final.text 置空」（交互场景防
     //   重复显示），挂机报告要全文——累积 text.delta，final.text 仅作「首字符前终结」路径的兜底。
     let finalText = "";
     let agentError: string | undefined;
-    try {
-        await handleUnifiedChat(
-            { sessionId, content: t.body },
-            async () => { /* sendOutbound：sseWrite 已给，不会走到 */ },
-            (evt: any) => {
-                if (evt?.type === "text.delta") finalText += evt.text;
-                else if (evt?.type === "text.reset") finalText = ""; // 流式 stall 重试：同轮从零重生成，丢弃已累积
-                else if (evt?.type === "final") finalText = evt.text || finalText;
-                else if (evt?.type === "round.start") emit(T.roundLine(ts(), evt.round));
-            },
-            ac.signal,
-            {
-                requestApproval: async (detail, meta) => {
-                    if (allowApproval.has(meta.toolName)) return "allow-once";
-                    deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
-                    return "deny";
-                },
-                onUIEvent: (evt: UIEvent) => {
-                    if (evt.type === "run.receipt") receipt = evt;
-                },
-                budgetYuan: t.budgetYuan,
-                toolSchemas: gatedSchemas,
-            },
-        );
-    } catch (e: any) {
-        agentError = e instanceof Error ? e.message : String(e);
-    } finally {
-        clearTimeout(timer);
-        // ★ 立即摘 session 注册表：engine dispose 会清注册表内全部 worktree，不摘则产物 worktree 被误删
-        clearSessionWorktree(sessionId);
-    }
-
-    // 状态判定：error/timeout 不跑验收；其余跑验收定 passed/accept-failed（预算截断不豁免验收——过了就是过了）
-    const timedOut = ac.signal.aborted;
-    const budgetTruncated = receipt?.budgetTruncated === true;
+    let budgetTruncated = false;
+    let wdKill: WatchdogKillInfo | null = null;
     let status: TaskStatus;
     let accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null = null;
-    if (agentError) {
-        status = "error";
-        emit(T.agentErrorLine(task.id, agentError));
-    } else if (timedOut) {
-        status = "timeout";
-        emit(T.timeoutLine(task.id, timeoutMin));
-    } else {
+
+    for (let round = 1; ; round++) {
+        wdKill = null;
+        finalText = "";
+        receipt = undefined as typeof receipt; // 断言防 CFA 收窄：receipt 由 onUIEvent 回调在 try 内赋值
+        agentError = undefined;
+        let nudgeCount = 0;
+
+        const roundAc = new AbortController();
+        // 看门狗与 ac/timer 并排初始化（方案 §3）：nudge 复用 pushSessionInbox（inbox steering 既有
+        // 通道，轮边界 claim）；kill 走 ac.abort 复用 timeout 路径，finally 清理全部照走。
+        const wd = watchdogEnabled ? new BatchWatchdog({
+            sessionId,
+            ticketTitle: t.title,
+            acceptCmd: t.accept,
+            targetText: `${t.title}\n${t.body}\n${t.accept}${t.setup ? `\n${t.setup}` : ""}`,
+            ac: roundAc,
+            worktreePath: wt.path,
+            budgetYuan: roundBudget,
+            getCost: () => collectSessionCost(sessionId),
+            onNudge: (text) => {
+                nudgeCount++;
+                pushSessionInbox(sessionId, text);
+                emit(T.wdNudgeNote(task.id, nudgeCount));
+            },
+            onKill: (err, info) => {
+                wdKill = info;
+                emit(T.wdKillNote(task.id, `${info.verdict} — ${info.evidence}`));
+                roundAc.abort(err);
+            },
+        }) : null;
+        wd?.start();
+        wd?.setPaused(true); // setup 命令执行期挂 PAUSED 豁免判定（事件流静默不算断流）
+
+        // ★ 环境 setup（可选，2026-10-16 首跑教训）：worktree 是干净检出（无 node_modules 等），验收命令
+        //   依赖环境时先在此备好（复用验收执行器：同 shell 形态/凭证剔除/超时护栏/输出尾部截取）。
+        //   setup 失败 → 任务直接失败，不进 agent 阶段（跑了也过不了验收，白烧钱）。仅首轮（重试轮同
+        //   worktree 续跑，环境已在）。
+        if (round === 1 && t.setup) {
+            emit(T.setupLine(t.setup));
+            const s = await runAcceptCommand(t.setup, wt.path);
+            if (s.code !== 0 || s.timedOut) {
+                wd?.stop();
+                const msg = `${T.setupFail(t.setup, s.code)}${s.timedOut ? T.acceptTimeoutSuffix : ""}\n\n\`\`\`\n${s.output}\n\`\`\``;
+                await killBackgroundTasksUnder(wt.path).catch(() => { });
+                const cost = await collectSessionCost(sessionId);
+                await finishTicket(task.id, buildReport({
+                    id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
+                    finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
+                }));
+                emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
+                return { status: "setup-failed", cost, budgetTruncated: false };
+            }
+        }
+        wd?.setPaused(false);
+        await wd?.markBaseline(); // R6 基线：setup 完成后首读（装依赖动 lockfile，基线必须后置）
+
+        const timer = setTimeout(() => roundAc.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
+        setSessionWorktree(sessionId, wt); // 重试轮重挂（上轮 finally 已摘）
+        try {
+            await handleUnifiedChat(
+                { sessionId, content },
+                async () => { /* sendOutbound：sseWrite 已给，不会走到 */ },
+                (evt: any) => {
+                    wd?.feed(evt); // tool.start/tool.end/round.start/text.delta/thinking.delta/final 全喂
+                    if (evt?.type === "text.delta") finalText += evt.text;
+                    else if (evt?.type === "text.reset") finalText = ""; // 流式 stall 重试：同轮从零重生成，丢弃已累积
+                    else if (evt?.type === "final") finalText = evt.text || finalText;
+                    else if (evt?.type === "round.start") emit(T.roundLine(ts(), evt.round));
+                },
+                roundAc.signal,
+                {
+                    requestApproval: async (detail, meta) => {
+                        if (allowApproval.has(meta.toolName)) return "allow-once";
+                        deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
+                        return "deny";
+                    },
+                    onUIEvent: (evt: UIEvent) => {
+                        if (evt.type === "run.receipt") receipt = evt;
+                    },
+                    budgetYuan: roundBudget,
+                    toolSchemas: gatedSchemas,
+                },
+            );
+        } catch (e: any) {
+            agentError = e instanceof Error ? e.message : String(e);
+        } finally {
+            clearTimeout(timer);
+            wd?.stop();
+            // ★ 立即摘 session 注册表：engine dispose 会清注册表内全部 worktree，不摘则产物 worktree 被误删
+            clearSessionWorktree(sessionId);
+        }
+        if (wd) wdSnapshots.push(wd.snapshot());
+        budgetTruncated = receipt?.budgetTruncated === true;
+
+        // 状态判定：error/watchdog-killed/timeout 不跑验收（被杀/超时改动不完整，跑了也是噪声）；
+        // 其余跑验收定 passed/accept-failed（预算截断不豁免验收——过了就是过了）。
+        // watchdog 终止与 timeout 同走 abort 路径，靠 onKill 标志区分。
+        if (agentError) {
+            status = "error";
+            emit(T.agentErrorLine(task.id, agentError));
+            break;
+        }
+        if (wdKill) {
+            // §6.1 带证据重试（工单 retry 显式 opt-in，默认杀 = 终态、worktree 保留待人工处置）：
+            // 同 worktree 续跑（磁盘现状 + 半成品都在）；budget-yuan 跨轮累计共享（传剩余预算）。
+            const spent = await collectSessionCost(sessionId);
+            const nextBudget = sharedBudgetYuan(t.budgetYuan, spent.costYuan);
+            if (round < maxRounds && (nextBudget === undefined || nextBudget > 0)) {
+                emit(T.wdRetryNote(task.id, round + 1));
+                content = buildRetryTaskContent(t.body, wdKill, finalText);
+                roundBudget = nextBudget;
+                continue;
+            }
+            if (round < maxRounds) emit(T.wdBudgetStopNote(task.id));
+            status = "watchdog-killed";
+            break;
+        }
+        if (roundAc.signal.aborted) {
+            status = "timeout";
+            emit(T.timeoutLine(task.id, timeoutMin));
+            break;
+        }
+        // 软着陆归途：经 nudge-2 收尾汇报正常 final 的任务走正常验收判定（按成果判定，不算被杀，§7）
+        wd?.setPaused(true); // accept 命令执行期豁免判定（§4；看门狗已 stop，防御性对齐）
         const r = await runAcceptCommand(t.accept, wt.path);
         accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut };
         status = r.code === 0 && !r.timedOut ? "passed" : "accept-failed";
         emit(T.acceptLine(status === "passed", task.id, r.code) + (r.timedOut ? T.acceptKilledSuffix : ""));
+        break;
     }
 
     // 善后：杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）→ 收割 diff → 报告
@@ -358,6 +461,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     await finishTicket(task.id, buildReport({
         id: task.id, ticket: t, status, budgetTruncated, cost, receipt, finalText,
         accept, deniedTools, diff, wt, errorMessage: agentError,
+        watchdogLines: buildWatchdogLines(wdSnapshots, cost.costYuan) ?? undefined,
     }));
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);
     emit(T.artifactLine(wt.path, wt.branch));

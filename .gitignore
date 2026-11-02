@@ -17,3 +17,6 @@ src/core/tests/evals/.results/*
 
 # 挂机批处理运行时目录（done/ 报告存档 + 空态 pending/running——本地产物不入库；工单要入库可 git add -f）
 .deepseeker-code/batch/
+
+# 交互空转影子看门狗日志（本地观察数据不入库；复核 = 直接看 JSONL）
+.deepseeker-code/watchdog-shadow.jsonl

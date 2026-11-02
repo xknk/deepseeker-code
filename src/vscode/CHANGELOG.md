@@ -1,4 +1,19 @@
 # Changelog
+## 1.0.73
+
+看门狗双闭环：**挂机批处理看门狗（进展感知）** + **交互空转影子模式（影子先行）**。batch 侧给无人值守任务装上烧钱闸门——默认开启，`DEEP_SEEK_BATCH_WATCHDOG=0` 一键关闭（关闭路径与现状逐字节一致，守门钉死）；交互侧判定层照进真实 VSCode 会话，只记日志不干预，为黄灯版（2b）攒误报率数据——默认开启，`DEEP_SEEK_WATCHDOG_SHADOW=0` 关闭（零实例零文件）。
+
+- **batch·六条规则 + 健康信号短路**：R1 同参数重复调用（强）/ R2 只读空转（弱）/ R3 事件流断流（**唯一直杀**，5 分钟无任何事件）/ R4 烧钱无产出（弱）/ R5 写入方向偏差（弱，工单正文提取不到目标路径则整条自关）/ R6 净进展停滞（强，每 tick 在 worktree 跑 `git diff --numstat` 维护净变更行数时间序列，排除 lockfile、基线取 setup 完成后）；连续窗口 diff 增长 >20 行或新文件出现 → 健康短路直接判 normal（对 R2/R4 的反证，跳过二层调用）。
+- **batch·二级仲裁**：程序规则只出「疑似」，强规则疑似才升级 AUX 小模型非流式复核（normal/idle/offtrack 三值 + 证据）；AUX 调用任何异常（网络/超时/非法 JSON）一律降级 normal——看门狗自己坏，不能变成误杀器。
+- **batch·三级动作闭环**：nudge-1（inbox 改道提示）→ nudge-2（最后通牒 + 收尾汇报 + 5 分钟冻结窗）→ 第三次连续非 normal 才 abort；nudge 走 `pushSessionInbox` 不新造通道；经收尾汇报正常 final 的任务照常走 accept 验收，不标 watchdog-killed。判定循环用可注入 scheduler（缺省 setInterval，测试假时钟零真 sleep）；setup/accept 命令执行期 PAUSED 豁免。
+- **batch·工单可选 `retry` 字段（默认 0，上限 3）**：被终止后同 worktree 带证据重试——上轮 verdict/evidence/收尾摘要注入二轮首条任务（强制换思路锚点），budget-yuan 跨轮累计共享、timeout-min 每轮重计；二轮再挂即终态，报告记两轮证据。解析封顶 0-3（双倍烧钱口子须关）。
+- **batch·报告新增「看门狗」段**：判定/疑似/宽限/杀令/重试全程证据落 `batch/done/<id>.report.md`；`status: watchdog-killed` 的报告**不跑验收**（工单已被杀，accept 无意义），watchdog-killed 终态报告与重试二轮报告均含看门狗段，普通报告零新增段。
+- **判定层上收 core（StallDetector）**：状态 + 采样 + R1-R6 + 健康短路 + tick 循环（可注入时钟/调度器）收进 `core/agent/stallDetector.ts`，每 tick 产出 StallEvaluation 交政策层——batch 三级动作与交互影子日志是**同一求值结果的两种消费**；batch 特有字段（nudge/杀令/AUX 裁决）留在 cli 政策层，BatchWatchdog 公开 API 一个不改、23 例守门断言不变（搬迁零回归双保险）。
+- **影子政策零干预零成本（shadowWatchdog.ts）**：只追加写 `<项目>/.deepseeker-code/watchdog-shadow.jsonl`（JSONL 每行 ts/sessionId/kind/rules/evidence/runMin/round/netLines），不亮灯不 nudge 不 abort、**永不调 AUX 小模型**（守门测试注入 auxAdjudicate 断言零调用）；强命中记日志后 5 分钟抑制窗（同一空转 episode 去重），弱信号不抑制；健康行作复核时的对照组。
+- **交互规则适配（不是照搬）**：R3 断流降级为仅记录——交互端静默常态是等审批/等提问（走 PAUSED 豁免），PAUSED 外静默才记；R4 关（交互 run 无工单预算语义）；R5 自动关（无工单 → 目标路径集合空集）。判定周期 60s、起步宽限 5 分钟——短问答 run 全程在宽限期内零求值零采样；R6 diff 采样固定跑会话主根（process.cwd()）。
+- **VSCode host 接线（~15 行）**：sink 尾部 feed（白名单五类事件，其余静默忽略）、审批/提问挂起 `setPaused(true)` 与解锁恢复、runOnce 创建 start / finally stop（run 生命周期 = detector 生命周期）；开关关零实例零文件；`.gitignore` 同粒度补日志行。
+- **守门**：新增 core `stall-detector.test.ts` 14 例（规则触发/防误杀/宽限/抑制窗/silence 面/PAUSED/结构化输出）+ `shadow-watchdog.test.ts` 8 例（零 AUX 红线/抑制窗/schema/默认落盘/开关/host 接线源码扫描）；cli 23 例断言不变只换 import；ticket retry 解析 1 例；npm test 链路扩展进 cli 测试套件（根 package.json `test` 串联、新增 `test:cli`），三端 typecheck 绿。
+
 ## 1.0.72
 
 IDE 选区注入（对标 Claude Code 的 ide_selection）：编辑器里选中代码后，**composer 上方自动出现选区 chip**（`file.py#L22-23`，× 可忽略），随下一条消息发送——**标签块拼进模型可见正文尾部**（照抄 CC 文案含 "may or may not be related"，相关性判断交模型），消息行内以折叠块展示选区原文，历史回放经反解还原同构。
