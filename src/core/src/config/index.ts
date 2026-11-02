@@ -125,6 +125,12 @@ export const appConfig = {
      *  用户视图 resultForUser 不变）。关闭时 PreToolUse 回退旧位（审批后、仅 deny），改写字段全忽略，
      *  行为与改造前一致。env DEEP_SEEK_HOOK_REWRITE=0 回退。 */
     hookRewrite: process.env.DEEP_SEEK_HOOK_REWRITE !== "0",
+    /** ★ 外部记忆桥接开关（External Memory Bridge，2026-11-02）：true 时 loader 在 bootstrap 把其他 agent 的
+     *  规则/指令文件（~/.claude/CLAUDE.md、~/.codex/AGENTS.md、~/.gemini/GEMINI.md、<cwd>/CLAUDE.md、AGENTS.md、
+     *  GEMINI.md、.cursor/rules/*.md、.github/copilot-instructions.md，清单硬编码）以只读 ext- 前缀条目纳入记忆索引。
+     *  默认 false——关闭时记忆行为与未引入本功能逐字节一致。开启即意味着同意把这些文件内容随请求发给
+     *  DeepSeek API（loader 首次接入时 console 提示一次）。外部条目只读：memory_save/delete 拒 ext- 前缀。 */
+    memoryExternal: false,
 };
 
 // —— P1-4 按模型的上下文窗口（内核审查报告第二批） ——
@@ -200,6 +206,7 @@ const ENGINE_OVERRIDE_VALIDATORS: Record<string, (v: unknown) => unknown> = {
     undoRetentionDays: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? v : undefined),
     traceRetentionDays: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? v : undefined),
     MAX_TOOL_RESULT_CHARS: (v) => (typeof v === "number" && v > 0 && Number.isFinite(v) ? Math.floor(v) : undefined),
+    memoryExternal: (v) => (typeof v === "boolean" ? v : undefined), // 外部记忆桥接（只读接入其他 agent 规则文件；默认 false）
 };
 /** engine 段可覆盖的字段名（导出供可观测 / 文档校对）。 */
 export const ENGINE_OVERRIDE_KEYS = Object.keys(ENGINE_OVERRIDE_VALIDATORS);

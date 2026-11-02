@@ -127,7 +127,8 @@ code --install-extension deepseeker-code-<version>.vsix
     "undoBackupSensitive": "skip",    // 敏感文件(.env/私钥)备份策略：skip|deny|allow
     "undoRetentionDays": 7,           // Undo 备份保留天数
     "traceRetentionDays": 7,          // trace 诊断日志保留天数
-    "MAX_TOOL_RESULT_CHARS": 16000    // 单次工具结果截断长度（读大日志可放宽）
+    "MAX_TOOL_RESULT_CHARS": 16000,   // 单次工具结果截断长度（读大日志可放宽）
+    "memoryExternal": false           // 外部记忆桥接：true 只读接入其他 agent 规则文件（CLAUDE.md/AGENTS.md 等，内容将随请求发给 DeepSeek API）
   }
 }
 ```

@@ -25,6 +25,16 @@
 - **VSCode host 接线（~15 行）**：sink 尾部 feed（白名单五类事件，其余静默忽略）、审批/提问挂起 `setPaused(true)` 与解锁恢复、runOnce 创建 start / finally stop（run 生命周期 = detector 生命周期）；开关关零实例零文件；`.gitignore` 同粒度补日志行。
 - **守门**：新增 core `stall-detector.test.ts` 14 例（规则触发/防误杀/宽限/抑制窗/silence 面/PAUSED/结构化输出）+ `shadow-watchdog.test.ts` 8 例（零 AUX 红线/抑制窗/schema/默认落盘/开关/host 接线源码扫描）；cli 23 例断言不变只换 import；ticket retry 解析 1 例；npm test 链路扩展进 cli 测试套件（根 package.json `test` 串联、新增 `test:cli`），三端 typecheck 绿。
 
+---
+
+外部记忆桥接（External Memory Bridge）：把其他 agent 的规则/指令文件——全局 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.gemini/GEMINI.md`，项目级 `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`、`.cursor/rules/*.md`、`.github/copilot-instructions.md`——以**只读条目**纳入记忆索引，多 agent 并行工作流里「别人踩过的坑」不再从零再踩。默认关闭，settings.json `engine.memoryExternal: true` 显式开启（关闭时记忆行为与旧版逐字节一致，守门钉死）。
+
+- **只读红线**：外部条目 `ext-` 前缀、type=reference，索引行带 `[外部:xx]` 来源标注（二手信息可打折看待）；`memory_save` 拒 ext- 开头名称（保留字）、`memory_delete` 拒执行并提示到来源文件处修改——绝不回写外部文件。
+- **缓存纪律（生命线）**：外部文件仅进程启动时读盘一次，此后 run 间/会话间绝不重读，变更生效粒度 = 进程重启（CLI 每命令新进程自然刷新；VSCode 重启窗口生效）；索引行稳定性靠「description 定长截 120 字符 + 固定前缀 + 正文不进索引」，同组文件二次加载索引逐字节相等有守门钉死。
+- **预算双闸**：外部条目计入既有共享池（200 条 / 16KB 索引字节，越界单项拒载、自有记忆优先保住），另设外部独立软上限 **12 条**（超限按 mtime 丢最旧 + warn 一次），防 `.cursor/rules` 规则大户无界侵蚀索引预算。
+- **隐私边界**：开启即意味着同意来源文件内容随请求发送给 DeepSeek API——首次接入时 console 提示一次；项目层来源与项目记忆同受工作区信任闸门（未信任不加载）。
+- **守门**：新增 core `memory-external.test.ts` **11 例**（扫描发现/缺省静默/开关关/name 保留字/delete 拒绝/超限丢弃/共享预算/索引稳定/覆盖语义/body 截断 + cursor 文件名清洗）；core 全量 **800 例** + cli **23 例**绿，三端 typecheck 绿。
+
 ## 1.0.72
 
 IDE 选区注入（对标 Claude Code 的 ide_selection）：编辑器里选中代码后，**composer 上方自动出现选区 chip**（`file.py#L22-23`，× 可忽略），随下一条消息发送——**标签块拼进模型可见正文尾部**（照抄 CC 文案含 "may or may not be related"，相关性判断交模型），消息行内以折叠块展示选区原文，历史回放经反解还原同构。

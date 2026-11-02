@@ -16,27 +16,24 @@
  *   - memory_save/read 记 last-used（#9③，memory/usage.ts）：供未来淘汰策略与使用画像；
  *   - memory_save 用原子写（makeTmpPath + rename，复用 fs.ts 模式）防中断产生半写文件，
  *     写后即注册进运行时注册表（无需重启即对当前会话生效）；
- *   - 仅 global+project 两落盘点，project=true 写项目目录（可提交 git 团队共享），默认 global。
+ *   - 仅 global+project 两落盘点，project=true 写项目目录（可提交 git 团队共享），默认 global；
+ *   - 外部记忆桥接（2026-11-02）：ext- 前缀条目由 memory/loader.ts 从其他 agent 的规则/指令文件
+ *     只读桥接（engine.memoryExternal 门控）——本组工具对 ext- 前缀只读：save 拒名（保留字）、
+ *     delete 拒执行（只读红线），read/list 照常可用。
  */
 import fs from "fs/promises";
 import path from "path";
 import { toolFailure, CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
 import { makeTmpPath } from "./fs.ts";
 import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
-import { registerMemory, getMemory, unregisterMemory, listMemories, getMemoryIndex, memoryIndexLine, MemoryType, MemoryManifest } from "@/memory/registry.ts";
+import { registerMemory, getMemory, unregisterMemory, listMemories, getMemoryIndex, memoryIndexLine, MEMORY_LIMITS, MemoryType, MemoryManifest } from "@/memory/registry.ts";
 import { recordMemoryUse } from "@/memory/usage.ts";
 
-const MAX_BODY_BYTES = 64 * 1024; // 64KB：单条记忆上限，防误灌巨量日志撑爆索引/缓存
-const MAX_DESCRIPTION_CHARS = 200; // description 是唯一逐轮注入提示词的字段（索引行），限长防静默膨胀
+// MEMORY_LIMITS 已上移至 memory/registry.ts（外部桥接 loader 加载期按同一预算拒载，索引格式+预算同源）；此处再导出保既有测试路径。
+export { MEMORY_LIMITS };
 
-/**
- * 记忆库总量上限（#9②，2026-09-16）：索引每轮整段注入系统提示词，无上限即无界侵蚀。
- *  - maxCount：条数上限——每条一行索引，200 条按典型行宽已是数 KB 量级，到顶先治理再新增；
- *  - maxIndexBytes：索引整体字节上限（UTF-8，含行界换行）——按 description 限长 200 字符算，
- *    200 条 CJK 满配最坏 ~130KB，字节闸先于条数闸触发，真正兜住提示词体积。
- * 非 frozen：单测需缩水上限构造越界场景（生产代码勿改）。
- */
-export const MEMORY_LIMITS = { maxCount: 200, maxIndexBytes: 16 * 1024 };
+const MAX_BODY_BYTES = 64 * 1024; // 64KB：单条记忆上限，防误灌巨量日志撑爆索引/缓存（memory/loader.ts 外部桥接 EXTERNAL_BODY_MAX_BYTES 同值同义，调整须同步）
+const MAX_DESCRIPTION_CHARS = 200; // description 是唯一逐轮注入提示词的字段（索引行），限长防静默膨胀
 
 const NAME_RE = /^[a-z0-9-]+$/;
 const VALID_TYPES: MemoryType[] = ['user', 'feedback', 'project', 'reference'];
@@ -117,6 +114,8 @@ export const memoryTools: CustomTool[] = [
                 const type = (sanitizeLine(args?.type) as MemoryType) || "reference";
                 const project = args?.project === true;
                 if (!NAME_RE.test(name)) return toolFailure(`[memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`);
+                // 外部记忆桥接保留字（2026-11-02）：ext- 条目由 loader 从其他 agent 规则文件只读接入，用户不可占名。
+                if (name.startsWith("ext-")) return toolFailure(`[memory_save] "ext-" 名称前缀为外部记忆保留字（该前缀条目由 loader 从其他 agent 的规则/指令文件只读桥接，名称固定分配）。请改用其他名称。`);
                 if (!description) return toolFailure("[memory_save] description 不能为空。");
                 if (description.length > MAX_DESCRIPTION_CHARS) return toolFailure(`[memory_save] description 超过 ${MAX_DESCRIPTION_CHARS} 字符上限（当前 ${description.length}）。请压缩为一句话。`);
                 if (!body.trim()) return toolFailure("[memory_save] body 不能为空。");
@@ -147,7 +146,8 @@ export const memoryTools: CustomTool[] = [
             name: "memory_read",
             description:
                 "读取指定记忆的完整正文。系统提示词仅注入记忆索引（一行/条，省 token）；" +
-                "当索引中某条与当前任务相关、需要全文细节时，调用本工具按需召回。",
+                "当索引中某条与当前任务相关、需要全文细节时，调用本工具按需召回。" +
+                "索引中标 [外部:*] 的条目是其他 agent 规则文件的二手摘录（type=reference）：与现场实际不符时以现场为准，并可 memory_save 一条自有记忆纠偏。",
             parameters: {
                 type: "object",
                 properties: {
@@ -204,6 +204,8 @@ export const memoryTools: CustomTool[] = [
             requireApproval: (args: any) => `删除持久记忆 **${sanitizeLine(args?.name)}**（跨会话生效，删除后不可恢复）`,
             async execute(args: any) {
                 const name = sanitizeLine(args?.name);
+                // 外部记忆桥接只读红线（2026-11-02）：ext- 条目来自其他 agent 的规则/指令文件，本工具不落盘不注销。
+                if (name.startsWith("ext-")) return toolFailure(`[memory_delete] 外部条目只读，请到来源文件处修改（ext- 前缀条目由 loader 从其他 agent 的规则/指令文件只读桥接，删除/修改请直接编辑来源文件后重启进程）。`);
                 const m = getMemory(name);
                 if (!m) return toolFailure(`未找到记忆：${name}（可能已被删除）。`);
                 try { await fs.unlink(m.file); } catch { /* 文件已不在则忽略 */ }

@@ -9,7 +9,11 @@
  */
 import { createRegistry } from "@/common/registry.ts";
 
-export type MemorySource = 'global' | 'project';
+/**
+ * 记忆来源：global/project = 自有记忆（memory_save 可写落盘）；
+ * external = 外部桥接条目（loader 从其他 agent 的规则/指令文件只读接入，ext- 前缀，工具层拒写拒删）。
+ */
+export type MemorySource = 'global' | 'project' | 'external';
 
 /** 记忆类别（对标 Claude Code）：决定召回相关性与写入时机的语义提示。 */
 export type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
@@ -55,6 +59,17 @@ export const clearMemories = memories.clear;
  */
 export const memoryIndexLine = (m: Pick<MemoryManifest, "name" | "type" | "description">): string =>
     `- **${m.name}** (${m.type}) — ${m.description}`;
+
+/**
+ * 记忆库总量上限（#9②，2026-09-16）：索引每轮整段注入系统提示词，无上限即无界侵蚀。
+ *  - maxCount：条数上限——每条一行索引，200 条按典型行宽已是数 KB 量级，到顶先治理再新增；
+ *  - maxIndexBytes：索引整体字节上限（UTF-8，含行界换行）——按 description 限长 200 字符算，
+ *    200 条 CJK 满配最坏 ~130KB，字节闸先于条数闸触发，真正兜住提示词体积。
+ * 非 frozen：单测需缩水上限构造越界场景（生产代码勿改）。
+ * 位置说明：原在 tool/registry/memory.ts；外部记忆桥接（loader.loadExternalMemories）加载期要按
+ * 同一预算拒载（外部条目计入共享池），上移到注册表让「索引格式 + 预算」同源，工具层再导出保测试路径。
+ */
+export const MEMORY_LIMITS = { maxCount: 200, maxIndexBytes: 16 * 1024 };
 
 /**
  * 构建注入系统提示词的「记忆索引」：每条一行（name + 类别 + 描述），按 name 排序。
