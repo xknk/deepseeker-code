@@ -28,6 +28,7 @@ import type { ApprovalDecision, QuestionRequest, QuestionAnswer, IdeActionReques
 import { MODEL_THINKING_ENABLED, MODEL_REASONING_EFFORT } from "@/llm/createModel.ts";
 import type { ThinkingLevel } from "@/agent/type.ts";
 import { makeT } from "./i18n";
+import { appendSelectionBlock, parseSelectionBlock, withLabel, type EditorSelectionRef } from "./selection.ts";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -87,12 +88,25 @@ function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<str
     const role = m?.role;
     if (role === "user") {
       // ★ 多模态：贴图轮 content 是 parts 数组——文本视图照常展示，image part 抽为缩略图（dataURL，CSP 已放行）
-      const text = msgText(m.content);
+      const rawText = msgText(m.content);
+      // ★ 选区注入回放反解：标签块还原为用户原文，选区以 sel 字段走折叠块（与实时行同构）；
+      //   非注入消息原样通过（parseSelectionBlock 对普通消息返回 null）
+      const parsed = parseSelectionBlock(rawText);
+      const text = parsed ? parsed.text : rawText;
       const urls = imageUrlsOf(m.content);
       const attachments = urls.map((url, i) => ({ name: urls.length > 1 ? t("imgFallbackName")(i) : t("imgFallbackNameSingle"), dataUrl: url }));
       if (text.trim() || attachments.length) {
         const cpId = cpByLine?.get(String(m.id ?? ""));
-        sink({ type: "row", kind: "user", text, attachments, key: nextKey(), ...(m.ts ? { ts: String(m.ts) } : {}), ...(cpId ? { cpId } : {}) });
+        sink({
+          type: "row",
+          kind: "user",
+          text,
+          attachments,
+          key: nextKey(),
+          ...(parsed ? { sel: withLabel(parsed.sel) } : {}),
+          ...(m.ts ? { ts: String(m.ts) } : {}),
+          ...(cpId ? { cpId } : {}),
+        });
       }
     } else if (role === "assistant") {
       if (typeof m.reasoning_content === "string" && m.reasoning_content.trim()) {
@@ -393,8 +407,10 @@ export class ChatHost {
     await recordBashEntry(this.sessionId!, formatBashEntry(cmd, r));
   }
 
-  /** 提交一轮对话（UI 输入框 Enter 触发）。★ 多模态：attachments 为本次贴图（vision 开启时随消息进 core）。 */
-  async submit(content: string, attachments?: InboundImageAttachment[]): Promise<void> {
+  /** 提交一轮对话（UI 输入框 Enter 触发）。★ 多模态：attachments 为本次贴图（vision 开启时随消息进 core）。
+   *  ★ 选区注入（对标 CC ide_selection）：selection 为活动编辑器选区快照——标签块只拼进模型可见正文
+   *    （wireText），UI 行回显用户原文 + sel 字段走折叠块；`!` 直执行轮与 busy 排队轮不带选区。 */
+  async submit(content: string, attachments?: InboundImageAttachment[], selection?: EditorSelectionRef): Promise<void> {
     const text = content.trim();
     const hasAtt = Array.isArray(attachments) && attachments.length > 0;
     if (!text && !hasAtt) return;
@@ -409,8 +425,9 @@ export class ChatHost {
     //   ——webview 在调用前已清空输入框，静默等于丢字。排队失败（开关关/队满）至少提示用户未发送。
     if (this.busy) {
       const sid = this.sessionId;
-      // inbox 协议是纯文本：附件无法随排队消息进上下文，如实告知（不静默丢图）
+      // inbox 协议是纯文本：附件无法随排队消息进上下文，如实告知（不静默丢图）；选区同理（不静默丢）
       if (hasAtt) this.sink({ type: "info", text: this.t("imgQueuedBusy") });
+      if (selection) this.sink({ type: "info", text: this.t("selQueuedBusy") });
       if (sid && pushSessionInbox(sid, text)) {
         this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}` });
         this.sink({ type: "info", text: this.t("queuedAck") });
@@ -423,23 +440,33 @@ export class ChatHost {
     if (this.sessionId == null) {
       this.setSessionId(await getOrCreateSessionId(undefined));
     }
+    // ★ 选区注入：标签块只进模型可见正文；检查点预览/行回显保持用户原文（回放时经 parseSelectionBlock 还原同构）
+    const wireText = selection ? appendSelectionBlock(text, selection) : text;
     // ★ C1 Checkpoints：每轮用户消息发送【前】记检查点（transcript 当前边界 + 将发文本预览）。
     //   位置在 busy/inbox 分支之后：排队轮不记（回合边界送达时 runAgent 侧本轮已在上一检查点界内）。
     //   cpId 贴行：该行 ↺ 撤回按钮直达此边界（逐消息撤回，对标 CC 的消息级 rewind）。
     const cpId = await recordCheckpoint(this.sessionId!, text || (hasAtt ? this.t("imgMsgLabel") : ""));
     // user 行回显带缩略图（dataURL），与回放视图同构
-    this.sink({ type: "row", kind: "user", text, key: `u-${Date.now()}`, attachments: this.attachmentThumbs(attachments), ...(cpId ? { cpId } : {}) });
+    this.sink({
+      type: "row",
+      kind: "user",
+      text,
+      key: `u-${Date.now()}`,
+      attachments: this.attachmentThumbs(attachments),
+      ...(selection ? { sel: withLabel(selection) } : {}),
+      ...(cpId ? { cpId } : {}),
+    });
     if (this.planMode) {
       // 计划模式轮走只读调研管线（提示词由 host 拼装），附件无载体——如实告知，建议实现阶段再贴图
       if (hasAtt) this.sink({ type: "info", text: this.t("planNoImage") });
-      const kept = await this.runPlanStage(text);
+      const kept = await this.runPlanStage(wireText);
       // ★ 对齐 Claude Code：接受方案（已执行实现）→ 退出计划模式；拒绝/未产出 → 留在计划模式。
       if (kept) {
         this.planMode = false;
         this.sink({ type: "mode.change", planMode: false });
       }
     } else {
-      await this.runOnce(text, false, false, attachments);
+      await this.runOnce(wireText, false, false, attachments);
       // ★ 模型在普通轮可能：(a) 调 exit_plan_mode 直接提交方案（系统提示词鼓励，自行只读调研后）；
       //   (b) 调 enter_plan_mode 请求进入计划模式。先看方案（exit）——若已提交则直接走方案审批弹窗，
       //   否则看是否请求进入计划模式。与 CLI useChatState 一致，避免退回纯文本方案而无按钮可点。

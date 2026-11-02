@@ -154,6 +154,8 @@ function buildRowEl(row) {
         }
         wrap.appendChild(box);
       }
+      // ★ 选区折叠块（与缩略图同为行级）：有 sel 字段才渲染（回放反解与实时同构）
+      if (row.sel && row.sel.label) wrap.appendChild(buildUserSelEl(row.sel));
       break;
     }
     case "assistant": {
@@ -625,6 +627,62 @@ function clearPendingRefs() {
   if (box) box.querySelectorAll(".ref-chip").forEach((c) => c.remove());
 }
 
+// ★ 选区注入 chip（对标 CC ide_selection）：与贴图/引用 chip 同排（#composer-attachments）。
+//   host 推送快照（selectionChanged）→ 存 state.pendingSel 并渲染；× 只清 webview 侧
+//   （host 下次选区变化才重推）；发送即消费（composer doSend），不做 live 跟随重发。
+function removePendingSelChip() {
+  const box = $("#composer-attachments");
+  if (box) box.querySelectorAll(".sel-chip").forEach((c) => c.remove());
+}
+
+function renderPendingSel() {
+  removePendingSelChip();
+  const sel = state.pendingSel;
+  if (!sel || !sel.label) return;
+  const box = $("#composer-attachments");
+  if (!box) return;
+  const chip = document.createElement("div");
+  chip.className = "attach-chip sel-chip";
+  chip.title = S.cpSelTitle;
+  const ic = document.createElement("span");
+  ic.className = "codicon codicon-code";
+  const span = document.createElement("span");
+  span.textContent = sel.label;
+  chip.appendChild(ic);
+  chip.appendChild(span);
+  const btn = document.createElement("button");
+  btn.className = "attach-remove";
+  btn.title = S.rwRemoveSel;
+  btn.innerHTML = '<span class="codicon codicon-close"></span>';
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.pendingSel = null;
+    chip.remove();
+  });
+  chip.appendChild(btn);
+  box.appendChild(chip);
+}
+
+// ★ 消息行内的选区折叠块（对标 CC「Selected code: file#L22-23 ⌄」）：summary=标签，展开看选区原文。
+//   实时行与回放行同构（行文本都是用户原文——标签块只进模型可见正文，host 侧拼接/回放侧反解）。
+function buildUserSelEl(sel) {
+  const det = document.createElement("details");
+  det.className = "user-sel";
+  const sum = document.createElement("summary");
+  sum.title = S.rwSelTitle;
+  const ic = document.createElement("span");
+  ic.className = "codicon codicon-code";
+  const label = document.createElement("span");
+  label.textContent = sel.label;
+  sum.appendChild(ic);
+  sum.appendChild(label);
+  const pre = document.createElement("pre");
+  pre.textContent = String(sel.text ?? "");
+  det.appendChild(sum);
+  det.appendChild(pre);
+  return det;
+}
+
 function clearMessages() {
   closeStreaming();
   state.order = [];
@@ -712,6 +770,7 @@ export {
   closeStreaming, ensureAssistantRow, closeThinking, ensureThinkingRow,
   scheduleFlush, flush, addInfo,
   appendImagePreview, clearPendingImages, appendRefChip, clearPendingRefs, clearMessages,
+  renderPendingSel, removePendingSelChip,
   renderInitError, renderTodos, buildEmptyState, updateEmptyState,
   setThinkVisible,
 };

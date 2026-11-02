@@ -17,6 +17,7 @@ import { randomUUID } from "crypto";
 // 否则模块加载期按「插件安装目录」cwd 初始化（createModel 等），导致读取/执行错目录。
 import type { ChatHost, ChatHostCallbacks } from "./host";
 import { createIdeActionHandler } from "./ideBridge";
+import { parseInboundSelection, withLabel, type EditorSelectionRef } from "./selection";
 import { makeT, setVscodeLanguage, envLocale } from "./i18n";
 import { isVisionEnabled } from "@/session/contentParts.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
@@ -201,6 +202,34 @@ const latestTab = (): ChatTab | null => {
 const deliverTo = (tab: ChatTab, msg: Record<string, unknown>): void => {
   if (tab.disposed) return;
   void tab.panel.webview.postMessage(msg);
+};
+
+// —— IDE 选区快照（对标 Claude Code 的 ide_selection 注入） ——
+//  只维护「最近活动文本编辑器的非空选区」，变化即推送各聊天页签（composer 上方待发 chip）；
+//  提交时 webview 把快照随 submit 回传，host 拼标签块进模型正文（host.ts）。判断纯机械：
+//  非空且有非空白字符即快照，相关性交给模型。webview 聚焦后 activeTextEditor 变 undefined，
+//  故必须持续跟踪快照而非提交时现读。多 Tab 同见一个选区（单人工具，可接受）。
+let selectionSnapshot: EditorSelectionRef | null = null;
+let selDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** 读编辑器当前选区：空选区/纯空白（如拖过空行）返回 null——无信息量不注入。 */
+const readSelectionRef = (ed: vscode.TextEditor): EditorSelectionRef | null => {
+  const s = ed.selection;
+  if (!s || s.isEmpty) return null;
+  const text = ed.document.getText(s);
+  if (!text.trim()) return null;
+  return { path: ed.document.uri.fsPath, startLine: s.start.line + 1, endLine: s.end.line + 1, text };
+};
+
+const pushSelection = (): void => {
+  const sel = selectionSnapshot ? withLabel(selectionSnapshot) : null;
+  for (const t of tabs) deliverTo(t, { type: "selectionChanged", sel });
+};
+
+/** 拖拽选区时事件高频触发（getText O(选区大小)）：150ms 尾沿去抖，只处理停点。 */
+const applySelection = (ed: vscode.TextEditor | undefined): void => {
+  selectionSnapshot = ed ? readSelectionRef(ed) : null;
+  pushSelection();
 };
 
 /** 通知某页签前端一次状态快照（busy/模式/模型…），数据取自该 Tab 自己的 host。 */
@@ -582,9 +611,11 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
           }))
         : undefined;
       if (!text.trim() && !(attachments && attachments.length)) break;
+      // ★ 选区注入（对标 CC ide_selection）：webview 随 submit 回传的选区快照，形状不符静默降级
+      const selection = parseInboundSelection(msg.selection);
       // ★ 无切换·全可见：不按活动编辑器切根。主根 activate 时定（selectProjectRoot 可显式切换），
       //   agent 经绝对路径访问所有 folder；切项目无需切编辑器/关对话。
-      void h.submit(text, attachments);
+      void h.submit(text, attachments, selection ?? undefined);
       break;
     }
     case "abort":
@@ -934,6 +965,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   setAllowedWorkspaceRoots(getAllWorkspaceRoots());
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => setAllowedWorkspaceRoots(getAllWorkspaceRoots())),
+    // —— IDE 选区快照（对标 CC ide_selection）：活动编辑器选区变化 → 去抖快照 → 推送各聊天页签 ——
+    vscode.window.onDidChangeTextEditorSelection((e) => {
+      // 非活动编辑器不跟：后台 tab 的陈旧选区不注入
+      if (e.textEditor !== vscode.window.activeTextEditor) return;
+      if (selDebounce) clearTimeout(selDebounce);
+      selDebounce = setTimeout(() => {
+        selDebounce = null;
+        applySelection(e.textEditor);
+      }, 150);
+    }),
+    vscode.window.onDidChangeActiveTextEditor((ed) => {
+      // 聚焦 webview 时 activeTextEditor 变 undefined 且本事件照发——此刻不清快照：
+      // 用户正切到输入框准备发送，清了等于自废选区（chip 恰在发送前消失）。
+      // 只有切到另一个文本编辑器才作废旧快照（防把 A 文件的选区附到看 B 文件的消息上），
+      // 新编辑器有选区则 applySelection 内重取。
+      if (ed === undefined) return;
+      if (selDebounce) {
+        clearTimeout(selDebounce);
+        selDebounce = null;
+      }
+      applySelection(ed);
+    }),
   );
 
   // —— 5. 会话宿主构造器 + workspaceState 句柄（★ 动态加载 host：其 core 依赖此时才执行模块加载期代码，cwd=workspace；

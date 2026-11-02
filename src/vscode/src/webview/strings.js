@@ -171,6 +171,9 @@ const ZH = {
   rwTodos: "任务",
   rwRemoveImg: "移除图片",
   rwRemoveRef: "移除引用",
+  rwSelTitle: "随消息附带的选区（模型可见）",
+  rwRemoveSel: "忽略本次选区",
+  cpSelTitle: "编辑器选中的代码将随下一条消息发给模型（× 可忽略）",
   rwCopyMsg: "复制回复原文（Markdown）",
   rwCopyCode: "复制代码",
 
@@ -389,6 +392,9 @@ const EN = {
   rwTodos: "Tasks",
   rwRemoveImg: "Remove image",
   rwRemoveRef: "Remove reference",
+  rwSelTitle: "Code selection attached with this message (visible to the model)",
+  rwRemoveSel: "Dismiss this selection",
+  cpSelTitle: "Selected code in the editor will be attached to your next message (× to dismiss)",
   rwCopyMsg: "Copy message as markdown",
   rwCopyCode: "Copy code",
 

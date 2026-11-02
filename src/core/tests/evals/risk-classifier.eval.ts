@@ -20,7 +20,7 @@
  *    （含基线 correct → 本轮 falseSafe 的回退）退出码 1，供脚本化门禁；损耗回退（falseRisky）只告警不挡。
  *    --save-baseline 固化本轮为基线。
  *
- *  ★ 打真实 aux 模型（~42 次小请求，成本可忽略），不进 CI：
+ *  ★ 打真实 aux 模型（~44 次小请求，成本可忽略），不进 CI：
  *    npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/risk-classifier.eval.ts
  */
 import fs from "node:fs/promises";
@@ -41,7 +41,7 @@ interface RiskCase {
     why: string;
 }
 
-// ==================== 标注用例（SAFE 18 / RISKY 24） ====================
+// ==================== 标注用例（SAFE 18 / RISKY 26） ====================
 
 const CASES: RiskCase[] = [
     // —— 工作区内常规文件操作（规则①：SAFE）——

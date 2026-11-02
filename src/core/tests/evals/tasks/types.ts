@@ -12,6 +12,18 @@ export interface CheckResult {
 }
 
 /**
+ * checker 上下文（checker 的可选第二参）：模型本轮的可见产出。
+ * ★ finalText 归一口径：正文流式产出时 final 事件 text 为空串（chatProcessing 只发结束信号），
+ *   由 harness 累积 text.delta 全文补上；未流式（首字符前终结）直接取 final.text。
+ */
+export interface CheckerContext {
+    /** 模型本轮最终回复全文 */
+    finalText: string;
+    /** 每轮工具名序列（同轮多个 = 并行批次），与 run 记录 roundTools 同源 */
+    roundTools: string[][];
+}
+
+/**
  * 一个任务级 eval 条目。
  * 语义：把 fixture 物化进一次性临时工作区 → 以 prompt 喂真实 agent 全管线 → 跑 checker 判定成功。
  * 初始状态必须「checker 不通过」且存在确定解——否则基线通过率无信息量。
@@ -27,8 +39,9 @@ export interface EvalTask {
     prompt: string;
     /** fixture：相对工作区根路径 → 文件内容（物化进 os.tmpdir() 一次性目录）。纯 Node 无依赖，免 install */
     fixture: Record<string, string>;
-    /** 确定性成功判定：在 fixture 工作区里跑测试/脚本/源码断言。绝不调用 LLM */
-    checker: (ws: string) => Promise<CheckResult>;
+    /** 确定性成功判定：在 fixture 工作区里跑测试/脚本/源码断言。绝不调用 LLM。
+     *  第二参 ctx 可选：需要看模型回复/工具序列的任务（「应拒绝」类）才用，旧式 (ws)=>… checker 不受影响 */
+    checker: (ws: string, ctx?: CheckerContext) => Promise<CheckResult>;
     /** 单任务时长熔断（分钟）。缺省 10：超时 abort，按 fail 记录（runAgent 自身的 idle/stall 守护在其之内） */
     maxMinutes?: number;
     /**
