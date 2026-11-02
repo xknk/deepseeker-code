@@ -1,5 +1,5 @@
 import { toolFailure, asToolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";
-import { runSubagent } from "@/agent/subagent.ts";
+import { prepareSubagent, runPreparedSubagent } from "@/agent/subagent.ts";
 
 /**
  * @file tool/registry/agent.ts
@@ -7,8 +7,14 @@ import { runSubagent } from "@/agent/subagent.ts";
  *  支持声明式子 Agent：spawn_agent 传 name 时，按 .deepseeker-code/agents/<name>.agent.md 声明加载
  *  系统词 / 工具白名单 / model（见 agents/loader.ts）；不传 name 走默认通用模板（向后兼容）。
  *
- *  ★ 派生/执行内核已抽至 agent/subagent.ts 的 runSubagent，本文件仅保留 spawn_agent 的「文案包装」
- *    （🎉 汇报框 + 🚨 同步通知），与 run_workflow（并行/流水线编排）共享同一派生内核，逻辑零分叉。
+ *  ★ 子代理异步化（方案《子代理异步化与完成唤醒》，路径 B 唤醒式）：isSync:false + async* execute——
+ *    首个 yield 立即返回 agent_id（不等待完成），generator 挂起 = 子代理在飞（对齐 run_in_background
+ *    挂起语义）；子代理 runAgent 驱动完成后，结构化汇报经 agentWake.notifySubagentDone 推入主会话
+ *    inbox（run 在跑 → 轮边界消化；idle → 程序化唤醒续跑）。
+ *    ★ 中止语义：完成回调挂在首个 await 之后——宿主中止时执行层 runBackgroundTool 走 gen.return()，
+ *      回调被拦在 await 前不执行 → 不产生中止后的唤醒（用户喊停就是停）。
+ *  ★ 派生/执行内核已抽至 agent/subagent.ts 的 prepareSubagent / runPreparedSubagent，与 run_workflow
+ *    （并行/流水线编排）共享同一派生内核，逻辑零分叉。
  */
 
 /**
@@ -21,7 +27,12 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
         type: "function",
         function: {
             name: "spawn_agent",
-            description: "派生拥有独立执行环境的子 agent 处理隔离子任务，完成后自动汇报改动点与结论。name 可指定声明式子 Agent（见系统提示词【可用子 Agent 目录】，套用其系统词/工具白名单/model）；缺省走通用模板。续跑：传 resume_session_id（此前返回的 agent_id）复用该子 Agent 完整历史记忆，适合追问/继续未完任务。",
+            description: [
+                "异步派生拥有独立执行环境的子 agent 处理隔离子任务：调用立即返回 agent_id，不等待完成；子 agent 在后台执行，完成后其汇报会自动注入本会话并唤醒你继续推进（无需轮询、无需等待）。",
+                "派出后你可立即继续派活 / 处理其他事务 / 回复用户；当前无其他事务时可简短告知已委派并结束本轮——汇报送达时你会被自动唤醒。",
+                "name 可指定声明式子 Agent（见系统提示词【可用子 Agent 目录】，套用其系统词/工具白名单/model）；缺省走通用模板。",
+                "续跑：传 resume_session_id（此前返回的 agent_id）复用该子 Agent 完整历史记忆，适合追问/继续未完任务（同样异步，完成后自动唤醒）。",
+            ].join("\n"),
             parameters: {
                 type: "object",
                 properties: {
@@ -33,33 +44,37 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
                 required: ["task"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
-            isSync: true,
-            async execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext) { // 返回类型经 CustomTool 协议约束（#8b 起允许 string | ToolExecuteResult）
-                if (!ctx) return toolFailure("[派生失败]：spawn_agent 缺少必须的智能体运行上下文。");
+            isSync: false,
+            async *execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext) {
+                if (!ctx) { yield toolFailure("[派生失败]：spawn_agent 缺少必须的智能体运行上下文。"); return; }
 
-                // ★ 派生内核：深度 / manifest / 子系统词 / 工具收权 / runAgent 驱动 / 异常熔断 / 续跑校验均在内
-                //   （协议层 snake_case → spec 层 camelCase 映射）
-                const res = await runSubagent(
+                // ★ 前置阶段（校验 + 计算，首个 yield 之前）：深度 / manifest / 子系统词 / 工具收权 / 续跑校验。
+                //   校验失败当场同步返回（模型立即看到，无子代理在飞，不产生唤醒）。
+                const prep = await prepareSubagent(
                     { task: args.task, name: args.name, role: args.role, resumeSessionId: args.resume_session_id },
                     ctx,
                     getGlobalTools,
                 );
+                if (!prep.ok) {
+                    //（#8b：output 为纯文本契约含 ❌ 前缀，asToolFailure 包结构——执行层按 status 判失败，不再嗅探前缀）
+                    yield asToolFailure(prep.error);
+                    return;
+                }
+                const agentId = prep.prepared.subSessionId;
 
-                // 失败（深度熔断 / manifest 未命中 / 崩溃 / 中止 / 续跑校验 / 外层异常）：升格为结构化失败
-                //（#8b：output 为纯文本契约含 ❌ 前缀，asToolFailure 包结构——执行层按 status 判失败，不再嗅探前缀）
-                if (!res.ok) return asToolFailure(res.output);
+                // ★ 首个 yield = 工具结果（立即返回，子代理此后在 generator 挂起期间后台执行）
+                yield [
+                    `✅ 子代理已异步启动 🆔 ${agentId}${prep.prepared.manifest ? `（声明式=${prep.prepared.manifest.name}）` : ""}`,
+                    `任务摘要：${prep.prepared.taskBrief}${args.task.length > 60 ? "…" : ""}`,
+                    `它完成后汇报会自动送达本会话并唤醒你继续；期间无需等待——可继续派活 / 处理其他事务，无其他事务时简短告知用户即可收尾本轮。`,
+                    `（追问/续跑：spawn_agent 传 resume_session_id="${agentId}"，其历史记忆完整保留。）`,
+                ].join("\n");
 
-                // 💡 成功：【状态同步防护】注入高亮醒目的硬性契约提示
-                // 强迫父 Agent 在拿到报告的第一时间，如果需要继续操作文件，必须先调用 read_file 刷新其对代码的"视网膜缓存"
-                return [
-                    `🎉 [子 Agent 执行完毕${args.resume_session_id ? "·续跑" : ""}] 派生子任务汇报如下：\n`,
-                    `🆔 agent_id: ${res.sessionId}\n（需要继续该子 Agent 的任务或追问时，调用 spawn_agent 传 resume_session_id=${res.sessionId}，其历史记忆完整保留）\n`,
-                    `==================================================\n`,
-                    res.output,
-                    `\n==================================================\n`,
-                    `🚨【重要同步通知】: 该子 Agent 刚才极有可能已经高频修改、创建或删除了你管辖区内的本地源码文件。`,
-                    `如果你（父级Agent）接下来需要对文件系统继续实施 edit_file、write_file 或验证，【你必须】首先调用 read_file 或 list_dir 重新读取最新磁盘状态，禁止盲目依赖你之前的记忆缓存，否则必然会引发唯一性冲突匹配失败！`
-                ].join("");
+                // ★ 运行阶段：驱动子 agent runAgent 至终态（挂起在后台；此处 await 的恢复可能晚于主 run 结束）。
+                //   notifyDone=true：完成回调在 runPreparedSubagent 内部、在飞释放**之前**触发（§4.2）——
+                //   notify→pump 同步占 busy，quiescence 判据因此闭合（batch 验收不与唤醒 run 赛跑）；
+                //   宿主中止时执行层 gen.return() 拦在本 await 前 → 回调不执行（aborted 同样不回调），无中止后唤醒。
+                await runPreparedSubagent(prep.prepared, ctx, { notifyDone: true });
             },
         },
     },

@@ -13,6 +13,7 @@ import { handleUnifiedChat, type HostOptions } from "@/serve/chatProcessing.ts";
 import type { InboundImageAttachment } from "@/channels/unifiedMessage.ts";
 import { msgText, imageUrlsOf } from "@/session/contentParts.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
+import { registerWakeDriver, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 import { ShadowWatchdog, shadowEnabled } from "@/agent/shadowWatchdog.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
@@ -344,6 +345,15 @@ export class ChatHost {
       outputStyle: this.outputStyle,
       budgetYuan: this.budgetYuan, // ★ 预算制运行（成本信任链第二环 E1）：超限 soft nudge + 120% 硬截断
     };
+    // ★ 子代理完成唤醒（agentWake）：每轮注册本会话的唤醒驱动（覆盖式刷新，闭包持有本轮 opts——
+    //   审批通道/预算/模型随最新一轮）。驱动被 core 唤醒泵在主 run idle 时调用；已切走会话则跳过
+    //   （汇报留 inbox，用户回来后下轮 claim 自然消化）。runOnce 自带 busy 生命周期，唤醒轮复用之。
+    const regSid = this.sessionId ?? "";
+    registerWakeDriver(regSid, async () => {
+      if (this.sessionId !== regSid) return;
+      this.sink({ type: "info", text: "🤖 子代理完成，自动唤醒主会话继续…" });
+      await this.runOnce(AGENT_DONE_SENTINEL, false);
+    });
     try {
       await handleUnifiedChat(
         { sessionId: this.sessionId ?? "", content: body, attachments },
@@ -359,13 +369,18 @@ export class ChatHost {
     } finally {
       this.shadow?.stop();
       this.shadow = null;
-      this.currentAc = null;
-      this.setBusy(false);
-      // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
-      //   flush 落盘（此刻已完成），如实提示下轮自动带入。
-      if (this.queuedUnclaimed > 0) {
-        this.sink({ type: "info", text: this.t("inboxCarryover")(this.queuedUnclaimed) });
-        this.queuedUnclaimed = 0;
+      // ★ 代际守卫（子代理异步化）：唤醒轮经 pump 在本轮 handleUnifiedChat 的 finally 内重入启动——
+      //   若无条件复位，旧轮收尾会把唤醒轮的 currentAc 清掉（UI 无法中止唤醒轮）并提前解锁 busy。
+      //   仅当仍是本轮 ac 时清理；被唤醒轮接管时由唤醒轮自己的 finally 收尾。
+      if (this.currentAc === ac) {
+        this.currentAc = null;
+        this.setBusy(false);
+        // ★ inbox steering 收尾：run 结束仍未在回合边界送达的补充输入已被 runAgent finally
+        //   flush 落盘（此刻已完成），如实提示下轮自动带入。
+        if (this.queuedUnclaimed > 0) {
+          this.sink({ type: "info", text: this.t("inboxCarryover")(this.queuedUnclaimed) });
+          this.queuedUnclaimed = 0;
+        }
       }
     }
   }

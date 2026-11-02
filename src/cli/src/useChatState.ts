@@ -14,6 +14,7 @@ import { getOrCreateSessionId, listSessions, type SessionSummary } from "@/sessi
 import { readTranscriptLines } from "@/session/transcript.ts";
 import { forkSession, listForkAnchors, type ForkAnchor } from "@/session/fork.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
+import { registerWakeDriver, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
@@ -619,6 +620,21 @@ export const useChatState = (initialSessionId?: string, initialPlanMode?: boolea
             outputStyle: outputStyleRef.current,
             budgetYuan: budgetYuanRef.current, // ★ 预算制运行（成本信任链第二环 E1）：/budget 设置，超限 soft nudge + 120% 硬截断
         };
+        // ★ 子代理完成唤醒（agentWake）：每轮注册本会话的唤醒驱动（registerWakeDriver 覆盖式刷新，
+        //   闭包持有本轮 opts——审批通道/预算/模型随最新一轮）。驱动被 core 唤醒泵在主 run idle 时调用：
+        //   busy 编排与 submit 同构（turnGen 代际 + setBusy），唤醒轮期间输入框照常锁定、Esc 照常可中止；
+        //   用户已切走会话（sessionIdRef 不再指向 sid）则跳过——汇报留 inbox，回来后下轮 claim 自然消化。
+        registerWakeDriver(sid, async () => {
+            if (sessionIdRef.current !== sid) return;
+            const myGen = ++turnGenRef.current;
+            setBusy(true);
+            pushInfo("🤖 子代理完成，自动唤醒主会话继续…");
+            try {
+                await runOnce(sid, AGENT_DONE_SENTINEL, false);
+            } finally {
+                if (turnGenRef.current === myGen) setBusy(false);
+            }
+        });
         try {
             await handleUnifiedChat(
                 { sessionId: sid, content: body },

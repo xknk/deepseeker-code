@@ -29,6 +29,7 @@ import path from "path";
 import fs from "fs";
 import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
 import { activeProvider } from "@/llm/model.ts";
+import { markRunStart, markRunEnd, registerWakeDriverIfAbsent, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -82,10 +83,48 @@ export const handleUnifiedChat = async (
     abortSignal?: AbortSignal,
     opts?: HostOptions,
 ) => {
+    // ★ agentWake busy 快速标记（子代理异步化）：调用方显式 sessionId（CLI/VSCode/batch/serve 全部显式传）
+    //   时在**任何 await 之前**同步占位 busyRuns——封死「run 刚被调用、尚未解析出 sessionId」窗口内
+    //   子代理完成 notify 观察到 idle 而误启动并发唤醒的竞态（唤醒泵要求 busy 先于一切异步点）。
+    //   占位键在解析出真实 id 后转移；未传 sessionId 的路径沿用「先解析后标记」的既有语义。
+    let busyKey = typeof inbound.sessionId === "string" && inbound.sessionId ? inbound.sessionId : "";
+    markRunStart(busyKey);
+    try {
+        await handleUnifiedChatRun(inbound, sendOutbound, sseWrite, abortSignal, opts, (resolved: string) => {
+            if (busyKey === resolved) return;
+            markRunStart(resolved); // 先立新标再撤旧标：缝隙里 notify 观察到的也是「在跑」
+            if (busyKey) markRunEnd(busyKey);
+            busyKey = resolved;
+        });
+    } finally {
+        markRunEnd(busyKey); // 摘 busy + 泵一次挂起唤醒（排队中的完成事件在此兑付）
+    }
+};
+
+/** 一次 run 的实体（busy 标记与唤醒泵在外层 handleUnifiedChat 包裹）。 */
+const handleUnifiedChatRun = async (
+    inbound: UnifiedInboundMessage,
+    sendOutbound: OutboundSender,
+    sseWrite?: SseWriter,
+    abortSignal?: AbortSignal,
+    opts?: HostOptions,
+    transferBusy?: (resolved: string) => void,
+) => {
     // ★ 始终经 getOrCreateSessionId：复用已持久化会话；新会话（含 createServer 生成的 uuid）据此"创建即落盘"
     //   身份记录。旧实现 `inbound.sessionId || ...` 因 createServer 总回填 sessionId 而恒 truthy 短路，
     //   新会话从不落 createAt 等元信息，listSessions 只能回退目录 mtime 排序。
     const sessionId: string = await getOrCreateSessionId(inbound.sessionId);
+    transferBusy?.(sessionId);
+    // ★ agentWake 唤醒兜底驱动（仅当宿主未注册时生效——CLI/VSCode/batch 均在调用前注册自己的驱动，
+    //   本 IfAbsent 注册不会覆盖它们）：serve 的程序化续 run 入口就是 handleUnifiedChat 自身，
+    //   唤醒 run = 以唤醒哨兵为 user 消息的常规 run（既有前缀之后追加，缓存纪律不破）。
+    //   pure-serve 会话保持首调的 opts 形态（本地程序化入口可接受）；宿主驱动每轮刷新，无陈旧问题。
+    registerWakeDriverIfAbsent(sessionId, async () => {
+        await handleUnifiedChat(
+            { ...inbound, sessionId, content: AGENT_DONE_SENTINEL, attachments: undefined } as UnifiedInboundMessage,
+            sendOutbound, sseWrite, abortSignal, opts,
+        );
+    });
     // ★ G4 斜杠命令展开：在 hook 派发与 buildContextMessages 之前，把 /<name> rest 展开为命令正文。
     //   展开在 dispatch 前 → hook / buildContextMessages / appendMessage 全部看到展开后文本，transcript 忠实记录模型所见。
     //   未注册的 /x（含文件路径）原样透传；异常一律原样（fail-safe）。

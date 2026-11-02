@@ -28,6 +28,7 @@ import { appConfig } from "@/config/index.ts";
 import { runWithWorkspaceRoot } from "../guard.ts";
 import { createWorktree, harvestDiff, removeWorktree, type WorktreeHandle } from "../worktree/manager.ts";
 import type { RequestApprovalFn } from "@/host/type.ts";
+import { notifySubagentDone } from "@/agent/agentWake.ts";
 // 纯逻辑层（校验 / 标签 / 流水线拼接 / 聚合）独立成模块：零 agent 依赖，不进 tool/index 循环，可被单测直接 import。
 import {
     validateWorkflowArgs,
@@ -52,7 +53,8 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
         function: {
             name: "run_workflow",
             description: [
-                "多子 agent 编排：把可分解的大任务派给多个独立子 agent。parallel（默认）=各步骤并发执行、结果按序聚合，适合互相独立的只读/分析任务；pipeline=步骤串行，前阶段产出自动作为后阶段输入，适合分阶段加工（抽取→归类→汇总）。",
+                "异步多子 agent 编排：把可分解的大任务派给多个独立子 agent，调用立即返回（不等待完成），全部步骤结束后一条终态汇总自动注入本会话并唤醒你继续推进（中间态不回流，防事件洪峰）。parallel（默认）=各步骤并发执行、结果按序聚合，适合互相独立的只读/分析任务；pipeline=步骤串行，前阶段产出自动作为后阶段输入，适合分阶段加工（抽取→归类→汇总）。",
+                "派出后你可立即继续派活 / 处理其他事务 / 回复用户；当前无其他事务时可简短告知已编排并结束本轮——汇总送达时你会被自动唤醒。",
                 "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；并行写/迁移用 isolation=\"worktree\"（每步独立 git worktree，结束后收割各步 diff）。",
                 "与 spawn_agent 的分工：单任务串行委派用 spawn_agent；任务可分解、多分支或流水线式时用本工具。",
             ].join("\n"),
@@ -92,15 +94,19 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                 required: ["steps"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
-            isSync: true,
+            isSync: false,
             // 聚合输出整体兜底截断（各子 agent 结果已按 workflowPerStepChars 单独截断）。
+            // ★ 异步化后工具结果 = 首个 yield 的启动回执（天然短）；此上限改用于终态汇总的 inbox 报文截断。
             maxOutputCharacters: 18000,
-            async execute(args: any, ctx?: ToolContext) {
-                if (!ctx) return toolFailure("[工作流]：run_workflow 缺少必须的智能体运行上下文。");
+            // ★ 子代理异步化（方案 §4.4）：async* + 首个 yield 立即回执；全部步骤在 generator 挂起期间后台执行，
+            //   完成后一条终态汇总经 agentWake.notifySubagentDone 回流（中间态不回流，防事件洪峰）。
+            //   宿主中止时执行层 gen.return() 拦在 await 前 → 不产生中止后的唤醒（与 spawn_agent 同语义）。
+            async *execute(args: any, ctx?: ToolContext) {
+                if (!ctx) { yield toolFailure("[工作流]：run_workflow 缺少必须的智能体运行上下文。"); return; }
 
                 const maxSteps = appConfig.workflowMaxSteps;
                 const validationError = validateWorkflowArgs(args, maxSteps);
-                if (validationError) return validationError;
+                if (validationError) { yield validationError; return; }
 
                 // mode 归一化：非 "pipeline" 一律按 parallel（默认）
                 const mode: "parallel" | "pipeline" = args.mode === "pipeline" ? "pipeline" : "parallel";
@@ -108,7 +114,8 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                 const isolation: "none" | "worktree" = args.isolation === "worktree" ? "worktree" : "none";
                 // worktree 隔离仅支持 parallel（pipeline 串行隔离收益小，v1 不开）
                 if (isolation === "worktree" && mode === "pipeline") {
-                    return toolFailure("[工作流]：isolation=\"worktree\" 暂仅支持 parallel 模式（pipeline 串行无需隔离）。请改 mode=parallel 或 isolation=none。");
+                    yield toolFailure("[工作流]：isolation=\"worktree\" 暂仅支持 parallel 模式（pipeline 串行无需隔离）。请改 mode=parallel 或 isolation=none。");
+                    return;
                 }
                 const steps = (args.steps as WorkflowStep[]).map(s => ({
                     task: String(s.task),
@@ -119,8 +126,15 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
 
                 // ★ 深度预检：当前 agent 已达 MAX_AGENT_DEPTH → 任何子 agent 都派不出去，一次性清晰报错
                 if (ctx.depth >= MAX_AGENT_DEPTH) {
-                    return toolFailure(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层），无法派生工作流子 agent。请在本层级自行消化任务。`);
+                    yield toolFailure(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层），无法派生工作流子 agent。请在本层级自行消化任务。`);
+                    return;
                 }
+
+                // ★ 首个 yield = 工具结果（立即返回；各步骤此后在 generator 挂起期间后台执行）
+                yield [
+                    `✅ 工作流已异步启动（mode=${mode}，共 ${steps.length} 步${isolation === "worktree" ? "，每步独立 git worktree 隔离" : ""}）。`,
+                    `全部步骤后台执行完毕后，一条终态汇总会自动送达本会话并唤醒你继续（中间态不回流）；期间无需等待——可继续派活 / 处理其他事务，无其他事务时简短告知用户即可收尾本轮。`,
+                ].join("\n");
 
                 // ★ 并发子 agent 共享审批互斥锁：包裹 requestApproval，确保并行高危请求排队审批（CLI 单弹窗），
                 //   而非并发竞态。pipeline 模式天然串行无竞态，包裹亦无副作用（无争用）。
@@ -223,10 +237,33 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                         outcomes = await Promise.all(running);
                     }
                 } catch (err: any) {
-                    return toolFailure(`[工作流编排异常]：${err?.message ?? err}`);
+                    // ★ 编排级异常同样走完成回调（status=error 定态）：主会话必有终态可收，不产生悬挂等待
+                    await notifySubagentDone(ctx.sessionId, [
+                        `🤖 [工作流完成]（mode=${mode}，共 ${steps.length} 步）`,
+                        `状态：error（编排异常）`,
+                        `汇总：`,
+                        `⚠️ [工作流编排异常]：${err?.message ?? err}`,
+                    ].join("\n"));
+                    return;
                 }
 
-                return formatWorkflowResult(mode, outcomes);
+                // ★ 终态汇总回调（§4.4）：全部步骤结束后一条聚合消息推入主会话 inbox 并编排唤醒。
+                //   宿主中止时执行层 gen.return() 拦在上一个 await 前——本段不执行。
+                const allOk = outcomes.every((o) => o.ok);
+                const abortedCount = outcomes.filter((o) => !o.ok && o.output.includes("已中止")).length;
+                const status: "final" | "aborted" | "error" =
+                    abortedCount === outcomes.length ? "aborted" : allOk ? "final" : "error";
+                const statusLabel =
+                    status === "final" ? "final（全部步骤正常完成）"
+                        : status === "aborted" ? "aborted（全部步骤被中止）"
+                            : "error（部分步骤失败/中止）";
+                await notifySubagentDone(ctx.sessionId, [
+                    `🤖 [工作流完成]（mode=${mode}，共 ${steps.length} 步）`,
+                    `状态：${statusLabel}`,
+                    `汇总：`,
+                    // 截断口径与原同步返回一致（maxOutputCharacters 18000）
+                    truncateToolResult(formatWorkflowResult(mode, outcomes), 18000),
+                ].join("\n"));
             },
         },
     },

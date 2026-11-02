@@ -18,9 +18,10 @@ import { appendMessage, readTranscriptLines } from "@/session/transcript.ts";
 import { createUUID } from "@/common/index.ts";
 import { RunAgentOptions } from "@/agent/type.ts";
 import { toolFailure, CustomTool, MAX_AGENT_DEPTH, ToolContext } from "@/tool/type.ts";
-import { getAgent } from "@/agents/registry.ts";
+import { getAgent, AgentManifest } from "@/agents/registry.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { ownerCanApprove } from "@/session/lineage.ts";
+import { trackSubagentInFlight, releaseSubagentInFlight, notifySubagentDone, buildSubagentDoneReport } from "./agentWake.ts";
 
 /**
  * 子 agent 工具收权黑名单：嵌套深度 ≥ 1 的子 agent 不再拥有 shell 执行（run_command）、
@@ -126,64 +127,76 @@ export interface SubagentResult {
     sessionId: string;
     /** 命中的声明式 agent 名（未用声明式则 undefined）。 */
     manifestName?: string;
+    /**
+     * ★ 子代理异步化（agentWake）：终态分类——完成汇报经 buildSubagentDoneReport 按此标注
+     * 「final（正常完成）/ aborted（被中止）/ error（异常）」，主 agent 据此决定续推或止损。
+     * ok=true ⇒ 'final'（含「未取到结构化 final」的兜底摘要——run 本身正常结束）；
+     * ok=false 按成因分流：中止='aborted'，崩溃/异常/未知='error'。
+     */
+    status: "final" | "aborted" | "error";
 }
 
+/** 派生前置校验与计算的产物（spawn_agent 异步首 yield 之前完成——不含任何运行期副作用）。 */
+export interface PreparedSubagent {
+    /** 子会话 ID（新建=本会话派生的 __sub__ UUID；续跑=resumeSessionId）。即对外 agent_id。 */
+    subSessionId: string;
+    /** 是否续跑既有子会话。 */
+    resuming: boolean;
+    /** 命中的声明式 agent（未用声明式则 undefined）。 */
+    manifest?: AgentManifest;
+    /** 子系统词（message[0]，同会话恒定内容——缓存友好设计见 prepareSubagent 内注释）。 */
+    subSystem: string;
+    /** 首条 user 消息（task/role/续跑说明等 per-spawn 可变注入）。 */
+    subTaskPrompt: string;
+    /** 收权后的子 agent 工具表。 */
+    toolSchemas: CustomTool[];
+    /** SubagentStart/Stop hook 上下文。 */
+    startCtx: { sessionId: string; parentSessionId: string; task: string; depth: number; name?: string; cwd?: string };
+    /** 任务摘要（完成汇报的括注，取 task 前 60 字符）。 */
+    taskBrief: string;
+}
+
+/** prepareSubagent 的返回：校验失败（深度/续跑形态/归属/并发/存在性/manifest 未命中）→ ok:false + ❌ 文案。 */
+export type PrepareOutcome =
+    | { ok: false; error: string }
+    | { ok: true; prepared: PreparedSubagent };
+
 /**
- * 派生并运行单个子 agent（runAgent 递归），采集其 final 文本。
+ * 派生前置阶段：校验（深度/续跑/manifest）+ 计算（子系统词/任务词/工具表/hook 上下文），零运行期副作用。
  *
- * @param spec        任务规格（task / name / role）
- * @param ctx         父级工具上下文（透传 cwd / abortSignal / requestApproval / onUIEvent / permissionMode 等）
- * @param getGlobalTools 运行时获取完整工具表的闭包（规避定义期循环依赖，与 spawn_agent 同源）
- * @returns {@link SubagentResult}；调用方负责文案包装与聚合
+ * ★ 与 runPreparedSubagent 拆分的动因（子代理异步化，方案《子代理异步化与完成唤醒》§4.1）：
+ *   spawn_agent 改 async* 后，全部校验与计算须在**首个 yield 之前**完成——校验失败可当场同步
+ *   返回错误（模型立即看到，不产生唤醒）；真正的 runAgent 驱动（可能数分钟）挂在 yield 之后，
+ *   以 generator 挂起形态在后台进行，完成经 agentWake.notifySubagentDone 回流。
  */
-export const runSubagent = async (
+export const prepareSubagent = async (
     spec: SubagentSpec,
     ctx: ToolContext,
     getGlobalTools: () => CustomTool[],
-): Promise<SubagentResult> => {
+): Promise<PrepareOutcome> => {
     const { task, name, role, resumeSessionId } = spec;
     const resuming = typeof resumeSessionId === "string" && resumeSessionId.length > 0;
 
     // ★ 深度熔断：达到 MAX_AGENT_DEPTH 禁止继续向下嵌套（与原 spawn_agent 一致）
     if (ctx.depth >= MAX_AGENT_DEPTH) {
-        return {
-            ok: false,
-            output: failText(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层）。禁止继续无限向下嵌套，请父层级 Agent 自行消化当前任务。`),
-            sessionId: "",
-        };
+        return { ok: false, error: failText(`[安全熔断]：已达到最大 Agent 嵌套深度（${MAX_AGENT_DEPTH}层）。禁止继续无限向下嵌套，请父层级 Agent 自行消化当前任务。`) };
     }
 
     // ★ 续跑前置校验（形态 / 归属 / 并发 / 存在性），全部通过才允许复用既有子会话；任一失败即拒，不静默降级为新建
     if (resuming) {
         const target = resumeSessionId!;
         if (!target.includes("__sub__")) {
-            return {
-                ok: false,
-                output: failText(`[续跑失败]：${target} 不是子 Agent 会话 ID（应形如 <会话>__sub__<uuid>，来自此前 spawn_agent 返回的 agent_id）。`),
-                sessionId: "",
-            };
+            return { ok: false, error: failText(`[续跑失败]：${target} 不是子 Agent 会话 ID（应形如 <会话>__sub__<uuid>，来自此前 spawn_agent 返回的 agent_id）。`) };
         }
         if (!ownerCanApprove(target, ctx.sessionId)) {
-            return {
-                ok: false,
-                output: failText(`[续跑失败]：子会话 ${target} 不属于当前会话（及其 fork 血缘），禁止跨会话复活。请核对 agent_id 或改用新建派生。`),
-                sessionId: "",
-            };
+            return { ok: false, error: failText(`[续跑失败]：子会话 ${target} 不属于当前会话（及其 fork 血缘），禁止跨会话复活。请核对 agent_id 或改用新建派生。`) };
         }
         if (activeSubagents.has(target)) {
-            return {
-                ok: false,
-                output: failText(`[续跑失败]：子 Agent ${target} 正在执行中，禁止并发续跑同一子会话（会交叉写坏转录）。请等待其完成后再试。`),
-                sessionId: "",
-            };
+            return { ok: false, error: failText(`[续跑失败]：子 Agent ${target} 正在执行中，禁止并发续跑同一子会话（会交叉写坏转录）。请等待其完成后再试。`) };
         }
         const existing = await readTranscriptLines(target);
         if (existing.length === 0) {
-            return {
-                ok: false,
-                output: failText(`[续跑失败]：子会话 ${target} 的转录不存在或为空，无法续跑。请改用新建派生。`),
-                sessionId: "",
-            };
+            return { ok: false, error: failText(`[续跑失败]：子会话 ${target} 的转录不存在或为空，无法续跑。请改用新建派生。`) };
         }
     }
 
@@ -193,11 +206,7 @@ export const runSubagent = async (
     // ★ 声明式子 Agent：name 显式给出 → 按 manifest 声明加载；未命中 → 显式报错（不静默回退）
     const manifest = name ? getAgent(name) : undefined;
     if (name && !manifest) {
-        return {
-            ok: false,
-            output: failText(`[派生失败]：未找到声明式子 Agent "${name}"。请核对系统提示词中【可用子 Agent 目录】的名称拼写。`),
-            sessionId: "",
-        };
+        return { ok: false, error: failText(`[派生失败]：未找到声明式子 Agent "${name}"。请核对系统提示词中【可用子 Agent 目录】的名称拼写。`) };
     }
 
     // ★ 子系统词：声明式 agent 用其 manifest.body；否则用精炼的默认模板（防上下文轰炸）。
@@ -243,10 +252,28 @@ export const runSubagent = async (
 
     console.log(`${resuming ? "🔁 续跑" : "🐣 派生"}子 Agent [深度: ${ctx.depth + 1}/${MAX_AGENT_DEPTH}][${subSessionId}]${manifest ? ` 声明式=${manifest.name}` : ""} 任务: "${task.slice(0, 50)}..."`);
 
+    // ★ P1-8 SubagentStart/Stop hook 上下文（prepare 期组装——纯数据；dispatch 在 run 期）
+    const startCtx = { sessionId: subSessionId, parentSessionId: ctx.sessionId, task, depth: ctx.depth + 1, name: manifest?.name, cwd: ctx.cwd };
+    return { ok: true, prepared: { subSessionId, resuming, manifest, subSystem, subTaskPrompt, toolSchemas, startCtx, taskBrief: task.slice(0, 60) } };
+};
+
+/**
+ * 运行已 prepared 的子 agent（runAgent 递归驱动），采集其 final 文本。
+ *
+ * ★ 并发护栏（同 ID 在飞拒续跑，transcript 单写者）与在飞归属登记都在函数体**最前的同步前缀**：
+ *   prepare 放行 ⇒ 护栏必登记。若挂到首个 await 之后，spawn_agent 异步化下宿主中止（执行层
+ *   gen.return 拦在 generator 的 await 前）可能令本函数永不执行而校验已放行——同步登记封死该窗口。
+ *   finally 统一释放（正常/中止/崩溃均走此），与 prepare 校验的 check-then-act 窗口同原实现。
+ */
+export const runPreparedSubagent = async (prepared: PreparedSubagent, ctx: ToolContext, opts?: { notifyDone?: boolean }): Promise<SubagentResult> => {
+    const { subSessionId, manifest, subTaskPrompt, subSystem, toolSchemas, startCtx } = prepared;
+    const manifestName = manifest?.name;
+
     activeSubagents.add(subSessionId); // 同 ID 并发护栏（新建 UUID 天然不撞，续跑同会话在此拦住）
+    trackSubagentInFlight(ctx.sessionId, subSessionId); // ★ agentWake：在飞归属（waitSessionQuiescent 的收敛判据）
     // ★ UI 侧「运行中子 agent」计数（对标 CC「● N agent」）：add 后立即发 start，finally delete 后发 stop——
     //   running 取 Set.size（进程级真值），正常/中止/崩溃均经 finally 收敛回 0；嵌套子 agent 同通道汇入，计数天然准确。
-    ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'start', name: manifest?.name, depth: ctx.depth + 1 });
+    ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'start', name: manifest?.name, depth: startCtx.depth });
     try {
         // 构建并初始化子智能体的独立消息队列
         const subMessages = await buildContextMessages(subSessionId, { role: "user", content: subTaskPrompt }, subSystem, manifest?.model); // ★ manifest.model 同源传入，子 agent vision 闸门按其生效模型判定
@@ -266,7 +293,7 @@ export const runSubagent = async (
             depth: ctx.depth + 1,
             keepRecentUnits: ctx.keepRecentUnits,
             compactRatio: ctx.compactRatio,
-            parentSystemPrompt: parentSystemPrompt,
+            parentSystemPrompt: ctx.parentSystemPrompt,
             events: ctx.events,
             onUIEvent: ctx.onUIEvent, // ★ 必须透传：否则子 agent 调用需审批工具时前端收不到弹窗，waitForUserApproval 永久挂起（死锁）
             requestApproval: ctx.requestApproval, // ★ 同步透传宿主审批钩子，子 agent 高危工具仍走同一审批通道
@@ -279,7 +306,6 @@ export const runSubagent = async (
         };
 
         // ★ P1-8 SubagentStart：子 agent 实际启动（观察事件；声明式名/深度/任务供 hook 记录/计量）
-        const startCtx = { sessionId: subSessionId, parentSessionId: ctx.sessionId, task, depth: ctx.depth + 1, name: manifest?.name, cwd: ctx.cwd };
         await dispatch('SubagentStart', startCtx);
 
         // ★ 异步生存流的异常与中止熔断监控；SubagentStop 在 finally 统一收尾（正常/中止/崩溃均触发）
@@ -293,7 +319,7 @@ export const runSubagent = async (
         try {
             for await (const e of runAgent(subMessages, subOptions)) {
                 if (ctx.abortSignal?.aborted) {
-                    result = { ok: false, output: failText(`[子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`), sessionId: subSessionId, manifestName: manifest?.name };
+                    result = { ok: false, output: failText(`[子Agent中断]：执行已被用户主动发起的 AbortSignal 强行熔断。`), sessionId: subSessionId, manifestName: manifest?.name, status: "aborted" };
                     break;
                 }
                 if (e.type === 'final') {
@@ -308,10 +334,10 @@ export const runSubagent = async (
                 if (!hasFinalResult || !subResult.trim()) {
                     subResult = `（未能获取到结构化 final 回报。请检查该子 Session [${subSessionId}] 的执行历史）`;
                 }
-                result = { ok: true, output: subResult, sessionId: subSessionId, manifestName: manifest?.name };
+                result = { ok: true, output: subResult, sessionId: subSessionId, manifestName: manifest?.name, status: "final" };
             }
         } catch (streamError: any) {
-            result = { ok: false, output: failText(`[子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`), sessionId: subSessionId, manifestName: manifest?.name };
+            result = { ok: false, output: failText(`[子Agent崩溃]：子 Agent 在迭代推理主循环时遭遇底层异常: ${streamError.message}`), sessionId: subSessionId, manifestName: manifest?.name, status: "error" };
         } finally {
             // ★ P3-7：子 agent 结束（正常/中止/崩溃均走此）→ 通知前端清瞬态进度行
             try { ctx.onUIEvent?.({ type: 'subagent.progress', text: "", done: true, agentKey: subSessionId }); } catch { /* 纯 UX 旁路不击垮收尾 */ }
@@ -320,11 +346,41 @@ export const runSubagent = async (
                 await dispatch('SubagentStop', { ...startCtx, ok: result.ok, output: result.output.slice(0, 2000) }).catch((e: any) => console.warn(`⚠️ SubagentStop hook 异常（已忽略）: ${e?.message ?? e}`));
             }
         }
-        return result ?? { ok: false, output: failText(`[派生执行失败]: 未知错误`), sessionId: subSessionId, manifestName: manifest?.name };
+        // ★ agentWake（异步化）：完成回调先于在飞释放——notify→pump 同步占 busyRuns，release 才触发
+        //   quiescence 等待者，waitSessionQuiescent 因此真正意味着「无在跑 run、无待发唤醒」（batch 验收
+        //   不会与最后一次唤醒 run 赛跑）。默认关闭：hooks/workflow 深层步骤/直调 runSubagent 的调用方
+        //   行为零变化，仅 spawn_agent 工具层显式开启；aborted 不回调（宿主中止 → 无中止后唤醒红线）。
+        if (opts?.notifyDone && result && result.status !== "aborted") {
+            try {
+                await notifySubagentDone(ctx.sessionId, buildSubagentDoneReport(subSessionId, prepared.taskBrief, { status: result.status, output: result.output }));
+            } catch { /* 完成回调失败不影响子 run 交付 */ }
+        }
+        return result ?? { ok: false, output: failText(`[派生执行失败]: 未知错误`), sessionId: subSessionId, manifestName: manifest?.name, status: "error" };
     } catch (error: any) {
-        return { ok: false, output: failText(`[派生执行失败]: ${error.message}`), sessionId: subSessionId, manifestName: manifest?.name };
+        return { ok: false, output: failText(`[派生执行失败]: ${error.message}`), sessionId: subSessionId, manifestName: manifest?.name, status: "error" };
     } finally {
         activeSubagents.delete(subSessionId); // 释放并发护栏（正常/中止/崩溃均走此）
-        ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'stop', name: manifest?.name, depth: ctx.depth + 1 }); // 计数收敛（与 start 配对）
+        releaseSubagentInFlight(ctx.sessionId, subSessionId); // ★ agentWake：撤在飞归属 + 唤醒 quiescence 等待者
+        ctx.onUIEvent?.({ type: 'subagent.count', running: activeSubagents.size, phase: 'stop', name: manifestName, depth: startCtx.depth }); // 计数收敛（与 start 配对）
     }
+};
+
+/**
+ * 派生并运行单个子 agent（prepare + run 组合）。保留单入口：run_workflow 与既有 e2e 单测同源复用。
+ *
+ * @param spec        任务规格（task / name / role / resumeSessionId）
+ * @param ctx         父级工具上下文（透传 cwd / abortSignal / requestApproval / onUIEvent / permissionMode 等）
+ * @param getGlobalTools 运行时获取完整工具表的闭包（规避定义期循环依赖，与 spawn_agent 同源）
+ * @returns {@link SubagentResult}；调用方负责文案包装与聚合
+ */
+export const runSubagent = async (
+    spec: SubagentSpec,
+    ctx: ToolContext,
+    getGlobalTools: () => CustomTool[],
+): Promise<SubagentResult> => {
+    const prep = await prepareSubagent(spec, ctx, getGlobalTools);
+    if (!prep.ok) {
+        return { ok: false, output: prep.error, sessionId: "", status: "error" };
+    }
+    return runPreparedSubagent(prep.prepared, ctx);
 };

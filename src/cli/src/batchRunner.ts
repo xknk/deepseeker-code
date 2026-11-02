@@ -38,6 +38,7 @@ import {
     type WatchdogKillInfo, type WatchdogRecord, type WatchdogSnapshot,
 } from "./batchWatchdog.ts";
 import { pushSessionInbox } from "@/agent/inbox.ts";
+import { registerWakeDriver, unregisterWakeDriver, waitSessionQuiescent, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 
 // ============ 白名单与缺省禁用（审批自动应答器的判定表） ============
 
@@ -381,6 +382,43 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
 
         const timer = setTimeout(() => roundAc.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
         setSessionWorktree(sessionId, wt); // 重试轮重挂（上轮 finally 已摘）
+        // ★ 子代理完成唤醒（agentWake，方案 §7 batch 联动）：每轮注册本任务的唤醒驱动——
+        //   继承审批自动应答器 / 剩余预算 / 工单工具表（含解释器闸门）；worktree 重挂（上轮 finally 已摘）
+        //   + 独立 ac/timer（round 的 timer/注册表在 finally 已清，唤醒 run 是 round 收尾后的续跑，自备环境）。
+        //   汇报/结算照常进 finalText/receipt（报告与验收口径完整）；不喂看门狗（已 stop，timer+预算兜底）。
+        registerWakeDriver(sessionId, async () => {
+            emit(`🤖 [${task.id}] 子代理完成，唤醒 run 续跑…`);
+            setSessionWorktree(sessionId, wt);
+            const wakeAc = new AbortController();
+            const wakeTimer = setTimeout(() => wakeAc.abort(new Error(T.timeoutAbort(timeoutMin))), timeoutMin * 60_000);
+            try {
+                await handleUnifiedChat(
+                    { sessionId, content: AGENT_DONE_SENTINEL },
+                    async () => { /* sendOutbound：sseWrite 已给，不会走到 */ },
+                    (evt: any) => {
+                        if (evt?.type === "text.delta") finalText += evt.text;
+                        else if (evt?.type === "text.reset") finalText = "";
+                        else if (evt?.type === "final") finalText = evt.text || finalText;
+                    },
+                    wakeAc.signal,
+                    {
+                        requestApproval: async (detail, meta) => {
+                            if (allowApproval.has(meta.toolName)) return "allow-once";
+                            deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
+                            return "deny";
+                        },
+                        onUIEvent: (evt: UIEvent) => {
+                            if (evt.type === "run.receipt") receipt = evt;
+                        },
+                        budgetYuan: roundBudget,
+                        toolSchemas: gatedSchemas,
+                    },
+                );
+            } finally {
+                clearTimeout(wakeTimer);
+                clearSessionWorktree(sessionId);
+            }
+        });
         try {
             await handleUnifiedChat(
                 { sessionId, content },
@@ -446,6 +484,11 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
             break;
         }
         // 软着陆归途：经 nudge-2 收尾汇报正常 final 的任务走正常验收判定（按成果判定，不算被杀，§7）
+        // ★ agentWake 唤醒链收敛（子代理异步化）：主 round 结束后若有在飞子代理，须等「完成 → 唤醒 run
+        //   →（可能再派生）……」整链安静再验收——否则验收跑到半途，唤醒 run 还在改文件，判定失真。
+        //   超时（timeout-min 每轮重计语义）→ resolve(false)，按现状继续（无人值守绝不挂死）。
+        const quiet = await waitSessionQuiescent(sessionId, undefined, timeoutMin * 60_000);
+        if (!quiet) emit(`⏳ [${task.id}] 唤醒链未在时限内收敛，按现状验收`);
         wd?.setPaused(true); // accept 命令执行期豁免判定（§4；看门狗已 stop，防御性对齐）
         const r = await runAcceptCommand(t.accept, wt.path);
         accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut };
@@ -454,7 +497,10 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         break;
     }
 
-    // 善后：杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）→ 收割 diff → 报告
+    // 善后：摘唤醒驱动（任务定态——此后完成的在飞子代理不再唤醒，inbox 保留备查；先于一切 await，
+    //  防 wdKill/timeout 路径状态判定期间的完成事件在 teardown 中途拉起唤醒 run 改文件）
+    unregisterWakeDriver(sessionId);
+    // 杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）→ 收割 diff → 报告
     await killBackgroundTasksUnder(wt.path).catch(() => { });
     const diff = await harvestDiff(wt);
     const cost = await collectSessionCost(sessionId);

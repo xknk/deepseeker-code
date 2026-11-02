@@ -16,6 +16,7 @@
 import OpenAI from "openai";
 import { appendMessage, appendMessages, appendEvent } from "@/session/transcript.ts";
 import { claimSessionInbox, flushLeftoverToTranscript } from "./inbox.ts";
+import { clearQueuedWake } from "./agentWake.ts";
 import { createUUID } from "@/common/index.ts";
 import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
@@ -259,6 +260,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   由 finally flushLeftoverToTranscript 落盘，下轮 buildContextMessages 自然带入。
             const inboxTexts = claimSessionInbox(sessionId);
             if (inboxTexts.length > 0) {
+                // ★ 子代理完成唤醒（agentWake）：非空 claim = 完成汇报已由本 run 在跑消化，
+                //   撤销挂起的唤醒标记——否则 run 结束时 pumpWake 会再泵一次「纯确认」空唤醒轮。
+                clearQueuedWake(sessionId);
                 for (const t of inboxTexts) {
                     message.push({ role: 'user', content: t });
                     await appendMessage({ sessionId, role: 'user', content: t } as any);

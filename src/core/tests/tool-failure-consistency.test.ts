@@ -56,7 +56,8 @@ const ALLOWLIST = new Set([
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）
     "web.ts:723",
     // 工作流聚合报告内的步骤级中止标注（该步未执行，非工具调用失败）
-    "workflow.ts:192", "workflow.ts:209",
+    //（192/209 → 206/223：2026-11 子代理异步化重写编排段（isSync:false + 完成回调）把两处中止分支顶下移）
+    "workflow.ts:206", "workflow.ts:223",
 ]);
 
 /** 取表达式的静态文本前缀（模板取 head；toolFailure/asToolFailure 及其 .content 取值视作已带 ❌ 前缀；动态返回 null） */

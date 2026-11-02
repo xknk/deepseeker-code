@@ -1,6 +1,17 @@
 # Changelog
 ## 1.0.73
 
+子代理异步化与完成唤醒（路径 B）：**spawn_agent / run_workflow 异步启动**——首个工具结果即返回 agent_id / 工作流概要，子代理在后台执行；完成后**结构化汇报自动送达主会话并程序化唤醒新一轮 run**（主会话在跑 → 轮边界自然消化，idle → 自动续跑）——模型不再同步长阻塞等待，对标 CC 的后台 agent 体验。（版本号按线上迭代：Marketplace 线上 1.0.72，本版 1.0.73。）
+
+- **异步启动 + 完成自动唤醒**：两工具改 `isSync:false`（执行层首个 yield 即回、generator 挂起期间后台 drain）；完成回调推三态汇报（final/aborted/error），正文超 **4096** 字符截断并附 resume 追问提示，工作流只回流终态汇总（截断 **18000**，中间态不回流）；主 run 还在跑 → inbox 轮边界 claim 消化，已结束 → 哨兵 user 消息（`⟦DSC:AGENT-DONE⟧`，transcript 回放一眼看懂「主 agent 为何自己开始说话」）+ 程序化唤醒 run，CLI/VSCode 端有清晰唤醒标识。
+- **风暴防护与链路收敛**：同会话唤醒串行单飞（busy 泵），多个子代理同时完成**合并进同一次唤醒 run**（一次 claim 整队兑付）；唤醒 run 纯确认不再产生新唤醒；无宿主驱动时唤醒丢弃、inbox 保留永不丢失。
+- **缓存纪律（红线）**：唤醒 run 首条消息与 inbox 注入都是「既有前缀之后追加」，不重排/不改写历史——DS 前缀缓存跨轮照常命中；完成回调先于在飞释放，`waitSessionQuiescent` 真正意味着「无在跑 run、无待发唤醒」（batch 验收不与唤醒 run 赛跑）；子会话 trace 共文件设计不变。
+- **既有护栏原样 + 中止语义**：同 ID 在飞拒续跑（transcript 单写者）保留并加回归；子代理禁 `run_in_background` 名单不动；不新增轮询式取结果工具（wait 仍是长阻塞，路径 A 明确否决）。宿主中止只断本轮交付——执行层 `gen.return()` 拦在完成回调前，无中止后唤醒；唤醒 run 被中止则汇报产物保留、不引发新唤醒。
+- **三端接线 + batch 继承**：serve（headless 兜底驱动）/ CLI / VSCode 各自注册唤醒驱动（VSCode 代际守卫：旧轮 finally 不误清唤醒轮的中止柄与 busy 态）；batch 的唤醒 run **继承工单自动应答器与预算**、worktree 重挂，验收前等唤醒链收敛，任务定态先摘驱动防 teardown 竞态。
+- **守门**：新增 core `agent-async-wake.test.ts` **11 例**（异步返回零 LLM 调用/run 在跑回流/idle 唤醒/合并唤醒/截断/工具表语义钉死/中止双路/级联收敛/护栏回归/batch 继承），线路路由门控假 LLM 全链路驱动、零 API 成本零真 sleep；core 全量 **789 例** + cli **23 例**绿，三端 typecheck 绿。
+
+---
+
 看门狗双闭环：**挂机批处理看门狗（进展感知）** + **交互空转影子模式（影子先行）**。batch 侧给无人值守任务装上烧钱闸门——默认开启，`DEEP_SEEK_BATCH_WATCHDOG=0` 一键关闭（关闭路径与现状逐字节一致，守门钉死）；交互侧判定层照进真实 VSCode 会话，只记日志不干预，为黄灯版（2b）攒误报率数据——默认开启，`DEEP_SEEK_WATCHDOG_SHADOW=0` 关闭（零实例零文件）。
 
 - **batch·六条规则 + 健康信号短路**：R1 同参数重复调用（强）/ R2 只读空转（弱）/ R3 事件流断流（**唯一直杀**，5 分钟无任何事件）/ R4 烧钱无产出（弱）/ R5 写入方向偏差（弱，工单正文提取不到目标路径则整条自关）/ R6 净进展停滞（强，每 tick 在 worktree 跑 `git diff --numstat` 维护净变更行数时间序列，排除 lockfile、基线取 setup 完成后）；连续窗口 diff 增长 >20 行或新文件出现 → 健康短路直接判 normal（对 R2/R4 的反证，跳过二层调用）。
