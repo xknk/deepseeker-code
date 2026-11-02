@@ -8,7 +8,7 @@
 import { vscode, $, state } from "./state.js";
 import { S } from "./strings.js";
 import { escapeHtml } from "./markdown.js";
-import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs } from "./rows.js";
+import { addInfo, clearMessages, clearPendingImages, appendImagePreview, appendRefChip, clearPendingRefs, removePendingSelChip } from "./rows.js";
 import { toggleSessionsPanel, toggleForkPanel, toggleCheckpointsPanel } from "./panels.js";
 import { syncToolbar, toggleModePopover, updateModeToggle, modeRefs, showRingCard, hideRingCard } from "./toolbar.js";
 import { toggleModelPicker, closeModelPicker } from "./modals.js";
@@ -396,18 +396,27 @@ let outText = text;
 if (refs.length) {
 outText += "\n\n" + S.cpRefsHeader + "\n" + refs.map((r) => "- " + r.path).join("\n");
 }
+// ★ 选区注入：待发选区随 submit 回传 host（host 拼标签块进模型正文）；发送即消费——
+//   一次性附带（同贴图/引用），选区仍在编辑器里时下一条消息不自动重发（避免陈旧重背）
+const sel = state.pendingSel || null;
+const selPayload = sel ? { selection: sel } : {};
 // ★ 多模态：待发贴图随 submit 上送（vision 开启时才有积累），随后清空 chip 与暂存
 if (hasPending) {
 vscode.postMessage({
 type: "submit",
 text: outText,
 attachments: state.pendingImages.map((p) => ({ name: p.name, mime: p.mime, base64: p.base64, ...(p.savedPath ? { path: p.savedPath } : {}) })),
+...selPayload,
 });
 clearPendingImages();
 } else {
-vscode.postMessage({ type: "submit", text: outText });
+vscode.postMessage({ type: "submit", text: outText, ...selPayload });
 }
 if (refs.length) clearPendingRefs();
+if (sel) {
+state.pendingSel = null;
+removePendingSelChip();
+}
 input.value = "";
 autoGrow(input);
 input.focus();

@@ -2591,3 +2591,45 @@ body {
   object-fit: contain;
   background: rgba(128, 128, 128, 0.08);
 }
+
+/* ★ 选区折叠块（对标 CC「Selected code: file#L22-23 ⌄」）：随用户行展示附带选区，
+   summary=文件#行段 标签（muted 小字），展开为等宽原文（块内自滚，同贴日志类块）。 */
+.user-sel {
+  margin-top: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.user-sel summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.user-sel summary::-webkit-details-marker { display: none; }
+
+.user-sel summary:hover { color: var(--fg); }
+
+.user-sel summary .codicon {
+  font-size: 12px;
+}
+
+.user-sel pre {
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border-soft);
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+}

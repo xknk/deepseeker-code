@@ -11,7 +11,7 @@ import { S } from "./strings.js";
 import {
   appendRow, updateRow, removeRow, closeStreaming, ensureAssistantRow, ensureThinkingRow,
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
-  appendRefChip, clearPendingRefs,
+  appendRefChip, clearPendingRefs, renderPendingSel, removePendingSelChip,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
 } from "./rows.js";
 import { syncToolbar, syncContextRing, flashCompactRing } from "./toolbar.js";
@@ -49,6 +49,8 @@ if (row.status === "running") row.startedAt = row.startedAt || Date.now();
 if (evt.kind === "thinking") row.expanded = false;
 // ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
 if (Array.isArray(evt.attachments)) row.attachments = evt.attachments;
+// ★ 选区注入：用户行的选区折叠块字段透传（实时行与回放行同路而来）
+if (evt.sel && typeof evt.sel === "object") row.sel = evt.sel;
 // ★ 逐消息撤回：host 贴的检查点 id（有 = 该行 hover 显 ↺；排队轮无检查点不显）
 if (evt.cpId) row.cpId = String(evt.cpId);
 appendRow(row);
@@ -315,6 +317,8 @@ function onMessage(msg) {
       if (msg.kind === "thinking") row.expanded = false;
       // ★ 多模态：用户行的贴图缩略图字段透传
       if (Array.isArray(msg.attachments)) row.attachments = msg.attachments;
+      // ★ 选区注入：用户行的选区折叠块字段透传（与 sink 通道 row 分支同构）
+      if (msg.sel && typeof msg.sel === "object") row.sel = msg.sel;
       // ★ 逐消息撤回：检查点 id 同透传（回放行与实时行同构）
       if (msg.cpId) row.cpId = String(msg.cpId);
       appendRow(row);
@@ -389,6 +393,9 @@ function onMessage(msg) {
       clearMessages();
       clearPendingImages();   // ★ 多模态：跨会话清空未发送贴图，防串会话
       clearPendingRefs();     // ★ B1：跨会话清空未发送文件引用，防串会话
+      // ★ 选区注入：跨会话清空待发选区（chip 一并撤）
+      state.pendingSel = null;
+      removePendingSelChip();
       // ★ HUD 态同属会话：水位/压缩计数清零，环随之隐藏
       state.contextUsage = null;
       state.compactCount = 0;
@@ -434,6 +441,13 @@ function onMessage(msg) {
         }
       }
       if (paths.length) addInfo(S.evRefsConverted(paths));
+      break;
+    }
+    case "selectionChanged": {
+      // ★ 选区注入（对标 CC ide_selection）：host 维护的活动编辑器选区快照（null=无选区/已作废）。
+      //   chip 带 × 可忽略本次；发送即消费（composer doSend）——host 只在选区变化时重推。
+      state.pendingSel = msg.sel && typeof msg.sel === "object" ? msg.sel : null;
+      renderPendingSel();
       break;
     }
     case "bookmarks": {
