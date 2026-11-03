@@ -96,6 +96,10 @@ const createGatedProvider = () => {
             yield { kind: "tool_call_delta", index: i, id: `call_${calls.length}_${i}`, type: "function", nameDelta: tc.name };
             yield { kind: "tool_call_delta", index: i, argumentsDelta: JSON.stringify(tc.args ?? {}) };
         }
+        // ★ wire 保真：末包补 usage——真实 DS（include_usage）任何完成（含空正文收尾轮）都带 usage 末包。
+        //   不补的话，空收尾轮 = 0 内容 0 usage，会被 streamInference 空断流防御当服务端断流重试，
+        //   多出一次门控外的 streamChat 调用 → take() 等一条不存在的 lane → 与测试互等死锁（2026-11-03 实证）。
+        yield { kind: "usage", usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } };
     };
     const provider = {
         id: "gated",

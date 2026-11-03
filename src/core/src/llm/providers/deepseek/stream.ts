@@ -19,6 +19,15 @@ import { getModel, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } 
  *  env DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS 可覆盖；默认 120s（与请求 timeout 同口径，思考模式长间隔亦安全）。 */
 const STREAM_IDLE_TIMEOUT_MS = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS) || 120_000;
 
+/** content 空(null/undefined/'')且无 tool_calls 的 assistant 消息：DS API 拒收形状——
+ *  400 "Invalid assistant message: content or tool_calls must be set"（2026-11-03 生产 0d245bd0
+ *  实证 + 探针原样复现）。只认 assistant（user/system/tool 无此校验）；带 tool_calls 的不算空
+ *  （删它会留孤儿 tool 消息，换一种 400）。 */
+const isEmptyAssistantMsg = (m: any): boolean =>
+    m?.role === "assistant"
+    && !(typeof m.content === "string" && m.content.length > 0)
+    && !(Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
+
 /**
  * 历史轮 reasoning_content 剥离（DS API 出口单点，默认开；env DEEP_SEEK_REASONING_PASSTHROUGH=1 还原全量回传）。
  *  ★ 协议探针（2026-09-10，scripts/reasoning-passthrough-probe.ts 9 条 + reasoning-guard-probe.ts 6 变体
@@ -34,7 +43,14 @@ const STREAM_IDLE_TIMEOUT_MS = Number(process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_
  *  恒等条件（浅拷贝去字段，绝不原地改）：入参数组往往就是落盘消息本体，原地删除会损坏持久化记录。
  */
 export const stripHistoricalReasoning = (messages: Msg[]): Msg[] => {
-    if (process.env.DEEP_SEEK_REASONING_PASSTHROUGH === "1") return messages;
+    // ★ 空 assistant 自愈（出口单点，streamChat / summarize 两通道共用）：修复前已落盘的受害会话，
+    //   历史里带着 content:null 消息每次请求必 400；出口整条丢弃即恢复，无需迁移落盘数据。
+    //   正常会话无此形状 → filter 零命中，引用原样传递，缓存前缀零扰动。不 mutate 入参（入参即落盘
+    //   消息本体）。不受 REASONING_PASSTHROUGH 门控——那是 reasoning 协议实验开关，本清洗是正确性修复。
+    const wire = messages.some(isEmptyAssistantMsg)
+        ? messages.filter((m) => !isEmptyAssistantMsg(m))
+        : messages;
+    if (process.env.DEEP_SEEK_REASONING_PASSTHROUGH === "1") return wire;
     // ★ 协议细则（2026-09-10 守护轮 400 实证，scripts/reasoning-guard-probe.ts 六变体 + 真实会话 trace）：
     //   严格档的判定 = 【最后一条非 system 消息是 assistant】（草稿续写场景）——守护轮线形状是
     //   [.., 草稿 assistant, 尾部临时 system nudge]，末条虽是 system，DS 仍按严格校验：
@@ -48,18 +64,18 @@ export const stripHistoricalReasoning = (messages: Msg[]): Msg[] => {
     //   旧判定误走剥离分支，DS 仍按草稿续写严格校验，全剥即 400。纯文本相邻【不】触发（W9 + 生产
     //   31 对/23 会话零 400 实证），照走剥离保住 ~25% 请求瘦身收益。
     let lastNonSystem: any = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if ((messages[i] as any)?.role !== "system") { lastNonSystem = messages[i]; break; }
+    for (let i = wire.length - 1; i >= 0; i--) {
+        if ((wire[i] as any)?.role !== "system") { lastNonSystem = wire[i]; break; }
     }
-    const hasSplitToolTurn = messages.some((m, i) =>
+    const hasSplitToolTurn = wire.some((m, i) =>
         i > 0 && (m as any)?.role === "assistant"
-        && (messages[i - 1] as any)?.role === "assistant"
+        && (wire[i - 1] as any)?.role === "assistant"
         && Array.isArray((m as any).tool_calls) && ((m as any).tool_calls as unknown[]).length > 0);
-    if (lastNonSystem?.role === "assistant" || hasSplitToolTurn) return messages;
-    return messages.map((m) => {
-        const wire = m as any;
-        if (wire?.role !== "assistant" || typeof wire.reasoning_content !== "string") return m;
-        const copy = { ...wire };
+    if (lastNonSystem?.role === "assistant" || hasSplitToolTurn) return wire;
+    return wire.map((m) => {
+        const w = m as any;
+        if (w?.role !== "assistant" || typeof w.reasoning_content !== "string") return m;
+        const copy = { ...w };
         delete copy.reasoning_content;
         return copy as Msg;
     });

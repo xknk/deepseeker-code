@@ -312,7 +312,10 @@ describe("runAgent harness 回归（PHANTOM / EARLY_FINAL / TOOL_DIGEST / repeat
         const sid = `hr-phantom-${Date.now()}`;
         const { handle, ret } = await withReplay({
             turns: [
-                { kind: 'reply', content: null },                                        // 空包（无正文无工具）
+                // 空包（无正文无工具）但带 usage 末包——真实 API 的模型层空回复形态（include_usage 下
+                // 必有 usage）；无 usage 的空流 = 服务端断流，归 streamInference 空断流重试域（见
+                // empty-assistant-poison.test.ts），不触发 PHANTOM。
+                { kind: 'reply', content: null, usage: { prompt_tokens: 100, completion_tokens: 0, total_tokens: 100 } },
                 { kind: 'reply', content: '已完成：这是重试后的实质回答，长度超过三十个字符以免误触发其它守护。' },
             ],
         }, async (p) => driveAgent('随便回答点什么', sid).then((r) => ({ ...r, calls: p.calls })));

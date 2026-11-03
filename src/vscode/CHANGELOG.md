@@ -1,3 +1,12 @@
+## 1.0.77
+
+**修复：DS 服务故障期「空断流」把会话永久毒化——空 assistant 消息三层设防（生产 0d245bd0 实证）**。当日 DS 服务故障（非流式 200 空 body / 流式 500），一轮推理流跑了 126 秒 0 chunk 后「干净」结束：旧逻辑把它当 ok 完成，拼出 `content:null` 无 tool_calls 的 assistant 消息 push 进上下文并落盘——DS API 对此形状每次请求必 400（"Invalid assistant message: content or tool_calls must be set"，探针原样复现），该会话从此每轮 1 秒内被拒，**服务恢复也救不回**。三层修复各断一条毒化路径：
+
+- **根（streamInference）**：流结束若 0 内容 0 tool_call 0 usage——include_usage 下真实完成必有 usage 末包，此形态 = 服务端断流——按 stall 同款重试（共享 idleRetries 预算 2 次封顶，不放大请求）；重试耗尽仍空则 completed 如实带 `emptyStream` 标记（修复前 trace 记裸 ok:true，取证时完全看不出 round 13 是空流）。有 usage 的空回复不触发（模型层空回复归 PHANTOM 域，传输层断流才归本防御）。
+- **防御（runAgent 主循环）**：content 空(null)且无 tool_calls 的 assistant 消息**不 push 不落盘**——落盘即毒化（后续 run 重建上下文必带它）。跳过后走既有 PHANTOM nudge 重试，控制流不变；`markDegraded('emptyAssistantSkip')` 进结算单可观测。该轮 reasoning_content 一并丢弃（UI 已实时见过思考增量；落盘即毒化，两害取其轻）。
+- **自愈（deepseek 出口单点）**：`stripHistoricalReasoning` 入口先整条丢弃历史中的空 assistant（streamChat / summarize 两通道共用）——修复前已落盘的受害会话**无需迁移自动恢复**；正常会话零命中、引用原样、缓存前缀零扰动；不受 REASONING_PASSTHROUGH 实验开关门控（正确性 ≠ 协议实验）。
+- **守门**：新增 `empty-assistant-poison.test.ts` 8 例——断流重试恢复 / 预算封顶 + emptyStream 标记 / 有 usage 不误拦 / runAgent 端到端零空 assistant 落盘且上下文不膨胀 / 出口自愈四态（中毒、严格档、零扰动、PASSTHROUGH 不豁免）；replay 的 PHANTOM 剧本空包轮补 usage 末包（对齐真实 wire：模型层空回复也带 usage）。core 全量 **825 例**绿 + tsc 零错误。
+
 # Changelog
 ## 1.0.76
 

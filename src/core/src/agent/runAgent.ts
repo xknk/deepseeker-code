@@ -375,17 +375,29 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // as any：Msg(ChatCompletionMessageParam) 是联合类型，.content/.tool_calls 不在所有成员上，
             //   直接访问触发「不存在属性」；此处一律按 any 窄化访问（与原 .tool_calls as any 同惯法）。
             const assistantMessage = infResult.assistantMessage as any;
-            message.push(assistantMessage);
-            // ★ D5 三轮：消费内层返回值——assistant 落盘失败（每轮必经；丢的是对话本体而非边界标记，
-            //   内存有/磁盘无，重启后历史缺行）可观测，GUI 宿主下内层 warn 用户不可见。
-            try {
-                const ok = await appendMessage({ ...assistantMessage, sessionId } as any);
-                if (!ok) markDegraded('appendMessage(assistant)');
-            } catch { markDegraded('appendMessage(assistant)'); /* 兜底：违反吞错契约的异常信号 */ }
-            // 存储最后一条消息，以供后面返回使用
-            // ★ 多模态防御：assistant content 按协议恒 string（数组会污染后续字符串拼接/回显），非 string 不入
-            if (typeof assistantMessage.content === 'string' && assistantMessage.content) {
-                lastContent = assistantMessage.content;
+            // ★ 空响应防御（2026-11-03 生产 0d245bd0 实证，DS 服务故障期）：content 空(null)且无
+            //   tool_calls 的 assistant 消息【不 push 不落盘】——DS API 校验 assistant 必须有 content
+            //   或 tool_calls，带上即 400；且一旦落盘，本会话每个后续 run 重建上下文都带它，服务恢复
+            //   也救不回（当轮 400 三连实锤）。跳过后走下方既有无工具分支 interceptFinal → PHANTOM
+            //   nudge 重试，控制流不变；该轮 reasoning_content 一并丢弃（UI 已实时见过思考增量；
+            //   落盘即毒化，两害取其轻）。出口侧另有 stripHistoricalReasoning 兜底清洗历史存量。
+            const emptyAssistant = !(typeof assistantMessage.content === 'string' && assistantMessage.content.length > 0)
+                && !(Array.isArray(assistantMessage.tool_calls) && assistantMessage.tool_calls.length > 0);
+            if (emptyAssistant) {
+                markDegraded('emptyAssistantSkip');   // D5 可观测：receipt 可见空响应曾发生且被跳过
+            } else {
+                message.push(assistantMessage);
+                // ★ D5 三轮：消费内层返回值——assistant 落盘失败（每轮必经；丢的是对话本体而非边界标记，
+                //   内存有/磁盘无，重启后历史缺行）可观测，GUI 宿主下内层 warn 用户不可见。
+                try {
+                    const ok = await appendMessage({ ...assistantMessage, sessionId } as any);
+                    if (!ok) markDegraded('appendMessage(assistant)');
+                } catch { markDegraded('appendMessage(assistant)'); /* 兜底：违反吞错契约的异常信号 */ }
+                // 存储最后一条消息，以供后面返回使用
+                // ★ 多模态防御：assistant content 按协议恒 string（数组会污染后续字符串拼接/回显），非 string 不入
+                if (typeof assistantMessage.content === 'string' && assistantMessage.content) {
+                    lastContent = assistantMessage.content;
+                }
             }
 
             // 1、如果本次无调用工具或者工具调用完成后，则主动跳出循环

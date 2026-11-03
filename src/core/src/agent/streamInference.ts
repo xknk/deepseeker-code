@@ -209,6 +209,23 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                             break;
                     }
                 }
+                // ★ 空断流防御（2026-11-03 生产 0d245bd0 实证，DS 服务故障期）：流"干净"结束但 0 内容、
+                //   0 tool_call、0 usage——include_usage 下真实完成必有 usage 末包，此形态 = 服务端断流
+                //   （当日实测：126s 0 chunk 后连接正常关闭，连异常都不抛）。旧逻辑当 completed 返回 →
+                //   content:null 的 assistant 消息进历史 → 后续请求 400 "Invalid assistant message:
+                //   content or tool_calls must be set"。处置：按 stall 同款重试（共享 idleRetries 预算，
+                //   防长故障下请求放大）；耗尽则如实带 emptyStream 标记返回 completed，由主循环空响应
+                //   防御（不落盘）+ PHANTOM nudge 接管收尾。
+                //   ★ 必须让位于中止：消费循环因 signal.aborted break 出来时同样是 0 内容 0 usage，
+                //   此处若抢先重试 = 拿已中止信号再发请求（agent-async-wake 中止演练死锁实证）——
+                //   与 API 瞬时错误重试同款 !signal?.aborted 门控，中止路径交下方既有 aborted 分支。
+                if (!signal?.aborted && !contentBuf && toolCallsBuf.size === 0 && !lastUsage && idleRetries < MAX_STREAM_RETRIES) {
+                    idleRetries++;
+                    if (reasoningBuf) yield { type: 'text.reset' };   // 思考增量已推前端，重试前重置防重复
+                    console.warn(`⚠️ 流空结束（0 内容 0 usage，疑似服务端断流），第 ${idleRetries}/${MAX_STREAM_RETRIES} 次重试...`);
+                    contentBuf = ""; reasoningBuf = ""; toolCallsBuf.clear(); lastUsage = undefined;
+                    continue;
+                }
                 break; // 流正常结束（含用户中止经 provider 干净 break）→ 跳出重试循环
             } catch (streamErr) {
                 // 用户中止：provider 已干净 break 不会到此；防御性判断交外层 signal.aborted 分支处理
@@ -338,7 +355,10 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         events({
             sessionId,
             eventType: 'llm.response',
-            metadata: { depth, decisionSource: llmDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model },
+            // ★ emptyStream 标记：0 内容 0 usage 的退化完成（重试耗尽仍空）——修复前该形态记 ok:true
+            //   无任何异常痕迹（0d245bd0 取证时 trace 里完全看不出 round 13 是空流），此处如实回报。
+            metadata: { depth, decisionSource: llmDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model,
+                ...(!contentBuf && toolCallsBuf.size === 0 && !lastUsage ? { emptyStream: true } : {}) },
             usage: {
                 prompt_tokens: lastUsage?.prompt_tokens,
                 completion_tokens: lastUsage?.completion_tokens,
