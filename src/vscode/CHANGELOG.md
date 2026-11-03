@@ -1,6 +1,10 @@
 # Changelog
 ## 1.0.73
 
+**修复：VSCode 端存储分桶键错挂（会话/trace/undo/usage 全部落错桶）**——扩展文件顶部的静态 import 链会在主根 chdir **之前**求值 core config，存储隔离键被钉死成扩展宿主 cwd（即 VSCode 安装目录，「App-Microsoft VS Code」桶）。2026-10-21 的切根修复只覆盖了**显式切换**路径，首次挂载仍错——真实数据实锤 10 月 78/98 个 run 归因错位。现 activate 注入重导钩子后**无条件按已解析主根重导一次**（幂等，CLI 形态零行为差异），守门测试源码扫描钉死该兜底调用。注意：历史 VSCode 会话仍留在旧桶（磁盘不迁移），修复后新会话按项目正确分桶。
+
+---
+
 子代理异步化与完成唤醒（路径 B）：**spawn_agent / run_workflow 异步启动**——首个工具结果即返回 agent_id / 工作流概要，子代理在后台执行；完成后**结构化汇报自动送达主会话并程序化唤醒新一轮 run**（主会话在跑 → 轮边界自然消化，idle → 自动续跑）——模型不再同步长阻塞等待，对标 CC 的后台 agent 体验。（版本号按线上迭代：Marketplace 线上 1.0.72，本版 1.0.73。）
 
 - **异步启动 + 完成自动唤醒**：两工具改 `isSync:false`（执行层首个 yield 即回、generator 挂起期间后台 drain）；完成回调推三态汇报（final/aborted/error），正文超 **4096** 字符截断并附 resume 追问提示，工作流只回流终态汇总（截断 **18000**，中间态不回流）；主 run 还在跑 → inbox 轮边界 claim 消化，已结束 → 哨兵 user 消息（`⟦DSC:AGENT-DONE⟧`，transcript 回放一眼看懂「主 agent 为何自己开始说话」）+ 程序化唤醒 run，CLI/VSCode 端有清晰唤醒标识。

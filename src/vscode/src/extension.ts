@@ -147,7 +147,9 @@ const applyProjectRoot = (root: string): boolean => {
   process.env.WORKSPACE_ROOT = root;
   // ★ 存储隔离键跟随切根（2026-10-21）：会话/trace/undo/worktree/用量按 userWorkspaceDir 分桶，
   //   该键在 core config 模块加载期按当时 cwd 算定——切根不重导，新会话仍落旧桶，历史列表跨项目串显。
-  //   activate 首次调用于 core import 之前（钩子未注入=无需重导，IIFE 按已 chdir 的 cwd 算对）。
+  //   activate 首次调用（本函数在 core import 之前）时钩子未注入=跳过；首次挂载的键由
+  //   activate 第 4 步钩子注入后的无条件 rekeyWorkspaceStorage(workspaceRoot) 兜住（2026-11-03 修，
+  //   静态 import 链会抢在 chdir 前求值 config，模块加载期 cwd 不可信，勿依赖）。
   rekeyWorkspaceStorage?.(root);
   return true;
 };
@@ -930,7 +932,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const sit = cfg.get<number>("streamIdleTimeoutMs");
   if (sit && sit > 0) process.env.DEEP_SEEK_STREAM_IDLE_TIMEOUT_MS = String(sit);
 
-  // —— 4. 加载 core 模块（★ 已在 chdir 之后，模块加载期 cwd 正确） ——
+  // —— 4. 加载 core 模块（chdir 已完成；但 config 可能已被顶部静态 import 链提前加载，
+  //     模块加载期 cwd 口径不可信——存储分桶键以下方钩子重导为准，勿依赖此处 cwd） ——
   const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }, { appConfig: coreAppConfig, deriveWorkspaceKey }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
@@ -946,6 +949,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   rekeyWorkspaceStorage = (root: string) => {
     coreAppConfig.userWorkspaceDir = deriveWorkspaceKey(root);
   };
+  // ★ 首次挂载也必须重导（2026-11-03 修）：本文件顶部有 core 的**运行时静态 import 链**
+  //   （extension.ts → session/contentParts.ts → llm/visionCapability.ts → config/index.ts），
+  //   config 在扩展模块加载期（chdir 之前）即被求值，userWorkspaceDir 钉死扩展宿主 cwd
+  //   （实测 = VSCode 安装目录 → 「App-Microsoft VS Code」桶，VSCode 端会话/trace/undo/usage
+  //   全部错落）。下方 await import("@/config/index.ts") 拿到的是缓存实例，cwd 已无关；
+  //   故注入钩子后无条件按已解析主根重导一次（幂等：CLI 形态下 deriveWorkspaceKey(root)
+  //   与模块初值同键，赋值零行为差异）。workspace-key.test.ts 源码扫描钉此调用。
+  //   （workspaceRoot 此时必非空——activate 对无根/切根失败已提前 return，守卫仅满足 TS 收窄）
+  if (workspaceRoot) rekeyWorkspaceStorage(workspaceRoot);
   // 观测/命令目录函数提升为模块级（handleMessage 是模块级函数，webview 的 /usage 等命令要用）
   inspectUsage = inspect.inspectUsage;
   inspectContext = inspect.inspectContext;

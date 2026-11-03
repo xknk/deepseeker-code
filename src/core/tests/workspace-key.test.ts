@@ -10,8 +10,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 process.env.DEEPSEEKER_CODE_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-wskey-"));
 
@@ -64,5 +66,22 @@ describe("会话项目根盖章（projectRoot）", () => {
         const hit = list.find((s) => s.sessionId === id);
         assert.ok(hit, "会话出现在本桶枚举中");
         assert.equal(hit.projectRoot, process.cwd(), "摘要透出 projectRoot");
+    });
+});
+
+describe("VSCode 首次挂载重导守门（源码扫描，kernel-audit 风格）", () => {
+    // 2026-11-03 修的实锤 bug：extension.ts 顶部静态 import 链（→ contentParts → visionCapability →
+    // config）抢在 activate chdir 之前求值 config，userWorkspaceDir 钉死扩展宿主 cwd（实测
+    // 「App-Microsoft VS Code」桶，VSCode 端会话/trace/undo/usage 全部错落）；而 activate 首次
+    // applyProjectRoot 调用在钩子注入之前、拿不到 rekey。守门钉死「注入钩子后无条件按主根重导一次」
+    // 这行兜底调用存在——删了它 VSCode 端分桶就静默回到错桶（2026-10 真实数据 78/98 run 受害）。
+    it("activate 注入 rekeyWorkspaceStorage 后必须无条件按已解析主根重导一次", () => {
+        const src = readFileSync(
+            path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "vscode", "src", "extension.ts"),
+            "utf-8",
+        );
+        assert.match(src, /rekeyWorkspaceStorage = \(root: string\)/, "钩子注入仍在");
+        assert.match(src, /rekeyWorkspaceStorage\(workspaceRoot\)/, "★ 首次挂载兜底重导（2026-11-03 修）必须在注入后调用");
+        assert.match(src, /rekeyWorkspaceStorage\?\.\(root\);/, "显式切根路径跟随重导仍在");
     });
 });
