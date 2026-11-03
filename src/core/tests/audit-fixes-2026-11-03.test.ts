@@ -6,6 +6,11 @@
  *  - D2 自收敛判据对齐：「索引满编 + 叙述极短」的槽（旧整槽口径必触发）不再白付一次
  *    无收益的 aux 自收敛调用——判据只量叙述段，与「只改叙述段」的动作对齐；
  *  - D5 收尾聚合健康信号：人为让旁路（结算单 UI）抛错 → 聚合 warn 含组件名、主流程不被击垮；
+ *  - D5 二轮（4f15287 复核）：外层 catch 是死信号——事件行/trace/用量/inbox 的内层早就吞了错。
+ *    二轮内层如实回报（appendEvent/recordUsageRun → boolean、flushTraceBuffer → 失败计数、
+ *    flushLeftover → {flushed, failed}），runAgent finally 按返回值聚合。守门用 EISDIR 毒化法
+ *    （文件位预建成目录 → appendFile EISDIR，跨平台稳定）打通真实落盘失败路径，反向档断言
+ *    「禁用开关 ≠ 降级」（DEEPSEEKER_CODE_USAGE_LOG=0 的加载期快照在独立文件 d5-disabled）；
  *  - D1「不猜原因」的文案断言在 transcript-events.test.ts（recoverSession reason / 孤儿占位档）。
  *
  *  约定：涉及 transcript/store 落盘，静态 import 会先于 env 沙盒设置——故一律在 env 就位后
@@ -28,7 +33,13 @@ const { estimateTokens } = await import("@/session/contextCore.ts");
 const { setActiveProvider, resetActiveProvider } = await import("@/llm/model.ts");
 const { createReplayProvider } = await import("@/llm/providers/replay/index.ts");
 const { runAgent } = await import("@/agent/runAgent.ts");
-const { readTranscriptLines } = await import("@/session/transcript.ts");
+const { readTranscriptLines, appendEvent, appendMessage } = await import("@/session/transcript.ts");
+const { getTranscriptPath } = await import("@/session/store.ts");
+const { getUsageLogPath, recordUsageRun } = await import("@/observability/usageLog.ts");
+const { getTraceStorePath } = await import("@/observability/store.ts");
+const { appendTraceEvent, flushTraceBuffer } = await import("@/observability/trace.ts");
+const { pushSessionInbox, flushLeftoverToTranscript } = await import("@/agent/inbox.ts");
+const { appConfig } = await import("@/config/index.ts");
 
 // ==================== 夹具 ====================
 
@@ -251,5 +262,143 @@ describe("D5 收尾聚合健康信号（审查报告 2026-11-03 §6-3）", () =>
         // 结算单之后的收尾段照常执行：run.end 事件行已落盘（顺序：receipt → Stop hook → 校准）
         const lines = await readTranscriptLines("d5-degraded-warn");
         assert.ok(lines.some((l: any) => l?.dscEvent === "run.end"), "run.end 事件行不受结算单失败影响");
+    });
+});
+
+// ==================== D5 二轮：内层如实回报（EISDIR 毒化守门） ====================
+
+/** recordUsageRun 最小入参（直接单测通道；workspace 由模块统一盖章，调用方不传） */
+const makeUsageRecord = (sessionId: string) => ({
+    v: 1 as const,
+    ts: new Date().toISOString(),
+    sessionId,
+    runId: `r-${sessionId}`,
+    depth: 0,
+    model: "fake",
+    stopReason: "normal" as const,
+    rounds: 1,
+    durationMs: 1,
+    tools: {},
+});
+
+/** EISDIR 毒化：把「本应是文件」的路径预建成目录 → appendFile EISDIR（权限位法跨平台不稳，此法稳定）。
+ *  先 rm（file 兼容 dir）再 mkdir——同进程前面的健康用例可能已在同路径写过真文件。 */
+const poisonAsDir = async (p: string): Promise<void> => {
+    await fs.rm(p, { force: true, recursive: true });
+    await fs.mkdir(p, { recursive: true });
+};
+const usageMonthPath = (): string => getUsageLogPath(new Date().toISOString().slice(0, 7));
+
+describe("D5 二轮单元档：内层吞错组件如实回报成败（外层 catch 是死信号）", () => {
+    it("毒化路径上 appendEvent / appendMessage 回 false、flushLeftover 聚合失败数", async () => {
+        const sid = `d5u-${Date.now()}`;
+        await poisonAsDir(getTranscriptPath(sid));
+        assert.equal(await appendEvent(sid, { dscEvent: "run.end", runId: "r1", stopReason: "normal", rounds: 1 }), false, "事件行落盘失败如实回 false（旧 void 签名外层永远收不到）");
+        assert.equal(await appendMessage({ sessionId: sid, role: "user", content: "x" } as any), false, "消息行落盘失败如实回 false");
+        // inbox flush 聚合：队列 2 条全部落盘失败 → {flushed:0, failed:2}（不再「2 条已写入」假成功）
+        assert.ok(pushSessionInbox(sid, "补充一"));
+        assert.ok(pushSessionInbox(sid, "补充二"));
+        assert.deepEqual(await flushLeftoverToTranscript(sid), { flushed: 0, failed: 2 }, "失败条数聚合如实上报");
+    });
+
+    it("毒化路径上 flushTraceBuffer 回失败计数 1（缓冲后立即毒化、立即 flush——不给 200ms 兜底 timer 竞态窗口）", async () => {
+        const tid = `d5u-trace-${Date.now()}`;
+        await appendTraceEvent({ sessionId: tid, eventType: "llm.request", metadata: {} } as any); // 普通事件不触发即时档
+        await poisonAsDir(await getTraceStorePath(tid));
+        assert.equal(await flushTraceBuffer(tid), 1, "毒化会话失败计数 1（健康会话不计入）");
+    });
+
+    it("健康路径上四个组件如实回成功（毒化对照：同一断言的 green 侧）", async () => {
+        const sid = `d5u-ok-${Date.now()}`;
+        assert.equal(await appendEvent(sid, { dscEvent: "run.end", runId: "r2", stopReason: "normal", rounds: 1 }), true);
+        assert.equal(await appendMessage({ sessionId: sid, role: "user", content: "ok" } as any), true);
+        assert.equal(await flushTraceBuffer(`d5u-ok-trace-${Date.now()}`), 0, "空队/全成功 → 计数 0");
+        assert.equal(await recordUsageRun(makeUsageRecord(sid)), true);
+        // 落盘实证：用量行真的写进了月分片
+        const raw = await fs.readFile(usageMonthPath(), "utf-8");
+        assert.ok(raw.includes(sid), "recordUsageRun(true) 应有对应盘上行");
+    });
+
+    it("毒化路径上 recordUsageRun 回 false（健康用例之后跑——毒化不反噬前面的 green 断言）", async () => {
+        await poisonAsDir(usageMonthPath());
+        assert.equal(await recordUsageRun(makeUsageRecord(`d5u-${Date.now()}`)), false, "用量落盘失败如实回 false（双重死的内层已修）");
+    });
+});
+
+describe("D5 二轮集成档：EISDIR 毒化打通四个返回值降级信号（warn + receipt 双通道）", () => {
+    it("transcript/trace/usage 三处毒化 + inbox 排队 → degraded 含全部四个组件名，主流程不被击垮", async () => {
+        const sid = `d5i-${Date.now()}`;
+        await poisonAsDir(getTranscriptPath(sid));
+        await poisonAsDir(await getTraceStorePath(sid));
+        await poisonAsDir(usageMonthPath());
+
+        const script = {
+            turns: [{
+                kind: "reply" as const,
+                content: "D5 二轮注入：三处盘上路径毒化，收尾照常。",
+                usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cached_tokens: 0 },
+            }],
+        };
+        const warns: string[] = [];
+        const receipts: any[] = [];
+        const origWarn = console.warn;
+        console.warn = (...a: any[]) => { warns.push(a.map(x => (typeof x === "string" ? x : String(x))).join(" ")); };
+        let finalSeen = false;
+        // trace 缓冲续注：20ms interval 持续向毒化会话缓冲普通事件行。200ms 兜底 timer 可能在 run
+        // 中途冲掉一批（毒化路径上丢弃），但 interval 会立刻补上——保证 finally drain 时缓冲必有货，
+        // 竞态窗口被结构性消除（timer 冲批 → interval 补批 → drain 必撞 EISDIR）。
+        const refill = setInterval(() => {
+            void appendTraceEvent({ sessionId: sid, eventType: "llm.request", metadata: {} } as any);
+        }, 20);
+        try {
+            setActiveProvider(createReplayProvider(script as any));
+            const message: any[] = [{ role: "system", content: "SYS" }, { role: "user", content: "go" }];
+            for await (const ev of runAgent(message, {
+                sessionId: sid, cwd: SANDBOX,
+                events: (async () => { }) as any,
+                toolSchemas: [], modelWindow: 250000, keepRecentUnits: 5, compactRatio: 0.72,
+                parentSystemPrompt: "", depth: 0,
+                onUIEvent: (e: any) => { if (e?.type === "run.receipt") receipts.push(e); },
+            } as any)) {
+                if ((ev as any)?.type === "final") {
+                    finalSeen = true;
+                    // ★ inbox 条目在 final 事件消费点入队：generator 挂起在本循环体、恢复即进 finally——
+                    //   此刻入队的条目躲过了轮边界认领，只有收尾 flushLeftover 能认领它（撞毒化路径 → failed=1）。
+                    assert.ok(pushSessionInbox(sid, "final 后排队——只有收尾 flush 能带走的补充输入"), "inbox 入队成功");
+                }
+            }
+        } finally {
+            clearInterval(refill);
+            resetActiveProvider();
+            console.warn = origWarn;
+            clearHooks();
+        }
+        assert.ok(finalSeen, "旁路集体降级不击垮收尾（final 照常 yield）");
+        const expected = ["flushLeftoverToTranscript", "appendEvent(run.end)", "flushTraceBuffer", "recordUsageRun"];
+        const allWarn = warns.join("\n");
+        assert.ok(allWarn.includes("旁路降级"), `聚合 warn 应存在，实得：${JSON.stringify(warns)}`);
+        for (const name of expected) {
+            assert.ok(allWarn.includes(name), `聚合 warn 应含 ${name}`);
+        }
+        assert.equal(receipts.length, 1, "结算单照常发出（用户可见通道）");
+        assert.ok(Array.isArray(receipts[0].degraded), "receipt 应带 degraded 数组");
+        for (const name of expected) {
+            assert.ok(receipts[0].degraded.includes(name), `receipt.degraded 应含 ${name}`);
+        }
+    });
+});
+
+describe("D5 二轮反向档：禁用开关 ≠ 降级（误报即狼来了）", () => {
+    it("transcriptEvents 关闭：毒化路径上 appendEvent 仍回 true（有意 no-op 未触盘）；消息行无开关，对照回 false", async () => {
+        const sid = `d5off-${Date.now()}`;
+        await poisonAsDir(getTranscriptPath(sid)); // 路径已坏——若关闭路径仍触盘必回 false
+        const prev = appConfig.transcriptEvents;
+        appConfig.transcriptEvents = false;
+        try {
+            assert.equal(await appendEvent(sid, { dscEvent: "run.end", runId: "r3", stopReason: "normal", rounds: 1 }), true, "关闭 = 有意 no-op，返回成功");
+            assert.equal(await appendMessage({ sessionId: sid, role: "user", content: "x" } as any), false, "对照组：消息行无禁用开关，同一路径如实回 false");
+        } finally {
+            appConfig.transcriptEvents = prev;
+        }
     });
 });

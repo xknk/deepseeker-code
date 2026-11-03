@@ -1,4 +1,14 @@
 # Changelog
+## 1.0.75
+
+**修复：收尾降级观测从「外层猜」改为「内层如实回报」（D5 二轮）**。1.0.74 的 degraded 聚合把 push 接在 run 收尾旁路的外层 catch 上，但复核发现：被立案点名的四个组件（事件行 / trace / 用量日志 / inbox 落盘）全都在函数**内层**就吞掉错误只打 warn——外层 catch 永不触发，是接了假线的死信号（用量日志还叠加 `void` fire-and-forget，异步拒绝连同步 catch 都进不了，双重死）。纯内存的结算单 UI 通道是唯一真可达档，上一轮恰好只测了它。本轮让内层如实回报成败、外层按返回值聚合，守门测试改用 EISDIR 毒化法打通真实落盘失败路径。
+
+- **内层契约升级**：`appendEvent` / `appendMessage` / `recordUsageRun` 返回 `boolean`（落盘成败），`flushTraceBuffer` 返回失败会话数，`flushLeftoverToTranscript` 返回 `{flushed, failed}` 聚合——吞错照旧（旁路绝不击垮收尾），但调用方终于拿得到真话。禁用开关（`transcriptEvents` 关 / `DEEPSEEKER_CODE_USAGE_LOG=0`）返回成功：有意 no-op ≠ 降级，误报即狼来了。
+- **runAgent 收尾接线**：`recordUsageRun` 的 `void` 改 `await`（不 await 拿不到返回值，双重死只修一重）；四个返回值旁路按返回值 push 进 degraded，外层 catch 保留作兜底（防内层容错被未来改动破坏）并去重防双报。组件名沿用旧名，grep 定位不变。
+- **守门重构**：EISDIR 毒化法（把本应是文件的路径预建成目录 → appendFile EISDIR，跨平台稳定）三处毒化 + inbox final 后入队，单测/集成双档断言 degraded 含全部四个组件名（warn + 结算单 `degraded` 字段双通道）；反向档在独立进程断言「禁用通道毒化也不得报降级、无开关的 trace 毒化仍必须报」（防全绿假象）。1.0.74 的结算单抛错档保留，降级为合法可达档之一。
+- **顺手清理**：恢复层运行时 warn 去掉「崩溃确认」措辞（与 1.0.74 的不猜原因原则对齐）；孤儿修复参数与类型字段 `confirmedCrash` → `confirmedUnclosed`（事件只能确认「未闭合」，确认不了成因）；transcript.ts 一段缩进漂移补完。
+- **守门**：新增 `audit-fixes-2026-11-03.test.ts` 6 例 + `audit-fixes-d5-disabled-2026-11-03.test.ts` 3 例（独立进程，env 先于模块加载）；core 全量 **815 例**绿 + tsc 零错误。
+
 ## 1.0.74
 
 **修复：运维与成本审查报告五项——hook 事件配对 / 收尾降级聚合可见 / 恢复文案中性化 / 压缩自收敛判据对齐 / 注释纠偏**。全部属「系统现在跑得好，继续演进会踩」的契约与可观测性修复，无功能行为变更；工具表固定成本（D4）经三轮裁定维持挂账不动——前缀缓存实价 1/50 吸收钱维，窗口占用由压缩机制渐进兜底。

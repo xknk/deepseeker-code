@@ -55,15 +55,23 @@ export const claimSessionInbox = (sessionId: string): string[] => {
 
 /**
  * run 结束仍未认领 → 逐条落盘成 user 消息（下轮 buildContextMessages 自然带入）。
- * @returns 落盘条数（0 = 队列本空 / 开关关）
+ * ★ D5 二轮（2026-11-03）：appendMessage 内层吞错只回 boolean——此处聚合失败条数如实上报，
+ *   不再「N 条已写入」的假成功；runAgent finally 按 failed>0 聚合 degraded（外层 catch 是死信号）。
+ * @returns {flushed, failed}（两者恒 0 = 队列本空 / 开关关）
  */
-export const flushLeftoverToTranscript = async (sessionId: string): Promise<number> => {
+export const flushLeftoverToTranscript = async (sessionId: string): Promise<{ flushed: number; failed: number }> => {
     const texts = claimSessionInbox(sessionId);
+    let failed = 0;
     for (const t of texts) {
-        await appendMessage({ sessionId, role: 'user', content: t } as any);
+        const ok = await appendMessage({ sessionId, role: 'user', content: t } as any);
+        if (!ok) failed++;
     }
     if (texts.length > 0) {
-        console.warn(`[inbox] 会话 ${sessionId} 结束时 ${texts.length} 条补充输入未认领，已写入 transcript（下轮自动带入）`);
+        if (failed > 0) {
+            console.warn(`[inbox] 会话 ${sessionId} 结束时 ${failed}/${texts.length} 条补充输入落盘失败（transcript 侧故障，下轮无法带入）`);
+        } else {
+            console.warn(`[inbox] 会话 ${sessionId} 结束时 ${texts.length} 条补充输入未认领，已写入 transcript（下轮自动带入）`);
+        }
     }
-    return texts.length;
+    return { flushed: texts.length - failed, failed };
 };

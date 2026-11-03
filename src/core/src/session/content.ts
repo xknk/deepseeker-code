@@ -114,7 +114,8 @@ export const buildContextMessages = async (sessionId: string, currentUserMsg: Ms
         return enforceVisionGate(result, modelId)
     }
     // ★ 先 slice 后 repair（顺序不可换）：孤儿占位行会插入消息流，若先修后切会移位归档计数基准。
-    //   confirmedCrash 由事件判定升级档位：崩溃确认 → 占位文案精确；legacy/闭合 → 与改造前文案一致。
+    //   confirmedUnclosed 由事件判定升级档位：事件确认未闭合 → 占位文案区分（成因不指认，D1）；
+    //   legacy/闭合 → 与改造前文案一致。
     //   repair 后再入 decayOldToolResults 衰减（assistant 文本/方案不衰减，仅旧 tool content 截断）。
     const repair = repairOrphanToolCalls(messageAll, recovery.interruption.kind === 'crashed')
     result.push(...decayOldToolResults(repair.msgs))

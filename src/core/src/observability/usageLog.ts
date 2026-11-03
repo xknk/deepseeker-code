@@ -49,9 +49,12 @@ export const getUsageLogPath = (month: string): string => path.join(usageDir(), 
 /**
  * 追加一条 run 记录（每 run 一次的收尾路径，非热路径；全容错——旁路计量绝不击垮 run 收尾链路）。
  * workspace 由本模块统一盖章（appConfig 读侧单点），调用方不传。
+ * ★ 返回落盘成败（D5 二轮 2026-11-03）：停用开关（DEEPSEEK_CODE_USAGE_LOG=0）路径返回 true——
+ *   有意 no-op ≠ 降级；落盘失败返回 false。调用方须 await（runAgent 原 void fire-and-forget
+ *   连同本函数内层吞错构成「双重死」——异步拒绝进不了同步 catch、内层吞错进不了外 catch）。
  */
-export const recordUsageRun = async (rec: Omit<UsageRunRecord, "workspace"> & { workspace?: string }): Promise<void> => {
-    if (USAGE_DISABLED) return;
+export const recordUsageRun = async (rec: Omit<UsageRunRecord, "workspace"> & { workspace?: string }): Promise<boolean> => {
+    if (USAGE_DISABLED) return true;
     try {
         const full = { workspace: appConfig.userWorkspaceDir, ...rec } as UsageRunRecord;
         const month = (full.ts || new Date().toISOString()).slice(0, 7);
@@ -61,8 +64,10 @@ export const recordUsageRun = async (rec: Omit<UsageRunRecord, "workspace"> & { 
             ensuredDir = dir;
         }
         await fs.appendFile(getUsageLogPath(month), JSON.stringify(full) + "\n", "utf-8");
+        return true;
     } catch (e) {
         console.warn("⚠️ [usageLog] 使用日志落盘失败（不影响主业务）:", e instanceof Error ? e.message : e);
+        return false; // D5 二轮：吞错但如实回报成败，外层按返回值聚合 degraded
     }
 }
 

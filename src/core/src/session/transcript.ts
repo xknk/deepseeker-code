@@ -131,7 +131,11 @@ const appendLineWithRetry = async (p: string, payload: string, handle?: fs.FileH
     }
 }
 
-export const appendMessage = async (entry: MessageWithId): Promise<void> => {
+/**
+ * 追加一条消息行。★ 返回落盘成败（D5 二轮 2026-11-03）：内层容错只 warn 不抛，调用方（inbox flush
+ * 聚合等）靠返回值如实感知降级——外层 catch 永不触发的「死信号」病根见 runAgent finally 注释。
+ */
+export const appendMessage = async (entry: MessageWithId): Promise<boolean> => {
     try {
         await ensureSessionsDir(entry.sessionId);
 
@@ -146,13 +150,15 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
         // ★ 编码体检：内容含 U+FFFD（无效 UTF-8 的替换符）多半是 Windows 子进程 GBK 输出被误解码，
         // 或用户粘贴了乱码文本。不擅改内容，原样落盘 + 打日志便于追溯乱码来源。
         if (payload.includes("\uFFFD")) {
-        const fffdCount = (payload.match(/\uFFFD/g) || []).length;
-        console.warn(`⚠️ [transcript] 消息含 ${fffdCount} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
+            const fffdCount = (payload.match(/\uFFFD/g) || []).length;
+            console.warn(`⚠️ [transcript] 消息含 ${fffdCount} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
         }
         await appendLineWithRetry(p, payload);
+        return true;
     } catch (e) {
         // 容错优先：持续失败仍不阻断推理，但明确告警内存/磁盘可能不一致
         console.warn(`⚠️ 消息落盘失败（已重试 3 次，内存与磁盘转录可能不一致）:`, e);
+        return false; // D5 二轮：吞错但如实回报成败
     }
 }
 
@@ -166,7 +172,7 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
  */
 export const appendMessages = async (sessionId: string, entries: MessageWithId[]): Promise<void> => {
     if (entries.length === 0) return;
-    if (entries.length === 1) return appendMessage(entries[0]);
+    if (entries.length === 1) { await appendMessage(entries[0]); return; }
     try {
         await ensureSessionsDir(sessionId);
         const p = getTranscriptPath(sessionId);
@@ -199,14 +205,18 @@ export const appendMessages = async (sessionId: string, entries: MessageWithId[]
  * 发射点（runAgent / truncate / recovery）一律无脑调用，不散落开关判断。
  * 盖章 id/ts 与消息行同构（行 id 唯一性作用域 = 单会话内；fork 前缀沿用源 id 是有意的溯源保留）。
  * 失败只 warn 不抛（与 appendMessage 同容错策略，绝不击垮推理）。
+ * ★ 返回落盘成败（D5 二轮 2026-11-03）：关闭路径返回 true——有意 no-op ≠ 降级（报「降级」=狼来了）；
+ *   落盘失败返回 false，调用方（runAgent finally）按返回值聚合 degraded，外层 catch 是死信号。
  */
-export const appendEvent = async (sessionId: string, ev: TranscriptEvent): Promise<void> => {
-    if (!appConfig.transcriptEvents) return;
+export const appendEvent = async (sessionId: string, ev: TranscriptEvent): Promise<boolean> => {
+    if (!appConfig.transcriptEvents) return true;
     try {
         await ensureSessionsDir(sessionId);
         const line: TranscriptEventLine = { id: createUUID(), ts: new Date().toISOString(), ...ev };
         await appendLineWithRetry(getTranscriptPath(sessionId), JSON.stringify(line) + "\n");
+        return true;
     } catch (e) {
         console.warn(`⚠️ [transcript] 事件行落盘失败（${ev.dscEvent}，恢复/分叉将回退启发式）:`, e);
+        return false;
     }
 }

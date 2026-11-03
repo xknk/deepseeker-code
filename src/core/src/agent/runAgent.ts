@@ -491,29 +491,40 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         //   失效且无任何汇总线索。degraded[] 收集本 run 收尾失败的组件名，末尾一句聚合 warn（开发者
         //   可见兜底通道）+ run.receipt 可选字段（用户可见通道，快照为结算单发出前已降级的组件）——
         //   旁路降级从「无声」变「可观测」。
+        // ★ D5 二轮（4f15287 复核）：首轮把 push 接在外层 catch 上，但 D5 立案点名的组件（事件行/trace/
+        //   用量/inbox）全部在函数内层就吞了错误只 warn——外层 catch 永不触发（死信号，与 D1 病根同源；
+        //   recordUsageRun 还叠加 void fire-and-forget，异步拒绝连同步 catch 都进不了，双重死）。
+        //   二轮改为：内层如实回报成败（返回值/失败计数），此处按返回值 push；外层 catch 保留作兜底
+        //   （防内层容错被未来改动破坏），markDegraded 去重使两路不重复报。禁用开关（transcriptEvents
+        //   关 / USAGE_LOG=0）内层返回成功——有意 no-op ≠ 降级，误报即狼来了。
         const degraded: string[] = [];
+        const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
         // ★ inbox 收尾：未认领的补充输入落盘成 user 消息。置于 run.end 事件行之前——
         //   fork 缺省锚点（最后一个 run.end）的前缀包含它们，分叉语义完整。
         try {
-            await flushLeftoverToTranscript(sessionId);
-        } catch { degraded.push('flushLeftoverToTranscript'); /* 容错，绝不击垮收尾 */ }
+            const flushResult = await flushLeftoverToTranscript(sessionId);
+            if (flushResult.failed > 0) markDegraded('flushLeftoverToTranscript'); // 内层按条聚合失败数（D5 二轮）
+        } catch { markDegraded('flushLeftoverToTranscript'); /* 兜底：内层容错失效属异常信号 */ }
         // ★ 事件日志化：run 闭合事件行——必须在 finally 直接落盘（generator return 路径不能 yield，
         //   AgentEvent 通道送不出去）；stopReason 与 Stop hook 同口径（signal.aborted 覆盖推断）。
         //   放 Stop hook / updateCalibration 之前：run 边界元数据先于旁路持久化。
         try {
-            await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
-        } catch { degraded.push('appendEvent(run.end)'); /* appendEvent 已内部吞错，双保险 */ }
+            const ok = await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
+            if (!ok) markDegraded('appendEvent(run.end)'); // 内层吞错只回 false（D5 二轮）
+        } catch { markDegraded('appendEvent(run.end)'); /* 兜底：appendEvent 契约是吞错回 false，抛错即异常信号 */ }
         // ★ D 批（§4.2-3）显式 drain：trace 批量缓冲收尾不丢尾——200ms 窗口内的普通事件尾巴在此落盘
         //   （错误类事件已即时落盘，§4.2-5；无参 flush 全部会话，子 run 共文件一并收尾）。与 appendEvent 同级容错。
         try {
-            await flushTraceBuffer();
-        } catch { degraded.push('flushTraceBuffer'); /* flushTraceBuffer 内部已逐会话容错，双保险 */ }
+            const failedSessions = await flushTraceBuffer();
+            if (failedSessions > 0) markDegraded('flushTraceBuffer'); // 内层逐会话吞错只回失败计数（D5 二轮）
+        } catch { markDegraded('flushTraceBuffer'); /* 兜底：flushTraceBuffer 契约是吞错回计数，抛错即异常信号 */ }
         // ★ 使用日志落盘（路线 #6 真实使用数据回路）：每 run 一行（轮数/token/工具分布/停止原因），
-        //   按月分片纯本地留存、绝不上报；recordUsageRun 内部全容错，此处 fire-and-forget 再包一层——
-        //   旁路计量绝不击垮收尾链路（与 Stop hook / updateCalibration 同级）。
+        //   按月分片纯本地留存、绝不上报。★ D5 二轮：void 改 await——原 void fire-and-forget 连同
+        //   内层吞错构成双重死（异步拒绝进不了同步 catch、内层吞错进不了外 catch），await 拿返回值
+        //   是观测闭环的必要条件；旁路计量仍不击垮收尾链路（本段自有 try/catch）。
         try {
             const us = ledger.usageSummary();
-            void recordUsageRun({
+            const ok = await recordUsageRun({
                 v: 1,
                 ts: new Date().toISOString(),
                 sessionId, runId, depth,
@@ -528,7 +539,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 ...ledger.usageLogFields(), // costYuan/toolCostYuan/auxCostYuan（口径与舍入在 runLedger）
                 tools: toolCounts,
             });
-        } catch { degraded.push('recordUsageRun'); /* recordUsageRun 已内部吞错，双保险 */ }
+            if (!ok) markDegraded('recordUsageRun'); // 内层吞错只回 false（D5 二轮）
+        } catch { markDegraded('recordUsageRun'); /* 兜底：recordUsageRun 契约是吞错回 false，抛错即异常信号 */ }
         // ★ 子 run 成本回灌（E1 + P1-5）：本 runAgent 为子 run 时（options.costSink 已注入），收尾补报余量
         //   给父累计器——各 round.end 已增量上报过，此处 flush 只补差额（中继幂等）。基数=预算圈子树完整
         //   口径（含下级 relay 回灌），论证统一见 runLedger.ts 文件头。旁路，绝不击垮收尾。

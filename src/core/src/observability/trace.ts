@@ -105,9 +105,12 @@ const scheduleTraceTimer = (sessionId: string): void => {
  * 显式 drain（§4.2-3）：把缓冲中的行落盘。runAgent 的 finally 在 run.end 事件之后调用一次，
  * 保证 run 收尾不丢尾。幂等：空队直接跳过，重复调用不重复写。
  * @param sessionId 只 flush 该会话；缺省 flush 全部会话（子 run 与主 run 共文件，一并收尾）。
+ * @returns 落盘失败会话数（D5 二轮 2026-11-03：内层逐会话吞错只 warn，外层按此返回值聚合
+ *   degraded——外层 catch 是死信号；0 = 队列本空 / 全部落盘成功）。
  */
-export const flushTraceBuffer = async (sessionId?: string): Promise<void> => {
+export const flushTraceBuffer = async (sessionId?: string): Promise<number> => {
     const ids = sessionId !== undefined ? [sessionId] : [...traceBuf.keys()];
+    let failedSessions = 0;
     for (const id of ids) {
         const arr = traceBuf.get(id);
         if (!arr || arr.length === 0) { traceBuf.delete(id); continue; }
@@ -129,9 +132,11 @@ export const flushTraceBuffer = async (sessionId?: string): Promise<void> => {
             void maybeCleanupAfterAppend(id);
         } catch (error) {
             // 落盘失败只告警并丢弃该批（§4.2-7）：旁路绝不击垮主链路，也不无限重试
+            failedSessions++; // D5 二轮：吞错但如实计数，调用方按返回值聚合 degraded
             console.warn("⚠️ [Trace] 批量落盘失败，丢弃该批（不影响主业务）:", error);
         }
     }
+    return failedSessions;
 };
 /**
  * 进程级单次加载磁盘冷时钟（只读一次，之后全部走内存，绝不污染每次写入的热路径）

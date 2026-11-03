@@ -5,7 +5,7 @@
  *    （legacy = 无事件行的旧会话，回退启发式档）；
  *  - repairOrphanToolCalls：孤儿 tool_call 结构修复——API 400（"messages must contain tool responses"）
  *    的硬约束，无论成因（崩溃 / 旧 repeat-break 遗留 / appendMessage 三连败失同步）都必须补齐，
- *    因此结构扫描永远执行；confirmedCrash 只升级占位文案与置信标记（事件确认档 vs 盲扫启发式档）；
+ *    因此结构扫描永远执行；confirmedUnclosed 只升级占位文案与置信标记（未闭合确认档 vs 盲扫启发式档）；
  *  - reconcileCompaction：末个 compaction 事件 vs state.json 交叉校验——冲突时信 state
  *    （它是 buildContextMessages slice 的实际执行闸门），desync 只 warn（事件侧仅镜像；
  *    truncate 的「先 setRollingState 后 appendEvent」顺序铁律保证夹缝只出现 state-ahead 单向）；
@@ -29,8 +29,8 @@ export type InterruptionInfo =
     | { kind: 'clean' }
     | { kind: 'legacy' };
 
-/** 孤儿修复结果：repairedToolCallIds 供审计/测试断言（事件确认档 vs 启发式档的置信差异） */
-export type OrphanRepair = { msgs: Msg[]; repairedToolCallIds: string[]; confirmedCrash: boolean };
+/** 孤儿修复结果：repairedToolCallIds 供审计/测试断言（未闭合确认档 vs 启发式档的置信差异） */
+export type OrphanRepair = { msgs: Msg[]; repairedToolCallIds: string[]; confirmedUnclosed: boolean };
 
 /** 压缩状态交叉校验结果：archivedMessageCount/rollingSummary 为「裁决后应采用值」（即 state 值） */
 export type CompactionRecon = {
@@ -64,14 +64,14 @@ export const detectInterruption = (lines: TranscriptLine[]): InterruptionInfo =>
 /**
  * 孤儿 tool_call 修复（自 content.ts 迁入升级）：assistant 的 tool_calls 必须每条都有紧随的
  * tool 结果消息。为缺失项补占位（插在已有 tool 结果之后、下一非 tool 消息之前），只修内存视图不落盘。
- * ★ 双档语义：结构扫描永远执行；confirmedCrash=true（事件确认崩溃）时占位文案区分档位
- *   （两档均为中性描述、不指认成因——见下方 D1 注；置信差异经 confirmedCrash 标记承载），
+ * ★ 双档语义：结构扫描永远执行；confirmedUnclosed=true（事件确认未闭合）时占位文案区分档位
+ *   （两档均为中性描述、不指认成因——见下方 D1 注；置信差异经 confirmedUnclosed 标记承载），
  *   旧会话（legacy）与闭合 run 内孤儿走 false 档，文案与改造前完全一致（黄金兼容）。
  */
-export const repairOrphanToolCalls = (msgs: Msg[], confirmedCrash: boolean): OrphanRepair => {
+export const repairOrphanToolCalls = (msgs: Msg[], confirmedUnclosed: boolean): OrphanRepair => {
     // ★ D1（审查报告 2026-11-03）：confirmed 档文案同样中性——run 未闭合可能因崩溃也可能因
     //   run.end 写入失败（appendEvent 只 warn 不抛，transcript 侧无法区分成因），不指认「崩溃」。
-    const placeholder = confirmedCrash
+    const placeholder = confirmedUnclosed
         ? '（上次会话的这次工具调用未完成（run 未闭合），已跳过。）'
         : '（该工具调用因上次会话异常中断未留下结果，已跳过。）';
     const out: Msg[] = [];
@@ -96,7 +96,7 @@ export const repairOrphanToolCalls = (msgs: Msg[], confirmedCrash: boolean): Orp
             }
         }
     }
-    return { msgs: out, repairedToolCallIds, confirmedCrash };
+    return { msgs: out, repairedToolCallIds, confirmedUnclosed };
 };
 
 /**
@@ -128,7 +128,7 @@ export const reconcileCompaction = (
  * 恢复入口（幂等，每 turn 经 buildContextMessages 调用一次）：
  * 读 transcript → 判定中断 → crashed 则补写 run.abandoned（detect 刚确认未闭合，写一行即闭合，
  * 下次 detect 返回 clean——天然幂等；多进程并发极端情况多写一行同义闭墓也不破坏数据）→ 压缩交叉校验。
- * 返回报告供调用方决定孤儿修复档位（interruption.kind === 'crashed' → confirmedCrash=true）。
+ * 返回报告供调用方决定孤儿修复档位（interruption.kind === 'crashed' → confirmedUnclosed=true）。
  * @param precomputed 调用方已读好的 transcript 行与 rolling state（buildContextMessages 在本函数前
  *   已各自读过一遍，传入免二次碰盘）。可选、向后兼容——缺省时本函数自读（测试/独立调用方不受影响）。
  *   ★ 快照语义：crashed 补写 run.abandoned 只 append 新行，不改写传入的 lines 快照内容，
@@ -149,7 +149,7 @@ export const recoverSession = async (
             runId: interruption.runId,
             reason: 'unclosed (cause unknown)',
         });
-        console.warn(`⟦recovery⟧ 检测到未闭合 run（${interruption.runId.slice(0, 8)}…）→ 已补 run.abandoned 闭墓标记；孤儿修复按「崩溃确认」档执行。`);
+        console.warn(`⟦recovery⟧ 检测到未闭合 run（${interruption.runId.slice(0, 8)}…）→ 已补 run.abandoned 闭墓标记；孤儿修复按「未闭合」档执行。`);
     }
     const state = precomputed?.state ?? await getRollingState(sessionId);
     const compaction = reconcileCompaction(

@@ -96,7 +96,7 @@ describe("recoverSession（幂等补闭墓 + 孤儿修复双档）", () => {
         assert.equal((await readTranscriptLines(s)).filter((l: any) => l?.dscEvent === "run.abandoned").length, 1, "幂等：不重复补写");
     });
 
-    it("孤儿修复双档：confirmedCrash 文案精确 / 启发式档文案与改造前黄金一致", async () => {
+    it("孤儿修复双档：confirmedUnclosed 未闭合确认档文案区分 / 启发式档文案与改造前黄金一致", async () => {
         const msgs: any = [userMsg("q"), assistantWithCalls("c1", "c2"), toolResult("c1")];
         const confirmed = repairOrphanToolCalls(msgs, true);
         assert.deepEqual(confirmed.repairedToolCallIds, ["c2"]);

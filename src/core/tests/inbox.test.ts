@@ -58,15 +58,16 @@ describe("pushSessionInbox / claimSessionInbox（队列语义）", () => {
 });
 
 describe("flushLeftoverToTranscript（收尾落盘）", () => {
-    it("未认领条目逐条落盘 user 行 + 队列清空；空队列返回 0 且不写行", async () => {
+    it("未认领条目逐条落盘 user 行 + 队列清空；空队列返回全零且不写行", async () => {
         const s = `inbx${Date.now()}f`;
         const before = (await readTranscriptLines(s)).length;
-        assert.equal(await flushLeftoverToTranscript(s), 0, "空队列 no-op");
+        // D5 二轮：返回 {flushed, failed}（appendMessage 内层吞错只回 boolean，此处聚合如实上报）
+        assert.deepEqual(await flushLeftoverToTranscript(s), { flushed: 0, failed: 0 }, "空队列 no-op");
         assert.equal((await readTranscriptLines(s)).length, before, "未写任何行");
 
         pushSessionInbox(s, "遗留一");
         pushSessionInbox(s, "遗留二");
-        assert.equal(await flushLeftoverToTranscript(s), 2);
+        assert.deepEqual(await flushLeftoverToTranscript(s), { flushed: 2, failed: 0 });
         const lines = await readTranscriptLines(s);
         assert.equal(lines.length, before + 2, "两条 user 行");
         const roles = lines.slice(before).map((l: any) => l.role);
@@ -75,7 +76,7 @@ describe("flushLeftoverToTranscript（收尾落盘）", () => {
         assert.deepEqual(contents, ["遗留一", "遗留二"], "保序");
         assert.deepEqual(claimSessionInbox(s), [], "flush 后队列已清空");
         // 二次 flush 幂等（不再重复落盘）
-        assert.equal(await flushLeftoverToTranscript(s), 0);
+        assert.deepEqual(await flushLeftoverToTranscript(s), { flushed: 0, failed: 0 });
         assert.equal((await readTranscriptLines(s)).length, before + 2);
     });
 });
