@@ -201,7 +201,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
     const toolCounts: Record<string, number> = {};
-    await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
+    // ★ D5 三轮（8bdb712 遗留项工单 2026-11-03）：degraded/markDegraded 上提到函数体顶部——主循环里
+    //   的调用点（round.end 事件行 / assistant/user 消息落盘）同样要上报降级，定义在 finally 内则
+    //   主循环作用域不可达。finally 收尾段沿用同一份列表（去重语义不变）。
+    const degraded: string[] = [];
+    const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
+    // run.start 事件行：appendEvent 契约是吞错回 false，此处消费返回值上报降级；仍包 try/catch——
+    //   防「永不抛错」契约被未来改动破坏（D1 教训：别假设内层永远可靠）。本处在主 try 之外，异常若
+    //   冲出 generator → final 永不发 → 前端 busy 永不清（见下方 catch 注释点名要防的事故）。
+    try {
+        const ok = await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
+        if (!ok) markDegraded('appendEvent(run.start)');
+    } catch { markDegraded('appendEvent(run.start)'); /* 兜底：违反吞错契约的异常信号 */ }
     try {
         while (true) {
             round++;
@@ -265,7 +276,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 clearQueuedWake(sessionId);
                 for (const t of inboxTexts) {
                     message.push({ role: 'user', content: t });
-                    await appendMessage({ sessionId, role: 'user', content: t } as any);
+                    // ★ D5 三轮：消费内层返回值——补充输入落盘失败（内存有/磁盘无，重启后缺行）可观测；
+                    //   单条失败不断循环（try/catch 在 for 内，逐条独立）。
+                    try {
+                        const ok = await appendMessage({ sessionId, role: 'user', content: t } as any);
+                        if (!ok) markDegraded('appendMessage(user)');
+                    } catch { markDegraded('appendMessage(user)'); /* 兜底：违反吞错契约的异常信号 */ }
                 }
                 yield { type: 'inbox.claimed', texts: inboxTexts };
             }
@@ -360,7 +376,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   直接访问触发「不存在属性」；此处一律按 any 窄化访问（与原 .tool_calls as any 同惯法）。
             const assistantMessage = infResult.assistantMessage as any;
             message.push(assistantMessage);
-            await appendMessage({ ...assistantMessage, sessionId } as any);
+            // ★ D5 三轮：消费内层返回值——assistant 落盘失败（每轮必经；丢的是对话本体而非边界标记，
+            //   内存有/磁盘无，重启后历史缺行）可观测，GUI 宿主下内层 warn 用户不可见。
+            try {
+                const ok = await appendMessage({ ...assistantMessage, sessionId } as any);
+                if (!ok) markDegraded('appendMessage(assistant)');
+            } catch { markDegraded('appendMessage(assistant)'); /* 兜底：违反吞错契约的异常信号 */ }
             // 存储最后一条消息，以供后面返回使用
             // ★ 多模态防御：assistant content 按协议恒 string（数组会污染后续字符串拼接/回显），非 string 不入
             if (typeof assistantMessage.content === 'string' && assistantMessage.content) {
@@ -371,7 +392,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
                 // ★ 事件日志化：本轮 assistant 已落盘、无工具调用（无待 flush 项）→ round 完整闭合。
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
-                await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                //   ★ D5 三轮：round.end 缺失即异常收尾取证信号 → 写失败同样可观测（消费内层返回值）。
+                try {
+                    const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                    if (!ok) markDegraded('appendEvent(round.end)');
+                } catch { markDegraded('appendEvent(round.end)'); /* 兜底：违反吞错契约的异常信号 */ }
                 emitContextUsage();
                 // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（基数=预算圈子树完整口径，论证统一见 runLedger.ts 文件头）。主 run 无 sink，flush 为 no-op。
                 ledger.flushRelay();
@@ -458,7 +483,11 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // completed：继续下一轮推理
             // ★ 事件日志化：本轮 assistant + 全部 tool 结果已完整 flush → round 闭合（两条正常路径都写：
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
-            await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+            //   ★ D5 三轮：写失败可观测（消费内层返回值，理由同无工具收尾处）。
+            try {
+                const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                if (!ok) markDegraded('appendEvent(round.end)');
+            } catch { markDegraded('appendEvent(round.end)'); /* 兜底：违反吞错契约的异常信号 */ }
             emitContextUsage();
             // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（父轮边界预算检查即时生效；基数口径见 runLedger.ts 文件头）。
             ledger.flushRelay();
@@ -488,17 +517,21 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     } finally {
         // ★ D5 聚合健康信号（审查报告 2026-11-03）：收尾段 8 个旁路逐个容错（单点判断正确、任何依赖
         //   都不该击垮收尾），但组合效应是异常环境下（如磁盘满）trace/用量/结算单/校准可能集体静默
-        //   失效且无任何汇总线索。degraded[] 收集本 run 收尾失败的组件名，末尾一句聚合 warn（开发者
-        //   可见兜底通道）+ run.receipt 可选字段（用户可见通道，快照为结算单发出前已降级的组件）——
-        //   旁路降级从「无声」变「可观测」。
+        //   失效且无任何汇总线索。degraded[] 收集本 run 全程失败的组件名，末尾一句聚合 warn（开发者
+        //   可见兜底通道）+ run.receipt 可选字段（用户可见通道）——旁路降级从「无声」变「可观测」。
         // ★ D5 二轮（4f15287 复核）：首轮把 push 接在外层 catch 上，但 D5 立案点名的组件（事件行/trace/
         //   用量/inbox）全部在函数内层就吞了错误只 warn——外层 catch 永不触发（死信号，与 D1 病根同源；
         //   recordUsageRun 还叠加 void fire-and-forget，异步拒绝连同步 catch 都进不了，双重死）。
-        //   二轮改为：内层如实回报成败（返回值/失败计数），此处按返回值 push；外层 catch 保留作兜底
+        //   二轮改为：内层如实回报成败（返回值/失败计数），按返回值 push；外层 catch 保留作兜底
         //   （防内层容错被未来改动破坏），markDegraded 去重使两路不重复报。禁用开关（transcriptEvents
         //   关 / USAGE_LOG=0）内层返回成功——有意 no-op ≠ 降级，误报即狼来了。
-        const degraded: string[] = [];
-        const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
+        // ★ D5 三轮（8bdb712 遗留项工单 2026-11-03）：信号采集范围扩到主循环——round.end 事件行与
+        //   assistant/user 消息落盘同样消费内层返回值（degraded/markDegraded 已上提至函数体顶部，
+        //   run.start 一并消费并包 try 兜底）。
+        // ★ receipt 快照边界（工单 P2-1，方案 A 已执行）：updateCalibration 前移至结算单之前（纯本地
+        //   文件写，前置零风险），Stop hook 保持在后（dispatch 会跑用户配置的 shell 命令，可能数秒，
+        //   不能拖结算单 UI）——故快照含 8 项旁路中的 6 项；进不去的两项：Stop-hook（在结算单之后）、
+        //   run.receipt（无法报自身）。主循环段（round.end / 消息落盘）降级发生在 receipt 前，天然入快照。
         // ★ inbox 收尾：未认领的补充输入落盘成 user 消息。置于 run.end 事件行之前——
         //   fork 缺省锚点（最后一个 run.end）的前缀包含它们，分叉语义完整。
         try {
@@ -546,7 +579,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         //   口径（含下级 relay 回灌），论证统一见 runLedger.ts 文件头。旁路，绝不击垮收尾。
         try {
             ledger.flushRelay();
-        } catch { degraded.push('ledger.flushRelay'); /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
+        } catch { markDegraded('ledger.flushRelay'); /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
+        // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
+        //   ★ P1-4 按 effectiveModel 分键写回（旧扁平字段镜像同步），切模型后各模型校准互不污染。
+        //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
+        //   ★ D5 三轮（工单 P2-1 方案 A）：自 Stop hook 之后前移到结算单之前——纯本地文件写，前置零风险，
+        //   使其降级能进 receipt 快照（8 项旁路中 6 项可进用户可见通道）。
+        try {
+            await updateCalibration(sessionId, effectiveModel, { calibRatio, lastRealPromptTokens, lastCachedTokens });
+        } catch (e) { markDegraded('updateCalibration'); console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；ledger.usageSummary() 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
         //   事件行先例），经 onUIEvent 直发；旁路 UI 绝不击垮收尾链路。
@@ -564,23 +605,17 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     ...ledger.receiptFields(), // costYuan(null=无价)/toolCostYuan/auxCostYuan/subCostYuan（口径与舍入在 runLedger）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
-                    degraded: degraded.length > 0 ? [...degraded] : undefined, // D5：结算单前已降级的旁路（undefined 自动省略）
+                    degraded: degraded.length > 0 ? [...degraded] : undefined, // D5：结算单发出前已降级的旁路快照（边界=updateCalibration 之后、Stop hook 之前；undefined 自动省略）
                 });
             }
-        } catch { degraded.push('run.receipt'); /* 结算单是旁路 UI，失败不影响收尾 */ }
+        } catch { markDegraded('run.receipt'); /* 结算单是旁路 UI，失败不影响收尾 */ }
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
         try {
             const reason = signal?.aborted ? 'aborted' : stopReason;
             // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
-        } catch (e) { degraded.push('Stop-hook'); console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
-        // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
-        //   ★ P1-4 按 effectiveModel 分键写回（旧扁平字段镜像同步），切模型后各模型校准互不污染。
-        //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
-        try {
-            await updateCalibration(sessionId, effectiveModel, { calibRatio, lastRealPromptTokens, lastCachedTokens });
-        } catch (e) { degraded.push('updateCalibration'); console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
+        } catch (e) { markDegraded('Stop-hook'); console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
         // ★ D5 聚合兜底（末尾一句，不依赖 receipt 通道存在）：本 run 收尾有旁路降级时聚合告警一次。
         //   限制：VSCode 宿主 console.warn 未必进用户面板（全库既有现状），此通道是开发者可见；
         //   用户可见通道 = run.receipt 的 degraded 字段。组件名可 grep 定位实现。

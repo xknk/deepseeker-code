@@ -1,4 +1,15 @@
 # Changelog
+## 1.0.76
+
+**补强：收尾降级观测的主循环盲区——调用点消费返回值（D5 第三轮，8bdb712 遗留项）**。上一轮内层函数已如实回报成败，但多数调用点把返回值丢了——信号在产生它的地方被丢弃，与 D5 原病同类、位置不同。本轮按工单把主循环与收尾的信号断点全部接通，范围刻意做小。
+
+- **round.end 写失败可观测**：两条正常闭合路径（无工具收尾 / 工具后闭合）的 round.end 事件行此前丢弃返回值——代码自己把「round.end 缺失」定义为异常收尾取证信号，写失败理应同样可观测。不影响崩溃判定（detectInterruption 只看 run 级事件），仅补审计/回放完整性。
+- **degraded/markDegraded 上提至函数体顶部**：主循环调用点要用，原定义在 finally 内作用域不可达。顺带把 run.start 事件行包进 try/catch 兜底——它原是主 try 之外的裸 await，契约一旦被破坏（理论上不该抛，但 D1 的教训是别假设内层永远可靠）异常会冲出 generator → final 永不发 → 前端 busy 永不清。
+- **appendMessage 两处消费返回值**：assistant 消息落盘（每轮必经热路径）与 inbox 认领落盘——丢的不是边界标记而是对话本体：内存有、磁盘无，重启后历史缺行；磁盘满场景下每轮静默失败。名字区分 `appendMessage(assistant)` / `appendMessage(user)` 便于定位。
+- **四处裸 degraded.push → markDegraded**：纯替换，当前无行为变化，恢复去重意图（防将来组件名在两处出现时重复上报）。
+- **receipt 快照边界前移（方案 A）**：updateCalibration 移到结算单之前——纯本地文件写、前置零风险，其降级从此进用户可见通道（8 项旁路 6 项可进）；Stop hook 保持在后（跑用户 shell 命令可能数秒，不能拖结算单 UI）。最终边界已写进收尾段块注释，防下轮审查再当新发现。
+- **守门**：新增 2 例——EISDIR 毒化断言 receipt.degraded 含 `appendEvent(round.end)` 与 `appendMessage(assistant)`；反向红线断言健康路径 degraded 必须为 undefined（防狼来了）。core 全量 **817 例**绿 + tsc 零错误。
+
 ## 1.0.75
 
 **修复：收尾降级观测从「外层猜」改为「内层如实回报」（D5 二轮）**。1.0.74 的 degraded 聚合把 push 接在 run 收尾旁路的外层 catch 上，但复核发现：被立案点名的四个组件（事件行 / trace / 用量日志 / inbox 落盘）全都在函数**内层**就吞掉错误只打 warn——外层 catch 永不触发，是接了假线的死信号（用量日志还叠加 `void` fire-and-forget，异步拒绝连同步 catch 都进不了，双重死）。纯内存的结算单 UI 通道是唯一真可达档，上一轮恰好只测了它。本轮让内层如实回报成败、外层按返回值聚合，守门测试改用 EISDIR 毒化法打通真实落盘失败路径。

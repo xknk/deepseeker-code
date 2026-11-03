@@ -402,3 +402,73 @@ describe("D5 二轮反向档：禁用开关 ≠ 降级（误报即狼来了）",
         }
     });
 });
+
+// ==================== D5 三轮：主循环信号采集（round.end / assistant 消息）+ receipt 快照边界 ====================
+
+describe("D5 三轮（8bdb712 遗留项工单）：主循环调用点消费返回值", () => {
+    it("EISDIR 毒化 transcript：receipt.degraded 含 appendEvent(round.end) 与 appendMessage(assistant)", async () => {
+        const sid = `d5t-${Date.now()}`;
+        await poisonAsDir(getTranscriptPath(sid)); // 主循环与收尾的事件行/消息落盘同批失败
+        const script = {
+            turns: [{
+                kind: "reply" as const,
+                content: "D5 三轮注入：主循环信号采集，收尾照常。",
+                usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cached_tokens: 0 },
+            }],
+        };
+        const receipts: any[] = [];
+        let finalSeen = false;
+        try {
+            setActiveProvider(createReplayProvider(script as any));
+            const message: any[] = [{ role: "system", content: "SYS" }, { role: "user", content: "go" }];
+            for await (const ev of runAgent(message, {
+                sessionId: sid, cwd: SANDBOX, events: (async () => { }) as any,
+                toolSchemas: [], modelWindow: 250000, keepRecentUnits: 5, compactRatio: 0.72,
+                parentSystemPrompt: "", depth: 0,
+                onUIEvent: (e: any) => { if (e?.type === "run.receipt") receipts.push(e); },
+            } as any)) {
+                if ((ev as any)?.type === "final") finalSeen = true;
+            }
+        } finally {
+            resetActiveProvider();
+            clearHooks();
+        }
+        assert.ok(finalSeen, "主循环降级不击垮 run（final 照常 yield）");
+        assert.equal(receipts.length, 1, "结算单照常发出");
+        assert.ok(Array.isArray(receipts[0].degraded), "receipt.degraded 应存在");
+        assert.ok(receipts[0].degraded.includes("appendEvent(round.end)"), `receipt.degraded 应含 appendEvent(round.end)，实得 ${JSON.stringify(receipts[0].degraded)}`);
+        assert.ok(receipts[0].degraded.includes("appendMessage(assistant)"), "receipt.degraded 应含 appendMessage(assistant)（对话本体落盘失败）");
+        assert.ok(receipts[0].degraded.includes("appendEvent(run.end)"), "收尾 run.end 同批失败一并入快照");
+    });
+
+    it("反向红线：健康路径 receipt.degraded 必须为 undefined（防狼来了）", async () => {
+        // 防跨用例残留：先排空其它会话的 trace 缓冲尾巴（毒化会话的行会丢弃、队列清空）、
+        // 撤销前序用例对 usage 月分片的目录毒化——恢复健康基线后再断言零降级
+        await flushTraceBuffer();
+        await fs.rm(usageMonthPath(), { recursive: true, force: true });
+        const sid = `d5t-ok-${Date.now()}`;
+        const script = {
+            turns: [{
+                kind: "reply" as const,
+                content: "D5 三轮反向：健康路径零降级，收尾照常。",
+                usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cached_tokens: 0 },
+            }],
+        };
+        const receipts: any[] = [];
+        try {
+            setActiveProvider(createReplayProvider(script as any));
+            const message: any[] = [{ role: "system", content: "SYS" }, { role: "user", content: "go" }];
+            for await (const ev of runAgent(message, {
+                sessionId: sid, cwd: SANDBOX, events: (async () => { }) as any,
+                toolSchemas: [], modelWindow: 250000, keepRecentUnits: 5, compactRatio: 0.72,
+                parentSystemPrompt: "", depth: 0,
+                onUIEvent: (e: any) => { if (e?.type === "run.receipt") receipts.push(e); },
+            } as any)) { /* drain */ }
+        } finally {
+            resetActiveProvider();
+            clearHooks();
+        }
+        assert.equal(receipts.length, 1, "结算单照常发出");
+        assert.equal(receipts[0].degraded, undefined, "健康路径 degraded 必须缺省（误报=狼来了）");
+    });
+});
