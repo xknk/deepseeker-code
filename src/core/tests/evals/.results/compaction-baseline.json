@@ -1,5 +1,5 @@
 {
-  "createdAt": "2026-09-16T07:45:11.501Z",
+  "createdAt": "2026-11-02T01:52:06.724Z",
   "model": "default",
   "results": {
     "S1 下一步正确性/checkpoint": true,
@@ -7,6 +7,12 @@
     "S2 约束保持/checkpoint": true,
     "S2 约束保持/legacy": true,
     "S3 关键上下文/checkpoint": true,
-    "S3 关键上下文/legacy": true
+    "S3 关键上下文/legacy": true,
+    "S4 跨实体关联·搭档文件（链式召回探针）/checkpoint": true,
+    "S4 跨实体关联·搭档文件（链式召回探针）/legacy": true,
+    "S5 任务改动集（对照组）/checkpoint": true,
+    "S5 任务改动集（对照组）/legacy": false,
+    "S6 跨实体关联·警示依赖（链式召回探针）/checkpoint": true,
+    "S6 跨实体关联·警示依赖（链式召回探针）/legacy": true
   }
 }

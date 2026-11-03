@@ -91,6 +91,37 @@ const scenarioKeyContext = (): Msg[] =>
         ...Array.from({ length: 10 }, (_, i) => filler(i + 4)),
     ]);
 
+// —— S4-S6：链式召回探针（2026-11-02，DSH super-agent 研究结论的取证用例）——
+// 测什么：单跳召回对「低频跨实体关联」的保真。S4/S6 的关联细节只在早期出现过一次且被
+// 后续稀释，实体索引（ARCHIVE-INDEX）大概率仍含两端实体、但叙述（ARCHIVE-NOTES）自收敛
+// 时易丢关联——正是链式召回（沿实体链找回原消息）的目标场景。S5 是对照：任务→改动集的
+// 直接枚举，单跳叙述通常能保住。解读规则（勿当回退挡门看，新场景首轮 = 新增）：
+//   S5 中 + S4/S6 miss → 链式召回立项依据成立（实体在索引、关联在叙述丢失）；
+//   S4-S6 全中        → 叙述已够用，链式召回不做。
+
+/** S4：早期一次性提到的「同改搭档文件」关联，压缩后反查（实验组） */
+const scenarioPairFile = (): Msg[] =>
+    mkConvo([
+        [`订单重复扣库存了，查一下`, `定位到 order-sync.ts 的 deductInventory 失败重试后二次扣减。注意一个关联约定：inventory-api.ts 的 InventoryHandler.deduct 是它的同事务双写对端，两处扣减口径必须一起改，只改一边会造成库存对不上。本次修复两文件同步修改并补了补偿回滚逻辑。`],
+        ...Array.from({ length: 14 }, (_, i) => filler(i + 1)),
+    ]);
+
+/** S5：任务→改动文件集合的直接枚举（对照组：单跳通常保得住） */
+const scenarioTaskFiles = (): Msg[] =>
+    mkConvo([
+        ...Array.from({ length: 3 }, (_, i) => filler(i)),
+        [`把导出内存暴涨的问题修掉`, `csvExport.ts 改为流式写入（每 1000 行 flush），并在 web/pager.ts 加了游标分页避免全量拉取。两处都已通过 10 万行压测。`],
+        ...Array.from({ length: 12 }, (_, i) => filler(i + 3)),
+    ]);
+
+/** S6：早期一次性提到的「改前必看」警示关联，压缩后反查（实验组） */
+const scenarioWarnDep = (): Msg[] =>
+    mkConvo([
+        ...Array.from({ length: 2 }, (_, i) => filler(i)),
+        [`为什么 webhook 偶发丢消息`, `查到是 webhook/dispatch.ts 的消费批次提交太激进。修复时发现一个坑先记着：dispatch.ts 的事件序号由 sequence.ts 的 SequenceAllocator 统一分配，任何改 dispatch 提交语义的动作都必须先确认 allocator 的窗口水位，否则会跳号。本次修复已按此约束走。`],
+        ...Array.from({ length: 13 }, (_, i) => filler(i + 2)),
+    ]);
+
 // ==================== 压缩路径（新 / 旧对照） ====================
 
 /** 产线同款新路径：行式摘要（交换格式）→ 索引确定性合并 → 检查点合成（镜像 ensureFitsWindow 主分支）。 */
@@ -166,6 +197,36 @@ const SCENARIOS: Scenario[] = [
             const err = /ETIMEDOUT|超时/i.test(a);
             const fix = /退避|重试|retry/i.test(a);
             return { pass: err && fix, why: `错误码=${err}，临时解法=${fix}` };
+        },
+    },
+    {
+        name: "S4 跨实体关联·搭档文件（链式召回探针）",
+        convo: scenarioPairFile(),
+        question: "我现在要调整 order-sync.ts 的库存扣减策略，根据历史还有哪个文件必须一起处理？为什么？",
+        judge: (a) => {
+            const pair = /inventory-api/i.test(a);
+            const assoc = /一起|同步|双写|同事务|对端|配套|同时/.test(a);
+            return { pass: pair && assoc, why: `搭档文件=${pair}，关联语义=${assoc}` };
+        },
+    },
+    {
+        name: "S5 任务改动集（对照组）",
+        convo: scenarioTaskFiles(),
+        question: "之前修「导出内存暴涨」那个任务一共改了哪些文件？",
+        judge: (a) => {
+            const f1 = /csvExport/i.test(a);
+            const f2 = /pager\.ts/i.test(a);
+            return { pass: f1 && f2, why: `csvExport=${f1}，pager.ts=${f2}` };
+        },
+    },
+    {
+        name: "S6 跨实体关联·警示依赖（链式召回探针）",
+        convo: scenarioWarnDep(),
+        question: "改动 webhook/dispatch.ts 的提交逻辑前，按历史经验必须先确认什么？",
+        judge: (a) => {
+            const dep = /sequence|allocator/i.test(a);
+            const warn = /水位|窗口|跳号|序号|确认/.test(a);
+            return { pass: dep && warn, why: `依赖对象=${dep}，警示语义=${warn}` };
         },
     },
 ];
