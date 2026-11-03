@@ -87,6 +87,10 @@ describe("recoverSession（幂等补闭墓 + 孤儿修复双档）", () => {
         const abandoned1 = (await readTranscriptLines(s)).filter((l: any) => l?.dscEvent === "run.abandoned");
         assert.equal(abandoned1.length, 1);
         assert.equal((abandoned1[0] as any).runId, "runX");
+        // D1（审查报告 2026-11-03）：reason 不猜原因——「崩溃 vs run.end 写失败」在 transcript 侧不可区分，
+        // 补写行只陈述事实（未闭合、成因未知），不得保留伪结论 'interrupted by process exit'
+        assert.equal((abandoned1[0] as any).reason, "unclosed (cause unknown)");
+        assert.ok(!String((abandoned1[0] as any).reason).includes("interrupted by process exit"));
         const second = await recoverSession(s);
         assert.equal(second.interruption.kind, "clean", "闭墓后不再误报 crashed");
         assert.equal((await readTranscriptLines(s)).filter((l: any) => l?.dscEvent === "run.abandoned").length, 1, "幂等：不重复补写");
@@ -100,7 +104,9 @@ describe("recoverSession（幂等补闭墓 + 孤儿修复双档）", () => {
         assert.deepEqual(heuristic.repairedToolCallIds, ["c2"]);
         const confirmedText = (confirmed.msgs.find((m: any) => m.role === "tool" && m.tool_call_id === "c2") as any).content;
         const heuristicText = (heuristic.msgs.find((m: any) => m.role === "tool" && m.tool_call_id === "c2") as any).content;
-        assert.ok(confirmedText.includes("崩溃"), "崩溃确认档文案");
+        // D1（审查报告 2026-11-03）：confirmed 档文案中性化——不指认「崩溃」（写失败同样导致 run 未闭合）
+        assert.ok(!confirmedText.includes("崩溃"), "confirmed 档不得指认崩溃成因");
+        assert.ok(confirmedText.includes("未完成"), "confirmed 档中性描述（调用未完成）");
         assert.equal(heuristicText, "（该工具调用因上次会话异常中断未留下结果，已跳过。）", "启发式档 = 改造前文案（黄金）");
     });
 });
@@ -118,8 +124,8 @@ describe("buildContextMessages（恢复接线端到端）", () => {
         assert.equal(messages[1].role, "system");
         assert.equal(messages[messages.length - 1].content, "继续");
         assert.equal(findDangling(messages).length, 0, "崩溃孤儿已被补占位，无悬空 tool_call_id");
-        // 崩溃确认档已生效（文案区分）且 run.abandoned 已由本次调用补写（契约允许的一次有界写）
-        assert.ok((messages.find((m: any) => m.role === "tool" && m.tool_call_id === "k2") as any).content.includes("崩溃"));
+        // 崩溃确认档已生效（文案区分，D1 后为中性描述）且 run.abandoned 已由本次调用补写（契约允许的一次有界写）
+        assert.ok((messages.find((m: any) => m.role === "tool" && m.tool_call_id === "k2") as any).content.includes("未完成"));
         assert.equal((await readTranscriptLines(s)).some((l: any) => l?.dscEvent === "run.abandoned"), true);
     });
 

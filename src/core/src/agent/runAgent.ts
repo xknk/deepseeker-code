@@ -486,22 +486,28 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         yield { type: 'final', text: (lastContent || "") + `\n（工具执行异常：${errMsg}）` };
         return;
     } finally {
+        // ★ D5 聚合健康信号（审查报告 2026-11-03）：收尾段 8 个旁路逐个容错（单点判断正确、任何依赖
+        //   都不该击垮收尾），但组合效应是异常环境下（如磁盘满）trace/用量/结算单/校准可能集体静默
+        //   失效且无任何汇总线索。degraded[] 收集本 run 收尾失败的组件名，末尾一句聚合 warn（开发者
+        //   可见兜底通道）+ run.receipt 可选字段（用户可见通道，快照为结算单发出前已降级的组件）——
+        //   旁路降级从「无声」变「可观测」。
+        const degraded: string[] = [];
         // ★ inbox 收尾：未认领的补充输入落盘成 user 消息。置于 run.end 事件行之前——
         //   fork 缺省锚点（最后一个 run.end）的前缀包含它们，分叉语义完整。
         try {
             await flushLeftoverToTranscript(sessionId);
-        } catch { /* 容错，绝不击垮收尾 */ }
+        } catch { degraded.push('flushLeftoverToTranscript'); /* 容错，绝不击垮收尾 */ }
         // ★ 事件日志化：run 闭合事件行——必须在 finally 直接落盘（generator return 路径不能 yield，
         //   AgentEvent 通道送不出去）；stopReason 与 Stop hook 同口径（signal.aborted 覆盖推断）。
         //   放 Stop hook / updateCalibration 之前：run 边界元数据先于旁路持久化。
         try {
             await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
-        } catch { /* appendEvent 已内部吞错，双保险 */ }
+        } catch { degraded.push('appendEvent(run.end)'); /* appendEvent 已内部吞错，双保险 */ }
         // ★ D 批（§4.2-3）显式 drain：trace 批量缓冲收尾不丢尾——200ms 窗口内的普通事件尾巴在此落盘
         //   （错误类事件已即时落盘，§4.2-5；无参 flush 全部会话，子 run 共文件一并收尾）。与 appendEvent 同级容错。
         try {
             await flushTraceBuffer();
-        } catch { /* flushTraceBuffer 内部已逐会话容错，双保险 */ }
+        } catch { degraded.push('flushTraceBuffer'); /* flushTraceBuffer 内部已逐会话容错，双保险 */ }
         // ★ 使用日志落盘（路线 #6 真实使用数据回路）：每 run 一行（轮数/token/工具分布/停止原因），
         //   按月分片纯本地留存、绝不上报；recordUsageRun 内部全容错，此处 fire-and-forget 再包一层——
         //   旁路计量绝不击垮收尾链路（与 Stop hook / updateCalibration 同级）。
@@ -522,13 +528,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 ...ledger.usageLogFields(), // costYuan/toolCostYuan/auxCostYuan（口径与舍入在 runLedger）
                 tools: toolCounts,
             });
-        } catch { /* recordUsageRun 已内部吞错，双保险 */ }
+        } catch { degraded.push('recordUsageRun'); /* recordUsageRun 已内部吞错，双保险 */ }
         // ★ 子 run 成本回灌（E1 + P1-5）：本 runAgent 为子 run 时（options.costSink 已注入），收尾补报余量
         //   给父累计器——各 round.end 已增量上报过，此处 flush 只补差额（中继幂等）。基数=预算圈子树完整
         //   口径（含下级 relay 回灌），论证统一见 runLedger.ts 文件头。旁路，绝不击垮收尾。
         try {
             ledger.flushRelay();
-        } catch { /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
+        } catch { degraded.push('ledger.flushRelay'); /* 成本回灌失败不影响收尾（父预算检查按已有读数执行） */ }
         // ★ 任务结算单（成本信任链第一环 D2）：run 收尾向用户展示本次花费。门禁照 compact.done——仅主 agent
         //   且 onUIEvent 出口存在；ledger.usageSummary() 缺失（未产生推理的空 run）不发零单。finally 内不能 yield（同 run.end
         //   事件行先例），经 onUIEvent 直发；旁路 UI 绝不击垮收尾链路。
@@ -546,21 +552,28 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     ...ledger.receiptFields(), // costYuan(null=无价)/toolCostYuan/auxCostYuan/subCostYuan（口径与舍入在 runLedger）
                     durationMs: Math.round(performance.now() - startTime),
                     budgetTruncated: budgetTruncated || undefined, // 预算截断标注（E2；undefined 自动省略）
+                    degraded: degraded.length > 0 ? [...degraded] : undefined, // D5：结算单前已降级的旁路（undefined 自动省略）
                 });
             }
-        } catch { /* 结算单是旁路 UI，失败不影响收尾 */ }
+        } catch { degraded.push('run.receipt'); /* 结算单是旁路 UI，失败不影响收尾 */ }
         // ★ Stop hook（观察）：agent 主循环退出时触发；reason 由各出口标记 + signal.aborted 推断。
         //   dispatch 内部已容错，外层再包 try/catch，绝不击垮主流程。
         try {
             const reason = signal?.aborted ? 'aborted' : stopReason;
             // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
-        } catch (e) { console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
+        } catch (e) { degraded.push('Stop-hook'); console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
         // ★ 持久化压缩校准状态：让下一 run（同会话续接/实现阶段）复用本 run 攒的真实校准与缓存命中率。
         //   ★ P1-4 按 effectiveModel 分键写回（旧扁平字段镜像同步），切模型后各模型校准互不污染。
         //   旁路操作，失败绝不阻塞主流程（与 Stop hook 同级容错）。
         try {
             await updateCalibration(sessionId, effectiveModel, { calibRatio, lastRealPromptTokens, lastCachedTokens });
-        } catch (e) { console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
+        } catch (e) { degraded.push('updateCalibration'); console.warn('⚠️ 压缩校准状态落盘失败（下 run 校准重零，缓存感知压缩退化回缺省 1.4）:', e instanceof Error ? e.message : e); }
+        // ★ D5 聚合兜底（末尾一句，不依赖 receipt 通道存在）：本 run 收尾有旁路降级时聚合告警一次。
+        //   限制：VSCode 宿主 console.warn 未必进用户面板（全库既有现状），此通道是开发者可见；
+        //   用户可见通道 = run.receipt 的 degraded 字段。组件名可 grep 定位实现。
+        if (degraded.length > 0) {
+            console.warn(`⚠️ [run 收尾] ${degraded.length} 项旁路降级（不影响主流程；计量/校准/结算可能不完整）: ${degraded.join(', ')}`);
+        }
     }
 }

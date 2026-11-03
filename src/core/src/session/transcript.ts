@@ -143,12 +143,12 @@ export const appendMessage = async (entry: MessageWithId): Promise<void> => {
 
         const p = getTranscriptPath(sessionId);
         const payload = JSON.stringify(line) + "\n";
- // ★ 编码体检：内容含 U+FFFD（无效 UTF-8 的替换符）多半是 Windows 子进程 GBK 输出被误解码，
- // 或用户粘贴了乱码文本。不擅改内容，原样落盘 + 打日志便于追溯乱码来源。
- if (payload.includes("\uFFFD")) {
- const fffdCount = (payload.match(/\uFFFD/g) || []).length;
- console.warn(`⚠️ [transcript] 消息含 ${fffdCount} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
- }
+        // ★ 编码体检：内容含 U+FFFD（无效 UTF-8 的替换符）多半是 Windows 子进程 GBK 输出被误解码，
+        // 或用户粘贴了乱码文本。不擅改内容，原样落盘 + 打日志便于追溯乱码来源。
+        if (payload.includes("\uFFFD")) {
+        const fffdCount = (payload.match(/\uFFFD/g) || []).length;
+        console.warn(`⚠️ [transcript] 消息含 ${fffdCount} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
+        }
         await appendLineWithRetry(p, payload);
     } catch (e) {
         // 容错优先：持续失败仍不阻断推理，但明确告警内存/磁盘可能不一致

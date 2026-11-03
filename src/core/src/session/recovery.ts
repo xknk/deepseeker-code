@@ -64,12 +64,15 @@ export const detectInterruption = (lines: TranscriptLine[]): InterruptionInfo =>
 /**
  * 孤儿 tool_call 修复（自 content.ts 迁入升级）：assistant 的 tool_calls 必须每条都有紧随的
  * tool 结果消息。为缺失项补占位（插在已有 tool 结果之后、下一非 tool 消息之前），只修内存视图不落盘。
- * ★ 双档语义：结构扫描永远执行；confirmedCrash=true（事件确认崩溃）时占位文案更精确，
+ * ★ 双档语义：结构扫描永远执行；confirmedCrash=true（事件确认崩溃）时占位文案区分档位
+ *   （两档均为中性描述、不指认成因——见下方 D1 注；置信差异经 confirmedCrash 标记承载），
  *   旧会话（legacy）与闭合 run 内孤儿走 false 档，文案与改造前完全一致（黄金兼容）。
  */
 export const repairOrphanToolCalls = (msgs: Msg[], confirmedCrash: boolean): OrphanRepair => {
+    // ★ D1（审查报告 2026-11-03）：confirmed 档文案同样中性——run 未闭合可能因崩溃也可能因
+    //   run.end 写入失败（appendEvent 只 warn 不抛，transcript 侧无法区分成因），不指认「崩溃」。
     const placeholder = confirmedCrash
-        ? '（上次会话在工具执行中崩溃（run 未闭合），该调用未执行，已跳过。）'
+        ? '（上次会话的这次工具调用未完成（run 未闭合），已跳过。）'
         : '（该工具调用因上次会话异常中断未留下结果，已跳过。）';
     const out: Msg[] = [];
     const repairedToolCallIds: string[] = [];
@@ -138,10 +141,13 @@ export const recoverSession = async (
     const lines = precomputed?.lines ?? await readTranscriptLines(sessionId);
     const interruption = detectInterruption(lines);
     if (interruption.kind === 'crashed') {
+        // ★ D1（审查报告 2026-11-03）：reason 不猜原因——「崩溃 vs 写失败」的区分在 transcript 侧
+        //   并不存在（appendEvent 落盘失败只 warn 不留痕），旧硬编码 'interrupted by process exit/kill'
+        //   是代码从未验证过的伪结论，会污染审计。中性陈述事实：未闭合、成因未知。
         await appendEvent(sessionId, {
             dscEvent: 'run.abandoned',
             runId: interruption.runId,
-            reason: 'run.end missing: interrupted by process exit/kill',
+            reason: 'unclosed (cause unknown)',
         });
         console.warn(`⟦recovery⟧ 检测到未闭合 run（${interruption.runId.slice(0, 8)}…）→ 已补 run.abandoned 闭墓标记；孤儿修复按「崩溃确认」档执行。`);
     }

@@ -207,8 +207,9 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailConte
 //
 // ★ 设计动机：摘要自收敛（摘要的摘要）几乎必然丢实体名，而实体名恰是 recall 检索的查询词来源——
 //   索引系统会在最需要它的超长会话里率先失效。故摘要槽分两段分别治理：
-//   · ⟦DSC:ARCHIVE-INDEX⟧ 实体索引：代码侧正则从被压缩原文【确定性提取】，只去重合并、永不送 LLM
-//     压缩——检索索引无损是硬约束；
+//   · ⟦DSC:ARCHIVE-INDEX⟧ 实体索引：代码侧正则从被压缩原文【确定性提取】，只去重合并。索引段会随
+//     摘要槽原样进入辅助压缩请求（作为合成档案上下文），但重建时按旧值原样回写、不被 LLM 改写——
+//     见 assembleSlot（检索索引无损是硬约束，「无损」指输出侧）；
 //   · ⟦DSC:ARCHIVE-NOTES⟧ 叙述：LLM 每轮压缩合成的结构化检查点（整段重写；行式摘要只是中间交换
 //     格式，不落槽——见下方「检查点式摘要合成」）。
 //   槽格式（parseSummarySlot 容忍无标记的旧格式——整体当叙述，实体索引为空，向后兼容）：
@@ -327,7 +328,7 @@ export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntiti
 //   同一 prompt 的两个变体，无分支路径。旧实现（行追加 + 槽超 2000 才自收敛）有两处硬伤：
 //   首轮起槽里就是行堆、全局状态靠续接模型自行归纳；自收敛复用「一行话概括对话」任务书压一摞摘要行，
 //   ~2000 token 压到百余 token 无差别蒸发。检查点整段重写把信息分级保留（丢过期时间线、留决策框架）。
-//   实体索引段原样保留、永不进 LLM（无损红线不越界）；2000 token 自收敛阈值保留作安全网。
+//   实体索引段随槽进请求、重建时按旧值原样回写（无损红线在输出侧，见 assembleSlot）；2000 token 自收敛阈值保留作安全网。
 
 /** 检查点输出字数预算：防合成结果膨胀吃窗口（中文 1 字≈1 token，约对应 800 token）。 */
 const CHECKPOINT_MAX_CHARS = 800;
@@ -697,7 +698,14 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     }
     // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
     const tokensThreshold = Math.round(event.modelWindow * effectiveRatio);
+    // ★ D3 Pre/Post 配对（审查报告 2026-11-03）：PreCompact 已发出后，后续所有退出路径（循环首检 abort
+    //   return / catch 内 abort return / 熔断 throw）都必须有 PostCompact 收尾——标志位 + try/finally
+    //   保证配对（声明式 hook 的「Pre 开 Post 关」记账契约，如压缩耗时统计/临时换模型/加锁）。
+    //   ★ 包裹起点刻意在 PreCompact dispatch 之后：上方免费衰减早退路径没发过 PreCompact，flag 守卫
+    //   保证不会给它补发 PostCompact（少发→错发比不配对更糟）。
+    let preCompactSent = false;
     await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(estReal(event.messageArr)), tokensThreshold });
+    preCompactSent = true;
     const systemMsg = event.messageArr[0]; // 获取系统提示词
     const summaryMsg: any = event.messageArr[1]; // 获取摘要信息
     let keep = event.keepRecentUnits;
@@ -709,131 +717,142 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     let forcedPass = event.forceCompact === true;
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
     //   唯一的 continue 分支（keep--）不修改 messageArr，故 lastSize 始终与实际 token 量一致。省一次全量扫描/轮。
-    while (forcedPass || lastSize > event.modelWindow * effectiveRatio) {
-        forcedPass = false;
-        if (event.signal?.aborted) {
-            return
-        }; // 是否停止
-        const active = event.messageArr.slice(2); // 截取系统提示词和摘要
-        const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
-        try {
-            if (toCompact.length > 0) {
-                // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先、永不送 LLM）——与叙述合成
-                //   解耦；noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
-                summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact));
-                // ★ 检查点合成（首轮生成语义、后续更新语义），整段替换叙述段。行是批量归档的交换格式、不落槽——
-                //   槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
-                //   ★ 单批直通：常见形态（1–3 批中的单批）批次原文直接交合成，跳过行式中转——
-                //   省 1 次 LLM 调用与一轮串行延迟，少一次「原文→行」有损转手；多批保持并行行式路线。
-                const batches = splitIntoBatches(toCompact);
-                summaryMsg.content = batches.length === 1
-                    ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal, event.onAuxUsage)
-                    : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined, event.onAuxUsage), event.signal, event.onAuxUsage);
-                // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
-                //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
-                //   summaryMsg 是 system 角色 → estimateTokens 走 ÷4.8（散文口径），与摘要文本折算一致。
-                if (estimateTokens([summaryMsg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
-                    summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
-                }
-                const endTime = performance.now();
+    try {
+        while (forcedPass || lastSize > event.modelWindow * effectiveRatio) {
+            forcedPass = false;
+            if (event.signal?.aborted) {
+                return
+            }; // 是否停止
+            const active = event.messageArr.slice(2); // 截取系统提示词和摘要
+            const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
+            try {
+                if (toCompact.length > 0) {
+                    // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先）。索引段随槽进入辅助
+                    //   压缩请求，但合成产物重建时按旧值原样回写、不被改写——见 assembleSlot——与叙述合成解耦；
+                    //   noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
+                    summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact));
+                    // ★ 检查点合成（首轮生成语义、后续更新语义），整段替换叙述段。行是批量归档的交换格式、不落槽——
+                    //   槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
+                    //   ★ 单批直通：常见形态（1–3 批中的单批）批次原文直接交合成，跳过行式中转——
+                    //   省 1 次 LLM 调用与一轮串行延迟，少一次「原文→行」有损转手；多批保持并行行式路线。
+                    const batches = splitIntoBatches(toCompact);
+                    summaryMsg.content = batches.length === 1
+                        ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal, event.onAuxUsage)
+                        : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined, event.onAuxUsage), event.signal, event.onAuxUsage);
+                    // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
+                    //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
+                    //   ★ D2 判据对齐（审查报告 2026-11-03）：自收敛动作只重写叙述段（assembleSlot 原样回写
+                    //   索引段），判据也只量叙述段——索引段有 120 条硬顶自治（ARCHIVE_INDEX_MAX_ENTRIES），
+                    //   接近满编时旧「整槽口径」会让每轮压缩都白付一次不可能有收益的 aux 调用（索引 ~1500
+                    //   token + 极短叙述即可越过 2000 阈值）。system 角色 → estimateTokens 走 ÷4.8（散文口径）。
+                    const slotNotes = parseSummarySlot(typeof summaryMsg?.content === 'string' ? summaryMsg.content : '').notes;
+                    if (estimateTokens([{ role: summaryMsg?.role ?? 'system', content: slotNotes } as Msg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
+                        summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
+                    }
+                    const endTime = performance.now();
 
-                event.messageArr.length = 0;
-                event.messageArr.push(systemMsg, summaryMsg, ...keepRecent); // 重构整个上下文
+                    event.messageArr.length = 0;
+                    event.messageArr.push(systemMsg, summaryMsg, ...keepRecent); // 重构整个上下文
+                    event.events({
+                        sessionId: event.sessionId,
+                        eventType: 'session.summary',
+                        metadata: {
+                            depth: event.depth,
+                            decisionSource: 'summary',
+                            ok: true,
+                            durationMs: endTime - startTime,
+                            round: round++
+                        },
+                        usage: {
+                            prompt_tokens: lastSize,
+                            compress_tokens: estReal(event.messageArr),
+                        }
+                    })
+                    // 【核心大厂级落盘动作】：强行把这个最新滚好的快照，作为一个新节点，写入本地数据库/JSONL中
+                    // 注意：此时我们要捕获这批被压缩的废料中，最后一条消息的真实持久化唯一 ID (如 uuid)
+                    const store = await getRollingState(event.sessionId);
+                    store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
+                    // ★ 压缩边界事件行经 persistCompaction 单点落盘（先 state 后 event 的顺序铁律在其内保证）。
+                    await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
+                } else if (keep > 1) { // 如果保留的条数还是大于最大token，则继续减少保留数据
+                    keep--;
+                    continue;
+                } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
+                    // 同样走仅叙述段自收敛（实体索引保留）
+                    summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
+                    event.messageArr.length = 0;
+                    event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
+                    const store = await getRollingState(event.sessionId);
+                    // 注：本分支 toCompact 为空（无新归档消息），仅对既有摘要做再压缩——归档计数不变，
+                    //   仅需把新的 summary 内容落盘。原先 `+ toCompact.length`(=0) 是误导死代码，已移除。
+                    //   fork 派生"该时点的摘要文本"依赖此处的 compaction 事件，与归档分支同经 persistCompaction 单点。
+                    await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
+                } else {
+                    break
+                }
+
+            } catch (error) {
+                if (event.signal?.aborted) return;
+                const err = error instanceof Error ? error : new Error(String(error));
+                console.warn('⚠️ 本轮压缩失败，跳过:', err.message);
+                // ==================== 🛠️ 核心熔断安全升级区 ====================
+                // 1. 去硬盘里捞出上一次的状态
+                const store = await getRollingState(event.sessionId);
+                // 2. 失败计数默默加 1
+                const nextFailures = (store.consecutiveFailures || 0) + 1;
+                // 3. 一脚强行回写落盘，锁死连续失败的物理记忆（刻意不走 persistCompaction：失败无压缩事实，不写事件）
+                await setRollingState(event.sessionId, {
+                    archivedMessageCount: store.archivedMessageCount || 0,
+                    rollingSummary: summaryMsg?.content || "",
+                    consecutiveFailures: nextFailures // 👈 同步落盘
+                });
+                const endTime = performance.now();
                 event.events({
                     sessionId: event.sessionId,
+                    parentId: event.depth > 0 ? event.sessionId : '',
                     eventType: 'session.summary',
                     metadata: {
                         depth: event.depth,
+                        messageId: summaryMsg?.id ?? '(rolling-summary-slot)',
                         decisionSource: 'summary',
-                        ok: true,
+                        ok: false,
                         durationMs: endTime - startTime,
-                        round: round++
+                        attempt: nextFailures
                     },
                     usage: {
                         prompt_tokens: lastSize,
-                        compress_tokens: estReal(event.messageArr),
+                        compress_tokens: estimateTokens(event.messageArr),
+                    },
+                    payload: {
+                        output: err.message,
                     }
                 })
-                // 【核心大厂级落盘动作】：强行把这个最新滚好的快照，作为一个新节点，写入本地数据库/JSONL中
-                // 注意：此时我们要捕获这批被压缩的废料中，最后一条消息的真实持久化唯一 ID (如 uuid)
-                const store = await getRollingState(event.sessionId);
-                store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
-                // ★ 压缩边界事件行经 persistCompaction 单点落盘（先 state 后 event 的顺序铁律在其内保证）。
-                await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
-            } else if (keep > 1) { // 如果保留的条数还是大于最大token，则继续减少保留数据
-                keep--;
-                continue;
-            } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
-                // 同样走仅叙述段自收敛（实体索引保留）
-                summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
-                event.messageArr.length = 0;
-                event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
-                const store = await getRollingState(event.sessionId);
-                // 注：本分支 toCompact 为空（无新归档消息），仅对既有摘要做再压缩——归档计数不变，
-                //   仅需把新的 summary 内容落盘。原先 `+ toCompact.length`(=0) 是误导死代码，已移除。
-                //   fork 派生"该时点的摘要文本"依赖此处的 compaction 事件，与归档分支同经 persistCompaction 单点。
-                await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
-            } else {
-                break
-            }
-
-        } catch (error) {
-            if (event.signal?.aborted) return;
-            const err = error instanceof Error ? error : new Error(String(error));
-            console.warn('⚠️ 本轮压缩失败，跳过:', err.message);
-            // ==================== 🛠️ 核心熔断安全升级区 ====================
-            // 1. 去硬盘里捞出上一次的状态
-            const store = await getRollingState(event.sessionId);
-            // 2. 失败计数默默加 1
-            const nextFailures = (store.consecutiveFailures || 0) + 1;
-            // 3. 一脚强行回写落盘，锁死连续失败的物理记忆（刻意不走 persistCompaction：失败无压缩事实，不写事件）
-            await setRollingState(event.sessionId, {
-                archivedMessageCount: store.archivedMessageCount || 0,
-                rollingSummary: summaryMsg?.content || "",
-                consecutiveFailures: nextFailures // 👈 同步落盘
-            });
-            const endTime = performance.now();
-            event.events({
-                sessionId: event.sessionId,
-                parentId: event.depth > 0 ? event.sessionId : '',
-                eventType: 'session.summary',
-                metadata: {
-                    depth: event.depth,
-                    messageId: summaryMsg?.id ?? '(rolling-summary-slot)',
-                    decisionSource: 'summary',
-                    ok: false,
-                    durationMs: endTime - startTime,
-                    attempt: nextFailures
-                },
-                usage: {
-                    prompt_tokens: lastSize,
-                    compress_tokens: estimateTokens(event.messageArr),
-                },
-                payload: {
-                    output: err.message,
+                // 4. 【终极物理断流闸门】：触线报警，保护钱包！
+                if (nextFailures >= 3) {
+                    // ★ 熔断文案指真根因 + 自愈指引（压缩熔断单点治理，2026-09-16）：超长单元已由分批前
+                    //   确定性预截断兜住（见 pretruncateOversizedUnit），仍连败多为辅助模型服务/网络异常；
+                    //   旧文案误导性指向「网络/提供商崩溃」且无自愈指引，把可恢复问题演成会话死刑。
+                    throw new Error(
+                        `❌ [压缩熔断] 上下文压缩连续 ${nextFailures} 次失败，为防天价账单死循环已暂停自动压缩。`
+                        + `常见根因：摘要辅助模型服务异常或网络不通（可查 DEEP_SEEK_AUX_MODEL 服务可用性；超长工具结果已由系统自动预截断，一般不再是主因）。`
+                        + `自愈：直接重发消息即可重试（成功压缩一次计数即清零）；或 /fork 分叉续接、/new 开新会话。`
+                    );
                 }
-            })
-            // 4. 【终极物理断流闸门】：触线报警，保护钱包！
-            if (nextFailures >= 3) {
-                // ★ 熔断文案指真根因 + 自愈指引（压缩熔断单点治理，2026-09-16）：超长单元已由分批前
-                //   确定性预截断兜住（见 pretruncateOversizedUnit），仍连败多为辅助模型服务/网络异常；
-                //   旧文案误导性指向「网络/提供商崩溃」且无自愈指引，把可恢复问题演成会话死刑。
-                throw new Error(
-                    `❌ [压缩熔断] 上下文压缩连续 ${nextFailures} 次失败，为防天价账单死循环已暂停自动压缩。`
-                    + `常见根因：摘要辅助模型服务异常或网络不通（可查 DEEP_SEEK_AUX_MODEL 服务可用性；超长工具结果已由系统自动预截断，一般不再是主因）。`
-                    + `自愈：直接重发消息即可重试（成功压缩一次计数即清零）；或 /fork 分叉续接、/new 开新会话。`
-                );
+                // =============================================================
+                break;
             }
-            // =============================================================
-            break;
+            const newSize = estReal(event.messageArr);
+            if (newSize >= lastSize) break;
+            lastSize = newSize;
         }
-        const newSize = estReal(event.messageArr);
-        if (newSize >= lastSize) break;
-        lastSize = newSize;
+    } finally {
+        // ★ D3：PostCompact 移入 finally——循环首检 abort / catch 内 abort / 熔断 throw 三条退出路径
+        //   都补发收尾，Pre/Post 配对语义完整（正常路径行为不变）。best-effort：dispatch 内部已容错，
+        //   再兜一层不阻断退出。abort/熔断时 tokensBefore/After 为当时快照（非压缩完成值）。
+        if (preCompactSent) {
+            await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
+        }
     }
-
-    // ★ P1-8 PostCompact：压缩循环完成（含压缩前后 token），观察事件。best-effort，不阻断
-    await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
 
     // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 且确有释放时发 UI 事件（免费衰减早退路径不动
     //   摘要槽、走不到这里）。子 agent（depth>0）不发——其压缩是父上下文治理的内部细节，不进用户消息流。
