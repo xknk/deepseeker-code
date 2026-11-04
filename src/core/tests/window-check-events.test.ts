@@ -126,25 +126,25 @@ describe("窗口治理观测：onWindowCheck 每轮必报（含 noop）", () => 
     });
 });
 
-// ==================== decay 路径：context.decay + context.check 双落（r53 双盲补课） ====================
+// ==================== decay 路径（M3-1 后 = compact 的预处理）：context.decay + context.check 双落 ====================
 
-describe("窗口治理观测：免费衰减路径（M1 现行为钉死；M3-1 合并后 decision 变 'compact' 时同步更新本档）", () => {
-    it("衰减降回阈值内早退：decision='decay' + decayed=true；context.decay Before>After；context.check 带窗口字段；零 aux 调用", async () => {
+describe("窗口治理观测：衰减+压缩合并单破（M3-1 单次破规则）", () => {
+    it("超阈值触发：decay 生效（context.decay Before>After）后同调用续走压缩 → decision='compact' + decayed=true", async () => {
         const cap = capture();
-        const { provider, summarizeSizes } = makeAuxProvider();
+        const { provider, summarizeSizes } = makeAuxProvider({ notes: "Fake 压缩摘要" });
         const messageArr = decayFixture();
         try {
             await withProvider(provider, async () => {
-                await ensureFitsWindow(buildEvent("wc-decay", messageArr, { events: cap.events, onWindowCheck: cap.onWindowCheck }));
+                await ensureFitsWindow(buildEvent("wc-decay-compact", messageArr, { events: cap.events, onWindowCheck: cap.onWindowCheck }));
             });
         } finally {
             // no cleanup needed（无 hook 注册）
         }
         assert.equal(cap.checks.length, 1);
         const c = cap.checks[0];
-        assert.equal(c.decision, "decay", "衰减后回到阈值内 → 早退 decision='decay'");
-        assert.equal(c.decayed, true, "decay 路径 decayed 恒 true");
-        assert.equal(summarizeSizes.length, 0, "免费衰减成功降级，零 LLM 成本");
+        assert.equal(c.decision, "compact", "M3-1：衰减不再早退，同调用续走压缩 → decision='compact'");
+        assert.equal(c.decayed, true, "衰减改写过历史 → decayed=true（与压缩合并为一次历史改写）");
+        assert.ok(summarizeSizes.length >= 1, "压缩走了 aux 合成调用");
         // context.decay：衰减前后 token 快照（此前只有 console.log，trace 双盲）
         const decays = cap.trace.filter((e: any) => e.eventType === "context.decay");
         assert.equal(decays.length, 1, "衰减生效恰落一条 context.decay");
@@ -153,12 +153,32 @@ describe("窗口治理观测：免费衰减路径（M1 现行为钉死；M3-1 �
         // context.check：仅 decision≠noop 发，带触发时刻口径
         const checks2 = cap.trace.filter((e: any) => e.eventType === "context.check");
         assert.equal(checks2.length, 1);
-        assert.equal(checks2[0].metadata.windowDecision, "decay");
+        assert.equal(checks2[0].metadata.windowDecision, "compact");
         assert.equal(checks2[0].metadata.hitRateAtCheck, null);
         assert.equal(checks2[0].metadata.cacheFactorAtCheck, 1.0);
         assert.equal(typeof checks2[0].metadata.estReal, "number", "触发时刻 estReal 快照（回答『当时为什么触发』）");
         assert.equal(checks2[0].metadata.thresholdAtSend, 15000);
         assert.equal(checks2[0].metadata.correctionRatioUsed, 1);
+    });
+
+    it("验收（方案 M3-1）：连续两轮不再各破一次前缀——第一轮 decay+compact 一次改写，第二轮 noop", async () => {
+        const cap = capture();
+        const { provider } = makeAuxProvider({ notes: "Fake 压缩摘要" });
+        const messageArr = decayFixture();
+        await withProvider(provider, async () => {
+            // 第 1 轮：超阈值 → decay + 压缩在同一次调用完成（唯一一次历史改写）
+            await ensureFitsWindow(buildEvent("wc-single-break", messageArr, { events: cap.events, onWindowCheck: cap.onWindowCheck }));
+            // 第 2 轮：同一（已被压到位的）消息数组再判定——不得再动历史
+            await ensureFitsWindow(buildEvent("wc-single-break", messageArr, { events: cap.events, onWindowCheck: cap.onWindowCheck }));
+        });
+        assert.equal(cap.checks.length, 2);
+        assert.equal(cap.checks[0].decision, "compact");
+        assert.equal(cap.checks[0].decayed, true, "第一轮：衰减+压缩合并（唯一一次破前缀）");
+        assert.equal(cap.checks[1].decision, "noop", "第二轮：上下文已压到位 → 不再触发任何治理（旧形态下这里会再破一次）");
+        assert.equal(cap.checks[1].decayed, undefined, "第二轮零历史改写");
+        // 全程恰一次 decay、恰一次非 noop 判定事件——「连续两轮各破一次」不出现
+        assert.equal(cap.trace.filter((e: any) => e.eventType === "context.decay").length, 1);
+        assert.equal(cap.trace.filter((e: any) => e.eventType === "context.check").length, 1);
     });
 });
 

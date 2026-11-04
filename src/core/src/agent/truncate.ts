@@ -718,10 +718,11 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         reportCheck('noop');
         return;
     }
-    // ★ 压缩前免费衰减（2026-09-15）：超阈值先试零 LLM 成本的旧工具结果折叠（与跨 run 重建同款
+    // ★ 压缩前免费衰减（2026-09-15 引入）：超阈值先做零 LLM 成本的旧工具结果折叠（与跨 run 重建同款
     //   decayOldToolResults：保留最近 KEEP_RECENT_UNITS 个对话单元全文，更早单元的超长 tool content
-    //   截头+折叠提示、老图占位）。旧 tool 结论早已被后续 assistant 消化，折叠信息损失有界；降回
-    //   阈值内即免整轮 LLM 摘要调用。仍在阈值上 → 照走下方 LLM 压缩（衰减不白做：待压缩批体积更小）。
+    //   截头+折叠提示、老图占位）。旧 tool 结论早已被后续 assistant 消化，折叠信息损失有界；
+    //   M3-1 后衰减不再有「降回阈值内即早退」分支——它只作为压缩的预处理步骤（待压缩批体积更小、
+    //   合成更便宜），与 LLM 压缩合并为同一次调用里的唯一一次历史改写。
     //   ★ 缓存口径：仅在本就超阈值（= 原本必触发压缩、message[1] 必被改写）时才动历史字节，首个
     //     分歧点深于 message[1]，击穿范围严格小于压缩路径；estReal 数值口径不变（衰减是内容操作）。
     //   幂等：已折叠内容（头 keep 字符+固定尾注）重衰减收敛到同一固定点，不逐次加深。
@@ -745,19 +746,17 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             },
         });
     }
-    if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
-        console.log(`📉 [窗口治理] 免费衰减（旧工具结果折叠）后回到阈值内（${Math.round(preDecaySize)} → ${Math.round(estReal(event.messageArr))} token），跳过 LLM 压缩`);
-        reportCheck('decay', true);
-        emitCheckEvent('decay');
-        return;
-    }
+    // ★ M3-1 单次破规则（缓存塌方治理，2026-11-04）：此处不再「衰减降回阈值内就早退」——decay 一旦
+    //   改写历史，前缀已破（首个分歧点在 message[2+]），早退只会留下「decay 破一次 → 下轮压缩再破一次」
+    //   的双破形态（r53(decay)→r54(再破) 实锤）。衰减后无条件续走下方 LLM 压缩，一次破解决问题：
+    //   上下文一步压到位，后续轮在小前缀上重建缓存，压缩红利当次兑现。
     // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
     const tokensThreshold = Math.round(event.modelWindow * effectiveRatio);
     // ★ D3 Pre/Post 配对（审查报告 2026-11-03）：PreCompact 已发出后，后续所有退出路径（循环首检 abort
     //   return / catch 内 abort return / 熔断 throw）都必须有 PostCompact 收尾——标志位 + try/finally
     //   保证配对（声明式 hook 的「Pre 开 Post 关」记账契约，如压缩耗时统计/临时换模型/加锁）。
-    //   ★ 包裹起点刻意在 PreCompact dispatch 之后：上方免费衰减早退路径没发过 PreCompact，flag 守卫
-    //   保证不会给它补发 PostCompact（少发→错发比不配对更糟）。
+    //   ★ 包裹起点刻意在 PreCompact dispatch 之后：入口 noop 早退（未超阈值直接 return）没发过
+    //   PreCompact，flag 守卫保证不会给它补发 PostCompact（少发→错发比不配对更糟）。
     let preCompactSent = false;
     await dispatch('PreCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(estReal(event.messageArr)), tokensThreshold });
     preCompactSent = true;
@@ -771,7 +770,10 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     // ★ M1：压缩判定动作记录——循环实际做了什么，循环后在统一出口上报（onWindowCheck + context.check）。
     let compactDecision: 'compact' | 'selfCompact' | 'noop' = 'noop';
     // ★ 手动压缩：至少强制跑一遍压缩循环（健康会话 lastSize 本就低于阈值，普通条件一轮都不进 = 点了没反应）
-    let forcedPass = event.forceCompact === true;
+    // ★ M3-1（缓存塌方治理）：衰减生效同样强制跑一遍——历史已被 decay 改写（前缀已破），若放任循环
+    //   条件不成立（衰减后已低于阈值），压缩体一轮都不进 → compactDecision 停在 noop → 前缀破了一次
+    //   却没拿到压缩红利，下轮再超阈值时二次破前缀（正是 r53(decay)→r54(再破) 的双破形态）。
+    let forcedPass = event.forceCompact === true || decayed;
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
     //   唯一的 continue 分支（keep--）不修改 messageArr，故 lastSize 始终与实际 token 量一致。省一次全量扫描/轮。
     try {

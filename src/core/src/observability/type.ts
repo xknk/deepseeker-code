@@ -75,7 +75,7 @@ export interface TraceBase {
         estReal?: number;              // 校准后真实口径估算（estimateTokens×correctionRatio + toolsTokens）
         thresholdAtSend?: number;      // 本轮生效压缩阈值（modelWindow × effectiveRatio，四舍五入）
         correctionRatioUsed?: number;  // 本轮使用的估算校准系数
-        windowDecision?: 'noop' | 'decay' | 'compact' | 'selfCompact'; // 判定动作（noop 只进 llm.request 回调不落 trace）
+        windowDecision?: 'noop' | 'compact' | 'selfCompact'; // 判定动作（M3-1 后 decay 并入 compact 的预处理，以 decayed 语义标注；noop 只进 llm.request 回调不落 trace）
         hitRateAtCheck?: number | null; // 判定时缓存命中率（无真实 usage 时 null）
         cacheFactorAtCheck?: number;    // 判定时缓存感知阈值系数（∈[0.9,1.1]，无 usage 时 1.0）
         decayTokensBefore?: number;     // context.decay：衰减前 token 快照

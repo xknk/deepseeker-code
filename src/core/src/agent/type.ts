@@ -144,10 +144,10 @@ export interface WindowCheckInfo {
     hitRate: number | null;
     /** 判定时缓存感知阈值系数（∈[0.9,1.1]；无 usage 时 1.0）。 */
     cacheFactor: number;
-    /** 判定动作：noop=未触发治理 / decay=免费衰减生效后早退（M3-1 后该路径消失）/
-     *  compact=LLM 压缩 / selfCompact=仅摘要自收敛（无新归档）。 */
-    decision: 'noop' | 'decay' | 'compact' | 'selfCompact';
-    /** 本轮免费衰减是否改写过历史（compact 的预衰减步骤置 true——衰减+压缩合并为一次历史改写）。 */
+    /** 判定动作：noop=未触发治理 / compact=LLM 压缩（M3-1 后 decay 只是其预处理步骤，
+     *  不再是独立判定——衰减生效以 decayed=true 标注）/ selfCompact=仅摘要自收敛（无新归档）。 */
+    decision: 'noop' | 'compact' | 'selfCompact';
+    /** 本轮免费衰减是否改写过历史（compact 的预衰减步骤置 true——衰减+压缩合并为一次历史改写，M3-1）。 */
     decayed?: boolean;
 }
 
