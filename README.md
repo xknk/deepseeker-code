@@ -84,6 +84,66 @@ The data directory defaults to `~/.deepseeker-code/` (override with `DEEPSEEKER_
 
 ---
 
+## Unattended batch & scheduled sync
+
+`deepseeker-code batch` runs queued work tickets unattended; `batch sync` pulls labeled GitHub/GitLab issues into the local ticket queue. One-time setup:
+
+```bash
+# 1. copy the example config into the project and trim to the source you use
+cp sync.json.example <project>/.deepseeker-code/batch/sync.json
+# 2. self-test first: config / gh auth / repos / labels / token — each ✓/✗ with a fix hint
+deepseeker-code batch sync --check
+# 3. pull once (--dry-run previews without writing anything)
+deepseeker-code batch sync
+# 4. run the queue (--max-total-yuan caps total batch spend; --wait-window defers the start)
+deepseeker-code batch run --max-total-yuan 5
+```
+
+Schedule **detection and work as two separate clocks** (§2.3 of the design doc): sync often, run in your off-peak window. `sync` holds its own lock — an overlapping run just exits — and `batch run --wait-window 01:00-07:00` can also defer a single schedule instead of a second clock.
+
+**Linux (cron)** — `crontab -e`:
+
+```cron
+# detection clock: pull tickets every 30 minutes
+*/30 * * * * cd /path/to/project && deepseeker-code batch sync >> /tmp/dsc-sync.log 2>&1
+# work clock: run the queue nightly at 01:00 (off-peak), capped at ¥5 per batch
+0 1 * * * cd /path/to/project && deepseeker-code batch run --max-total-yuan 5 >> /tmp/dsc-run.log 2>&1
+```
+
+**macOS (launchd)** — `~/Library/LaunchAgents/com.deepseeker-code.sync.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.deepseeker-code.sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd /path/to/project &amp;&amp; deepseeker-code batch sync</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>StandardOutPath</key><string>/tmp/dsc-sync.log</string>
+  <key>StandardErrorPath</key><string>/tmp/dsc-sync.log</string>
+</dict></plist>
+```
+
+Load with `launchctl load ~/Library/LaunchAgents/com.deepseeker-code.sync.plist`. For the work clock, duplicate the file as `com.deepseeker-code.run.plist`, replace the command with `batch run --max-total-yuan 5`, and swap `StartInterval` for a calendar trigger: `<key>StartCalendarInterval</key><dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>`.
+
+**Windows (Task Scheduler)** — elevated PowerShell:
+
+```powershell
+# detection clock: every 30 minutes
+schtasks /Create /TN "DeepSeeker sync" /SC MINUTE /MO 30 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch sync"
+# work clock: nightly 01:00; --wait-window gives a second guard inside the run itself
+schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch run --max-total-yuan 5"
+```
+
+> To have the machine wake up for the nightly window: open Task Scheduler → the task's Properties → Conditions → tick **"Wake the computer to run this task"**. Keep "Run only when user is logged on" for interactive-safe defaults; `batch run` needs the same environment (API key) your normal shell has.
+
+---
+
 ## Architecture (monorepo)
 
 ```text

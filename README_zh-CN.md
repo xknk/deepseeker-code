@@ -84,6 +84,66 @@ npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
 
 ---
 
+## 挂机批处理与定时同步
+
+`deepseeker-code batch` 挂机跑工单队列；`batch sync` 把 GitHub/GitLab 上打了 label 的 issue 拉成本地工单（多入口流水线）。一次性配置：
+
+```bash
+# 1. 把示例配置复制进项目，删掉用不到的源（GitHub 源两行即好）
+cp sync.json.example <项目>/.deepseeker-code/batch/sync.json
+# 2. 先自检：配置 / gh 登录 / 仓库 / label / token，逐项 ✓/✗ + 怎么修
+deepseeker-code batch sync --check
+# 3. 首次拉取（--dry-run 只预演，零落盘）
+deepseeker-code batch sync
+# 4. 跑队列（--max-total-yuan 本批总花费上限；--wait-window 到点再开跑）
+deepseeker-code batch run --max-total-yuan 5
+```
+
+定时**检测与开工分两个钟**（方案 §2.3）：sync 钟跑得勤，run 钟对准电价谷期。`sync` 自带单飞锁——定时器重叠时后一个直接退出；`batch run --wait-window 01:00-07:00` 也可以只配一个钟、把延迟交给 run 自己。
+
+**Linux（cron）**——`crontab -e`：
+
+```cron
+# 检测钟：每 30 分钟拉一次票
+*/30 * * * * cd /path/to/project && deepseeker-code batch sync >> /tmp/dsc-sync.log 2>&1
+# 开工钟：每晚 01:00（谷期）跑队列，单批花费上限 ¥5
+0 1 * * * cd /path/to/project && deepseeker-code batch run --max-total-yuan 5 >> /tmp/dsc-run.log 2>&1
+```
+
+**macOS（launchd）**——`~/Library/LaunchAgents/com.deepseeker-code.sync.plist`：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.deepseeker-code.sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd /path/to/project &amp;&amp; deepseeker-code batch sync</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>StandardOutPath</key><string>/tmp/dsc-sync.log</string>
+  <key>StandardErrorPath</key><string>/tmp/dsc-sync.log</string>
+</dict></plist>
+```
+
+加载：`launchctl load ~/Library/LaunchAgents/com.deepseeker-code.sync.plist`。开工钟复制一份改名 `com.deepseeker-code.run.plist`，命令换成 `batch run --max-total-yuan 5`，并把 `StartInterval` 换成日历触发：`<key>StartCalendarInterval</key><dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>`。
+
+**Windows（任务计划程序）**——管理员 PowerShell：
+
+```powershell
+# 检测钟：每 30 分钟
+schtasks /Create /TN "DeepSeeker sync" /SC MINUTE /MO 30 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch sync"
+# 开工钟：每晚 01:00；--wait-window 在 run 内部再加一道延迟闸
+schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch run --max-total-yuan 5"
+```
+
+> 要让机器到点自动唤醒跑夜间窗口：任务计划程序 → 该任务 → 属性 → 条件 → 勾选**「唤醒计算机运行此任务」**。「只在用户登录时运行」保持默认即可；`batch run` 需要与你普通 shell 相同的环境变量（API key）。
+
+---
+
 ## 架构（Monorepo）
 
 ```text

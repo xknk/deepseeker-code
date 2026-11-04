@@ -38,8 +38,10 @@ const ZH = {
 改动收割在独立 git worktree（临时分支）上，任务收尾自动 commit 到该分支（跨重启不丢），保留待人工 merge 或丢弃。
 
 sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）：
-  sync [--source github|gitlab] [--dry-run]   拉取（配置：<项目>/.deepseeker-code/batch/sync.json）；
-                                              --dry-run 只预演会建哪些票、验收取自哪里，零落盘`,
+  sync [--source github|gitlab] [--dry-run] [--check]
+                                              拉取（配置：<项目>/.deepseeker-code/batch/sync.json）；
+                                              --dry-run 只预演会建哪些票、验收取自哪里，零落盘；
+                                              --check 自检（gh/仓库/label/配置/token 逐项 ✓/✗ + 怎么修）`,
     commitSkipped: "（未执行——worktree 未创建）",
     commitNotReached: "未执行（任务在 agent 阶段前终止，没有需要固化的改动）",
     commitDone: (sha: string) => `${sha.slice(0, 8)}（worktree 改动已固化为分支上的 commit，重启被清扫也不丢）`,
@@ -62,7 +64,7 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     reportMissing: "（报告缺失）",
 
     // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
-    syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
+    syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
     syncBadFlag: (f: string) => `❌ 未知参数："${f}"`,
     // M6 总量硬闸（§5.2.3）：run 侧解析 fail-closed + 每票开始前检查花费上限
     runUsage: "用法：deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
@@ -198,8 +200,10 @@ Artifacts: <project>/.deepseeker-code/batch/done/<id>.report.md (status / receip
 changes are harvested onto an isolated git worktree (temp branch) and committed to that branch when the task ends (survives restarts), kept for manual merge or disposal.
 
 sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tickets):
-  sync [--source github|gitlab] [--dry-run]   Pull (config: <project>/.deepseeker-code/batch/sync.json);
-                                              --dry-run previews what would be created and where the acceptance comes from, writing nothing`,
+  sync [--source github|gitlab] [--dry-run] [--check]
+                                              Pull (config: <project>/.deepseeker-code/batch/sync.json);
+                                              --dry-run previews what would be created and where the acceptance comes from, writing nothing;
+                                              --check self-test (gh / repos / labels / config / token, each ✓/✗ + how to fix)`,
     commitSkipped: "(not run — no worktree was created)",
     commitNotReached: "not run (the task stopped before the agent phase; nothing to commit)",
     commitDone: (sha: string) => `${sha.slice(0, 8)} (worktree changes committed onto the branch — a restart sweep will not lose them)`,
@@ -221,7 +225,7 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     cleaned: (n) => `🧹 Cleared done/ (${n} task archives). pending/running untouched.`,
     reportMissing: "(report missing)",
 
-    syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
+    syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
     syncBadFlag: (f) => `❌ Unknown flag: "${f}"`,
     // M6 total-spend hard cap (§5.2.3): fail-closed run parsing + per-ticket pre-check of the spend cap
     runUsage: "Usage: deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",

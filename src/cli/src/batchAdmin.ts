@@ -17,7 +17,7 @@ import { readLocale } from "./prefs.ts";
 export type BatchArgv =
     | { sub: "add"; files: string[] }
     | { sub: "run"; waitWindow?: string; maxTotalYuan?: number; unknownFlag?: string }
-    | { sub: "sync"; source?: "github" | "gitlab"; dryRun: boolean; unknownFlag?: string }
+    | { sub: "sync"; source?: "github" | "gitlab"; dryRun: boolean; check: boolean; unknownFlag?: string }
     | { sub: "list" }
     | { sub: "clean" }
     | { sub: "help" };
@@ -34,22 +34,25 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
     if (sub === "add") return { sub: "add", files: argv.slice(2) };
     if (sub === "sync") {
         // ★ sync 是轻模块（拉取/去重/建票零 LLM，§3.3）：pre-key 派发；未知 flag fail-closed。
+        //   --check：doctor 自检（M7，§5.3）——逐项 ✓/✗ + 怎么修，不改任何状态。
         const rest = argv.slice(2);
         let source: "github" | "gitlab" | undefined;
         let dryRun = false;
+        let check = false;
         let unknownFlag: string | undefined;
         for (let i = 0; i < rest.length; i++) {
             const a = rest[i];
             if (a === "--dry-run") dryRun = true;
+            else if (a === "--check") check = true;
             else if (a === "--source") {
                 const v = rest[++i];
                 if (v === "github" || v === "gitlab") source = v;
-                else return { sub: "sync", dryRun, unknownFlag: a === undefined ? "--source" : `${a} ${v ?? "（缺值）"}` };
+                else return { sub: "sync", dryRun, check, unknownFlag: a === undefined ? "--source" : `${a} ${v ?? "（缺值）"}` };
             } else {
-                return { sub: "sync", dryRun, unknownFlag: a };
+                return { sub: "sync", dryRun, check, unknownFlag: a };
             }
         }
-        return { sub: "sync", source, dryRun, unknownFlag };
+        return { sub: "sync", source, dryRun, check, unknownFlag };
     }
     if (sub === "run") {
         // ★ run 参数解析 fail-closed（M6 总量硬闸）：未知 flag / 缺值 / 非法数值直接报 unknownFlag，
@@ -100,6 +103,13 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
             emit(T.syncBadFlag(b.unknownFlag));
             emit(T.syncUsage);
             process.exitCode = 2;
+            return;
+        }
+        if (b.check) {
+            // M7 doctor（§5.3）：逐项自检零副作用（不动 state/锁/队列）；有 ✗ 退出码 1（定时器可感知）。
+            const { runSyncCheck } = await import("@/batch/sync/doctor.ts");
+            const r = await runSyncCheck({ locale: getLocale() });
+            if (!r.ok) process.exitCode = 1;
             return;
         }
         const { runSync } = await import("@/batch/sync/sync.ts");

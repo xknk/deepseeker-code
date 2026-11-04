@@ -9,11 +9,13 @@ import assert from "node:assert/strict";
 const { parseBatchArgv } = await import("../src/batchAdmin.ts");
 const { batchT } = await import("../src/batchStrings.ts");
 
-test("parseBatchArgv：sync 子命令解析 --source / --dry-run / 无参", () => {
-    assert.deepEqual(parseBatchArgv(["batch", "sync"]), { sub: "sync", source: undefined, dryRun: false, unknownFlag: undefined });
-    assert.deepEqual(parseBatchArgv(["batch", "sync", "--dry-run"]), { sub: "sync", source: undefined, dryRun: true, unknownFlag: undefined });
-    assert.deepEqual(parseBatchArgv(["batch", "sync", "--source", "github"]), { sub: "sync", source: "github", dryRun: false, unknownFlag: undefined });
-    assert.deepEqual(parseBatchArgv(["batch", "sync", "--source", "gitlab", "--dry-run"]), { sub: "sync", source: "gitlab", dryRun: true, unknownFlag: undefined });
+test("parseBatchArgv：sync 子命令解析 --source / --dry-run / --check / 无参", () => {
+    assert.deepEqual(parseBatchArgv(["batch", "sync"]), { sub: "sync", source: undefined, dryRun: false, check: false, unknownFlag: undefined });
+    assert.deepEqual(parseBatchArgv(["batch", "sync", "--dry-run"]), { sub: "sync", source: undefined, dryRun: true, check: false, unknownFlag: undefined });
+    assert.deepEqual(parseBatchArgv(["batch", "sync", "--source", "github"]), { sub: "sync", source: "github", dryRun: false, check: false, unknownFlag: undefined });
+    assert.deepEqual(parseBatchArgv(["batch", "sync", "--source", "gitlab", "--dry-run"]), { sub: "sync", source: "gitlab", dryRun: true, check: false, unknownFlag: undefined });
+    assert.deepEqual(parseBatchArgv(["batch", "sync", "--check"]), { sub: "sync", source: undefined, dryRun: false, check: true, unknownFlag: undefined });
+    assert.deepEqual(parseBatchArgv(["batch", "sync", "--check", "--dry-run"]), { sub: "sync", source: undefined, dryRun: true, check: true, unknownFlag: undefined });
     const bad = parseBatchArgv(["batch", "sync", "--wat"]);
     assert.equal(bad?.sub, "sync");
     if (bad?.sub === "sync") assert.equal(bad.unknownFlag, "--wat");
