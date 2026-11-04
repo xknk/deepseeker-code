@@ -34,7 +34,16 @@ const ZH = {
   任务描述正文（Markdown）…
 
 产物：<项目>/.deepseeker-code/batch/done/<id>.report.md（状态/结算单/验收输出/diff 摘要）；
-改动收割在独立 git worktree（临时分支）上，保留待人工 merge 或丢弃。`,
+改动收割在独立 git worktree（临时分支）上，任务收尾自动 commit 到该分支（跨重启不丢），保留待人工 merge 或丢弃。`,
+    commitSkipped: "（未执行——worktree 未创建）",
+    commitNotReached: "未执行（任务在 agent 阶段前终止，没有需要固化的改动）",
+    commitDone: (sha: string) => `${sha.slice(0, 8)}（worktree 改动已固化为分支上的 commit，重启被清扫也不丢）`,
+    commitPre: (sha: string) => `${sha.slice(0, 8)}（agent 自己提交过，本轮未新建 commit）`,
+    commitNone: "无改动（相对基座没有可提交的内容）",
+    commitFail: (e: string) => `⚠️ 未提交成功（${e}）——改动仍在该 worktree 目录内，下次启动清扫后会丢失`,
+    commitEntry: (v: string) => `- 收尾提交：${v}`,
+    commitMsg: (id: string, title: string) => `batch: ${id} ${title}`.slice(0, 120),
+    commitLine: (branch: string, sha: string) => `💾 已提交到分支 ${branch}（${sha.slice(0, 8)}）`,
     adminAddUsage: "用法：deepseeker-code batch add <工单.md> [...]（缺验收命令的工单会被拒绝）\n详情：deepseeker-code batch help",
     readFileFail: (e: string) => `读文件失败：${e}`,
     enqueued: (id: string, title: string) => `📥 已入队 [${id}] ${title}`,
@@ -63,7 +72,7 @@ const ZH = {
     acceptLine: (passed: boolean, id: string, code: number | null) => `${passed ? "✅" : "❌"} [${id}] 验收 exit ${code}`,
     acceptKilledSuffix: "（超时被杀）",
     timeoutAbort: (min: number) => `任务超时（${min} 分钟）`,
-    artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，保留待人工处置）`,
+    artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，已提交，保留待人工处置）`,
     inWindowNow: (hhmm: string) => `⏰ 当前 ${hhmm} 已在窗口内，立即开跑。`,
     waitWindowWait: (h: number, m: number) => `⏰ --wait-window：${h} 小时 ${m} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`,
     waitWindowInvalid: (s: string) => `❌ --wait-window 格式非法："${s}"（应为 HH:MM-HH:MM，如 23:30-06:30）`,
@@ -72,7 +81,7 @@ const ZH = {
     summaryCost: (sum: string, tasks: number) => `💰 总花费：¥${sum}（${tasks} 个任务计价）`,
     summaryCostFree: "💰 总花费：全部无价模型，未计钱",
     failedHead: "⚠️ 未过清单：",
-    artifactsDir: "报告与改动：.deepseeker-code/batch/done/（worktree 均保留待人工处置）",
+    artifactsDir: "报告与改动：.deepseeker-code/batch/done/（改动已提交到 dsc-wt-* 分支，worktree 目录清理不影响交付）",
 
     // —— 状态标签（控制台与报告共用） ——
     statusLabel: (s: BatchTaskStatus) => ({
@@ -122,8 +131,8 @@ const ZH = {
     noAccept: "\n（未执行验收——改动不完整，跑了也是噪声）",
     deniedH: "## 被拒工具调用（fail-closed 记录）",
     deniedNone: "无。",
-    diffH: "## Diff 摘要（worktree 相对基座，未提交，待人工处置）",
-    diffNote: (branch: string, p: string) => `改动在独立 worktree（分支 \`${branch}\`，路径 ${p}）。处置：检查满意 → 在 worktree 内 commit 并合回主仓；丢弃 → 删除该 worktree 目录 + \`git worktree prune\` + \`git branch -D <分支>\`。`,
+    diffH: "## Diff 摘要（worktree 相对基座，已提交到分支，待人工处置）",
+    diffNote: (branch: string, p: string) => `改动已提交到分支 \`${branch}\`（worktree 路径 ${p}；该目录下次启动即被清扫，分支不受影响）。查看：\`git show ${branch}\`；合回：\`git merge ${branch}\`；丢弃：\`git branch -D ${branch}\`。`,
     diffNone: "（无）",
 
     // —— 看门狗（进展感知）报告段与进度行 ——
@@ -162,7 +171,16 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
   Task description body (Markdown)…
 
 Artifacts: <project>/.deepseeker-code/batch/done/<id>.report.md (status / receipt / acceptance output / diff summary);
-changes are harvested onto an isolated git worktree (temp branch), kept for manual merge or disposal.`,
+changes are harvested onto an isolated git worktree (temp branch) and committed to that branch when the task ends (survives restarts), kept for manual merge or disposal.`,
+    commitSkipped: "(not run — no worktree was created)",
+    commitNotReached: "not run (the task stopped before the agent phase; nothing to commit)",
+    commitDone: (sha: string) => `${sha.slice(0, 8)} (worktree changes committed onto the branch — a restart sweep will not lose them)`,
+    commitPre: (sha: string) => `${sha.slice(0, 8)} (the agent committed already; no new commit here)`,
+    commitNone: "no changes (nothing to commit against the base)",
+    commitFail: (e: string) => `⚠️ Commit failed (${e}) — changes remain inside the worktree directory and will be lost at the next startup sweep`,
+    commitEntry: (v: string) => `- Final commit: ${v}`,
+    commitMsg: (id: string, title: string) => `batch: ${id} ${title}`.slice(0, 120),
+    commitLine: (branch: string, sha: string) => `💾 Committed to branch ${branch} (${sha.slice(0, 8)})`,
     adminAddUsage: "Usage: deepseeker-code batch add <ticket.md> [...] (tickets without an acceptance command are rejected)\nDetails: deepseeker-code batch help",
     readFileFail: (e) => `Failed to read file: ${e}`,
     enqueued: (id, title) => `📥 Enqueued [${id}] ${title}`,
@@ -190,7 +208,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     acceptLine: (passed, id, code) => `${passed ? "✅" : "❌"} [${id}] acceptance exit ${code}`,
     acceptKilledSuffix: " (killed on timeout)",
     timeoutAbort: (min) => `Task timed out (${min} minutes)`,
-    artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, kept for manual handling)`,
+    artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, committed, kept for manual handling)`,
     inWindowNow: (hhmm) => `⏰ It's ${hhmm}, already inside the window — starting now.`,
     waitWindowWait: (h, m) => `⏰ --wait-window: starting in ${h}h ${m}m (at the window start). Waiting — Ctrl+C to cancel.`,
     waitWindowInvalid: (s) => `❌ Invalid --wait-window: "${s}" (expected HH:MM-HH:MM, e.g. 23:30-06:30)`,
@@ -199,7 +217,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     summaryCost: (sum, tasks) => `💰 Total cost: ¥${sum} (${tasks} tasks priced)`,
     summaryCostFree: "💰 Total cost: all records unpriced, no money counted",
     failedHead: "⚠️ Failed tasks:",
-    artifactsDir: "Reports and changes: .deepseeker-code/batch/done/ (worktrees kept for manual handling)",
+    artifactsDir: "Reports and changes: .deepseeker-code/batch/done/ (changes are committed to dsc-wt-* branches; sweeping the worktree directories does not affect delivery)",
 
     statusLabel: (s) => ({
         passed: "✅ acceptance passed",
@@ -245,8 +263,8 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     noAccept: "\n(Acceptance not run — changes incomplete, running it would be noise.)",
     deniedH: "## Denied tool calls (fail-closed log)",
     deniedNone: "None.",
-    diffH: "## Diff summary (worktree vs base, uncommitted, awaiting manual handling)",
-    diffNote: (branch, p) => `Changes live in an isolated worktree (branch \`${branch}\`, path ${p}). To keep: commit inside the worktree and merge back. To discard: delete the worktree directory + \`git worktree prune\` + \`git branch -D <branch>\`.`,
+    diffH: "## Diff summary (worktree vs base, committed to the branch, awaiting manual handling)",
+    diffNote: (branch, p) => `Changes are committed onto branch \`${branch}\` (worktree path ${p}; that directory is swept at the next startup, the branch is unaffected). Inspect: \`git show ${branch}\`; merge: \`git merge ${branch}\`; discard: \`git branch -D ${branch}\`.`,
     diffNone: "(none)",
 
     wdH: "## Watchdog (progress-aware)",

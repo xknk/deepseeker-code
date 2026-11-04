@@ -21,7 +21,7 @@ import { spawn } from "child_process";
 import { handleUnifiedChat } from "@/serve/chatProcessing.ts";
 import { agentTools } from "@/tool/index.ts";
 import { isInterpreterRepoScript } from "@/tool/autoPermission.ts";
-import { createWorktree, harvestDiff, type WorktreeHandle } from "@/tool/worktree/manager.ts";
+import { createWorktree, harvestDiff, commitWorktreeChanges, type WorktreeHandle, type WorktreeCommit } from "@/tool/worktree/manager.ts";
 import { setSessionWorktree, clearSessionWorktree } from "@/tool/worktree/sessionRegistry.ts";
 import { killBackgroundTasksUnder, resolveWinShell } from "@/tool/registry/background.ts";
 import { scrubCommandEnv } from "@/tool/guard.ts";
@@ -145,6 +145,16 @@ const collectSessionCost = async (sessionId: string): Promise<SessionCost> => {
 
 // ============ 报告生成 ============
 
+/** 收尾提交状态 → 报告一行（无提交记录时显式说「未执行」，不留空白让人猜）。 */
+const commitText = (c: WorktreeCommit | undefined): string => {
+    const T = batchT(getLocale());
+    if (!c) return T.commitSkipped;
+    if (c.error) return T.commitFail(c.error);
+    if (c.committed) return T.commitDone(c.sha);
+    if (c.noChanges) return T.commitNone;
+    return T.commitPre(c.sha);
+};
+
 /** 看门狗证据链 → 报告行（方案 §7：证据链是硬要求——用户早上复核时能独立判断杀得对不对）。 */
 const buildWatchdogLines = (snaps: WatchdogSnapshot[], costYuan: number | null): string[] | null => {
     if (snaps.length === 0) return null;
@@ -175,6 +185,8 @@ export const buildReport = (args: {
     cost: SessionCost; receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
     finalText: string; accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null;
     deniedTools: { tool: string; detail: string }[]; diff: string; wt: WorktreeHandle | null;
+    /** 收尾快照提交结果（worktree 未创建时不传）。 */
+    commit?: WorktreeCommit | null;
     errorMessage?: string;
     /** 看门狗证据链（方案 §7：触发规则/verdict/evidence/nudge 记录/终止时刻轮数与花费/重试轮次）。 */
     watchdogLines?: string[];
@@ -199,6 +211,7 @@ ${T.reportTitle(ticket.title)}
 ${T.statusEntry(`${T.statusLabel(status)}${budgetNote}`)}
 ${T.costEntry(T.costSummary(cost))}
 ${T.receiptEntry(receipt ? T.receiptLine(receipt) : T.noReceipt)}
+${T.commitEntry(args.commit ? commitText(args.commit) : (wt ? T.commitNotReached : T.commitSkipped))}
 ${args.errorMessage ? T.errorEntry(args.errorMessage) : ""}
 ${args.watchdogLines?.length ? `${T.wdH}\n\n${args.watchdogLines.map(T.wdRecord).join("\n")}\n\n` : ""}${T.taskH}
 
@@ -500,13 +513,17 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     // 善后：摘唤醒驱动（任务定态——此后完成的在飞子代理不再唤醒，inbox 保留备查；先于一切 await，
     //  防 wdKill/timeout 路径状态判定期间的完成事件在 teardown 中途拉起唤醒 run 改文件）
     unregisterWakeDriver(sessionId);
-    // 杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）→ 收割 diff → 报告
+    // 杀本任务在 worktree 下遗留的后台进程（dev server 等，防跨任务端口冲突）
+    // → 收尾快照提交（把改动固化到分支，跨重启不丢）→ 收割 diff → 报告
     await killBackgroundTasksUnder(wt.path).catch(() => { });
+    const commit = await commitWorktreeChanges(wt, T.commitMsg(task.id, t.title));
+    if (commit.committed) emit(T.commitLine(wt.branch, commit.sha));
+    else if (commit.error) emit(T.commitFail(commit.error));
     const diff = await harvestDiff(wt);
     const cost = await collectSessionCost(sessionId);
     await finishTicket(task.id, buildReport({
         id: task.id, ticket: t, status, budgetTruncated, cost, receipt, finalText,
-        accept, deniedTools, diff, wt, errorMessage: agentError,
+        accept, deniedTools, diff, wt, commit, errorMessage: agentError,
         watchdogLines: buildWatchdogLines(wdSnapshots, cost.costYuan) ?? undefined,
     }));
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);

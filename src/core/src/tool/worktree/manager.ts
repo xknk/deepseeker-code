@@ -1,8 +1,10 @@
 /**
  * @file tool/worktree/manager.ts
  * @description P2-13 git worktree 生命周期管理：为 run_workflow 的 worktree 隔离模式提供
- *  create / harvestDiff / remove / sweep 四件套。每个并行子 agent 派生前 create 一个独立 worktree，
+ *  create / harvestDiff / commit / remove / sweep 五件套。每个并行子 agent 派生前 create 一个独立 worktree，
  *  子 agent 在其中运行（经 ALS 隔离，改动不污染主工作区），结束 harvestDiff 收割改动，最后 remove 回收。
+ *  ★ commitWorktreeChanges 只为 batch 服务（worktree 目录被保留、跨重启交付）：run_workflow 的 worktree
+ *    由 removeWorktree 连分支一起删，提交无意义。
  *
  *  设计要点：
  *  - worktree 工作树落在仓外 <os.tmpdir()>/deepseeker-code-worktrees/<userWorkspaceDir>/<sessionId>/<stepId>/，
@@ -122,6 +124,57 @@ export const harvestDiff = async (wt: WorktreeHandle): Promise<string> => {
 /** 在 worktree 内执行 git（git -C <wt>）。 */
 const runInWorktree = (wtPath: string, args: string[], maxBuffer = 1024 * 1024 * 5) =>
     execFileSmart("git", ["-C", wtPath, ...args], { maxBuffer });
+
+/** 收尾快照提交的结果（供 batch 报告落字）。 */
+export interface WorktreeCommit {
+    /** true=本次调用产生了新 commit（worktree 内未提交改动已固化）。 */
+    committed: boolean;
+    /** 分支当前 HEAD SHA（成功时；失败为空串）。 */
+    sha: string;
+    /** true=相对基座 baseSha 完全没有改动（无未提交改动、也没有 agent 自己 commit）。 */
+    noChanges: boolean;
+    /** 提交失败原因（git 报错原文截断，单行）；成功或无改动时缺省。 */
+    error?: string;
+}
+
+/**
+ * 收尾快照提交（**仅 batch 调用**）：把 worktree 内全部改动固化成一个 commit。
+ *
+ * ★ 为什么必须提交：worktree 工作树落在 os.tmpdir()，进程重启时 sweepOrphanedWorktrees 会
+ *   `worktree remove --force` 清掉目录——未提交的改动随之消失。只有 commit 到分支
+ *   （dsc-wt-* ref 留在主仓）才能跨重启存活，次日 `batch pr` 才有东西可交付。
+ * ★ 三处刻意关闭项（无人值守场景）:
+ *   - `--no-verify`：跳过 pre-commit/commit-msg 钩子——仓库钩子可能交互、联网或挂死；
+ *   - `-c commit.gpgsign=false`：开着签名会在无 tty 时等口令直至超时；
+ *   - 显式 `user.name/email`：干净机器 / CI 常无 git 身份，缺省直接 commit 失败。
+ * ★ 失败不抛错：改动还在 worktree 里（当下能看），只是重启会丢——由调用方写进报告。
+ */
+export const commitWorktreeChanges = async (wt: WorktreeHandle, message: string): Promise<WorktreeCommit> => {
+    const readHead = async (): Promise<string> => {
+        const { stdout } = await runInWorktree(wt.path, ["rev-parse", "HEAD"]);
+        return stdout.trim();
+    };
+    try {
+        await runInWorktree(wt.path, ["add", "-A"]);
+        const { stdout: status } = await runInWorktree(wt.path, ["status", "--porcelain"]);
+        if (!status.trim()) {
+            // 无未提交改动：agent 可能自己 commit 过（HEAD 已前移），也可能全程没动文件
+            const head = await readHead();
+            return { committed: false, sha: head, noChanges: head === wt.baseSha };
+        }
+        await runInWorktree(wt.path, [
+            "-c", "commit.gpgsign=false",
+            "-c", "user.name=deepseeker-code",
+            "-c", "user.email=deepseeker-code@localhost",
+            "commit", "--no-verify", "-m", message,
+        ]);
+        return { committed: true, sha: await readHead(), noChanges: false };
+    } catch (e: any) {
+        const text = `${e?.stderr || ""} ${e?.message || e}`.trim().replace(/\s+/g, " ");
+        console.warn(`⚠️ [worktree] 收尾提交失败（改动仍在该 worktree 内，重启即丢）: ${text}`);
+        return { committed: false, sha: "", noChanges: false, error: text.slice(0, 300) };
+    }
+};
 
 /**
  * 移除 worktree：先杀其下常驻后台进程，再 git worktree remove + prune + 删临时分支。
