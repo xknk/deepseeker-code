@@ -7,6 +7,7 @@
  *  - 输出 JSON 解析失败/gh 非零退出 → SyncPullError（人话 + gh stderr 尾部），fail-closed 不建票。
  */
 import type { SyncExec } from "./exec.ts";
+import type { SyncLocale } from "./config.ts";
 
 /** 统一候选（两平台适配器输出同一形状，下游去重/闸门/建票不分支）。 */
 export interface SyncCandidate {
@@ -25,6 +26,19 @@ export interface SyncCandidate {
 /** 拉取失败（人话原因进 CLI 控制台；state 不记录——拉取失败不是候选级结论）。 */
 export class SyncPullError extends Error {}
 
+const GH_MSG: Record<SyncLocale, Record<string, (...args: any[]) => string>> = {
+    zh: {
+        ghFail: (v) => `gh issue list 失败（${v}）`,
+        badJson: (v) => `gh 输出不是合法 JSON（${v}）`,
+        badShape: () => `gh 输出形态异常：期望 issue 数组`,
+    },
+    en: {
+        ghFail: (v) => `gh issue list failed (${v})`,
+        badJson: (v) => `gh output is not valid JSON (${v})`,
+        badShape: () => `gh output shape unexpected: expected an issue array`,
+    },
+};
+
 /** gh issue list 的输出行（--json 字段子集）。 */
 interface GhIssue {
     number: number;
@@ -36,10 +50,10 @@ interface GhIssue {
 }
 
 /**
- * 拉取一个仓库的准入 issue（open + label）。
- * @param ghVersion 见 gh --version 输出与否不影响；exec 由调用方注入（缺省真 gh）。
+ * 拉取一个仓库的准入 issue（open + label）。exec 由调用方注入（缺省真 gh）。
  */
-export const fetchGithubIssues = async (repo: string, label: string, exec: SyncExec): Promise<SyncCandidate[]> => {
+export const fetchGithubIssues = async (repo: string, label: string, exec: SyncExec, locale: SyncLocale = "zh"): Promise<SyncCandidate[]> => {
+    const msg = GH_MSG[locale] ?? GH_MSG.zh;
     const r = await exec("gh", [
         "issue", "list",
         "-R", repo,
@@ -48,15 +62,16 @@ export const fetchGithubIssues = async (repo: string, label: string, exec: SyncE
         "--json", "number,title,body,url,updatedAt,author",
     ]);
     if (r.code !== 0) {
-        throw new SyncPullError(`gh issue list 失败（repo ${repo}，exit ${r.code}）：${r.stderr.trim().split("\n").slice(-3).join(" | ") || "（无 stderr）"}`);
+        const detail = r.stderr.trim().split("\n").slice(-3).join(" | ") || "（无 stderr）";
+        throw new SyncPullError(`${msg.ghFail(`repo ${repo}，exit ${r.code}`)}：${detail}`);
     }
     let issues: GhIssue[];
     try {
         issues = JSON.parse(r.stdout) as GhIssue[];
     } catch (e: any) {
-        throw new SyncPullError(`gh 输出不是合法 JSON（repo ${repo}）：${String(e?.message ?? e).slice(0, 200)}`);
+        throw new SyncPullError(`${msg.badJson(`repo ${repo}`)}：${String(e?.message ?? e).slice(0, 200)}`);
     }
-    if (!Array.isArray(issues)) throw new SyncPullError(`gh 输出形态异常（repo ${repo}）：期望数组`);
+    if (!Array.isArray(issues)) throw new SyncPullError(msg.badShape(`repo ${repo}`));
     return issues.map((i) => ({
         sourceId: `github:${repo}#${i.number}`,
         url: i.url ?? "",

@@ -15,6 +15,7 @@ import { loadSyncConfig, type SyncConfig, type SyncLocale } from "./config.ts";
 import { acquireSyncLock, releaseSyncLock } from "./lock.ts";
 import { loadSyncState, appendSyncState, syncFingerprint, deduceVerdict, type SyncStateEntry } from "./state.ts";
 import { fetchGithubIssues, SyncPullError, type SyncCandidate } from "./github.ts";
+import { fetchGitlabIssues, defaultSyncFetch, type SyncFetch } from "./gitlab.ts";
 import { applyRuleGate, normalizeTitle } from "./rulegate.ts";
 import { resolveAccept, missingAcceptShort } from "./accept.ts";
 import { buildQuotedExternalBody, QUOTE_PREAMBLE } from "./boundary.ts";
@@ -29,8 +30,8 @@ export interface SyncOptions {
     locale?: SyncLocale;
     /** 注入外部命令执行（测试用假 gh；缺省真 spawn）。 */
     exec?: SyncExec;
-    /** 注入 HTTP（M3 GitLab；缺省 global fetch）。 */
-    fetchImpl?: typeof fetch;
+    /** 注入 HTTP（M3 GitLab；缺省 defaultSyncFetch 包装 global fetch）。 */
+    fetchImpl?: SyncFetch;
     /** 测试时钟（state seenAt / 每日上限）。 */
     now?: () => Date;
     /** 输出通道（缺省 process.stdout.write；测试捕获断言）。 */
@@ -180,22 +181,46 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         }
 
         // 3. 逐源拉取 + 逐候选处理（一个源挂掉不影响另一个——适配器互相独立，§2 原则 2）
-        const wantedGithub = config.github !== undefined && (opts?.source === undefined || opts.source === "github");
-        if (wantedGithub && config.github) {
+        const runCandidates = async (candidates: SyncCandidate[]): Promise<void> => {
+            for (const candidate of candidates) {
+                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out });
+                if (bucket === "changed") summary.skipped++;
+                else summary[bucket]++;
+            }
+        };
+        const wantGithub = config.github !== undefined && (opts?.source === undefined || opts.source === "github");
+        if (wantGithub && config.github) {
             for (const repo of config.github.repos) {
                 out(M("pulling", "github", `${repo}（label: ${config.github.label}）`));
                 let candidates: SyncCandidate[];
                 try {
-                    candidates = await fetchGithubIssues(repo, config.github.label, exec);
+                    candidates = await fetchGithubIssues(repo, config.github.label, exec, locale);
                 } catch (e: any) {
                     const why = e instanceof SyncPullError ? e.message : String(e?.message ?? e);
                     out(M("pullFail", "github", repo, why));
                     continue;
                 }
-                for (const candidate of candidates) {
-                    const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out });
-                    if (bucket === "changed") summary.skipped++;
-                    else summary[bucket]++;
+                await runCandidates(candidates);
+            }
+        }
+        const wantGitlab = config.gitlab !== undefined && (opts?.source === undefined || opts.source === "gitlab");
+        if (wantGitlab && config.gitlab) {
+            const gl = config.gitlab;
+            const fetchImpl: SyncFetch = opts?.fetchImpl ?? defaultSyncFetch;
+            for (const projectId of gl.projects) {
+                out(M("pulling", "gitlab", `project ${projectId}（label: ${gl.label}）`));
+                // 增量游标：该项目已见候选的最大 updatedAt（省配额；重复候选由指纹去重兜底）
+                let updatedAfter: string | undefined;
+                for (const e of state.values()) {
+                    if (e.sourceId.startsWith(`gitlab:${projectId}#`) && e.updatedAt && (!updatedAfter || e.updatedAt > updatedAfter)) {
+                        updatedAfter = e.updatedAt;
+                    }
+                }
+                try {
+                    await runCandidates(await fetchGitlabIssues(gl, projectId, { fetchImpl, updatedAfter, locale }));
+                } catch (e: any) {
+                    out(M("pullFail", "gitlab", `project ${projectId}`, String(e?.message ?? e)));
+                    continue;
                 }
             }
         }
