@@ -398,7 +398,7 @@ test("报告：watchdog-killed 含 watchdog 段且不跑验收；无看门狗任
     const { buildReport } = await import("../src/batchRunner.ts");
     const T = batchT("zh");
     const base = {
-        id: "t1", ticket: { title: "x", accept: "npm test", body: "正文" }, budgetTruncated: false,
+        id: "t1", ticket: { title: "x", accept: "npm test", body: "正文", source: "manual" as const }, budgetTruncated: false,
         cost: { rounds: 3, mainRounds: 3, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0.02, toolCostYuan: 0, auxCostYuan: 0, partialPrice: false, durationMs: 60_000 },
         receipt: undefined, finalText: "",
         deniedTools: [] as { tool: string; detail: string }[], diff: "（无）", wt: null,
