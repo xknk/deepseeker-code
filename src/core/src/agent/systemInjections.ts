@@ -135,7 +135,9 @@ export const prepareToolsAndInjections = async (
     injectSkillCatalog(message);
     injectAgentCatalog(message);
     injectProjectGuide(message);
-    // ★ 持久记忆：把【记忆索引】幂等注入系统提示词（仅一行/条，省 token；需要全文时模型调 memory_read）。fence 机制，不动 message 下标
-    injectMemory(message);
+    // ★ 持久记忆：把【记忆索引】幂等注入系统提示词（仅一行/条，省 token；需要全文时模型调 memory_read）。
+    //   fence 机制，不动 message 下标；带 sessionId 启用 M2 会话级快照冻结——会话中途写记忆不再改写
+    //   message[0]（前缀缓存不被击穿），新记忆下一会话生效。
+    injectMemory(message, options.sessionId);
     return { rawTools, cleanedToolSchemas, toolsTokens };
 };
