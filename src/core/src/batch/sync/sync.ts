@@ -218,10 +218,13 @@ const processCandidate = async (args: {
     }
     // M5 附件链（仅 GitHub；GitLab/飞书随 P2/P4）：先占票 id（附件目录按票命名），下载失败只标
     // 「未读取 + 原因」不阻塞建票；整体意外失败兜底成一条未读取段——宁可让它知道缺信息，不能让它猜。
-    let preId: string | undefined;
+    // 票 id 对所有源统一按注入时钟预生成（github 先占只是附件目录要按票命名的起因）：队列按文件名
+    // 字典序当 FIFO，若非 github 源落到队列默认的真实墙钟，同 run 多源建票的排序就随现实时刻漂移
+    // ——2026-11-04 CI 实锤：UTC 上午跑，gitlab 票（08:29 生成）排到 github 票（注入 12:00）之前，
+    // 双源测试时区性翻车；本地 UTC+8 下午跑则恒绿，典型「我机器上没问题」。
+    const preId = generateBatchId(now());
     let att: SyncAttachmentResult | undefined;
     if (candidate.sourceId.startsWith("github:")) {
-        preId = generateBatchId(now());
         try {
             att = await processAttachments({ issueBody: candidate.body, ticketId: preId, locale, download: args.download });
         } catch (e: any) {

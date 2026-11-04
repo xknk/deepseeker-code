@@ -143,6 +143,9 @@ test("双源编排：github+gitlab 同配，两源各建一票；一源挂掉另
             if (r2.ok) assert.deepEqual([r2.summary.added, r2.summary.skipped], [1, 1]);
             const ids = await queue.snapshotQueue();
             assert.equal(ids.pending.length, 2);
+            // 「最后一张 = gitlab 票」是确定性断言：两票 id 都由注入时钟预生成（12:00/12:10），
+            // 文件名字典序即 FIFO——此行同时钉住「非 github 源不得落到队列默认真实墙钟」
+            // （2026-11-04 CI 时区翻车回归锚：UTC 上午跑曾把 gitlab 票排到 github 票之前）。
             const glTicket = await fs.readFile(path.join(path.dirname(state.syncStatePath()), "pending", ids.pending[ids.pending.length - 1]), "utf-8");
             assert.match(glTicket, /^source: gitlab$/m);
             assert.match(glTicket, /^source-id: gitlab:55#8$/m);
