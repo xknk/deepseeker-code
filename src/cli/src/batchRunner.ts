@@ -75,7 +75,7 @@ const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: numbe
                 shell: isWin ? (resolveWinShell() ?? true) : true,
                 cwd,
                 windowsHide: true,
-                env: scrubCommandEnv(), // 剔除 agent 自身凭证（同 run_command 红线）
+                env: { ...scrubCommandEnv(), CI: "1" }, // 剔除 agent 凭证（同 run_command 红线）；CI=1 抑制 test runner 的 watch（跨平台，不靠 shell 前缀）
             });
         } catch (e: any) {
             resolve({ code: null, output: T.spawnFail(e?.message ?? e), timedOut: false });

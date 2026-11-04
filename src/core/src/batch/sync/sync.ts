@@ -59,8 +59,42 @@ export interface SyncSummary {
 
 const sanitizeTitle = (t: string): string => t.replace(/\s+/g, " ").trim().slice(0, 120);
 
-/** 组装 sync 工单源文本（frontmatter + 引用块正文 + 验收来源注记 + 附件段）。frontmatter 只给人与策略，agent 只见 body。 */
-export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResolution & { ok: true }, config: SyncConfig, locale: SyncLocale, att?: SyncAttachmentResult): string => {
+// ============ 仓库一致性标注（DS 评审第四条，2026-11-04 拍板：不阻断 + 显式标注 + 强制 needs-review） ============
+
+/** `git remote -v` 输出行形态：`<name>\t<url> (fetch|push)`。 */
+const REMOTE_LINE_RE = /^\S+\t(\S+) \((?:fetch|push)\)$/;
+/** github.com remote URL（https / ssh://git@ / git@ 三形态，可带 .git 后缀），捕获 owner/repo。 */
+const GH_REMOTE_RE = /^(?:https?:\/\/|ssh:\/\/git@|git@)github\.com[/:]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i;
+
+/**
+ * 本地仓库的 github remote 集合（小写 owner/repo）。比对【所有】 remote 而非仅 origin——
+ * fork 工作流（origin=fork、upstream=源仓库）任一匹配即视为一致，不误报。
+ * - git 不可用 / 非仓库 / 输出无一行合法 remote 形态 → null（无法判定，不标注；假 exec 的
+ *   全链路测试对任何调用都回 issue JSON，此规则让它们天然免疫，无需感知本探测）；
+ * - 有合法 remote 行但没有任何 github.com 远端 → 空集（有效判定：全不一致，标注）。
+ */
+export const collectLocalGithubRepos = async (exec: SyncExec, projectRoot: string): Promise<Set<string> | null> => {
+    let r: { code: number; stdout: string; stderr: string };
+    try {
+        r = await exec("git", ["-C", projectRoot, "remote", "-v"]);
+    } catch {
+        return null;
+    }
+    if (r.code !== 0) return null;
+    const repos = new Set<string>();
+    let sawRemoteLine = false;
+    for (const line of r.stdout.split("\n")) {
+        const m = REMOTE_LINE_RE.exec(line.trim());
+        if (!m) continue;
+        sawRemoteLine = true;
+        const u = GH_REMOTE_RE.exec(m[1]);
+        if (u) repos.add(u[1].toLowerCase());
+    }
+    return sawRemoteLine ? repos : null;
+};
+
+/** 组装 sync 工单源文本（frontmatter + 引用块正文 + 验收来源注记 + 仓库不一致警示 + 附件段）。frontmatter 只给人与策略，agent 只见 body。 */
+export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResolution & { ok: true }, config: SyncConfig, locale: SyncLocale, att?: SyncAttachmentResult, repoMismatch?: string): string => {
     const lines = [
         "---",
         `title: ${sanitizeTitle(candidate.title)}`,
@@ -68,7 +102,7 @@ export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResol
         `source: ${candidate.sourceId.split(":")[0]}`,
         candidate.url ? `source-url: ${candidate.url}` : null,
         `source-id: ${candidate.sourceId}`,
-        acc.needsReview || att?.needsReview ? "needs-review: true" : null,
+        acc.needsReview || att?.needsReview || repoMismatch ? "needs-review: true" : null,
         config.defaultBudgetYuan !== undefined ? `budget-yuan: ${config.defaultBudgetYuan}` : null,
         "---",
         "",
@@ -80,6 +114,14 @@ export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResol
         const sourceDesc = acc.origin === "detect" ? (acc.detectSource ?? "") : externalAcceptNote(locale);
         const head = locale === "zh" ? "验收命令说明" : "Accept command note";
         text += `---\n${head}：accept 来自 ${sourceDesc}。\n`;
+    }
+    // 仓库不一致警示：多 repo 配置下改动与验收都发生在本地代码库——来源对不上时人必须在烧钱前看见。
+    if (repoMismatch) {
+        const head = locale === "zh" ? "仓库不一致警示" : "Repo mismatch warning";
+        const note = locale === "zh"
+            ? `issue 来自 github.com/${repoMismatch}，但本地工作区的 git remote 不含该仓库——agent 将在本地代码库上改动并验收，可能答非所问。fork 工作流（本地是 fork、issue 来自上游）属有意为之可忽略；否则请核对 sync.json 的 github.repos。本票已强制 needs-review。`
+            : `The issue is from github.com/${repoMismatch}, but no local git remote points at that repo — the agent will modify and verify against the LOCAL codebase, which may not match. A fork workflow (local fork, issue from upstream) is intentional and fine; otherwise check github.repos in sync.json. needs-review is forced for this ticket.`;
+        text += `---\n${head}：${note}\n`;
     }
     // 附件段（M5）：内联文本在引用块内、落盘给绝对路径、不可读标「未读取 + 原因」——绝不静默。
     if (att?.section) text += `\n${att.section}\n`;
@@ -101,6 +143,8 @@ const processCandidate = async (args: {
     projectRoot: string;
     /** 附件下载注入（M5；缺省 gh api）。 */
     download: DownloadFile;
+    /** 本地 github remote 集合（仓库一致性标注；null=无法判定不标注，gitlab-only sync 传 null）。 */
+    localRepos: Set<string> | null;
     /** M6 每日建票上限（缺省不限）；createdToday 共享计数（本 run 建票即增），capAnnounced 保证上限文案只打一次。 */
     maxPerDay?: number;
     createdToday?: { n: number };
@@ -155,6 +199,13 @@ const processCandidate = async (args: {
         return "missingAccept";
     }
 
+    // 仓库一致性标注（DS 评审第四条）：多 repo 配置下改动与验收都发生在本地代码库——来源对不上
+    // 时不阻断（fork 工作流合法），但控制台 + 票内显式标注并强制 needs-review。GitLab 候选是
+    // 项目 ID、对不齐 remote 路径，随 P2/P4 的 GitLab 附件链一起做。
+    const issueRepo = candidate.sourceId.startsWith("github:") ? candidate.sourceId.slice("github:".length).split("#")[0].toLowerCase() : "";
+    const repoMismatch = issueRepo !== "" && args.localRepos !== null && !args.localRepos.has(issueRepo) ? issueRepo : undefined;
+    if (repoMismatch) out(`${pre}${M("repoMismatch", repoMismatch)}`);
+
     // 组装 + 入队（复用全部既有校验：accept 必填 / 字段白名单 fail-closed）
     if (dryRun) {
         out(`${pre}${M("wouldEnqueue", sanitizeTitle(candidate.title), candidate.sourceId, acc.origin)}`);
@@ -182,7 +233,7 @@ const processCandidate = async (args: {
             };
         }
     }
-    const source = buildSyncTicketSource(candidate, acc, config, locale, att);
+    const source = buildSyncTicketSource(candidate, acc, config, locale, att, repoMismatch);
     const tmp = path.join(os.tmpdir(), `dsc-sync-ticket-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
     try {
         await fs.writeFile(tmp, source, "utf-8");
@@ -237,6 +288,14 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
     const maxPerDay = config.maxTicketsPerDay;
     const createdToday = { n: !opts?.dryRun && maxPerDay !== undefined ? await todayTicketCount(now()) : 0 };
     const capAnnounced = { v: false };
+    const projectRoot = opts?.projectRoot ?? process.cwd();
+    // 仓库一致性标注的惰性探测：仅 github 源会比对（gitlab 候选是项目 ID 对不齐 remote 路径）；
+    // --source gitlab 时一次 git 调用也不发（「不发起 gh 调用」的测试口径对 git 同样成立）。
+    let localReposCache: { v: Set<string> | null } | undefined;
+    const githubLocalRepos = async (): Promise<Set<string> | null> => {
+        if (!localReposCache) localReposCache = { v: await collectLocalGithubRepos(exec, projectRoot) };
+        return localReposCache.v;
+    };
     try {
         const state = await loadSyncState();
         const knownTitles = new Set<string>();
@@ -245,15 +304,16 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         }
 
         // 3. 逐源拉取 + 逐候选处理（一个源挂掉不影响另一个——适配器互相独立，§2 原则 2）
-        const runCandidates = async (candidates: SyncCandidate[]): Promise<void> => {
+        const runCandidates = async (candidates: SyncCandidate[], localRepos: Set<string> | null): Promise<void> => {
             for (const candidate of candidates) {
-                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd(), download: opts?.download ?? defaultDownloadFile, maxPerDay, createdToday, capAnnounced });
+                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot, download: opts?.download ?? defaultDownloadFile, localRepos, maxPerDay, createdToday, capAnnounced });
                 if (bucket === "changed") summary.skipped++;
                 else summary[bucket]++;
             }
         };
         const wantGithub = config.github !== undefined && (opts?.source === undefined || opts.source === "github");
         if (wantGithub && config.github) {
+            const localRepos = await githubLocalRepos();
             for (const repo of config.github.repos) {
                 out(M("pulling", "github", `${repo}（label: ${config.github.label}）`));
                 let candidates: SyncCandidate[];
@@ -264,7 +324,7 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
                     out(M("pullFail", "github", repo, why));
                     continue;
                 }
-                await runCandidates(candidates);
+                await runCandidates(candidates, localRepos);
             }
         }
         const wantGitlab = config.gitlab !== undefined && (opts?.source === undefined || opts.source === "gitlab");
@@ -281,7 +341,8 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
                     }
                 }
                 try {
-                    await runCandidates(await fetchGitlabIssues(gl, projectId, { fetchImpl, updatedAfter, locale }));
+                    // gitlab 候选传 null：项目 ID 无法与 remote 路径对齐，一致性标注随 P2/P4 GitLab 链一起做
+                    await runCandidates(await fetchGitlabIssues(gl, projectId, { fetchImpl, updatedAfter, locale }), null);
                 } catch (e: any) {
                     out(M("pullFail", "gitlab", `project ${projectId}`, String(e?.message ?? e)));
                     continue;

@@ -105,14 +105,14 @@ test("外部档：开启后采纳单命令 accept，强制 needs-review；形态
     });
 });
 
-test("探测档：package.json（lockfile 选包管理器）→ Makefile → go.mod；全部带 CI=1 前缀", async () => {
+test("探测档：package.json（lockfile 选包管理器）→ Makefile → go.mod；均不带 CI=1 前缀（由 runner 注入环境变量）", async () => {
     await withTempDir(async (root) => {
         // 1) package.json + pnpm-lock.yaml
         await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ scripts: { test: "node test.js" } }), "utf-8");
         await fs.writeFile(path.join(root, "pnpm-lock.yaml"), "", "utf-8");
         const r1 = await acc.resolveAccept("t", "b", {}, "zh", root);
         assert.equal(r1.ok && r1.origin, "detect");
-        assert.equal(r1.ok && r1.accept, "CI=1 pnpm test");
+        assert.equal(r1.ok && r1.accept, "pnpm test");
         assert.equal(r1.ok && r1.needsReview, true);
         assert.match(r1.ok && r1.detectSource || "", /scripts\.test/);
 
@@ -121,14 +121,14 @@ test("探测档：package.json（lockfile 选包管理器）→ Makefile → go.
         await fs.rm(path.join(root, "pnpm-lock.yaml"), { force: true });
         await fs.writeFile(path.join(root, "Makefile"), "build:\n\techo b\n\ntest:\n\tnpm test\n", "utf-8");
         const r2 = await acc.resolveAccept("t", "b", {}, "zh", root);
-        assert.equal(r2.ok && r2.accept, "CI=1 make test");
+        assert.equal(r2.ok && r2.accept, "make test");
 
         // 3) 只有 go.mod
         await fs.rm(path.join(root, "Makefile"), { force: true });
         await fs.rm(path.join(root, "package.json"), { force: true });
         await fs.writeFile(path.join(root, "go.mod"), "module x\n", "utf-8");
         const r3 = await acc.resolveAccept("t", "b", {}, "zh", root);
-        assert.equal(r3.ok && r3.accept, "CI=1 go test ./...");
+        assert.equal(r3.ok && r3.accept, "go test ./...");
 
         // 4) 啥都没有 → 拒绝（多行指引点名 defaultAccept / accept 块 / 探测三路）
         await fs.rm(path.join(root, "go.mod"), { force: true });
@@ -142,7 +142,7 @@ test("探测档：package.json（lockfile 选包管理器）→ Makefile → go.
 
 test("组装：detect/external 来源 → needs-review: true + 正文来源注记；config 来源两者皆无", () => {
     const c = candidate();
-    const detect = buildSyncTicketSource(c, { ok: true, accept: "CI=1 pnpm test", origin: "detect", needsReview: true, detectSource: "package.json scripts.test（pnpm，CI=1 抑制 watch）" }, {}, "zh");
+    const detect = buildSyncTicketSource(c, { ok: true, accept: "pnpm test", origin: "detect", needsReview: true, detectSource: "package.json scripts.test（pnpm，CI=1 抑制 watch）" }, {}, "zh");
     assert.match(detect, /^needs-review: true$/m);
     assert.match(detect, /验收命令说明：accept 来自 package\.json scripts\.test/);
 
@@ -156,11 +156,11 @@ test("组装：detect/external 来源 → needs-review: true + 正文来源注�
 });
 
 test("组装：detect 来源工单 round-trip 通过 parseBatchTicket（needs-review 是合法字段）", () => {
-    const src = buildSyncTicketSource(candidate({ body: "含\n换行" }), { ok: true, accept: "CI=1 pnpm test", origin: "detect", needsReview: true, detectSource: "package.json scripts.test（pnpm）" }, { defaultBudgetYuan: 1 }, "zh");
+    const src = buildSyncTicketSource(candidate({ body: "含\n换行" }), { ok: true, accept: "pnpm test", origin: "detect", needsReview: true, detectSource: "package.json scripts.test（pnpm）" }, { defaultBudgetYuan: 1 }, "zh");
     const parsed = parseBatchTicket(src);
     assert.equal(parsed.ok, true, parsed.ok ? "" : parsed.error);
     if (parsed.ok) {
-        assert.equal(parsed.ticket.accept, "CI=1 pnpm test");
+        assert.equal(parsed.ticket.accept, "pnpm test");
         assert.equal(parsed.ticket.needsReview, true);
         assert.equal(parsed.ticket.budgetYuan, 1);
         assert.equal(parsed.ticket.source, "github");

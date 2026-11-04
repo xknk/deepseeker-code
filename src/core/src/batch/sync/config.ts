@@ -143,7 +143,9 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale 
         if (!Array.isArray(g.repos) || g.repos.length === 0 || !g.repos.every((r: unknown) => isStr(r) && REPO_SHAPE.test(r))) {
             return { ok: false, error: cfgMsg(locale, "badRepos", JSON.stringify(g.repos)) };
         }
-        if (!isStr(g.label) || !g.label.trim() || /\s/.test(g.label)) return { ok: false, error: cfgMsg(locale, "badLabel", "github", String(g.label)) };
+        // ★ label 允许空格：GitHub/GitLab 标准 label 就叫 "good first issue"、"help wanted"。
+        //   只禁换行（无空行的“单行”语义），禁空格会把整类真实仓库描在门外。
+        if (!isStr(g.label) || !g.label.trim() || /[\r\n]/.test(g.label)) return { ok: false, error: cfgMsg(locale, "badLabel", "github", String(g.label)) };
         config.github = { repos: g.repos, label: g.label };
     }
     if (obj.gitlab !== undefined) {
@@ -153,7 +155,7 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale 
         if (!Array.isArray(gl.projects) || gl.projects.length === 0 || !gl.projects.every((p: unknown) => Number.isInteger(p) && (p as number) > 0)) {
             return { ok: false, error: cfgMsg(locale, "badProjects", JSON.stringify(gl.projects)) };
         }
-        if (!isStr(gl.label) || !gl.label.trim() || /\s/.test(gl.label)) return { ok: false, error: cfgMsg(locale, "badLabel", "gitlab", String(gl.label)) };
+        if (!isStr(gl.label) || !gl.label.trim() || /[\r\n]/.test(gl.label)) return { ok: false, error: cfgMsg(locale, "badLabel", "gitlab", String(gl.label)) };
         if (!isStr(gl.tokenEnv) || !ENV_NAME_SHAPE.test(gl.tokenEnv)) return { ok: false, error: cfgMsg(locale, "badTokenEnv", String(gl.tokenEnv)) };
         if (TOKEN_SHAPE.test(gl.tokenEnv)) return { ok: false, error: cfgMsg(locale, "tokenLooksReal") };
         config.gitlab = { baseUrl: gl.baseUrl, projects: gl.projects, label: gl.label, tokenEnv: gl.tokenEnv };

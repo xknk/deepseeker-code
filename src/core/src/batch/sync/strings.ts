@@ -20,6 +20,7 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         dryRunAttachments: (n: number) => `   附件 ${n} 个：dry-run 不下载；正式建票时按「内联/落盘/未读取」三态处理`,
         wouldSkip: (sourceId: string, why: string) => `将跳过：${sourceId}（${why}）`,
         enqueueFail: (sourceId: string, err: string) => `🚫 ${sourceId} 建票失败：${err}`,
+        repoMismatch: (repo: string) => `⚠️ 仓库不一致：issue 来自 ${repo}，本地 git remote 不含该仓库——改动与验收都发生在本地代码库（fork 工作流可忽略；本票强制 needs-review）`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
             `✅ sync 完成：新增 ${added} / 跳过 ${skipped} / 拒绝 ${rejected} / 缺验收 ${missingAccept}`,
         capReached: (n: number) => `⏸️ 今日建票已达上限 ${n}（maxTicketsPerDay）：其余候选今日不再建票（明日自动继续）`,
@@ -69,6 +70,7 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         dryRunAttachments: (n: number) => `   ${n} attachment(s): dry-run does not download; real runs process them into inline/saved/not-read states`,
         wouldSkip: (sourceId: string, why: string) => `Would skip: ${sourceId} (${why})`,
         enqueueFail: (sourceId: string, err: string) => `🚫 Failed to enqueue ${sourceId}: ${err}`,
+        repoMismatch: (repo: string) => `⚠️ Repo mismatch: the issue is from ${repo}, but no local git remote points at it — changes and acceptance run against the local codebase (fine for a fork workflow; needs-review forced for this ticket)`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
             `✅ sync finished: added ${added} / skipped ${skipped} / rejected ${rejected} / missing-accept ${missingAccept}`,
         capReached: (n: number) => `⏸️ Daily ticket cap reached (${n}, maxTicketsPerDay): remaining candidates will not be enqueued today (resumes tomorrow)`,

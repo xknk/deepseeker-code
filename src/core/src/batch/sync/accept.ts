@@ -8,9 +8,10 @@
  *
  *  ★ 红线（§9.7）：issue 里写的验收命令 = 陌生人在你机器上执行命令，且 batch 的 accept 走
  *  spawn(cmd, {shell}) 直接执行、完全绕过工具白名单——默认完全忽略，绝不因「issue 写了」而采信。
- *  ★ watch 抑制（§3.5 评审修订）：自动探测所得 accept 一律带 CI=1 前缀（vitest/jest 在 CI 态
- *  关闭 watch，探测到的验收不会变成常驻进程）；npm test 先核验 scripts.test 不是
- *  「echo "no test specified" && exit 1」空壳。外部 accept 无抑制（维护者自担，且强制人工复核）。
+ *  ★ watch 抑制（§3.5 评审修订）：自动探测所得的验收命令【不带 `CI=1` 前缀】——前缀是 POSIX shell
+ *  语法，Windows 无 Git Bash 时回退 cmd.exe 会直接报「'CI' 不是内部或外部命令」，且报错与验收本身无关，
+ *  极难排查。改为 runner 执行 accept 时给子进程注入 CI=1 环境变量（跨平台，vitest/jest 同样读 env 关 watch）。
+ *  npm test 先核验 scripts.test 不是「echo "no test specified" && exit 1」空壳。
  */
 import fs from "fs/promises";
 import fsSync from "fs";
@@ -59,7 +60,7 @@ export const isSingleCommandShape = (cmd: string): boolean => cmd.length > 0 && 
 
 export interface DetectResult {
     ok: boolean;
-    /** 带 CI=1 前缀的验收命令（watch 抑制落在结构层，不靠提示词）。 */
+    /** 探测出的验收命令（不带 CI=1 前缀：由 runner 注入环境变量，跨平台）。 */
     accept?: string;
     /** 探测来源描述（进工单注记：「自动探测，来源 X」）。 */
     source?: string;
@@ -84,20 +85,20 @@ export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh
             for (const { lock, pm: name } of PM_BY_LOCK) {
                 if (fsSync.existsSync(path.join(projectRoot, lock))) { pm = name; break; }
             }
-            return { ok: true, accept: `CI=1 ${pm} test`, source: locale === "zh" ? `package.json scripts.test（${pm}，CI=1 抑制 watch）` : `package.json scripts.test (${pm}, CI=1 watch suppression)` };
+            return { ok: true, accept: `${pm} test`, source: locale === "zh" ? `package.json scripts.test（${pm}；CI=1 由 runner 环境变量注入）` : `package.json scripts.test (${pm}; CI=1 injected via runner env)` };
         }
     } catch { /* 无 package.json / 非法 JSON → 下一步 */ }
     // 2) Makefile test 目标
     try {
         const mk = await fs.readFile(path.join(projectRoot, "Makefile"), "utf-8");
         if (/^test\s*:/m.test(mk)) {
-            return { ok: true, accept: "CI=1 make test", source: locale === "zh" ? "Makefile test 目标（CI=1 抑制 watch）" : "Makefile test target (CI=1 watch suppression)" };
+            return { ok: true, accept: "make test", source: locale === "zh" ? "Makefile test 目标（CI=1 由 runner 环境变量注入）" : "Makefile test target (CI=1 injected via runner env)" };
         }
     } catch { /* 无 Makefile → 下一步 */ }
     // 3) go.mod → go test ./...
     try {
         await fs.access(path.join(projectRoot, "go.mod"));
-        return { ok: true, accept: "CI=1 go test ./...", source: locale === "zh" ? "go.mod（go test ./...）" : "go.mod (go test ./...)" };
+        return { ok: true, accept: "go test ./...", source: locale === "zh" ? "go.mod（go test ./...；CI=1 由 runner 环境变量注入）" : "go.mod (go test ./...; CI=1 injected via runner env)" };
     } catch { /* 无 go.mod → 探测失败 */ }
     return { ok: false };
 };

@@ -371,3 +371,61 @@ test("全链路：某仓库拉取失败不建票、不影响其余仓库（适�
         assert.match(lines.join("\n"), /rate limit/);
     });
 });
+
+// ============ 仓库一致性标注（DS 评审第四条：不阻断 + 显式标注 + 强制 needs-review） ============
+
+test("repoMatch：collectLocalGithubRepos 三形态 URL 归一；git 失败 / 无合法行 → null（无法判定）", async () => {
+    const { collectLocalGithubRepos } = await import("@/batch/sync/sync.ts");
+    const remoteOut = [
+        "origin\thttps://github.com/Me/Fork.git (fetch)",
+        "origin\thttps://github.com/Me/Fork.git (push)",
+        "upstream\tgit@github.com:o/r.git (fetch)",
+        "mirror\tssh://git@gitlab.com/x/y.git (fetch)",
+        "ssh\tssh://git@github.com/A/B.git (fetch)",
+    ].join("\n");
+    const repos = await collectLocalGithubRepos(async () => ({ code: 0, stdout: remoteOut, stderr: "" }), "/tmp");
+    assert.deepEqual([...(repos ?? [])].sort(), ["a/b", "me/fork", "o/r"], "https/git@/ssh 三形态归一，非 github 远端忽略");
+    assert.equal(await collectLocalGithubRepos(async () => ({ code: 128, stdout: "", stderr: "not a git repository" }), "/tmp"), null, "git 失败 → 无法判定");
+    assert.equal(
+        await collectLocalGithubRepos(async () => ({ code: 0, stdout: JSON.stringify([mkIssue(1)]), stderr: "" }), "/tmp"),
+        null,
+        "无一行合法 remote 形态（假 exec 对 git 探测也回 issue JSON）→ null——既有全链路测试天然免疫本探测",
+    );
+    const noGh = await collectLocalGithubRepos(async () => ({ code: 0, stdout: "o\thttps://gitlab.com/a/b.git (fetch)", stderr: "" }), "/tmp");
+    assert.deepEqual(noGh, new Set(), "有合法行但无 github 远端 → 空集（有效判定：全不一致）");
+});
+
+test("全链路：本地 remote 与 issue 仓库不一致 → 控制台警示 + 票内注记 + 强制 needs-review；任一 remote 匹配（fork）则无", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeConfig(path.dirname(SYNC_CONFIG_PATH()), { github: { repos: ["o/r"], label: "agent" }, defaultAccept: "pnpm test" });
+        const ghBody = JSON.stringify([mkIssue(42)]);
+        const mkExecWithRemotes = (remotes: string) => async (file: string, args: string[]) =>
+            file === "git" && args.includes("remote")
+                ? { code: 0, stdout: remotes, stderr: "" }
+                : { code: 0, stdout: ghBody, stderr: "" };
+        const lines: string[] = [];
+
+        // 不一致：本地只有 me/fork + gitlab 远端，issue 来自 o/r
+        let r = await runSync({ exec: mkExecWithRemotes("origin\thttps://github.com/me/fork.git (fetch)\nupstream\thttps://gitlab.com/x/y.git (fetch)"), out: (s) => lines.push(s), now: () => new Date("2026-11-04T12:00:00") });
+        assert.equal(r.ok, true);
+        if (r.ok) assert.equal(r.summary.added, 1, "不一致只标注不阻断");
+        assert.match(lines.join("\n"), /仓库不一致/);
+        let snap = await queue.snapshotQueue();
+        const t1 = await fs.readFile(path.join(dir, "pending", snap.pending[0]), "utf-8");
+        assert.match(t1, /^needs-review: true$/m, "不一致票强制 needs-review");
+        assert.match(t1, /仓库不一致警示/);
+        assert.match(t1, /github\.com\/o\/r/);
+
+        // 清场后 fork 场景：origin=fork、upstream=o/r → 任一匹配即一致，无标注
+        await fs.rm(path.join(dir, "pending"), { recursive: true, force: true });
+        await fs.rm(state.syncStatePath(), { force: true });
+        lines.length = 0;
+        r = await runSync({ exec: mkExecWithRemotes("origin\thttps://github.com/me/fork.git (fetch)\nupstream\tgit@github.com:o/r.git (fetch)"), out: (s) => lines.push(s), now: () => new Date("2026-11-04T12:05:00") });
+        assert.equal(r.ok, true);
+        assert.doesNotMatch(lines.join("\n"), /仓库不一致/);
+        snap = await queue.snapshotQueue();
+        const t2 = await fs.readFile(path.join(dir, "pending", snap.pending[0]), "utf-8");
+        assert.doesNotMatch(t2, /needs-review/, "config 来源 accept + 仓库一致 → 无 needs-review");
+        assert.doesNotMatch(t2, /仓库不一致警示/);
+    });
+});
