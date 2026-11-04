@@ -441,8 +441,13 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                     const ph = "（重复调用熔断，未执行）";
                     message.push({ role: 'tool', tool_call_id: tc.id, content: ph });
                 }
-                await appendMessages(sessionId, assistantMessage.tool_calls.map((tc: any) =>
-                    ({ sessionId, role: 'tool', tool_call_id: tc.id, content: "（重复调用熔断，未执行）" })));
+                // ★ D5 四轮：占位落盘失败可观测（与下方 round.end 同理）——占位行缺失会使恢复侧
+                //   repairOrphanToolCalls 下次启动补写，但会丢失“熔断而非真实结果”的语义。
+                try {
+                    const phWrite = await appendMessages(sessionId, assistantMessage.tool_calls.map((tc: any) =>
+                        ({ sessionId, role: 'tool', tool_call_id: tc.id, content: "（重复调用熔断，未执行）" })));
+                    if (phWrite.failed > 0) markDegraded('appendMessages(repeat-placeholder)');
+                } catch { markDegraded('appendMessages(repeat-placeholder)'); /* 兜底：违反吞错契约的异常信号 */ }
                 yield { type: 'final', text: repeatVerdict.text };
                 return;
             }
@@ -484,6 +489,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。
             //   调度内部异常不自理，上抛至此处外层 catch(toolErr) 兜底 yield final（与原内联实现一致）。
             const scheduleResult: ScheduleResult = yield* scheduleToolCalls(assistantMessage, message, toolCallCtx);
+            // ★ D5 四轮：调度层落盘降级并入 run 级 degraded。工具结果丢失 = 上下文永久残缺（恢复时补
+            //   占位，原始结果不可逆），是比边界事件更重的信号；aborted/terminal 提前 return 也要带上。
+            if (scheduleResult.degraded) for (const name of scheduleResult.degraded) markDegraded(name);
             if (scheduleResult.kind === 'aborted') {
                 yield { type: 'final', text: lastContent || "（已中止）" };
                 return;
@@ -628,11 +636,15 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // 与 SessionStart/SessionEnd 对齐：补 cwd，使声明式 Stop hook 的 shell 命令落在项目目录而非 process.cwd() 默认值
             await dispatch('Stop', { sessionId, cwd, lastText: lastContent || '', reason });
         } catch (e) { markDegraded('Stop-hook'); console.warn('⚠️ Stop hook 外层兜底（dispatch 内部容错失效，属异常信号）:', e instanceof Error ? e.message : e); }
-        // ★ D5 聚合兜底（末尾一句，不依赖 receipt 通道存在）：本 run 收尾有旁路降级时聚合告警一次。
+        // ★ D5 聚合兜底（末尾一句，不依赖 receipt 通道存在）：本 run 有旁路降级时聚合告警一次。
         //   限制：VSCode 宿主 console.warn 未必进用户面板（全库既有现状），此通道是开发者可见；
         //   用户可见通道 = run.receipt 的 degraded 字段。组件名可 grep 定位实现。
+        //   ★ 措辞限定为「降级组件」而不具体枚举后果：degraded 现已包含三类不同性质的信号——
+        //   收尾旁路（计量/校准/结算）、消息落盘（对话本体）、emptyAssistantSkip（模型空响应，
+        //   不是故障而是被跳过的异常输入）。旧措辞「计量/校准/结算可能不完整」只描述第一类，
+        //   拿它统摄后两类会误导读数（D5 四轮修正）。
         if (degraded.length > 0) {
-            console.warn(`⚠️ [run 收尾] ${degraded.length} 项旁路降级（不影响主流程；计量/校准/结算可能不完整）: ${degraded.join(', ')}`);
+            console.warn(`⚠️ [run 降级] ${degraded.length} 项（不影响主流程；具体后果见组件名）: ${degraded.join(', ')}`);
         }
     }
 }

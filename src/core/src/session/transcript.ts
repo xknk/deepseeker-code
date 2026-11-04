@@ -168,12 +168,19 @@ export const appendMessage = async (entry: MessageWithId): Promise<boolean> => {
  * 合批后每轮只付一次打开成本。行构造与 appendMessage 同式（id/ts 盖章 + U+FFFD 体检，两处同步维护），
  * 顺序语义与逐条 appendMessage 完全一致（按请求序逐行落盘）。
  * 单条失败：appendLineWithRetry 已含重试+截断回滚；仍抛错则该条起回落逐条旧路径（appendMessage，
- * 失败行已被截断回滚，逐条重写不产生半行/重复）。与 appendMessage 同容错——任何失败只 warn 不抛。
- */
-export const appendMessages = async (sessionId: string, entries: MessageWithId[]): Promise<void> => {
-    if (entries.length === 0) return;
-    if (entries.length === 1) { await appendMessage(entries[0]); return; }
-    try {
+  * 失败行已被截断回滚，逐条重写不产生半行/重复）。与 appendMessage 同容错——任何失败只 warn 不抛。
+  * ★ D5 四轮：返回 {written, failed} 如实回报——批内逐条失败（含回落路径里的二次失败）此前只能从
+  *   warn 里看到，调用点（工具结果落盘）拿不到返回值；工具结果丢失 = 上下文永久残缺（恢复时补占位，
+  *   原始结果不可逆），比边界事件丢失严重一个量级。
+  */
+ export type AppendMessagesResult = { written: number; failed: number };
+
+ export const appendMessages = async (sessionId: string, entries: MessageWithId[]): Promise<AppendMessagesResult> => {
+     if (entries.length === 0) return { written: 0, failed: 0 };
+     if (entries.length === 1) {
+         return (await appendMessage(entries[0])) ? { written: 1, failed: 0 } : { written: 0, failed: 1 };
+     }
+     try {
         await ensureSessionsDir(sessionId);
         const p = getTranscriptPath(sessionId);
         const payloads = entries.map((entry) => {
@@ -184,21 +191,26 @@ export const appendMessages = async (sessionId: string, entries: MessageWithId[]
         const FFFD = String.fromCharCode(0xfffd); // 无效 UTF-8 替换符（ASCII 写法，避免源码转义歧义）
         const fffdTotal = payloads.reduce((n, pl) => n + (pl.split(FFFD).length - 1), 0);
         if (fffdTotal > 0) console.warn(`[transcript] 批量消息含 ${fffdTotal} 个乱码字符（U+FFFD），已原样写入历史。来源可能是 GBK 子进程输出或乱码粘贴。`);
-        let handle: fs.FileHandle | null = null;
-        let i = 0;
-        try {
-            handle = await fs.open(p, "a");
-            for (; i < payloads.length; i++) await appendLineWithRetry(p, payloads[i], handle);
-        } catch (e) {
-            console.warn(`[transcript] 批量落盘第 ${i + 1}/${payloads.length} 条失败，该条起回落逐条旧路径:`, e instanceof Error ? e.message : e);
-            for (; i < entries.length; i++) await appendMessage(entries[i]);
-        } finally {
-            if (handle) await handle.close().catch(() => { /* 关闭失败无害：句柄随进程回收 */ });
+                let handle: fs.FileHandle | null = null;
+                let i = 0;
+                let failed = 0; // ★ D5 四轮：回落逐条路径的失败计数（批内首条失败后，逐条重写也可能继续失败）
+                try {
+                    handle = await fs.open(p, "a");
+                    for (; i < payloads.length; i++) await appendLineWithRetry(p, payloads[i], handle);
+                } catch (e) {
+                    console.warn(`[transcript] 批量落盘第 ${i + 1}/${payloads.length} 条失败，该条起回落逐条旧路径:`, e instanceof Error ? e.message : e);
+                    for (; i < entries.length; i++) {
+                        if (!(await appendMessage(entries[i]))) failed++;
+                    }
+                } finally {
+                    if (handle) await handle.close().catch(() => { /* 关闭失败无害：句柄随进程回收 */ });
+                }
+                return { written: entries.length - failed, failed };
+            } catch (e) {
+                console.warn(`批量消息落盘失败（内存与磁盘转录可能不一致）:`, e);
+                return { written: 0, failed: entries.length };
+            }
         }
-    } catch (e) {
-        console.warn(`批量消息落盘失败（内存与磁盘转录可能不一致）:`, e);
-    }
-}
 
 /**
  * 追加一条边界事件行（事件日志化）。appConfig.transcriptEvents 关闭时 no-op——

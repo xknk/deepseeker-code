@@ -82,7 +82,10 @@ describe("D5 二轮反向档（独立进程）：禁用开关 ≠ 降级", () =>
         const origWarn = console.warn;
         console.warn = (...a: any[]) => { warns.push(a.map(x => (typeof x === "string" ? x : String(x))).join(" ")); };
         let finalSeen = false;
-        // trace 缓冲续注（20ms interval）：200ms 兜底 timer 中途冲批也不怕——drain 时缓冲必有货
+        // trace 缓冲续注（20ms interval）：让毒化会话在 run 中途被 200ms 兜底 timer 冲批。
+        // ★ D5 四轮修正（2026-11-04）：旧注「drain 时缓冲必有货」是错的——冲批失败会丢批，
+        //   drain 可能落在“刚丢完、新货未到”的缝隙里而看到空缓冲。确定性保障已改由 trace 侧粘性
+        //   丢批计数提供（丢过批 → 全量 drain 必计数）；本 interval 只负责制造中途冲批。
         const refill = setInterval(() => {
             void appendTraceEvent({ sessionId: sid, eventType: "llm.request", metadata: {} } as any);
         }, 20);

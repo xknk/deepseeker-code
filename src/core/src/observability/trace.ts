@@ -65,6 +65,18 @@ const TRACE_BATCH_LINES = 50;
 const TRACE_BATCH_MS = 200;
 /** 同会话有序缓冲：sessionId → 攒行（JSONL 行，已带换行符）。 */
 const traceBuf = new Map<string, string[]>();
+/**
+ * 中途丢批粘性计数（D5 四轮，2026-11-04）：200ms 兜底 timer / 行数阈值触发的**中途** flush 失败时，
+ *  该批按 §4.2-7 设计直接丢弃（旁路不重试）。这类损失此前只有开发者可见的 console.warn，
+ *  用户可见的 degraded 通道全程是瞎的——run 收尾 drain 看到的是「此刻缓冲里有没有货」，
+ *  而不是「这一轮到底丢没丢过数据」。缓冲恰好为空时如实回 0，丢批事实彻底消失。
+ *
+ *  ★ 消费语义（关键）：只有**全量 drain（无参调用）**会把它计入返回值并清零（报一次即清）。
+ *    带 sessionId 的增量 flush / 定时器路径不消费——它们的返回值本就无人接收（timer 是 `void`、
+ *    appendTraceEvent 内部调用也不看），若在那里消费，粘性标记会被「读了但没人要」的调用吃掉，
+ *    等于白做。对应地：非 reporting 调用失败时**arming 而不消费**，交给下次全量 drain 上报。
+ */
+const droppedBatches = new Map<string, number>();
 /** 每会话一个 200ms 定时器（unref，不阻止进程退出）；flush 时清除。 */
 const traceTimers = new Map<string, NodeJS.Timeout>();
 /** 清理触发计数（§4.3-7 验收探针：每批至多一次）。 */
@@ -102,39 +114,75 @@ const scheduleTraceTimer = (sessionId: string): void => {
 };
 
 /**
+ * 每会话落盘串行链：同会话的两批写按调用顺序串行（避免 appendFile 交错）。
+ * ★ D5 四轮关键作用：让「在途批」对全量 drain 可见——定时器那批先 swap 清空缓冲、再 await 写盘，
+ *   若 drain 恰好落在「已取走、尚未写定」的窗口里，看到的是空缓冲且粘性标记尚未 arm（要等 catch）→
+ *   回 0。串行链把 drain 排在该批之后，它必然看到最终成败（失败已在 catch 里 arm）。
+ */
+const flushChains = new Map<string, Promise<unknown>>();
+const runSerialized = <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = flushChains.get(id) ?? Promise.resolve();
+    const next = prev.then(fn, fn); // 前一环成败都继续，绝不阻断后续批
+    flushChains.set(id, next.catch(() => undefined));
+    return next;
+};
+
+/**
  * 显式 drain（§4.2-3）：把缓冲中的行落盘。runAgent 的 finally 在 run.end 事件之后调用一次，
  * 保证 run 收尾不丢尾。幂等：空队直接跳过，重复调用不重复写。
  * @param sessionId 只 flush 该会话；缺省 flush 全部会话（子 run 与主 run 共文件，一并收尾）。
- * @returns 落盘失败会话数（D5 二轮 2026-11-03：内层逐会话吞错只 warn，外层按此返回值聚合
- *   degraded——外层 catch 是死信号；0 = 队列本空 / 全部落盘成功）。
+ * @returns 落盘失败会话数 + 粘性丢批会话数（D5 二/四轮 2026-11-03/04：内层逐会话吞错只 warn，外层按此
+ *   返回值聚合 degraded——外层 catch 是死信号；0 = 队列本空且无历史丢批 / 全部落盘成功）。
+ *   ★ 全量 drain（无参）会额外消化 droppedBatches（报一次即清）；带 sessionId 的调用不消化。
  */
 export const flushTraceBuffer = async (sessionId?: string): Promise<number> => {
-    const ids = sessionId !== undefined ? [sessionId] : [...traceBuf.keys()];
+    // ★ 只有全量 drain（runAgent finally 的无参调用）才报告并消费粘性丢批——见 droppedBatches 注释
+    const reportSticky = sessionId === undefined;
+    const ids = sessionId !== undefined
+        ? [sessionId]
+        : [...new Set([...traceBuf.keys(), ...droppedBatches.keys()])];
     let failedSessions = 0;
     for (const id of ids) {
-        const arr = traceBuf.get(id);
-        if (!arr || arr.length === 0) { traceBuf.delete(id); continue; }
-        // ★ swap-and-clear：先摘队列再写盘——写盘期间新事件进新队列不丢，重复调用不重复写（幂等）
-        traceBuf.set(id, []);
-        const timer = traceTimers.get(id);
-        if (timer) { clearTimeout(timer); traceTimers.delete(id); }
-        try {
-            const joined = arr.join("");
-            const p = await getTraceStorePath(id);
-            await fs.appendFile(p, joined, "utf-8");
-            // ★ 水位/清理联动搬到 flush 点（§4.2-6）：按批一次累加（Buffer.byteLength 一次算），
-            //   清理每批至多触发一次——不再「事件入队时偷偷累加/触发」与真实落盘时机脱钩
-            if (workspaceTraceBytes < 0) {
-                workspaceTraceBytes = await getDirBytes(getTracePath());
+        // ★ 串行化：本会话若有在途批，先等它写完再判断（否则会把「正在写」误看成「没货」）
+        const degraded = await runSerialized(id, async (): Promise<boolean> => {
+            let bad = false;
+            // ① 先消化粘性丢批：本轮之前（定时器/阈值路径）丢过批 → 即使此刻缓冲为空也必须如实报告
+            if (reportSticky && droppedBatches.has(id)) {
+                droppedBatches.delete(id);
+                bad = true;
             }
-            workspaceTraceBytes += Buffer.byteLength(joined, "utf-8");
-            cleanupTriggerCount++;
-            void maybeCleanupAfterAppend(id);
-        } catch (error) {
-            // 落盘失败只告警并丢弃该批（§4.2-7）：旁路绝不击垮主链路，也不无限重试
-            failedSessions++; // D5 二轮：吞错但如实计数，调用方按返回值聚合 degraded
-            console.warn("⚠️ [Trace] 批量落盘失败，丢弃该批（不影响主业务）:", error);
-        }
+            const arr = traceBuf.get(id);
+            if (!arr || arr.length === 0) {
+                traceBuf.delete(id);
+                return bad;
+            }
+            // ★ swap-and-clear：先摘队列再写盘——写盘期间新事件进新队列不丢，重复调用不重复写（幂等）
+            traceBuf.set(id, []);
+            const timer = traceTimers.get(id);
+            if (timer) { clearTimeout(timer); traceTimers.delete(id); }
+            try {
+                const joined = arr.join("");
+                const p = await getTraceStorePath(id);
+                await fs.appendFile(p, joined, "utf-8");
+                // ★ 水位/清理联动搬到 flush 点（§4.2-6）：按批一次累加（Buffer.byteLength 一次算），
+                //   清理每批至多触发一次——不再「事件入队时偷偷累加/触发」与真实落盘时机脱钩
+                if (workspaceTraceBytes < 0) {
+                    workspaceTraceBytes = await getDirBytes(getTracePath());
+                }
+                workspaceTraceBytes += Buffer.byteLength(joined, "utf-8");
+                cleanupTriggerCount++;
+                void maybeCleanupAfterAppend(id);
+            } catch (error) {
+                // 落盘失败只告警并丢弃该批（§4.2-7）：旁路绝不击垮主链路，也不无限重试
+                bad = true; // D5 二轮：吞错但如实计数，调用方按返回值聚合 degraded
+                // ★ D5 四轮：非 reporting 调用（定时器 / 阈值即时档）的返回值无人接收 → 留粘性标记，
+                //   由下次全量 drain 上报。reporting 调用本身就把失败算进返回值了，不必再 arm（否则下次重复报）。
+                if (!reportSticky) droppedBatches.set(id, (droppedBatches.get(id) ?? 0) + 1);
+                console.warn("⚠️ [Trace] 批量落盘失败，丢弃该批（不影响主业务）:", error);
+            }
+            return bad;
+        });
+        if (degraded) failedSessions++;
     }
     return failedSessions;
 };

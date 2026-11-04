@@ -1,44 +1,12 @@
-## 1.0.77
-
-**修复：DS 服务故障期「空断流」把会话永久毒化——空 assistant 消息三层设防（生产 0d245bd0 实证）**。当日 DS 服务故障（非流式 200 空 body / 流式 500），一轮推理流跑了 126 秒 0 chunk 后「干净」结束：旧逻辑把它当 ok 完成，拼出 `content:null` 无 tool_calls 的 assistant 消息 push 进上下文并落盘——DS API 对此形状每次请求必 400（"Invalid assistant message: content or tool_calls must be set"，探针原样复现），该会话从此每轮 1 秒内被拒，**服务恢复也救不回**。三层修复各断一条毒化路径：
-
-- **根（streamInference）**：流结束若 0 内容 0 tool_call 0 usage——include_usage 下真实完成必有 usage 末包，此形态 = 服务端断流——按 stall 同款重试（共享 idleRetries 预算 2 次封顶，不放大请求）；重试耗尽仍空则 completed 如实带 `emptyStream` 标记（修复前 trace 记裸 ok:true，取证时完全看不出 round 13 是空流）。有 usage 的空回复不触发（模型层空回复归 PHANTOM 域，传输层断流才归本防御）。
-- **防御（runAgent 主循环）**：content 空(null)且无 tool_calls 的 assistant 消息**不 push 不落盘**——落盘即毒化（后续 run 重建上下文必带它）。跳过后走既有 PHANTOM nudge 重试，控制流不变；`markDegraded('emptyAssistantSkip')` 进结算单可观测。该轮 reasoning_content 一并丢弃（UI 已实时见过思考增量；落盘即毒化，两害取其轻）。
-- **自愈（deepseek 出口单点）**：`stripHistoricalReasoning` 入口先整条丢弃历史中的空 assistant（streamChat / summarize 两通道共用）——修复前已落盘的受害会话**无需迁移自动恢复**；正常会话零命中、引用原样、缓存前缀零扰动；不受 REASONING_PASSTHROUGH 实验开关门控（正确性 ≠ 协议实验）。
-- **守门**：新增 `empty-assistant-poison.test.ts` 8 例——断流重试恢复 / 预算封顶 + emptyStream 标记 / 有 usage 不误拦 / runAgent 端到端零空 assistant 落盘且上下文不膨胀 / 出口自愈四态（中毒、严格档、零扰动、PASSTHROUGH 不豁免）；replay 的 PHANTOM 剧本空包轮补 usage 末包（对齐真实 wire：模型层空回复也带 usage）。core 全量 **825 例**绿 + tsc 零错误。
-
-# Changelog
-## 1.0.76
-
-**补强：收尾降级观测的主循环盲区——调用点消费返回值（D5 第三轮，8bdb712 遗留项）**。上一轮内层函数已如实回报成败，但多数调用点把返回值丢了——信号在产生它的地方被丢弃，与 D5 原病同类、位置不同。本轮按工单把主循环与收尾的信号断点全部接通，范围刻意做小。
-
-- **round.end 写失败可观测**：两条正常闭合路径（无工具收尾 / 工具后闭合）的 round.end 事件行此前丢弃返回值——代码自己把「round.end 缺失」定义为异常收尾取证信号，写失败理应同样可观测。不影响崩溃判定（detectInterruption 只看 run 级事件），仅补审计/回放完整性。
-- **degraded/markDegraded 上提至函数体顶部**：主循环调用点要用，原定义在 finally 内作用域不可达。顺带把 run.start 事件行包进 try/catch 兜底——它原是主 try 之外的裸 await，契约一旦被破坏（理论上不该抛，但 D1 的教训是别假设内层永远可靠）异常会冲出 generator → final 永不发 → 前端 busy 永不清。
-- **appendMessage 两处消费返回值**：assistant 消息落盘（每轮必经热路径）与 inbox 认领落盘——丢的不是边界标记而是对话本体：内存有、磁盘无，重启后历史缺行；磁盘满场景下每轮静默失败。名字区分 `appendMessage(assistant)` / `appendMessage(user)` 便于定位。
-- **四处裸 degraded.push → markDegraded**：纯替换，当前无行为变化，恢复去重意图（防将来组件名在两处出现时重复上报）。
-- **receipt 快照边界前移（方案 A）**：updateCalibration 移到结算单之前——纯本地文件写、前置零风险，其降级从此进用户可见通道（8 项旁路 6 项可进）；Stop hook 保持在后（跑用户 shell 命令可能数秒，不能拖结算单 UI）。最终边界已写进收尾段块注释，防下轮审查再当新发现。
-- **守门**：新增 2 例——EISDIR 毒化断言 receipt.degraded 含 `appendEvent(round.end)` 与 `appendMessage(assistant)`；反向红线断言健康路径 degraded 必须为 undefined（防狼来了）。core 全量 **817 例**绿 + tsc 零错误。
-
-## 1.0.75
-
-**修复：收尾降级观测从「外层猜」改为「内层如实回报」（D5 二轮）**。1.0.74 的 degraded 聚合把 push 接在 run 收尾旁路的外层 catch 上，但复核发现：被立案点名的四个组件（事件行 / trace / 用量日志 / inbox 落盘）全都在函数**内层**就吞掉错误只打 warn——外层 catch 永不触发，是接了假线的死信号（用量日志还叠加 `void` fire-and-forget，异步拒绝连同步 catch 都进不了，双重死）。纯内存的结算单 UI 通道是唯一真可达档，上一轮恰好只测了它。本轮让内层如实回报成败、外层按返回值聚合，守门测试改用 EISDIR 毒化法打通真实落盘失败路径。
-
-- **内层契约升级**：`appendEvent` / `appendMessage` / `recordUsageRun` 返回 `boolean`（落盘成败），`flushTraceBuffer` 返回失败会话数，`flushLeftoverToTranscript` 返回 `{flushed, failed}` 聚合——吞错照旧（旁路绝不击垮收尾），但调用方终于拿得到真话。禁用开关（`transcriptEvents` 关 / `DEEPSEEKER_CODE_USAGE_LOG=0`）返回成功：有意 no-op ≠ 降级，误报即狼来了。
-- **runAgent 收尾接线**：`recordUsageRun` 的 `void` 改 `await`（不 await 拿不到返回值，双重死只修一重）；四个返回值旁路按返回值 push 进 degraded，外层 catch 保留作兜底（防内层容错被未来改动破坏）并去重防双报。组件名沿用旧名，grep 定位不变。
-- **守门重构**：EISDIR 毒化法（把本应是文件的路径预建成目录 → appendFile EISDIR，跨平台稳定）三处毒化 + inbox final 后入队，单测/集成双档断言 degraded 含全部四个组件名（warn + 结算单 `degraded` 字段双通道）；反向档在独立进程断言「禁用通道毒化也不得报降级、无开关的 trace 毒化仍必须报」（防全绿假象）。1.0.74 的结算单抛错档保留，降级为合法可达档之一。
-- **顺手清理**：恢复层运行时 warn 去掉「崩溃确认」措辞（与 1.0.74 的不猜原因原则对齐）；孤儿修复参数与类型字段 `confirmedCrash` → `confirmedUnclosed`（事件只能确认「未闭合」，确认不了成因）；transcript.ts 一段缩进漂移补完。
-- **守门**：新增 `audit-fixes-2026-11-03.test.ts` 6 例 + `audit-fixes-d5-disabled-2026-11-03.test.ts` 3 例（独立进程，env 先于模块加载）；core 全量 **815 例**绿 + tsc 零错误。
-
 ## 1.0.74
 
-**修复：运维与成本审查报告五项——hook 事件配对 / 收尾降级聚合可见 / 恢复文案中性化 / 压缩自收敛判据对齐 / 注释纠偏**。全部属「系统现在跑得好，继续演进会踩」的契约与可观测性修复，无功能行为变更；工具表固定成本（D4）经三轮裁定维持挂账不动——前缀缓存实价 1/50 吸收钱维，窗口占用由压缩机制渐进兜底。
+**版本口径重置后首个发版（版本号按 Marketplace 线上+1 重编；原本地号链 1.0.75–1.0.77 作废未发布）**，批量携带四组已合入主干但从未单独发版的修复 + 本轮 D5 四轮收尾：
 
-- **PreCompact/PostCompact 强制配对**：压缩循环三条中途退出路径（循环首检中止 / catch 内中止 / 连败熔断 throw）旧实现都漏发 PostCompact——按「Pre 开 Post 关」记账的声明式 hook（压缩耗时统计、临时换模型、加锁）在中止场景收不了尾。现标志位 + try/finally 保证成对，且免费衰减早退路径（从未发过 Pre）不会被错发 Post（少发→错发比不配对更糟）。
-- **收尾旁路降级聚合可见**：run 收尾 8 段静默容错（inbox 落盘 / run.end 事件行 / trace 落盘 / 用量日志 / 成本回灌 / 结算单 / Stop hook / 压缩校准）单点判断都对，但异常环境下（如磁盘满）可能集体失效且无任何汇总线索。现 degraded[] 收集失败组件名，末尾一句聚合 warn（开发者可见）+ 结算单新增可选 `degraded` 字段（用户可见），旁路降级从「无声」变「可观测」。
-- **崩溃恢复「不猜原因」**：会话末 run 未闭合时，补写行的 reason 旧硬编码「interrupted by process exit/kill」是代码从未验证过的伪结论（run.end 写入失败与真崩溃在 transcript 侧不可区分）；孤儿工具调用占位文案同样错档指认「崩溃」。现改中性陈述（`unclosed (cause unknown)` / 「该调用未完成」）——放弃一个本来就不存在的区分，换输出诚实。fork 锚点、kind 语义、幂等行为全部不变。
-- **压缩自收敛判据对齐**：自收敛动作只重写叙述段，旧判据却按「整槽」计——索引段接近 120 条满编的长会话，每轮压缩都白付一次不可能有收益的辅助模型调用（索引 ~1500 token + 极短叙述即可越过 2000 阈值）。现判据只量叙述段，与「索引原样回写」的硬约束各管各的。
-- **注释即规格纠偏**：「实体索引永不送 LLM」的字面承诺与实现不符（索引段随摘要槽进入辅助压缩请求，无损性在于重建时按旧值原样回写）——3 处副本（truncate.ts ×2 + CLAUDE.md）统一改准确口径，顺带修复 transcript.ts 一段缩进漂移。
-- **守门**：新增 `audit-fixes-2026-11-03.test.ts` 5 例（abort 补发配对 / 熔断三连配对 / 免费衰减不错发 / 满编索引槽跨阈值不再触发自收敛 / 旁路抛错聚合 warn 点名组件）；恢复层文案断言随行为同步更新并钉死「不得再指认崩溃」；core 全量 806 例绿 + tsc 零错误。
+- **调度层落盘降级并入 run 级 degraded（D5 四轮，本轮新增）**：ScheduleResult 增加 degraded 字段回传调度层 6 个落盘点（终结/中止占位、并行批、终结工具、串行工具、图片跟随）的失败——工具结果丢失 = 上下文永久残缺（恢复补占位、原始结果不可逆），比边界事件丢失重一个量级，此前完全静默；appendMessages 返回 {written, failed}（批内回落路径的二次失败也计数）；重复熔断占位落盘失败可观测；trace 中途丢批粘性计数（定时器/阈值档 flush 失败不再无人接收——粘性留标记，run 收尾全量 drain 报一次即清；swap-and-clear + 串行化防「在途写」误判为「没货」）；聚合告警措辞改为「具体后果见组件名」（degraded 现含收尾旁路/消息落盘/emptyAssistantSkip 三类性质不同的信号，旧措辞只覆盖第一类）。守门 audit-fixes-d5-round4-2026-11-03.test.ts（单元/集成/反向三档）。
+- **空断流毒化会话三层设防（生产 0d245bd0 实证）**：DS 服务故障期流 126s 0 chunk 0 usage「干净」结束被当 ok 完成，content:null 的 assistant 消息进历史并落盘，此后每轮请求必 400（Invalid assistant message），会话永久报废。三层：streamInference 空断流按 stall 同款重试（共享 idle 预算、让位中止信号）+ emptyStream trace 标记；runAgent 空 assistant 不 push 不落盘（PHANTOM nudge 接管 + markDegraded）；出口 stripHistoricalReasoning 整条丢弃存量毒消息（受害会话免迁移自愈，不受 PASSTHROUGH 门控）。守门 empty-assistant-poison.test.ts 8 例；replay PHANTOM 剧本与 async-wake 门控桩补 usage 末包（对齐真实 wire）。
+- **收尾降级观测从「外层猜」改为「内层如实回报」（D5 二轮）**：appendEvent / appendMessage / recordUsageRun 返回 boolean、flushTraceBuffer 返回失败会话数、flushLeftoverToTranscript 返回 {flushed, failed}——吞错照旧（旁路不击垮收尾）但调用方拿得到真话；runAgent 收尾按返回值聚合 degraded[]，结算单新增可选 degraded 字段（用户可见通道）。EISDIR 毒化法守门打通真实落盘失败路径。
+- **主循环盲区消费返回值（D5 三轮）**：round.end 两条闭合路径与 appendMessage(assistant/user) 的写失败接入 markDegraded；degraded/markDegraded 上提至函数体顶部；receipt 快照边界前移（updateCalibration 前置于结算单，其降级进用户可见通道）。
+- **运维与成本审查五项（D6→D3→D5→D2→D1）**：PreCompact/PostCompact 三条中途退出路径强制配对（try/finally）；收尾旁路降级聚合可见（degraded[] 雏形）；崩溃恢复文案中性化（unclosed/cause unknown，不再硬编码「崩溃」伪结论）；压缩自收敛判据只量叙述段（索引段满编长会话不再白付不可能有收益的辅助模型调用）；注释纠偏。
 
 ## 1.0.73
 

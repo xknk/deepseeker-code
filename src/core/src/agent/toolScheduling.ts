@@ -23,11 +23,14 @@ import { checkPermission } from "@/tool/permissions.ts";
 /** 调度结果（判别联合）：
  *  - completed —— 本轮工具全部执行完，主循环继续下一轮推理；
  *  - aborted   —— 中途有工具被中止（signal.aborted），剩余已补占位，主循环 yield final(已中止) + return；
- *  - terminal  —— 命中终结类工具（exit/enter_plan_mode），主循环 yield final(terminalText) + return。 */
+ *  - terminal  —— 命中终结类工具（exit/enter_plan_mode），主循环 yield final(terminalText) + return。
+ *  ★ D5 四轮：degraded —— 本波落盘降级的组件名（去重）。工具结果/占位落盘失败此前完全静默（
+ *    appendMessage/appendMessages 内层吞错只 warn，调度层拿不到），而工具结果丢失 = 上下文永久
+ *    残缺（恢复时补占位、原始结果不可逆）。主循环消费后并入 run 级 degraded（receipt 用户可见）。 */
 export type ScheduleResult =
-    | { kind: 'completed' }
-    | { kind: 'aborted' }
-    | { kind: 'terminal'; terminalText: string };
+    | { kind: 'completed'; degraded?: string[] }
+    | { kind: 'aborted'; degraded?: string[] }
+    | { kind: 'terminal'; terminalText: string; degraded?: string[] };
 
 /**
  * P3-6 同轮重复 tool_call 去重（纯函数，供单测）：并行批内 name+arguments 完全一致（原始字符串逐字节
@@ -100,6 +103,13 @@ export const scheduleToolCalls = async function* (
 ): AsyncGenerator<AgentEvent, ScheduleResult> {
     const { sessionId, signal, rawTools } = ctx;
     let abortedDuringTools = false;
+    // ★ D5 四轮：本波落盘降级收集器。调度层共 6 个落盘点（终结补占位/中止补占位/并行批/终结工具/
+    //   串行工具/图片跟随），此前全部丢弃 appendMessage(s) 返回值。经 ScheduleResult.degraded 回传主循环。
+    const degraded: string[] = [];
+    const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
+    const noteWrite = (ok: boolean, name: string): void => { if (!ok) markDegraded(name); };
+    /** 逐个返回点附带的 degraded 字段（空集省略，保持既有返回形状不变） */
+    const degradedField = (): { degraded?: string[] } => degraded.length > 0 ? { degraded: [...degraded] } : {};
     // ★ read_image 图像收集：本波全部工具 flush 完后统一注入一条 user 附件消息。不能在工具 result
     //   flush 时立刻插——OpenAI 兼容端点要求 tool 结果紧随 assistant(tool_calls)，中间夹 user 消息会 400；
     //   注入点必须在 while 循环外（所有 tool 消息落定之后）。
@@ -112,7 +122,7 @@ export const scheduleToolCalls = async function* (
         for (let j = fromIdx + 1; j < tcs.length; j++) {
             const ph = "（已跳过：终结类工具之后的并行调用未执行）";
             message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
-            await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
+            noteWrite(await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph }), 'appendMessage(placeholder)');
         }
     };
     // ★ P0-1 分波调度：开启 parallelSafeTools 时，连续的 SAFE 只读工具并发执行（Promise.all）；
@@ -154,7 +164,7 @@ export const scheduleToolCalls = async function* (
             for (let j = idx; j < tcs.length; j++) {
                 const ph = "（已中止，未执行）";
                 message.push({ role: 'tool', tool_call_id: tcs[j].id, content: ph });
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph });
+                noteWrite(await appendMessage({ sessionId, role: 'tool', tool_call_id: tcs[j].id, content: ph }), 'appendMessage(placeholder)');
             }
             break;
         }
@@ -211,7 +221,8 @@ export const scheduleToolCalls = async function* (
                 if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
                 if (oc.aborted) abortedDuringTools = true;
             }
-            await appendMessages(sessionId, batchEntries);
+            const batchWrite = await appendMessages(sessionId, batchEntries);
+            if (batchWrite.failed > 0) markDegraded('appendMessages(tool-results)'); // ★ D5 四轮：批内失败如实上报
             // ★ A 批校准埋点（§1.4-6）：真实「字符→token」密度分布的唯一数据源——§9 据此反算密度校准
             //   CHAR_PER_TOKEN / BATCH_WINDOW_SHARE（样本 ≥50 批；无此闭环系数只是拍脑袋常数）。
             //   各工具实际注入字符数 = 截断后 resultForModel.length（去重首集合口径，重复项复用不计）。
@@ -245,7 +256,7 @@ export const scheduleToolCalls = async function* (
             if (oc.terminal) {
                 // 终结类：push 本条 result + 补其后占位 + yield tool.end + yield plan.* + return terminal
                 message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-                await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+                noteWrite(await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel }), 'appendMessage(tool-result)');
                 await fillRestPlaceholders(idx);
                 // ★ 补 tool.end：终结类上方已 yield tool.start，但原逻辑直接跳 plan.*/final 未 yield tool.end，
                 //   导致 CLI 的 ToolCard 永远停在「运行中…」（status 恒 running、滞留动态区），表现为 enter_plan_mode 卡死。
@@ -253,18 +264,18 @@ export const scheduleToolCalls = async function* (
                 yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
                 if (oc.terminal.kind === 'exit_plan_mode') {
                     yield { type: 'plan.proposed', plan: oc.terminal.plan || '' };
-                    return { kind: 'terminal', terminalText: oc.terminal.plan || oc.resultForUser };
+                    return { kind: 'terminal', terminalText: oc.terminal.plan || oc.resultForUser, ...degradedField() };
                 } else if (oc.terminal.kind === 'enter_plan_mode') {
                     yield { type: 'plan.enterRequested', reason: oc.terminal.reason || '' };
-                    return { kind: 'terminal', terminalText: oc.terminal.reason ? `📋 模型请求进入计划模式：${oc.terminal.reason}` : oc.resultForUser };
+                    return { kind: 'terminal', terminalText: oc.terminal.reason ? `📋 模型请求进入计划模式：${oc.terminal.reason}` : oc.resultForUser, ...degradedField() };
                 } else {
                     // ★ P1-6 generic 终结（terminal:true 声明）：结果只给用户，不再回喂模型续推（本轮到此为止）
-                    return { kind: 'terminal', terminalText: oc.resultForUser };
+                    return { kind: 'terminal', terminalText: oc.resultForUser, ...degradedField() };
                 }
             }
             yield { type: 'tool.end', toolCallId: oc.toolCallId, toolName: oc.calledName, result: oc.resultForUser, ok: oc.ok };
             message.push({ role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
-            await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel });
+            noteWrite(await appendMessage({ sessionId, role: 'tool', tool_call_id: oc.toolCallId, content: oc.resultForModel }), 'appendMessage(tool-result)');
             if (oc.imageAttachments?.length) pendingImages.push(...oc.imageAttachments);
             if (oc.aborted) abortedDuringTools = true;
             idx++;
@@ -274,10 +285,10 @@ export const scheduleToolCalls = async function* (
     //   vision 关闸折叠、衰减折叠、按张计价等既有闸门按 parts 数组通用处理）。中止时跳过（主循环即将收尾）。
     if (!abortedDuringTools && pendingImages.length > 0) {
         const parts = buildImageFollowUpParts(pendingImages) as any;
-        message.push({ role: 'user', content: parts });
-        await appendMessage({ sessionId, role: 'user', content: parts });
-    }
-    // 主动停止：剩余已补占位，主循环据此 yield final(已中止)；否则本轮完成，继续下一轮推理
-    if (abortedDuringTools) return { kind: 'aborted' };
-    return { kind: 'completed' };
+            message.push({ role: 'user', content: parts });
+            noteWrite(await appendMessage({ sessionId, role: 'user', content: parts }), 'appendMessage(image-followup)');
+        }
+        // 主动停止：剩余已补占位，主循环据此 yield final(已中止)；否则本轮完成，继续下一轮推理
+        if (abortedDuringTools) return { kind: 'aborted', ...degradedField() };
+        return { kind: 'completed', ...degradedField() };
 };

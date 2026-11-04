@@ -256,7 +256,7 @@ describe("D5 收尾聚合健康信号（审查报告 2026-11-03 §6-3）", () =>
         }
         assert.ok(events.some((e: any) => e?.type === "final"), "旁路失败不击垮收尾（final 照常 yield）");
         assert.ok(
-            warns.some(w => w.includes("旁路降级") && w.includes("run.receipt")),
+            warns.some(w => w.includes("降级") && w.includes("run.receipt")),
             `聚合 warn 应含组件名，实得：${JSON.stringify(warns)}`,
         );
         // 结算单之后的收尾段照常执行：run.end 事件行已落盘（顺序：receipt → Stop hook → 校准）
@@ -308,6 +308,25 @@ describe("D5 二轮单元档：内层吞错组件如实回报成败（外层 cat
         assert.equal(await flushTraceBuffer(tid), 1, "毒化会话失败计数 1（健康会话不计入）");
     });
 
+    it("中途丢批粘性：定时器路径丢的批无人接收 → 留标记，由全量 drain 上报一次即清", async () => {
+        // 复现真实故障形状：中途（非 reporting 调用）丢批时缓冲被清空，若此刻就是 run 收尾，
+        // 旧实现会回 0（「没货」）——丢批事实彻底消失（就是那两个测试时抖时青的根因）。
+        // 先全量 drain 一次吸收前序用例遗留的粘性标记（粘性是模块级、跨用例存活，不排空则计数不唯一）。
+        await flushTraceBuffer();
+        const tid = `d5u-sticky-${Date.now()}`;
+        await appendTraceEvent({ sessionId: tid, eventType: "llm.request", metadata: {} } as any);
+        await poisonAsDir(await getTraceStorePath(tid));
+
+        // ① 定时器/阈值路径（带 sessionId）：自己上报 1，同时 arm 粘性标记
+        assert.equal(await flushTraceBuffer(tid), 1, "非 reporting 调用：本批失败如实回 1");
+        // ② 此刻缓冲已空——关键断言：再叫一次带参 flush 仍是 0，且**不会**把粘性标记吃掉
+        assert.equal(await flushTraceBuffer(tid), 0, "缓冲空 → 本批零失败（但粘性标记仍留着）");
+        // ③ 全量 drain（无参，runAgent finally 就走这条）：不靠缓冲有货，也能把历史丢批算进来
+        assert.equal(await flushTraceBuffer(), 1, "全量 drain 必须上报历史丢批（不再依赖 buffered 非空）");
+        // ④ 报一次即清：再 drain 不得重复报（防狼来了）
+        assert.equal(await flushTraceBuffer(), 0, "粘性标记报一次即清，不重复刷");
+    });
+
     it("健康路径上四个组件如实回成功（毒化对照：同一断言的 green 侧）", async () => {
         const sid = `d5u-ok-${Date.now()}`;
         assert.equal(await appendEvent(sid, { dscEvent: "run.end", runId: "r2", stopReason: "normal", rounds: 1 }), true);
@@ -344,9 +363,14 @@ describe("D5 二轮集成档：EISDIR 毒化打通四个返回值降级信号（
         const origWarn = console.warn;
         console.warn = (...a: any[]) => { warns.push(a.map(x => (typeof x === "string" ? x : String(x))).join(" ")); };
         let finalSeen = false;
-        // trace 缓冲续注：20ms interval 持续向毒化会话缓冲普通事件行。200ms 兜底 timer 可能在 run
-        // 中途冲掉一批（毒化路径上丢弃），但 interval 会立刻补上——保证 finally drain 时缓冲必有货，
-        // 竞态窗口被结构性消除（timer 冲批 → interval 补批 → drain 必撞 EISDIR）。
+        // trace 缓冲续注：20ms interval 持续向毒化会话缓冲普通事件行，确保 finally drain 时
+        // 大概率有货。
+        // ★ D5 四轮修正（2026-11-04）：旧注释声称「200ms timer 冲批 → interval 补批 → drain 必撞 EISDIR，
+        // 竞态窗口被结构性消除」——**这是错的，已实测打脸**。trace 内部 200ms timer 冲批失败后按
+        // §4.2-7 直接丢弃该批，而下一条补货最晚 20ms 后才到；全量并发下事件循环一挤，drain 完全可能
+        // 落在「货刚被扔掉、新货未到」的 ≤20ms 缝隙里——缓冲为空 → 如实回 0 失败 → 本用例误判信号丢失。
+        // 現在真正的确定性保障在 trace 侧：中途丢过批会留粘性标记，全量 drain 必将其计入返回值
+        // （与 drain 那一刻缓冲空不空无关）。本 interval 仍保留——它负责制造“中途必然冲批”的处境。
         const refill = setInterval(() => {
             void appendTraceEvent({ sessionId: sid, eventType: "llm.request", metadata: {} } as any);
         }, 20);
@@ -376,7 +400,7 @@ describe("D5 二轮集成档：EISDIR 毒化打通四个返回值降级信号（
         assert.ok(finalSeen, "旁路集体降级不击垮收尾（final 照常 yield）");
         const expected = ["flushLeftoverToTranscript", "appendEvent(run.end)", "flushTraceBuffer", "recordUsageRun"];
         const allWarn = warns.join("\n");
-        assert.ok(allWarn.includes("旁路降级"), `聚合 warn 应存在，实得：${JSON.stringify(warns)}`);
+        assert.ok(allWarn.includes("降级"), `聚合 warn 应存在，实得：${JSON.stringify(warns)}`);
         for (const name of expected) {
             assert.ok(allWarn.includes(name), `聚合 warn 应含 ${name}`);
         }
