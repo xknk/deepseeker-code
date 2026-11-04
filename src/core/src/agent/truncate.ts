@@ -23,7 +23,7 @@ import { MODEL_NAME } from "@/llm/createModel.ts";
 import path from "path";
 import { getRollingState, getCalibration, setRollingState } from "@/session/store.ts";
 import { appendEvent } from "@/session/transcript.ts";
-import { ensureOptions, RunAgentEvents, AuxUsageReporter } from "./type.ts";
+import { ensureOptions, RunAgentEvents, AuxUsageReporter, WindowCheckInfo } from "./type.ts";
 import { UIEvent } from "@/observability/type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 
@@ -678,7 +678,46 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
         ? event.lastCachedTokens / event.lastRealPromptTokens : null;
     const cacheFactor = hitRate == null ? 1.0 : Math.min(1.1, Math.max(0.9, 0.9 + hitRate * 0.2));
     const effectiveRatio = Math.min(event.compactRatio * cacheFactor, 0.82);
-    if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) return;
+    const thresholdAtCheck = Math.round(event.modelWindow * effectiveRatio);
+    // ★ M1 判定快照出口（缓存塌方治理，2026-11-04）：含 noop 每轮必报——runAgent 存为 lastWindowCheck
+    //   随本轮 llm.request 落 trace 三值（estReal/thresholdAtSend/correctionRatioUsed），口径出入当场可判。
+    //   estReal 取【调用时刻】值：compact 决策在循环后上报，即压缩后快照（描述本轮实际发送的上下文）。
+    const reportCheck = (decision: WindowCheckInfo['decision'], decayed?: boolean): void => {
+        event.onWindowCheck?.({
+            estReal: Math.round(estReal(event.messageArr)),
+            threshold: thresholdAtCheck,
+            correctionRatio,
+            toolsTokens,
+            hitRate,
+            cacheFactor,
+            decision,
+            ...(decayed === undefined ? {} : { decayed }),
+        });
+    };
+    // trace 事件（context.check）仅 decision≠noop 时发（控体积）；metadata 带触发时刻口径
+    // （estRealAtTrigger = 判定前快照，回答「当时为什么触发」，与回调里的发送时刻口径互补）。
+    const estRealAtTrigger = Math.round(estReal(event.messageArr));
+    const emitCheckEvent = (decision: WindowCheckInfo['decision']): void => {
+        event.events({
+            sessionId: event.sessionId,
+            eventType: 'context.check',
+            metadata: {
+                depth: event.depth,
+                decisionSource: 'summary',
+                ok: true,
+                estReal: estRealAtTrigger,
+                thresholdAtSend: thresholdAtCheck,
+                correctionRatioUsed: correctionRatio,
+                hitRateAtCheck: hitRate,
+                cacheFactorAtCheck: cacheFactor,
+                windowDecision: decision,
+            },
+        });
+    };
+    if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
+        reportCheck('noop');
+        return;
+    }
     // ★ 压缩前免费衰减（2026-09-15）：超阈值先试零 LLM 成本的旧工具结果折叠（与跨 run 重建同款
     //   decayOldToolResults：保留最近 KEEP_RECENT_UNITS 个对话单元全文，更早单元的超长 tool content
     //   截头+折叠提示、老图占位）。旧 tool 结论早已被后续 assistant 消化，折叠信息损失有界；降回
@@ -688,12 +727,28 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     //   幂等：已折叠内容（头 keep 字符+固定尾注）重衰减收敛到同一固定点，不逐次加深。
     const preDecaySize = estReal(event.messageArr);
     const decayedArr = decayOldToolResults(event.messageArr);
-    if (decayedArr !== event.messageArr) {
+    const decayed = decayedArr !== event.messageArr;
+    if (decayed) {
         event.messageArr.length = 0;
         event.messageArr.push(...decayedArr);
+        // ★ M1：衰减生效落 trace（此前只有 console.log，trace/UI 双盲——2026-11-04 r53「73K 断点 + 计费缩水」
+        //   即无观测衰减的实锤，事后无法从 trace 判定发生过什么）。
+        event.events({
+            sessionId: event.sessionId,
+            eventType: 'context.decay',
+            metadata: {
+                depth: event.depth,
+                decisionSource: 'summary',
+                ok: true,
+                decayTokensBefore: Math.round(preDecaySize),
+                decayTokensAfter: Math.round(estReal(event.messageArr)),
+            },
+        });
     }
     if (!event.forceCompact && estReal(event.messageArr) <= event.modelWindow * effectiveRatio) {
         console.log(`📉 [窗口治理] 免费衰减（旧工具结果折叠）后回到阈值内（${Math.round(preDecaySize)} → ${Math.round(estReal(event.messageArr))} token），跳过 LLM 压缩`);
+        reportCheck('decay', true);
+        emitCheckEvent('decay');
         return;
     }
     // ★ P1-8 PreCompact：压缩已确定触发（超阈值、尚未摘要），观察事件（审计/计量）
@@ -713,6 +768,8 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
     const preCompactSize = Math.round(lastSize); // 压缩前快照（compact.done 的 tokensBefore；lastSize 循环内会滚动更新）
     const startTime = performance.now();
     let round = 0
+    // ★ M1：压缩判定动作记录——循环实际做了什么，循环后在统一出口上报（onWindowCheck + context.check）。
+    let compactDecision: 'compact' | 'selfCompact' | 'noop' = 'noop';
     // ★ 手动压缩：至少强制跑一遍压缩循环（健康会话 lastSize 本就低于阈值，普通条件一轮都不进 = 点了没反应）
     let forcedPass = event.forceCompact === true;
     // 条件复用 lastSize 而非每轮重算 estimateTokens：lastSize 初值=全量估算，每轮末 newSize 同步更新；
@@ -774,12 +831,14 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                     store.archivedMessageCount = (store.archivedMessageCount || 0) + toCompact.length;
                     // ★ 压缩边界事件行经 persistCompaction 单点落盘（先 state 后 event 的顺序铁律在其内保证）。
                     await persistCompaction(event.sessionId, store.archivedMessageCount, summaryMsg.content);
+                    compactDecision = 'compact';
                 } else if (keep > 1) { // 如果保留的条数还是大于最大token，则继续减少保留数据
                     keep--;
                     continue;
                 } else if (summaryMsg?.content) { // 如果只剩下摘要信息还是大于最大值token，那么继续使用摘要生成摘要
                     // 同样走仅叙述段自收敛（实体索引保留）
                     summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
+                    compactDecision = 'selfCompact';
                     event.messageArr.length = 0;
                     event.messageArr.push(systemMsg, summaryMsg, ...keepRecent);
                     const store = await getRollingState(event.sessionId);
@@ -853,6 +912,11 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             await dispatch('PostCompact', { sessionId: event.sessionId, depth: event.depth, tokensBefore: Math.round(lastSize), tokensAfter: Math.round(estReal(event.messageArr)) }).catch(() => { });
         }
     }
+
+    // ★ M1 压缩判定统一出口：回调（随本轮 llm.request 三值）恒发；trace 事件仅确有动作时发。
+    //   abort/熔断提前 return/throw 的路径不经过此处（本轮请求不会发出，无需快照）。
+    reportCheck(compactDecision, decayed);
+    if (compactDecision !== 'noop') emitCheckEvent(compactDecision);
 
     // ★ 压缩显示（对标 CC「Compacted chat」行）：主 agent 且确有释放时发 UI 事件（免费衰减早退路径不动
     //   摘要槽、走不到这里）。子 agent（depth>0）不发——其压缩是父上下文治理的内部细节，不进用户消息流。

@@ -28,6 +28,9 @@ export type TraceEventType =
     | "llm.response"            // LLM 响应：收到大模型的回复（含 Token 消耗等）
     | "llm.error"               // LLM 调用失败：网络/模型/配置等导致本轮推理未返回
     | "llm.visionDowngraded"    // 视觉自学习降级：端点拒绝图片输入（400）→ 记能力 + 折叠为文本重试
+    | "llm.contextDowngraded"   // 上下文超长降级：API 400 context_length_exceeded → 强制压缩后重试本轮（缓存塌方治理 M1，2026-11-04）
+    | "context.check"           // 窗口治理判定：仅 decision≠noop 的轮发，压缩/衰减归因数据源（缓存塌方治理 M1，2026-11-04）
+    | "context.decay"           // 窗口治理免费衰减生效：老工具结果折叠前后 token 快照（缓存塌方治理 M1，2026-11-04）
     | "tool.resolve"            // 工具解析：系统识别出需要调用哪个插件/工具
     | "tool.execute.start"      // 工具执行开始：具体的函数或 API 开始运行
     | "tool.execute.end"        // 工具执行结束：拿到工具返回的结果
@@ -66,6 +69,17 @@ export interface TraceBase {
         batchSize?: number;         // A 批 tool.batch.budget：并行批去重后执行数
         batchCapChars?: number;     // A 批 tool.batch.budget：批级输出字符上限
         perToolCapChars?: number;   // A 批 tool.batch.budget：分摊到每工具的字符上限
+        // —— 缓存塌方治理 M1（2026-11-04）窗口治理判定随附 ——
+        // 载体：context.check / context.decay 事件与 llm.request metadata 三值增补。
+        // 目的：把「当时为什么触发/为什么没触发」焊进 trace，事后回算不再依赖散落参数。
+        estReal?: number;              // 校准后真实口径估算（estimateTokens×correctionRatio + toolsTokens）
+        thresholdAtSend?: number;      // 本轮生效压缩阈值（modelWindow × effectiveRatio，四舍五入）
+        correctionRatioUsed?: number;  // 本轮使用的估算校准系数
+        windowDecision?: 'noop' | 'decay' | 'compact' | 'selfCompact'; // 判定动作（noop 只进 llm.request 回调不落 trace）
+        hitRateAtCheck?: number | null; // 判定时缓存命中率（无真实 usage 时 null）
+        cacheFactorAtCheck?: number;    // 判定时缓存感知阈值系数（∈[0.9,1.1]，无 usage 时 1.0）
+        decayTokensBefore?: number;     // context.decay：衰减前 token 快照
+        decayTokensAfter?: number;      // context.decay：衰减后 token 快照
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {
