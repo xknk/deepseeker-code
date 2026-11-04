@@ -31,6 +31,7 @@ import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
 import { acquireRunLock, releaseRunLock, takeNextTicket, finishTicket } from "@/batch/queue.ts";
+import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
 import {
@@ -100,6 +101,34 @@ const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: numbe
             resolve({ code, output: tail || T.noOutput, timedOut });
         });
     });
+};
+
+// ============ 基线三态校验辅助（§5.2.1，仅外部源工单；git 直调零 shell） ============
+
+/** 测试文件路径启发式（§9.8 P1 信息标注，不参与状态判定）。 */
+const TEST_PATH_RE = /(^|[\\/])(tests?|__tests__)([\\/]|$)|\.(test|spec)\.[cm]?[jt]sx?$/i;
+
+/** git 只跑短命令（shell:false，无注入面）；失败返回 null（探测/列举失败不致命）。 */
+const gitSimple = (args: string[], cwd: string): Promise<string | null> =>
+    new Promise((resolve) => {
+        const child = spawn("git", args, { cwd, windowsHide: true, shell: false });
+        const chunks: Buffer[] = [];
+        child.stdout?.on("data", (d: Buffer) => chunks.push(d));
+        child.on("error", () => resolve(null));
+        child.on("close", (code) => resolve(code === 0 ? decodeProcessOutput(Buffer.concat(chunks)).trim() || null : null));
+    });
+
+/** 主仓库根（缓存键的「仓库」维度）：从 worktree 反查 common dir 的父目录。 */
+const mainRepoRootOf = async (wtPath: string): Promise<string> => {
+    const common = await gitSimple(["rev-parse", "--git-common-dir"], wtPath);
+    return common ? path.dirname(path.resolve(wtPath, common)) : process.cwd();
+};
+
+/** diff 相对 baseSha 的已改动文件清单（harvestDiff 同口径：全量已暂存）→ 过滤测试路径。 */
+const touchedTestFiles = async (wtPath: string, baseSha: string): Promise<string[]> => {
+    const out = await gitSimple(["diff", "--cached", "--name-only", baseSha], wtPath);
+    if (!out) return [];
+    return out.split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => TEST_PATH_RE.test(f));
 };
 
 // ============ 结算单聚合（usageLog 真实回传数字，可对账） ============
@@ -190,10 +219,15 @@ export const buildReport = (args: {
     errorMessage?: string;
     /** 看门狗证据链（方案 §7：触发规则/verdict/evidence/nudge 记录/终止时刻轮数与花费/重试轮次）。 */
     watchdogLines?: string[];
+    /** 本次 diff 触碰的测试文件（§9.8 P1 信息标注；空/缺省不渲染该段）。 */
+    touchedTestFiles?: string[];
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
     const T = batchT(getLocale());
     const budgetNote = budgetTruncated ? T.budgetTruncNote : "";
+    const testFilesSection = args.touchedTestFiles?.length
+        ? `\n${T.testFilesH}\n\n${T.testFilesNote(args.touchedTestFiles.length)}\n${args.touchedTestFiles.map((f) => `- \`${f}\``).join("\n")}\n`
+        : "";
     return `---
 id: ${id}
 title: ${ticket.title}
@@ -201,7 +235,7 @@ status: ${status}
 cost-yuan: ${cost.costYuan !== null ? cost.costYuan.toFixed(4) : "null"}
 rounds: ${cost.rounds}
 budget-truncated: ${budgetTruncated}
-session: batch-${id}
+${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
 ---
@@ -225,7 +259,7 @@ ${T.acceptH}
 ${accept
         ? `\n${T.acceptCmdLine(accept.cmd, accept.code)}${accept.timedOut ? T.acceptTimeoutSuffix : ""}\n\n${T.acceptTail}\n\n\`\`\`\n${accept.output}\n\`\`\`\n`
         : T.noAccept}
-
+${testFilesSection}
 ${T.deniedH}
 
 ${deniedTools.length === 0
@@ -319,6 +353,67 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         emit(`💥 [${task.id}] ${msg}`);
         return { status: "error", cost, budgetTruncated: false };
     }
+    // ============ 基线三态校验（§5.2.1，仅外部源工单；manual 票零改动） ============
+    // setup-broken（瞬态，不缓存——重试可能就好）与 baseline-broken（当日缓存，同基座免重跑）分开报；
+    // 基线红的仓库不产生任何 agent 花费——判定完成于 agent 阶段之前（结构性保证，不靠纪律）。
+    // 缓存键 = 仓库根 + HEAD SHA + accept 命令：代码或验收一变即失效，不拿旧结论盖新代码。
+    let setupDoneByProbe = false;
+    if (t.source !== "manual") {
+        emit(`🧪 [${task.id}] ${T.baselineGateNote}`);
+        const repoRoot = await mainRepoRootOf(wt.path);
+        const key = baselineKey(repoRoot, wt.baseSha, t.accept);
+        const finishBaselineBroken = async (verdict: "baseline-broken" | "watch-suspect", probe: { code: number | null; output: string; timedOut: boolean } | null) => {
+            await killBackgroundTasksUnder(wt.path).catch(() => { });
+            const cost = await collectSessionCost(sessionId);
+            await finishTicket(task.id, buildReport({
+                id: task.id, ticket: t, status: "baseline-broken", budgetTruncated: false, cost, receipt: undefined,
+                finalText: "", accept: probe ? { cmd: t.accept, code: probe.code, output: probe.output, timedOut: probe.timedOut } : null,
+                deniedTools: [], diff: T.diffNone, wt, errorMessage: baselineVerdictLabel(verdict, getLocale()),
+            }));
+            emit(`🧪 [${task.id}] ${T.statusLabel("baseline-broken")}`);
+            return { status: "baseline-broken" as const, cost, budgetTruncated: false };
+        };
+        const cached = await readBaselineCache(key, new Date());
+        if (cached && cached.verdict !== "ok") {
+            // 缓存命中且非 ok：连 setup 都不装（装了也白装），直接终止——零花费
+            emit(T.baselineCachedBroken(baselineVerdictLabel(cached.verdict, getLocale())));
+            return await finishBaselineBroken(cached.verdict, null);
+        }
+        if (!cached) {
+            // 先备环境再探测（复用验收执行器：同 shell 形态/凭证剔除/超时护栏）
+            if (t.setup) {
+                emit(T.setupLine(t.setup));
+                const s = await runAcceptCommand(t.setup, wt.path);
+                if (s.code !== 0 || s.timedOut) {
+                    await killBackgroundTasksUnder(wt.path).catch(() => { });
+                    const msg = `${T.setupFail(t.setup, s.code)}${s.timedOut ? T.acceptTimeoutSuffix : ""}\n\n\`\`\`\n${s.output}\n\`\`\``;
+                    const cost = await collectSessionCost(sessionId);
+                    await finishTicket(task.id, buildReport({
+                        id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
+                        finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
+                    }));
+                    emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
+                    return { status: "setup-failed", cost, budgetTruncated: false };
+                }
+                setupDoneByProbe = true; // 环境已备好，agent 阶段首轮不重跑 setup
+            }
+            emit(T.baselineProbeLine(t.accept));
+            const probe = await runAcceptCommand(t.accept, wt.path);
+            const verdict = classifyProbe({ code: probe.code ?? 1, timedOut: probe.timedOut });
+            await writeBaselineCache(key, verdict, new Date());
+            if (verdict !== "ok") {
+                // 超时 → watch-suspect（疑似 watch/常驻，修法与普通验收失败不同），与 baseline-broken 分开报
+                emit(T.baselineProbeFail(baselineVerdictLabel(verdict, getLocale())));
+                return await finishBaselineBroken(verdict, { code: probe.code, output: probe.output, timedOut: probe.timedOut });
+            }
+            // 探测通过：撤掉测试运行弄脏的已跟踪文件（untracked 不动——node_modules 必须活着供正式验收）
+            await gitSimple(["reset", "--hard"], wt.path);
+            emit(T.baselineProbePass);
+        } else {
+            emit(T.baselineCachedOk);
+        }
+    }
+
     // ============ agent 阶段（看门狗装配 + 可选带证据重试循环，方案 §3/§6/§6.1） ============
     // 每轮独立 ac/timer（timeout-min 每轮重计）；watchdog 逐轮新建（宽限/阶梯/采样序列各自归零），
     // 证据链快照跨轮累计进 wdSnapshots。工单 retry 字段（默认 0）控制被杀后的带证据重试轮数。
@@ -373,8 +468,8 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         // ★ 环境 setup（可选，2026-10-16 首跑教训）：worktree 是干净检出（无 node_modules 等），验收命令
         //   依赖环境时先在此备好（复用验收执行器：同 shell 形态/凭证剔除/超时护栏/输出尾部截取）。
         //   setup 失败 → 任务直接失败，不进 agent 阶段（跑了也过不了验收，白烧钱）。仅首轮（重试轮同
-        //   worktree 续跑，环境已在）。
-        if (round === 1 && t.setup) {
+        //   worktree 续跑，环境已在）。外部源工单若基线探测已备好环境则不重跑（setupDoneByProbe，M4）。
+        if (round === 1 && t.setup && !setupDoneByProbe) {
             emit(T.setupLine(t.setup));
             const s = await runAcceptCommand(t.setup, wt.path);
             if (s.code !== 0 || s.timedOut) {
@@ -520,11 +615,13 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     if (commit.committed) emit(T.commitLine(wt.branch, commit.sha));
     else if (commit.error) emit(T.commitFail(commit.error));
     const diff = await harvestDiff(wt);
+    const touched = await touchedTestFiles(wt.path, wt.baseSha); // §9.8：报告列触碰的测试文件（P1 信息标注）
     const cost = await collectSessionCost(sessionId);
     await finishTicket(task.id, buildReport({
         id: task.id, ticket: t, status, budgetTruncated, cost, receipt, finalText,
         accept, deniedTools, diff, wt, commit, errorMessage: agentError,
         watchdogLines: buildWatchdogLines(wdSnapshots, cost.costYuan) ?? undefined,
+        touchedTestFiles: touched.length > 0 ? touched : undefined,
     }));
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);
     emit(T.artifactLine(wt.path, wt.branch));

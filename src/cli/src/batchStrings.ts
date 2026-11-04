@@ -8,8 +8,8 @@
  */
 import type { Locale } from "@/common/index.ts";
 
-/** 任务终态（batchRunner 与词表共用；setup-failed/timeout/error/watchdog-killed 不跑验收，其余必跑验收定 passed/accept-failed）。 */
-export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed";
+/** 任务终态（batchRunner 与词表共用；setup-failed/baseline-broken/timeout/error/watchdog-killed 不跑验收，其余必跑验收定 passed/accept-failed）。 */
+export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed" | "baseline-broken";
 
 const ZH = {
     // —— batchAdmin（add / list / clean / help） ——
@@ -80,6 +80,14 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     acceptLine: (passed: boolean, id: string, code: number | null) => `${passed ? "✅" : "❌"} [${id}] 验收 exit ${code}`,
     acceptKilledSuffix: "（超时被杀）",
     timeoutAbort: (min: number) => `任务超时（${min} 分钟）`,
+    baselineGateNote: "基线校验（外部源工单：基线红不进 agent，零花费）",
+    baselineProbeLine: (cmd: string) => `🧪 基线探测：\`${cmd}\`（干净树上先跑验收，红则不进 agent）`,
+    baselineCachedOk: "🧪 基线缓存命中（今日同基座已验通过），跳过探测",
+    baselineCachedBroken: (v: string) => `🧪 基线缓存命中（今日已验：${v}）——不装环境、不进 agent（零花费）`,
+    baselineProbeFail: (v: string) => `🧪 基线探测未过：${v}`,
+    baselineProbePass: "🧪 基线探测通过，恢复干净树后进 agent 阶段",
+    testFilesH: "## 触碰的测试文件（信息标注）",
+    testFilesNote: (n: number) => `本次 diff 触碰 ${n} 个测试路径（P1 仅信息标注，不参与状态判定）：`,
     artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，已提交，保留待人工处置）`,
     inWindowNow: (hhmm: string) => `⏰ 当前 ${hhmm} 已在窗口内，立即开跑。`,
     waitWindowWait: (h: number, m: number) => `⏰ --wait-window：${h} 小时 ${m} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`,
@@ -100,6 +108,7 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
         "setup-failed": "🛠️ 环境准备失败",
         rejected: "🚫 工单被拒",
         "watchdog-killed": "🐕 看门狗终止",
+        "baseline-broken": "🧪 基线未过（本票未执行）",
     })[s],
 
     // —— 验收命令执行（输出嵌入报告） ——
@@ -223,6 +232,14 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     acceptLine: (passed, id, code) => `${passed ? "✅" : "❌"} [${id}] acceptance exit ${code}`,
     acceptKilledSuffix: " (killed on timeout)",
     timeoutAbort: (min) => `Task timed out (${min} minutes)`,
+    baselineGateNote: "baseline check (external-source ticket: a red baseline never reaches the agent; zero spend)",
+    baselineProbeLine: (cmd) => `🧪 baseline probe: \`${cmd}\` (run acceptance on the clean tree first; red means the agent never runs)`,
+    baselineCachedOk: "🧪 baseline cache hit (same base verified passing today) — probe skipped",
+    baselineCachedBroken: (v) => `🧪 baseline cache hit (verified today: ${v}) — no env setup, no agent (zero spend)`,
+    baselineProbeFail: (v) => `🧪 baseline probe failed: ${v}`,
+    baselineProbePass: "🧪 baseline probe passed; restoring the clean tree, entering the agent phase",
+    testFilesH: "## Touched test files (informational)",
+    testFilesNote: (n) => `This diff touches ${n} test paths (P1: informational only, not part of status judgment):`,
     artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, committed, kept for manual handling)`,
     inWindowNow: (hhmm) => `⏰ It's ${hhmm}, already inside the window — starting now.`,
     waitWindowWait: (h, m) => `⏰ --wait-window: starting in ${h}h ${m}m (at the window start). Waiting — Ctrl+C to cancel.`,
@@ -242,6 +259,7 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
         "setup-failed": "🛠️ setup failed",
         rejected: "🚫 ticket rejected",
         "watchdog-killed": "🐕 watchdog killed",
+        "baseline-broken": "🧪 baseline broken (ticket not executed)",
     })[s],
 
     spawnFail: (e) => `Spawn failed: ${e}`,

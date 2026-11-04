@@ -329,7 +329,7 @@ test("retry 装配（源码扫描）：同 worktree 续跑（循环内不再建�
     assert.match(RUNNER_SRC, /const maxRounds = 1 \+ Math\.min\(Math\.max\(0, Math\.floor\(t\.retry \?\? 0\)\), RETRY_MAX\)/, "retry 默认 0 → 单轮（杀即终态）");
     assert.match(RUNNER_SRC, /content = buildRetryTaskContent\(t\.body, wdKill, finalText\)/, "二轮注入上轮证据");
     assert.match(RUNNER_SRC, /roundBudget = nextBudget/, "budget-yuan 跨轮累计共享");
-    assert.match(RUNNER_SRC, /if \(round === 1 && t\.setup\)/, "setup 仅首轮（重试轮同 worktree，环境已在）");
+    assert.match(RUNNER_SRC, /if \(round === 1 && t\.setup && !setupDoneByProbe\)/, "setup 仅首轮（重试轮同 worktree，环境已在；M4：探测已备好环境不重跑）");
     assert.match(RUNNER_SRC, /wdSnapshots\.push\(wd\.snapshot\(\)\)/, "证据链跨轮累计进报告");
     // 重试轮循环体内不得出现 createWorktree（同 worktree 续跑是硬约定）
     const loopStart = RUNNER_SRC.indexOf("for (let round = 1");

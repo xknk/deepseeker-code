@@ -17,7 +17,7 @@ import { loadSyncState, appendSyncState, syncFingerprint, deduceVerdict, type Sy
 import { fetchGithubIssues, SyncPullError, type SyncCandidate } from "./github.ts";
 import { fetchGitlabIssues, defaultSyncFetch, type SyncFetch } from "./gitlab.ts";
 import { applyRuleGate, normalizeTitle } from "./rulegate.ts";
-import { resolveAccept, missingAcceptShort } from "./accept.ts";
+import { resolveAccept, missingAcceptShort, externalAcceptNote, type AcceptResolution } from "./accept.ts";
 import { buildQuotedExternalBody, QUOTE_PREAMBLE } from "./boundary.ts";
 import { defaultSyncExec, type SyncExec } from "./exec.ts";
 import { syncMsg } from "./strings.ts";
@@ -34,6 +34,8 @@ export interface SyncOptions {
     fetchImpl?: SyncFetch;
     /** 测试时钟（state seenAt / 每日上限）。 */
     now?: () => Date;
+    /** 自动探测的本地项目根（缺省 process.cwd()；测试传临时目录隔离宿主仓库形态）。 */
+    projectRoot?: string;
     /** 输出通道（缺省 process.stdout.write；测试捕获断言）。 */
     out?: (line: string) => void;
 }
@@ -51,21 +53,29 @@ export interface SyncSummary {
 
 const sanitizeTitle = (t: string): string => t.replace(/\s+/g, " ").trim().slice(0, 120);
 
-/** 组装 sync 工单源文本（frontmatter + 引用块正文）。frontmatter 只给人与策略，agent 只见 body。 */
-export const buildSyncTicketSource = (candidate: SyncCandidate, accept: string, config: SyncConfig, locale: SyncLocale): string => {
+/** 组装 sync 工单源文本（frontmatter + 引用块正文 + 验收来源注记）。frontmatter 只给人与策略，agent 只见 body。 */
+export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResolution & { ok: true }, config: SyncConfig, locale: SyncLocale): string => {
     const lines = [
         "---",
         `title: ${sanitizeTitle(candidate.title)}`,
-        `accept: ${accept}`,
+        `accept: ${acc.accept}`,
         `source: ${candidate.sourceId.split(":")[0]}`,
         candidate.url ? `source-url: ${candidate.url}` : null,
         `source-id: ${candidate.sourceId}`,
+        acc.needsReview ? "needs-review: true" : null,
         config.defaultBudgetYuan !== undefined ? `budget-yuan: ${config.defaultBudgetYuan}` : null,
         "---",
         "",
         buildQuotedExternalBody(QUOTE_PREAMBLE[locale], `issue #${candidate.sourceId.split("#")[1] ?? "?"}`, candidate.title, candidate.body),
     ];
-    return lines.filter((l) => l !== null).join("\n") + "\n";
+    let text = lines.filter((l) => l !== null).join("\n") + "\n";
+    // 验收来源注记（§3.5「探测到即注明」）：外部/探测来源必须让看票的人一眼知道 accept 哪来的。
+    if (acc.origin !== "config") {
+        const sourceDesc = acc.origin === "detect" ? (acc.detectSource ?? "") : externalAcceptNote(locale);
+        const head = locale === "zh" ? "验收命令说明" : "Accept command note";
+        text += `---\n${head}：accept 来自 ${sourceDesc}。\n`;
+    }
+    return text;
 };
 
 /** 单候选的完整处理：返回其计入的摘要桶。 */
@@ -79,6 +89,8 @@ const processCandidate = async (args: {
     dryRun: boolean;
     now: () => Date;
     out: (line: string) => void;
+    /** 自动探测的本地项目根（§3.5 探测的是本地仓库形态，不是远端）。 */
+    projectRoot: string;
 }): Promise<SummaryKey | "changed"> => {
     const { candidate, config, locale, dryRun, now, out } = args;
     const M = (k: string, ...a: any[]) => syncMsg(locale, k, ...a);
@@ -109,8 +121,8 @@ const processCandidate = async (args: {
         return "rejected";
     }
 
-    // 验收解析（M2：配置 > 拒绝；外部块/自动探测随 M4 插入）
-    const acc = resolveAccept(candidate.title, candidate.body, config, locale);
+    // 验收解析（M4 四档：配置 > 外部块[gated] > 自动探测 > 拒绝）
+    const acc = await resolveAccept(candidate.title, candidate.body, config, locale, args.projectRoot);
     if (!acc.ok) {
         out(`${pre}${M("missingAccept", candidate.sourceId, missingAcceptShort(locale))}`);
         out(`${pre}   └ ${acc.reason.replace(/\n/g, "\n   ")}`);
@@ -125,7 +137,7 @@ const processCandidate = async (args: {
         out(`${pre}${M("wouldEnqueue", sanitizeTitle(candidate.title), candidate.sourceId, acc.origin)}`);
         return "added";
     }
-    const source = buildSyncTicketSource(candidate, acc.accept, config, locale);
+    const source = buildSyncTicketSource(candidate, acc, config, locale);
     const tmp = path.join(os.tmpdir(), `dsc-sync-ticket-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
     try {
         await fs.writeFile(tmp, source, "utf-8");
@@ -183,7 +195,7 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         // 3. 逐源拉取 + 逐候选处理（一个源挂掉不影响另一个——适配器互相独立，§2 原则 2）
         const runCandidates = async (candidates: SyncCandidate[]): Promise<void> => {
             for (const candidate of candidates) {
-                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out });
+                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd() });
                 if (bucket === "changed") summary.skipped++;
                 else summary[bucket]++;
             }

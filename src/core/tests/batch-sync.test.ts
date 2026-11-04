@@ -181,15 +181,20 @@ test("rulegate：作者白名单 / 关键词 / 超长 / 同标题重复 四规�
     assert.equal(gate.applyRuleGate(c({ author: "whoever" }), {}, new Set()).work, true);
 });
 
-// ============ accept 解析（M2：配置 > 拒绝） ============
+// ============ accept 解析（M2 保留：配置最高优先 > 无任何来源拒绝；M4 四档细则在 batch-sync-accept.test.ts） ============
 
-test("accept M2：有 defaultAccept 用配置；无配置拒绝（宁可不自动做，不猜验收）", () => {
-    const hit = resolveAccept("t", "b", { defaultAccept: "pnpm test" });
-    assert.equal(hit.ok && hit.origin, "config");
-    assert.equal(hit.ok && hit.accept, "pnpm test");
-    const miss = resolveAccept("t", "b", {});
-    assert.equal(miss.ok, false);
-    if (!miss.ok) assert.match(miss.reason, /defaultAccept/);
+test("accept：有 defaultAccept 用配置（最高优先）；无任何来源拒绝（宁可不自动做，不猜验收）", async () => {
+    const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-accept-empty-"));
+    try {
+        const hit = await resolveAccept("t", "b", { defaultAccept: "pnpm test" }, "zh", emptyRoot);
+        assert.equal(hit.ok && hit.origin, "config");
+        assert.equal(hit.ok && hit.accept, "pnpm test");
+        const miss = await resolveAccept("t", "b", {}, "zh", emptyRoot);
+        assert.equal(miss.ok, false);
+        if (!miss.ok) assert.match(miss.reason, /defaultAccept/);
+    } finally {
+        await fs.rm(emptyRoot, { recursive: true, force: true });
+    }
 });
 
 // ============ 注入边界（§4.3） ============
@@ -269,11 +274,12 @@ test("全链路：首 sync 建票（frontmatter + 引用块 body + state work）
 });
 
 test("全链路：缺验收 → missing-accept 记 state 不建票 + 人话指引；--source 过滤与未配源报错", async () => {
-    await withTempBatchDir(async () => {
+    await withTempBatchDir(async (dir) => {
         await writeConfig(path.dirname(SYNC_CONFIG_PATH()), { github: { repos: ["o/r"], label: "agent" } });
         const lines: string[] = [];
         const mkExec = async () => ({ code: 0, stdout: JSON.stringify([mkIssue(7)]), stderr: "" });
-        const r = await runSync({ exec: mkExec, out: (s) => lines.push(s), now: () => new Date("2026-11-04T12:00:00") });
+        // projectRoot 指向空目录：宿主仓库（src/core）有可探测的 scripts.test，不隔离则探测会兜住本该拒绝的票
+        const r = await runSync({ exec: mkExec, out: (s) => lines.push(s), now: () => new Date("2026-11-04T12:00:00"), projectRoot: dir });
         assert.equal(r.ok, true);
         if (r.ok) assert.equal(r.summary.missingAccept, 1);
         assert.match(lines.join("\n"), /defaultAccept/);
@@ -330,7 +336,7 @@ test("全链路：建出的工单源文本 round-trip 通过 parseBatchTicket（
     const { parseBatchTicket } = await import("@/batch/ticket.ts");
     const src = buildSyncTicketSource(
         { sourceId: "github:o/r#3", url: "https://github.com/o/r/issues/3", title: "标题: 带冒号\n第二行", body: "body --- with dashes", author: "a", updatedAt: "x" },
-        "npm test",
+        { ok: true, accept: "npm test", origin: "config", needsReview: false },
         { defaultBudgetYuan: 2 },
         "zh",
     );
