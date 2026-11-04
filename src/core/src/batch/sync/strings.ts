@@ -22,6 +22,8 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         enqueueFail: (sourceId: string, err: string) => `🚫 ${sourceId} 建票失败：${err}`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
             `✅ sync 完成：新增 ${added} / 跳过 ${skipped} / 拒绝 ${rejected} / 缺验收 ${missingAccept}`,
+        capReached: (n: number) => `⏸️ 今日建票已达上限 ${n}（maxTicketsPerDay）：其余候选今日不再建票（明日自动继续）`,
+        capSuffix: (n: number, max: number) => `；今日已达上限 ${max}，${n} 个候选未建票`,
         noSource: (s: string) => `sync.json 未配置 ${s} 源（--source 只能选已配置的源）。`,
         sourceUnavailable: "sync.json 未配置任何源：至少配 github.repos 或 gitlab.projects（参考 sync.json.example）。",
     },
@@ -41,6 +43,8 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         enqueueFail: (sourceId: string, err: string) => `🚫 Failed to enqueue ${sourceId}: ${err}`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
             `✅ sync finished: added ${added} / skipped ${skipped} / rejected ${rejected} / missing-accept ${missingAccept}`,
+        capReached: (n: number) => `⏸️ Daily ticket cap reached (${n}, maxTicketsPerDay): remaining candidates will not be enqueued today (resumes tomorrow)`,
+        capSuffix: (n: number, max: number) => `; daily cap reached (${max}), ${n} candidates not enqueued`,
         noSource: (s: string) => `sync.json has no ${s} source (--source must pick a configured source).`,
         sourceUnavailable: "sync.json configures no source: set github.repos or gitlab.projects (see sync.json.example).",
     },

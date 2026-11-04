@@ -94,6 +94,18 @@ export const takeNextTicket = async (): Promise<{ id: string; path: string } | n
     return { id: file.replace(/\.md$/, ""), path: to };
 };
 
+/**
+ * 窥视队首但不取走（M6 总量硬闸）：超限停票信息需要知道「停在谁之前」，工单必须原样留在
+ * pending/（下一批继续，不留半成品也不丢票）。run 持单飞锁，窥视与取走之间无并发竞争。
+ */
+export const peekNextTicket = async (): Promise<{ id: string; path: string } | null> => {
+    await requeueStaleRunning();
+    const pending = await listState("pending");
+    if (pending.length === 0) return null;
+    const file = pending[0];
+    return { id: file.replace(/\.md$/, ""), path: path.join(stateDir("pending"), file) };
+};
+
 /** 崩溃残留重排队：running/ 全部搬回 pending/（工单内容没跑完即重跑；worktree 孤儿由启动期 sweep 清）。 */
 export const requeueStaleRunning = async (): Promise<number> => {
     const stale = await listState("running");

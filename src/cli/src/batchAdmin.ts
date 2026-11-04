@@ -16,7 +16,7 @@ import { readLocale } from "./prefs.ts";
 /** batch 子命令解析结果（argv[0] !== "batch" 时 parseBatchArgv 返回 null）。 */
 export type BatchArgv =
     | { sub: "add"; files: string[] }
-    | { sub: "run"; waitWindow?: string }
+    | { sub: "run"; waitWindow?: string; maxTotalYuan?: number; unknownFlag?: string }
     | { sub: "sync"; source?: "github" | "gitlab"; dryRun: boolean; unknownFlag?: string }
     | { sub: "list" }
     | { sub: "clean" }
@@ -52,9 +52,29 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
         return { sub: "sync", source, dryRun, unknownFlag };
     }
     if (sub === "run") {
-        const wi = argv.indexOf("--wait-window");
-        const waitWindow = wi !== -1 ? argv[wi + 1] : undefined;
-        return { sub: "run", waitWindow };
+        // ★ run 参数解析 fail-closed（M6 总量硬闸）：未知 flag / 缺值 / 非法数值直接报 unknownFlag，
+        //   main 在 key 校验前拒绝——挂机脚本拼错参数绝不能静默全量跑批。
+        //   --wait-window 格式校验仍在 runner（waitWindowInvalid），此处只保证有值。
+        const rest = argv.slice(2);
+        let waitWindow: string | undefined;
+        let maxTotalYuan: number | undefined;
+        let unknownFlag: string | undefined;
+        for (let i = 0; i < rest.length; i++) {
+            const a = rest[i];
+            if (a === "--wait-window") {
+                const v = rest[++i];
+                if (v === undefined) return { sub: "run", unknownFlag: `${a}（缺值）` };
+                waitWindow = v;
+            } else if (a === "--max-total-yuan") {
+                const v = rest[++i];
+                const n = v === undefined ? NaN : Number(v);
+                if (!Number.isFinite(n) || n < 0) return { sub: "run", unknownFlag: `${a} ${v ?? "（缺值）"}` };
+                maxTotalYuan = n;
+            } else {
+                return { sub: "run", unknownFlag: a };
+            }
+        }
+        return { sub: "run", waitWindow, maxTotalYuan, unknownFlag };
     }
     if (sub === "list") return { sub: "list" };
     if (sub === "clean") return { sub: "clean" };

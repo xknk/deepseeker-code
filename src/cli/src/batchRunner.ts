@@ -30,7 +30,7 @@ import { readUsageRecords } from "@/observability/usageLog.ts";
 import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
-import { acquireRunLock, releaseRunLock, takeNextTicket, finishTicket } from "@/batch/queue.ts";
+import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket } from "@/batch/queue.ts";
 import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
@@ -677,7 +677,7 @@ const waitUntilWindow = async (w: { startMin: number; endMin: number }): Promise
 /**
  * 执行挂机队列（engine 已就绪后由 main 派发）。全程持锁（并发=0）；崩溃残留 running/ 工单自动重排队。
  */
-export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<void> => {
+export const runBatchQueue = async (opts?: { waitWindow?: string; maxTotalYuan?: number }): Promise<void> => {
     const T = batchT(getLocale());
     const window = parseWaitWindow(opts?.waitWindow);
     if (opts?.waitWindow && !window) {
@@ -699,9 +699,20 @@ export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<voi
     let passed = 0;
     let costSum = 0;
     let costTasks = 0;
+    let budgetStopped = false;
     const failedIds: string[] = [];
     try {
         for (;;) {
+            // M6 总量硬闸（§5.2.3）：每票开始【前】检查——超限停在下一张票之前，绝不开跑半张票
+            // （不允许跑到 accept 中途才砍）。peek 只窥视不取走：票原样留在 pending/，下批继续。
+            if (opts?.maxTotalYuan !== undefined && costSum >= opts.maxTotalYuan) {
+                const next = await peekNextTicket();
+                if (next) {
+                    emit(T.budgetStop(costSum.toFixed(4), String(opts.maxTotalYuan), next.id));
+                    budgetStopped = true;
+                }
+                break;
+            }
             const task = await takeNextTicket();
             if (!task) break;
             total++;
@@ -718,7 +729,7 @@ export const runBatchQueue = async (opts?: { waitWindow?: string }): Promise<voi
     }
 
     if (total === 0) {
-        emit(T.runnerQueueEmpty);
+        if (!budgetStopped) emit(T.runnerQueueEmpty); // 超限首查即停：budgetStop 文案已说明，勿再报「队列空」误导
         return;
     }
     emit("");

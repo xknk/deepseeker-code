@@ -18,7 +18,8 @@ const ZH = {
 用法：deepseeker-code batch <子命令>
   add <工单.md> [...]              投递任务（可一次多个文件）
   list                             查看 pending / running / done 三态队列
-  run [--wait-window HH:MM-HH:MM]  执行队列（串行，逐任务出报告；--wait-window 到点再开跑）
+  run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
+                                   执行队列（串行，逐任务出报告；--wait-window 到点再开跑；--max-total-yuan 本批总花费上限，超限停在下一票之前）
   clean                            清空 done/（已读过的报告与工单存档）
 
 工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
@@ -63,6 +64,10 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
     syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
     syncBadFlag: (f: string) => `❌ 未知参数："${f}"`,
+    // M6 总量硬闸（§5.2.3）：run 侧解析 fail-closed + 每票开始前检查花费上限
+    runUsage: "用法：deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
+    runBadFlag: (f: string) => `❌ 未知参数或非法值："${f}"`,
+    budgetStop: (spent: string, cap: string, id: string) => `💰 本批已花 ¥${spent} / 上限 ¥${cap}，已停在票 \`${id}\` 之前`,
 
     // —— batchRunner 控制台进度 ——
     ticketRejected: (id: string, err: string) => `🚫 [${id}] 工单被拒：${err}`,
@@ -172,7 +177,8 @@ const EN: typeof ZH = {
 Usage: deepseeker-code batch <subcommand>
   add <ticket.md> [...]              Enqueue tasks (multiple files at once)
   list                               Show the pending / running / done queue
-  run [--wait-window HH:MM-HH:MM]    Run the queue (serial, one report per task; --wait-window waits for the window)
+  run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
+                                     Run the queue (serial, one report per task; --wait-window waits for the window; --max-total-yuan caps total batch spend, stops before the next ticket)
   clean                              Clear done/ (reports and ticket archives you've read)
 
 Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, no enqueue):
@@ -217,6 +223,10 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
 
     syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
     syncBadFlag: (f) => `❌ Unknown flag: "${f}"`,
+    // M6 total-spend hard cap (§5.2.3): fail-closed run parsing + per-ticket pre-check of the spend cap
+    runUsage: "Usage: deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
+    runBadFlag: (f) => `❌ Unknown flag or invalid value: "${f}"`,
+    budgetStop: (spent, cap, id) => `💰 Batch spent ¥${spent} / cap ¥${cap} — stopped before ticket \`${id}\``,
 
     ticketRejected: (id, err) => `🚫 [${id}] Ticket rejected: ${err}`,
     taskMeta: (budget, timeoutMin, accept) => `   Budget ${budget !== undefined ? `¥${budget}` : "uncapped"} · timeout ${timeoutMin}min · accept \`${accept}\``,

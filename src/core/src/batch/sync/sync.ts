@@ -14,7 +14,7 @@ import { enqueueTicketFile } from "../queue.ts";
 import { generateBatchId } from "../ticket.ts";
 import { loadSyncConfig, type SyncConfig, type SyncLocale } from "./config.ts";
 import { acquireSyncLock, releaseSyncLock } from "./lock.ts";
-import { loadSyncState, appendSyncState, syncFingerprint, deduceVerdict, type SyncStateEntry } from "./state.ts";
+import { loadSyncState, appendSyncState, syncFingerprint, deduceVerdict, todayTicketCount, type SyncStateEntry } from "./state.ts";
 import { fetchGithubIssues, SyncPullError, type SyncCandidate } from "./github.ts";
 import { fetchGitlabIssues, defaultSyncFetch, type SyncFetch } from "./gitlab.ts";
 import { applyRuleGate, normalizeTitle } from "./rulegate.ts";
@@ -53,6 +53,8 @@ export interface SyncSummary {
     rejected: number;
     /** 缺验收拒绝数。 */
     missingAccept: number;
+    /** 因 maxTicketsPerDay 未建票的候选数（M6：超限不建票，摘要写明）。 */
+    capped: number;
 }
 
 const sanitizeTitle = (t: string): string => t.replace(/\s+/g, " ").trim().slice(0, 120);
@@ -99,6 +101,10 @@ const processCandidate = async (args: {
     projectRoot: string;
     /** 附件下载注入（M5；缺省 gh api）。 */
     download: DownloadFile;
+    /** M6 每日建票上限（缺省不限）；createdToday 共享计数（本 run 建票即增），capAnnounced 保证上限文案只打一次。 */
+    maxPerDay?: number;
+    createdToday?: { n: number };
+    capAnnounced?: { v: boolean };
 }): Promise<SummaryKey | "changed"> => {
     const { candidate, config, locale, dryRun, now, out } = args;
     const M = (k: string, ...a: any[]) => syncMsg(locale, k, ...a);
@@ -117,6 +123,15 @@ const processCandidate = async (args: {
         }
         out(`${pre}${M("skipUnchanged", candidate.sourceId)}`);
         return "skipped";
+    }
+
+    // M6 每日建票上限（§5.2.3）：超限不建票（state 不记——明日上限重置后这些候选自然重进管线）
+    if (!dryRun && args.maxPerDay !== undefined && (args.createdToday?.n ?? 0) >= args.maxPerDay) {
+        if (args.capAnnounced && !args.capAnnounced.v) {
+            out(M("capReached", args.maxPerDay));
+            args.capAnnounced.v = true;
+        }
+        return "capped";
     }
 
     // 规则闸（纯规则，无 LLM）
@@ -181,6 +196,7 @@ const processCandidate = async (args: {
         out(M("added", enq.id, sanitizeTitle(candidate.title), candidate.sourceId, acc.origin));
         await appendSyncState({ sourceId: candidate.sourceId, ticketId: enq.id, seenAt: now().toISOString(), fingerprint, verdict: "work", title: sanitizeTitle(candidate.title), updatedAt: candidate.updatedAt || undefined });
         args.knownTitles.add(normalizeTitle(candidate.title));
+        if (args.createdToday) args.createdToday.n++; // M6：本 run 建票计入当日上限
         return "added";
     } finally {
         await fs.rm(tmp, { force: true }).catch(() => { });
@@ -215,7 +231,12 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         locked = true;
     }
 
-    const summary: SyncSummary = { added: 0, skipped: 0, rejected: 0, missingAccept: 0 };
+    const summary: SyncSummary = { added: 0, skipped: 0, rejected: 0, missingAccept: 0, capped: 0 };
+    // M6 每日建票上限（§5.2.3）：createdToday 是共享计数（state 今日数起步、本 run 建票即增），
+    // capAnnounced 保证「已达上限」文案只打一次；dry-run 不查上限（也不落盘）。
+    const maxPerDay = config.maxTicketsPerDay;
+    const createdToday = { n: !opts?.dryRun && maxPerDay !== undefined ? await todayTicketCount(now()) : 0 };
+    const capAnnounced = { v: false };
     try {
         const state = await loadSyncState();
         const knownTitles = new Set<string>();
@@ -226,7 +247,7 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         // 3. 逐源拉取 + 逐候选处理（一个源挂掉不影响另一个——适配器互相独立，§2 原则 2）
         const runCandidates = async (candidates: SyncCandidate[]): Promise<void> => {
             for (const candidate of candidates) {
-                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd(), download: opts?.download ?? defaultDownloadFile });
+                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd(), download: opts?.download ?? defaultDownloadFile, maxPerDay, createdToday, capAnnounced });
                 if (bucket === "changed") summary.skipped++;
                 else summary[bucket]++;
             }
@@ -268,8 +289,10 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
             }
         }
 
-        // 4. 摘要一行（§5.2 第 6 步）
-        out(M("summary", summary.added, summary.skipped, summary.rejected, summary.missingAccept) + (opts?.dryRun ? M("dryRunNote") : ""));
+        // 4. 摘要一行（§5.2 第 6 步）；超限时追加「今日已达上限 N」（M6）
+        out(M("summary", summary.added, summary.skipped, summary.rejected, summary.missingAccept)
+            + (summary.capped > 0 && maxPerDay !== undefined ? M("capSuffix", summary.capped, maxPerDay) : "")
+            + (opts?.dryRun ? M("dryRunNote") : ""));
         return { ok: true, summary };
     } finally {
         if (locked) await releaseSyncLock();

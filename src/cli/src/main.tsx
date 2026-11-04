@@ -128,6 +128,17 @@ const main = async (): Promise<void> => {
         await import("./batchAdmin.ts").then((m) => m.handleBatchAdmin(batchArgv));
         process.exit(0);
     }
+    // ★ run 参数 fail-closed（M6 总量硬闸）：未知 flag / 非法值在 key 校验前直接拒绝——
+    //   挂机脚本拼错参数不能静默全量跑批，更不该为此要求 API key。
+    if (batchArgv?.sub === "run" && batchArgv.unknownFlag) {
+        const savedLoc = await readLocale();
+        if (savedLoc) setLocale(savedLoc);
+        const { batchT } = await import("./batchStrings.ts");
+        const T = batchT((savedLoc ?? "zh") as Locale);
+        process.stdout.write(`${T.runBadFlag(batchArgv.unknownFlag)}\n${T.runUsage}\n`);
+        process.exitCode = 2;
+        return;
+    }
 
     // ★ 模型密钥前置校验（核心 OpenAI client 经 DEEP_SEEK_API_KEY 配置）。
     //    必须在动态 import 核心/Agent 之前——否则 createModel 加载期即抛错。
@@ -189,7 +200,7 @@ const main = async (): Promise<void> => {
         const dispose = await initEngine(agentTools, { includeProject });
         const { runBatchQueue } = await import("./batchRunner.ts");
         try {
-            await runBatchQueue({ waitWindow: batchArgv.waitWindow });
+            await runBatchQueue({ waitWindow: batchArgv.waitWindow, maxTotalYuan: batchArgv.maxTotalYuan });
         } finally {
             dispose();
         }
