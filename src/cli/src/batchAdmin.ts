@@ -17,6 +17,7 @@ import { readLocale } from "./prefs.ts";
 export type BatchArgv =
     | { sub: "add"; files: string[] }
     | { sub: "run"; waitWindow?: string }
+    | { sub: "sync"; source?: "github" | "gitlab"; dryRun: boolean; unknownFlag?: string }
     | { sub: "list" }
     | { sub: "clean" }
     | { sub: "help" };
@@ -31,6 +32,25 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
     if (argv[0] !== "batch") return null;
     const sub = argv[1];
     if (sub === "add") return { sub: "add", files: argv.slice(2) };
+    if (sub === "sync") {
+        // ★ sync 是轻模块（拉取/去重/建票零 LLM，§3.3）：pre-key 派发；未知 flag fail-closed。
+        const rest = argv.slice(2);
+        let source: "github" | "gitlab" | undefined;
+        let dryRun = false;
+        let unknownFlag: string | undefined;
+        for (let i = 0; i < rest.length; i++) {
+            const a = rest[i];
+            if (a === "--dry-run") dryRun = true;
+            else if (a === "--source") {
+                const v = rest[++i];
+                if (v === "github" || v === "gitlab") source = v;
+                else return { sub: "sync", dryRun, unknownFlag: a === undefined ? "--source" : `${a} ${v ?? "（缺值）"}` };
+            } else {
+                return { sub: "sync", dryRun, unknownFlag: a };
+            }
+        }
+        return { sub: "sync", source, dryRun, unknownFlag };
+    }
     if (sub === "run") {
         const wi = argv.indexOf("--wait-window");
         const waitWindow = wi !== -1 ? argv[wi + 1] : undefined;
@@ -51,6 +71,23 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
 
     if (b.sub === "help") {
         emit(T.usage);
+        return;
+    }
+    if (b.sub === "sync") {
+        // ★ 多入口流水线 P1（§5.1）：`batch sync` 把 label issue 拉成本地工单。零 LLM、零 API key 依赖，
+        //   与 add/list/clean 同级 pre-key 派发；配置在 <项目>/.deepseeker-code/batch/sync.json。
+        if (b.unknownFlag) {
+            emit(T.syncBadFlag(b.unknownFlag));
+            emit(T.syncUsage);
+            process.exitCode = 2;
+            return;
+        }
+        const { runSync } = await import("@/batch/sync/sync.ts");
+        const r = await runSync({ source: b.source, dryRun: b.dryRun, locale: getLocale() });
+        if (!r.ok) {
+            emit(`🚫 ${r.error}`);
+            process.exitCode = 1;
+        }
         return;
     }
     if (b.sub === "add") {

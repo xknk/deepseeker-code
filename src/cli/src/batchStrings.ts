@@ -34,7 +34,11 @@ const ZH = {
   任务描述正文（Markdown）…
 
 产物：<项目>/.deepseeker-code/batch/done/<id>.report.md（状态/结算单/验收输出/diff 摘要）；
-改动收割在独立 git worktree（临时分支）上，任务收尾自动 commit 到该分支（跨重启不丢），保留待人工 merge 或丢弃。`,
+改动收割在独立 git worktree（临时分支）上，任务收尾自动 commit 到该分支（跨重启不丢），保留待人工 merge 或丢弃。
+
+sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）：
+  sync [--source github|gitlab] [--dry-run]   拉取（配置：<项目>/.deepseeker-code/batch/sync.json）；
+                                              --dry-run 只预演会建哪些票、验收取自哪里，零落盘`,
     commitSkipped: "（未执行——worktree 未创建）",
     commitNotReached: "未执行（任务在 agent 阶段前终止，没有需要固化的改动）",
     commitDone: (sha: string) => `${sha.slice(0, 8)}（worktree 改动已固化为分支上的 commit，重启被清扫也不丢）`,
@@ -55,6 +59,10 @@ const ZH = {
     listDoneHead: (n: number) => `✔ 已完成 ${n}：`,
     cleaned: (n: number) => `🧹 已清空 done/（${n} 个任务存档）。pending/running 不受影响。`,
     reportMissing: "（报告缺失）",
+
+    // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
+    syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
+    syncBadFlag: (f: string) => `❌ 未知参数："${f}"`,
 
     // —— batchRunner 控制台进度 ——
     ticketRejected: (id: string, err: string) => `🚫 [${id}] 工单被拒：${err}`,
@@ -171,7 +179,11 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
   Task description body (Markdown)…
 
 Artifacts: <project>/.deepseeker-code/batch/done/<id>.report.md (status / receipt / acceptance output / diff summary);
-changes are harvested onto an isolated git worktree (temp branch) and committed to that branch when the task ends (survives restarts), kept for manual merge or disposal.`,
+changes are harvested onto an isolated git worktree (temp branch) and committed to that branch when the task ends (survives restarts), kept for manual merge or disposal.
+
+sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tickets):
+  sync [--source github|gitlab] [--dry-run]   Pull (config: <project>/.deepseeker-code/batch/sync.json);
+                                              --dry-run previews what would be created and where the acceptance comes from, writing nothing`,
     commitSkipped: "(not run — no worktree was created)",
     commitNotReached: "not run (the task stopped before the agent phase; nothing to commit)",
     commitDone: (sha: string) => `${sha.slice(0, 8)} (worktree changes committed onto the branch — a restart sweep will not lose them)`,
@@ -192,6 +204,9 @@ changes are harvested onto an isolated git worktree (temp branch) and committed 
     listDoneHead: (n) => `✔ Done ${n}:`,
     cleaned: (n) => `🧹 Cleared done/ (${n} task archives). pending/running untouched.`,
     reportMissing: "(report missing)",
+
+    syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
+    syncBadFlag: (f) => `❌ Unknown flag: "${f}"`,
 
     ticketRejected: (id, err) => `🚫 [${id}] Ticket rejected: ${err}`,
     taskMeta: (budget, timeoutMin, accept) => `   Budget ${budget !== undefined ? `¥${budget}` : "uncapped"} · timeout ${timeoutMin}min · accept \`${accept}\``,
