@@ -11,6 +11,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { enqueueTicketFile } from "../queue.ts";
+import { generateBatchId } from "../ticket.ts";
 import { loadSyncConfig, type SyncConfig, type SyncLocale } from "./config.ts";
 import { acquireSyncLock, releaseSyncLock } from "./lock.ts";
 import { loadSyncState, appendSyncState, syncFingerprint, deduceVerdict, type SyncStateEntry } from "./state.ts";
@@ -19,6 +20,7 @@ import { fetchGitlabIssues, defaultSyncFetch, type SyncFetch } from "./gitlab.ts
 import { applyRuleGate, normalizeTitle } from "./rulegate.ts";
 import { resolveAccept, missingAcceptShort, externalAcceptNote, type AcceptResolution } from "./accept.ts";
 import { buildQuotedExternalBody, QUOTE_PREAMBLE } from "./boundary.ts";
+import { processAttachments, extractUserAttachments, defaultDownloadFile, type DownloadFile, type SyncAttachmentResult } from "./attachments.ts";
 import { defaultSyncExec, type SyncExec } from "./exec.ts";
 import { syncMsg } from "./strings.ts";
 
@@ -36,6 +38,8 @@ export interface SyncOptions {
     now?: () => Date;
     /** 自动探测的本地项目根（缺省 process.cwd()；测试传临时目录隔离宿主仓库形态）。 */
     projectRoot?: string;
+    /** 附件下载注入（M5，测试用假下载器；缺省 gh api + fd 重定向）。 */
+    download?: DownloadFile;
     /** 输出通道（缺省 process.stdout.write；测试捕获断言）。 */
     out?: (line: string) => void;
 }
@@ -53,8 +57,8 @@ export interface SyncSummary {
 
 const sanitizeTitle = (t: string): string => t.replace(/\s+/g, " ").trim().slice(0, 120);
 
-/** 组装 sync 工单源文本（frontmatter + 引用块正文 + 验收来源注记）。frontmatter 只给人与策略，agent 只见 body。 */
-export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResolution & { ok: true }, config: SyncConfig, locale: SyncLocale): string => {
+/** 组装 sync 工单源文本（frontmatter + 引用块正文 + 验收来源注记 + 附件段）。frontmatter 只给人与策略，agent 只见 body。 */
+export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResolution & { ok: true }, config: SyncConfig, locale: SyncLocale, att?: SyncAttachmentResult): string => {
     const lines = [
         "---",
         `title: ${sanitizeTitle(candidate.title)}`,
@@ -62,7 +66,7 @@ export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResol
         `source: ${candidate.sourceId.split(":")[0]}`,
         candidate.url ? `source-url: ${candidate.url}` : null,
         `source-id: ${candidate.sourceId}`,
-        acc.needsReview ? "needs-review: true" : null,
+        acc.needsReview || att?.needsReview ? "needs-review: true" : null,
         config.defaultBudgetYuan !== undefined ? `budget-yuan: ${config.defaultBudgetYuan}` : null,
         "---",
         "",
@@ -75,6 +79,8 @@ export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResol
         const head = locale === "zh" ? "验收命令说明" : "Accept command note";
         text += `---\n${head}：accept 来自 ${sourceDesc}。\n`;
     }
+    // 附件段（M5）：内联文本在引用块内、落盘给绝对路径、不可读标「未读取 + 原因」——绝不静默。
+    if (att?.section) text += `\n${att.section}\n`;
     return text;
 };
 
@@ -91,6 +97,8 @@ const processCandidate = async (args: {
     out: (line: string) => void;
     /** 自动探测的本地项目根（§3.5 探测的是本地仓库形态，不是远端）。 */
     projectRoot: string;
+    /** 附件下载注入（M5；缺省 gh api）。 */
+    download: DownloadFile;
 }): Promise<SummaryKey | "changed"> => {
     const { candidate, config, locale, dryRun, now, out } = args;
     const M = (k: string, ...a: any[]) => syncMsg(locale, k, ...a);
@@ -135,14 +143,37 @@ const processCandidate = async (args: {
     // 组装 + 入队（复用全部既有校验：accept 必填 / 字段白名单 fail-closed）
     if (dryRun) {
         out(`${pre}${M("wouldEnqueue", sanitizeTitle(candidate.title), candidate.sourceId, acc.origin)}`);
+        // M5：dry-run 零落盘——附件不下载，只盘点提示（仅 GitHub 有下载链）
+        if (candidate.sourceId.startsWith("github:")) {
+            const found = extractUserAttachments(candidate.body).length;
+            if (found > 0) out(`${pre}${M("dryRunAttachments", found)}`);
+        }
         return "added";
     }
-    const source = buildSyncTicketSource(candidate, acc, config, locale);
+    // M5 附件链（仅 GitHub；GitLab/飞书随 P2/P4）：先占票 id（附件目录按票命名），下载失败只标
+    // 「未读取 + 原因」不阻塞建票；整体意外失败兜底成一条未读取段——宁可让它知道缺信息，不能让它猜。
+    let preId: string | undefined;
+    let att: SyncAttachmentResult | undefined;
+    if (candidate.sourceId.startsWith("github:")) {
+        preId = generateBatchId(now());
+        try {
+            att = await processAttachments({ issueBody: candidate.body, ticketId: preId, locale, download: args.download });
+        } catch (e: any) {
+            const why = String(e?.message ?? e).slice(0, 120);
+            att = {
+                section: locale === "zh" ? `### 附件——未读取：附件处理异常（${why}）` : `### Attachments — not read: processing error (${why})`,
+                needsReview: false,
+                anyAttachment: true,
+            };
+        }
+    }
+    const source = buildSyncTicketSource(candidate, acc, config, locale, att);
     const tmp = path.join(os.tmpdir(), `dsc-sync-ticket-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
     try {
         await fs.writeFile(tmp, source, "utf-8");
-        const enq = await enqueueTicketFile(tmp, locale);
+        const enq = await enqueueTicketFile(tmp, locale, preId);
         if (!enq.ok) {
+            if (att?.dir) await fs.rm(att.dir, { recursive: true, force: true }).catch(() => { }); // 防孤儿附件目录
             out(M("enqueueFail", candidate.sourceId, enq.error));
             await appendSyncState({ sourceId: candidate.sourceId, seenAt: now().toISOString(), fingerprint, verdict: "reject", reason: enq.error, title: sanitizeTitle(candidate.title), updatedAt: candidate.updatedAt || undefined });
             return "rejected";
@@ -195,7 +226,7 @@ export const runSync = async (opts?: SyncOptions): Promise<{ ok: true; summary: 
         // 3. 逐源拉取 + 逐候选处理（一个源挂掉不影响另一个——适配器互相独立，§2 原则 2）
         const runCandidates = async (candidates: SyncCandidate[]): Promise<void> => {
             for (const candidate of candidates) {
-                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd() });
+                const bucket = await processCandidate({ candidate, config, state, knownTitles, locale, dryRun: opts?.dryRun === true, now, out, projectRoot: opts?.projectRoot ?? process.cwd(), download: opts?.download ?? defaultDownloadFile });
                 if (bucket === "changed") summary.skipped++;
                 else summary[bucket]++;
             }

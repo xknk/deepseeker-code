@@ -64,14 +64,15 @@ export const readReport = async (id: string): Promise<string | null> => {
 
 /**
  * 入队：读源文件 → 解析校验（缺 accept 等在此拒绝）→ 生成 id → 写 pending/。
+ * @param preId 预生成 id（M5 附件链：附件目录按票 id 命名，建票前就要知道 id；缺省现场生成）。
  * @returns 入队结果（失败带原因文案，调用方直接打印）。
  */
-export const enqueueTicketFile = async (srcPath: string, locale: BatchLocale = "zh"): Promise<{ ok: true; id: string; title: string } | { ok: false; error: string }> => {
+export const enqueueTicketFile = async (srcPath: string, locale: BatchLocale = "zh", preId?: string): Promise<{ ok: true; id: string; title: string } | { ok: false; error: string }> => {
     const parsed = await readBatchTicket(srcPath, locale);
     if (!parsed.ok) return parsed;
     // 源文件原样搬运（校验在读取时已做；保留原文避免二次序列化走样）
     const source = await fs.readFile(srcPath, "utf-8");
-    const id = generateBatchId();
+    const id = preId ?? generateBatchId();
     await fs.mkdir(stateDir("pending"), { recursive: true });
     await fs.writeFile(path.join(stateDir("pending"), `${id}.md`), source, "utf-8");
     return { ok: true, id, title: parsed.ticket.title };

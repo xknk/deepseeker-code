@@ -69,4 +69,9 @@ test("报告：触碰的测试文件段 + needs-review 头字段（双语词表�
     const reviewed = buildReport({ ...base, status: "baseline-broken", accept: null, ticket: { ...base.ticket, needsReview: true } });
     assert.match(reviewed, /^needs-review: true$/m, "needs-review 工单在报告头可见（人工复核不漏）");
     assert.match(reviewed, /status: baseline-broken/);
+
+    const withImgs = buildReport({ ...base, status: "passed", imagesRead: 2 });
+    assert.match(withImgs, /图片读取：2 张/, "read_image 统计进报告（§5.2.2 落地要求 6：人要能判断该翻案还是换模型）");
+    const noImgs = buildReport({ ...base, status: "passed" });
+    assert.match(noImgs, /图片读取：0 张/, "缺省 0 张也可见（0 且票里有图 = 疑似无视觉未读）");
 });

@@ -126,6 +126,7 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
         return `${c.rounds} 轮 · ${money} · 缓存命中 ${hit}% · ${mins}min${c.partialPrice ? "（部分记录无价，钱为部分和）" : ""}${c.subRuns > 0 ? ` · 子 run ${c.subRuns} 个已计入` : ""}${c.toolCostYuan > 0 ? ` · 联网 ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · 辅助 ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "（无结算单——run 未到收尾即被截断，花费以上方 usageLog 聚合为准）",
+    imgReadEntry: (n: number) => `- 图片读取：${n} 张（read_image 调用统计；0 张且票里有图，多半是模型无视觉未读——可用 DEEP_SEEK_VISION=1 翻案）`,
     receiptLine: (r: { rounds: number; costYuan: number | null; cacheHitRate: number; durationMs: number; toolCostYuan?: number; auxCostYuan?: number }) =>
         `${r.rounds} 轮 · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "无价"} · 缓存命中 ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · 联网 ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · 辅助 ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 
@@ -275,6 +276,7 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
         return `${c.rounds} rounds · ${money} · cache hit ${hit}% · ${mins}min${c.partialPrice ? " (some records unpriced; money is a partial sum)" : ""}${c.subRuns > 0 ? ` · ${c.subRuns} sub-runs included` : ""}${c.toolCostYuan > 0 ? ` · web ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · aux ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "(no receipt — the run was truncated before finishing; cost per the usageLog aggregate above)",
+    imgReadEntry: (n) => `- Images read: ${n} (counted from read_image calls; 0 on an image-bearing ticket usually means the model lacks vision — retry with DEEP_SEEK_VISION=1)`,
     receiptLine: (r) =>
         `${r.rounds} rounds · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "unpriced"} · cache hit ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · web ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · aux ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 

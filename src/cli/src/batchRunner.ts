@@ -221,6 +221,8 @@ export const buildReport = (args: {
     watchdogLines?: string[];
     /** 本次 diff 触碰的测试文件（§9.8 P1 信息标注；空/缺省不渲染该段）。 */
     touchedTestFiles?: string[];
+    /** 本任务 read_image 调用次数（§5.2.2 落地要求 6：图片读取可见性——人要能判断该翻案还是换模型）。 */
+    imagesRead?: number;
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
     const T = batchT(getLocale());
@@ -245,6 +247,7 @@ ${T.reportTitle(ticket.title)}
 ${T.statusEntry(`${T.statusLabel(status)}${budgetNote}`)}
 ${T.costEntry(T.costSummary(cost))}
 ${T.receiptEntry(receipt ? T.receiptLine(receipt) : T.noReceipt)}
+${T.imgReadEntry(args.imagesRead ?? 0)}
 ${T.commitEntry(args.commit ? commitText(args.commit) : (wt ? T.commitNotReached : T.commitSkipped))}
 ${args.errorMessage ? T.errorEntry(args.errorMessage) : ""}
 ${args.watchdogLines?.length ? `${T.wdH}\n\n${args.watchdogLines.map(T.wdRecord).join("\n")}\n\n` : ""}${T.taskH}
@@ -431,6 +434,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     let wdKill: WatchdogKillInfo | null = null;
     let status: TaskStatus;
     let accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null = null;
+    let imagesRead = 0; // §5.2.2 落地要求 6：read_image 调用统计进报告（人要能判断该翻案还是换模型）
 
     for (let round = 1; ; round++) {
         wdKill = null;
@@ -507,6 +511,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                         if (evt?.type === "text.delta") finalText += evt.text;
                         else if (evt?.type === "text.reset") finalText = "";
                         else if (evt?.type === "final") finalText = evt.text || finalText;
+                        else if (evt?.type === "tool.start" && evt?.toolName === "read_image") imagesRead++;
                     },
                     wakeAc.signal,
                     {
@@ -537,6 +542,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                     else if (evt?.type === "text.reset") finalText = ""; // 流式 stall 重试：同轮从零重生成，丢弃已累积
                     else if (evt?.type === "final") finalText = evt.text || finalText;
                     else if (evt?.type === "round.start") emit(T.roundLine(ts(), evt.round));
+                    else if (evt?.type === "tool.start" && evt?.toolName === "read_image") imagesRead++;
                 },
                 roundAc.signal,
                 {
@@ -622,6 +628,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         accept, deniedTools, diff, wt, commit, errorMessage: agentError,
         watchdogLines: buildWatchdogLines(wdSnapshots, cost.costYuan) ?? undefined,
         touchedTestFiles: touched.length > 0 ? touched : undefined,
+        imagesRead,
     }));
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);
     emit(T.artifactLine(wt.path, wt.branch));

@@ -17,6 +17,7 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         dryRunPrefix: "[dry-run] ",
         dryRunNote: "（--dry-run：仅预演，未写任何文件）",
         wouldEnqueue: (title: string, sourceId: string, origin: string) => `将建票：${title}（${sourceId} · 验收来源 ${origin}）`,
+        dryRunAttachments: (n: number) => `   附件 ${n} 个：dry-run 不下载；正式建票时按「内联/落盘/未读取」三态处理`,
         wouldSkip: (sourceId: string, why: string) => `将跳过：${sourceId}（${why}）`,
         enqueueFail: (sourceId: string, err: string) => `🚫 ${sourceId} 建票失败：${err}`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
@@ -35,6 +36,7 @@ export const SYNC_MSG: Record<SyncLocale, Record<string, any>> = {
         dryRunPrefix: "[dry-run] ",
         dryRunNote: "(--dry-run: preview only, nothing written)",
         wouldEnqueue: (title: string, sourceId: string, origin: string) => `Would create: ${title} (${sourceId} · accept from ${origin})`,
+        dryRunAttachments: (n: number) => `   ${n} attachment(s): dry-run does not download; real runs process them into inline/saved/not-read states`,
         wouldSkip: (sourceId: string, why: string) => `Would skip: ${sourceId} (${why})`,
         enqueueFail: (sourceId: string, err: string) => `🚫 Failed to enqueue ${sourceId}: ${err}`,
         summary: (added: number, skipped: number, rejected: number, missingAccept: number) =>
