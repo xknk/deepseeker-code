@@ -152,11 +152,11 @@ describe("D3 PreCompact/PostCompact 配对（审查报告 2026-11-03 §6-2）", 
         assert.equal(post.length, 3, "熔断 throw 也补发 PostCompact（finally 兜住，不再只有正常路径发）");
     });
 
-    it("免费衰减早退：未发 PreCompact → 不得错发 PostCompact（反向红线）", async () => {
+    it("M3-1 单次破规则：衰减生效 → 同调用续走压缩，Pre/Post 照常配对（恰各 1）", async () => {
         const { pre, post, cleanup } = captureCompactHooks();
-        const { provider, summarizeSizes } = makeAuxProvider();
+        const { provider, summarizeSizes } = makeAuxProvider({ notes: "Fake 压缩摘要" });
         // 11 个对话单元（> KEEP_RECENT_UNITS=5 → cutoff=6）：6 个老单元各带 11K ASCII 工具结果
-        // （超阈值前 ~16.6K token > 15000；免费衰减折叠后 ~1.7K → 回到阈值内早退，不触发 LLM 压缩）
+        // （超阈值前 ~16.6K token > 15000；旧实现衰减降回阈值内即早退——M3-1 后无条件续走 LLM 压缩）
         const messageArr: any[] = [
             { role: "system", content: "SYS" },
             { role: "system", content: "" },
@@ -169,21 +169,27 @@ describe("D3 PreCompact/PostCompact 配对（审查报告 2026-11-03 §6-2）", 
             messageArr.push({ role: "tool", tool_call_id: `c${i}`, content: "L".repeat(11_000) });
         }
         for (let i = 0; i < 5; i++) messageArr.push({ role: "user", content: `recent unit number ${i}` });
+        const trace: any[] = [];
         try {
             await withProvider(provider, async () => {
-                await ensureFitsWindow(buildEvent("d3-freedecay", messageArr));
+                await ensureFitsWindow(buildEvent("d3-freedecay", messageArr, { events: (e: any) => { trace.push(e); } }));
             });
         } finally {
             cleanup();
         }
-        assert.equal(pre.length, 0, "未触发 LLM 压缩 → 无 PreCompact");
-        assert.equal(post.length, 0, "早退路径不得补发 PostCompact（没发过 Pre 就不能发 Post）");
-        assert.equal(summarizeSizes.length, 0, "免费衰减成功降级，零 LLM 成本");
-        // 衰减确曾生效——证明早退走的是「衰减后回到阈值内」，而非「根本没超阈值」的空转
-        assert.ok(
-            messageArr.some((m: any) => m.role === "tool" && typeof m.content === "string" && m.content.includes("历史工具输出已折叠")),
-            "老工具结果应被折叠（衰减路径证据）",
-        );
+        assert.equal(pre.length, 1, "衰减后续走压缩 → PreCompact 恰发一次");
+        assert.equal(post.length, 1, "Pre/Post 配对契约在衰减+压缩合并路径同样成立");
+        assert.ok(summarizeSizes.length >= 1, "压缩走了 aux 合成调用（M3-1：一次破解决问题）");
+        // 衰减确曾生效（M1 的 context.decay 事件为证：Before > After）——证明走的是
+        // 「衰减+压缩合并单破」，而非「根本没超阈值」的空转。折叠过的老单元已被归档出数组
+        // （压缩重建），内容证据改由事件快照承载。
+        const decays = trace.filter((e: any) => e.eventType === "context.decay");
+        assert.equal(decays.length, 1, "衰减生效恰落一条 context.decay");
+        assert.ok(decays[0].metadata.decayTokensBefore > decays[0].metadata.decayTokensAfter,
+            `decayTokensBefore 应大于 After，实得 ${decays[0].metadata.decayTokensBefore} → ${decays[0].metadata.decayTokensAfter}`);
+        // 压缩落地实证：老单元归档、数组重建为 [system, 摘要槽, 最近单元]
+        assert.ok(messageArr.length < 11, `压缩后数组应大幅缩短，实得 ${messageArr.length}`);
+        assert.ok(String((messageArr[1] as any)?.content ?? "").includes("ARCHIVE"), "摘要槽已写入归档内容");
     });
 });
 

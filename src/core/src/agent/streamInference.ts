@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import { Msg } from "@/session/contextCore.ts";
-import { AgentEvent, RunAgentEvents, ThinkingLevel, AuxUsageReporter } from "./type.ts";
+import { AgentEvent, RunAgentEvents, ThinkingLevel, AuxUsageReporter, WindowCheckInfo } from "./type.ts";
 import { TraceDecisionSource, UIEvent } from "@/observability/type.ts";
 import { activeProvider } from "@/llm/model.ts";
 import type { ProviderUsage } from "@/llm/provider.ts";
@@ -33,6 +33,32 @@ const sha1short = (s: string): string => createHash('sha1').update(s).digest('he
  *  （systemInjections 按工具名单 memo，名单变→新数组→新指纹），引用键不会撞陈旧值。
  *  指纹值不变 → trace 字段与原实现逐字节一致，不影响任何缓存判定。 */
 const toolsFingerprintCache = new WeakMap<object, string>();
+
+/**
+ * 前缀分段指纹（P0 缓存诊断；M1 首步提为纯函数以便单测钉住定义，2026-11-04）：
+ *  - toolsHash = sha1short(JSON.stringify(cleanedToolSchemas))——工具表分歧（env 门控漂移 / 版本迭代）；
+ *  - sysHash   = sha1short(message[0].content)——message[0] 注入漂移（locale/skills/memory）；
+ *  - sumHash   = sha1short(message[1].content)——【摘要槽内容 hash】★ 定义钉死（prefix-fingerprint.test.ts）：
+ *    2026-11-04 全天 trace sumHash 恒 `da39a3ee5e`（=sha1('')）即「摘要槽全天从未被写入」的直接证据，
+ *    由此排除 r54「压缩写槽」候选根因（若写槽 sumHash 必变）——指纹三段全恒定时分歧点必在 message[2] 起
+ *    （活动历史被改写），B 项归因方向据此定向。空槽/无槽位 message[1]?.content ?? '' → 同一空串 hash。
+ *  - msgCount  = message.length。
+ */
+export const buildPrefixFingerprint = (message: Msg[], cleanedToolSchemas: any[]): {
+    toolsHash: string; sysHash: string; sumHash: string; msgCount: number;
+} => ({
+    toolsHash: (() => {
+        let h = toolsFingerprintCache.get(cleanedToolSchemas as object);
+        if (h === undefined) {
+            h = sha1short(JSON.stringify(cleanedToolSchemas));
+            toolsFingerprintCache.set(cleanedToolSchemas as object, h);
+        }
+        return h;
+    })(),
+    sysHash: sha1short(String((message[0] as any)?.content ?? '')),
+    sumHash: sha1short(String((message[1] as any)?.content ?? '')),
+    msgCount: message.length,
+});
 
 /** 退避上限（ms）：服务器给天价 Retry-After 时封顶，防止 agent 被单次限流冻结半小时+。 */
 const RETRY_BACKOFF_CAP_MS = 30_000;
@@ -99,6 +125,10 @@ export type StreamInferenceContext = {
     /** ★ P0-2 aux 用量出口：context_length 降级路径的 ensureFitsWindow 压缩摘要同样烧辅助模型钱，
      *  经 runAgent 注入的 reportAuxUsage 计价入账（罕见路径也不漏账）。缺省不报（旧调用方兼容）。 */
     onAuxUsage?: AuxUsageReporter;
+    /** ★ M1 三值增补（缓存塌方治理，2026-11-04）：本 run 上一轮窗口治理判定快照（WindowCheckInfo），
+     *  由 runAgent 经 onWindowCheck 收集后随每轮 llm.request 落 trace（estReal/thresholdAtSend/
+     *  correctionRatioUsed 三值 + windowDecision）。缺省不落（首轮/旧调用方兼容）。 */
+    windowCheck?: WindowCheckInfo;
 };
 
 /**
@@ -122,7 +152,7 @@ const withNudgeTail = (base: Msg[], nudge: { role: string; content: string } | n
 export const streamInference = async function* (ctx: StreamInferenceContext): AsyncGenerator<AgentEvent, InferenceResult> {
     const { message, nudgeMsg, sessionId, depth, round, startTime, userDecisionSource, llmDecisionSource,
         signal, cleanedToolSchemas, model, thinkingLevel, events, keepRecentUnits, compactRatio, modelWindow,
-        toolsTokens = 0 } = ctx;
+        toolsTokens = 0, windowCheck } = ctx;
     let inferenceMessages = withNudgeTail(message, nudgeMsg);
     let assistantMessage: Msg = { role: 'assistant', content: null } as Msg;
     try {
@@ -130,23 +160,24 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
         //   DS 前缀缓存按序列化字节匹配，跨会话对比这四个字段即可二分定位「fresh-session 首轮 miss」的分歧点：
         //   toolsHash 变 → 工具表分歧（env 门控漂移 / 版本迭代）；sysHash 变 → message[0] 注入漂移（locale/
         //   skills/memory）；全同仍 miss → DS 服务端缓存 TTL/LRU 驱逐，非本地前缀问题。
-        const prefixFingerprint = {
-            toolsHash: (() => {
-                let h = toolsFingerprintCache.get(cleanedToolSchemas as object);
-                if (h === undefined) {
-                    h = sha1short(JSON.stringify(cleanedToolSchemas));
-                    toolsFingerprintCache.set(cleanedToolSchemas as object, h);
-                }
-                return h;
-            })(),
-            sysHash: sha1short(String((message[0] as any)?.content ?? '')),
-            sumHash: sha1short(String((message[1] as any)?.content ?? '')),
-            msgCount: message.length,
-        };
+        const prefixFingerprint = buildPrefixFingerprint(message, cleanedToolSchemas);
+        // ★ M1 三值增补（缓存塌方治理，2026-11-04）：本 run 上一轮窗口治理判定快照（ensureFitsWindow 经
+        //   onWindowCheck 产出）——estReal/thresholdAtSend/correctionRatioUsed 齐了，「回算不触发却触发了」
+        //   类口径出入（2026-11-04 r53 实例）当场可判。首轮无判定（undefined）→ 字段缺省不落。
+        const wc = windowCheck;
         events({
             sessionId,
             eventType: 'llm.request',
-            metadata: { depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model, ...prefixFingerprint },
+            metadata: {
+                depth, decisionSource: userDecisionSource, ok: true, durationMs: performance.now() - startTime, round, model,
+                ...prefixFingerprint,
+                ...(wc ? {
+                    estReal: wc.estReal,
+                    thresholdAtSend: wc.threshold,
+                    correctionRatioUsed: wc.correctionRatio,
+                    windowDecision: wc.decision,
+                } : {}),
+            },
             // ★ P2 口径：估算加上工具 schema 常数项（与 API 真实 prompt_tokens 同口径，trace 里 est/real 才可比）
             usage: { prompt_tokens: estimateTokens(inferenceMessages) + toolsTokens },
             payload: { input: msgText(message[message.length - 1].content) },   // ★ 多模态：trace 只记文本视图
@@ -293,6 +324,17 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                         toolsTokens,
                         onUIEvent: ctx.onUIEvent,
                         onAuxUsage: ctx.onAuxUsage,
+                    });
+                    // ★ M1（缓存塌方治理，2026-11-04）：降级动作落 trace——压缩前/后 est 快照可当场
+                    //   回答「API 实报超长时本地估算是多少」（r54 的 180K billed vs 本地估算出入靠它对账）。
+                    events({
+                        sessionId,
+                        eventType: 'llm.contextDowngraded',
+                        metadata: {
+                            depth, decisionSource: llmDecisionSource, ok: true, round, model,
+                            estReal: estimateTokens(withNudgeTail(message, nudgeMsg)) + (toolsTokens ?? 0),
+                        },
+                        payload: { output: streamErr instanceof Error ? streamErr.message : String(streamErr) },
                     });
                     inferenceMessages = withNudgeTail(message, nudgeMsg);
                     compactedThisRound = true;

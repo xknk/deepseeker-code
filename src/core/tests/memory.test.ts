@@ -23,7 +23,7 @@ process.chdir(TMP_ROOT); // project 源 = <TMP_ROOT>/.deepseeker-code/memory
 
 const { GLOBAL_MEMORY_DIR, loadMemories, initMemories } = await import("@/memory/loader.ts");
 const { registerMemory, getMemory, unregisterMemory, clearMemories, getMemoryIndex } = await import("@/memory/registry.ts");
-const { injectMemory } = await import("@/memory/inject.ts");
+const { injectMemory, clearMemorySnapshot } = await import("@/memory/inject.ts");
 const { getMemoryUsage } = await import("@/memory/usage.ts");
 const { memoryTools, MEMORY_LIMITS } = await import("@/tool/registry/memory.ts");
 const { ToolSafetyLevel } = await import("@/tool/type.ts");
@@ -214,6 +214,60 @@ describe("inject：fence 语义（保 DeepSeek 前缀缓存）", () => {
         const m2 = mkMsg(); // 模拟下轮 buildContextMessages 全新重建
         injectMemory(m2);
         assert.ok(m2[0].content.includes("- **new-mem** (reference) — 新记忆"), "下轮重建新索引生效");
+    });
+});
+
+describe("inject：M2 会话级快照冻结（缓存塌方治理，2026-11-04）", () => {
+    it("契约①：同会话跨 run 二次注入逐字节恒等——注册表中途变化也不改写 message[0]", async () => {
+        await resetState();
+        registerMemory(reg({ name: "old-mem", description: "旧记忆" }));
+        const m1 = mkMsg();
+        injectMemory(m1, "m2-sess-A"); // 首次注入：定格当前索引
+        const frozen = m1[0].content;
+        await save({ name: "new-mem", description: "会话中途新写的记忆", body: "正文" }); // 注册表即时变化
+        const m2 = mkMsg(); // 模拟下轮 buildContextMessages 全新重建（新数组）
+        injectMemory(m2, "m2-sess-A");
+        assert.equal(m2[0].content, frozen, "同会话下轮重建字节恒定（前缀缓存不被中途写记忆击穿）");
+        assert.ok(!m2[0].content.includes("**new-mem**"), "新记忆不混入当前会话");
+    });
+
+    it("契约②：新会话拿新索引——冻结不跨会话泄漏", async () => {
+        // 沿用上一用例的注册表态（old-mem + new-mem 都在）：新 sessionId 重新实时读
+        const m3 = mkMsg();
+        injectMemory(m3, "m2-sess-B");
+        assert.ok(m3[0].content.includes("- **new-mem** (reference) — 会话中途新写的记忆"), "新会话看到新记忆");
+        assert.ok(m3[0].content.includes("- **old-mem** (user) — 旧记忆"), "既有记忆照常在索引");
+    });
+
+    it("null 快照同样冻结：首注入时无记忆 → 中途保存 → 同会话仍不注入", async () => {
+        await resetState();
+        const m1 = mkMsg();
+        injectMemory(m1, "m2-sess-C");
+        assert.equal(m1[0].content, "BASE", "无记忆不注入");
+        await save({ name: "later-mem", description: "中途新增", body: "b" });
+        const m2 = mkMsg();
+        injectMemory(m2, "m2-sess-C");
+        assert.equal(m2[0].content, "BASE", "「无记忆」态也是定格态（中途写记忆不改写 message[0]）");
+        clearMemorySnapshot("m2-sess-C");
+        const m3 = mkMsg();
+        injectMemory(m3, "m2-sess-C");
+        assert.ok(m3[0].content.includes("**later-mem**"), "clearMemorySnapshot 释放后同会话重新实时读");
+    });
+
+    it("clearMemorySnapshot：释放后同 sessionId 重新实时读（serve SessionEnd 清理路径的语义契约）", async () => {
+        await resetState();
+        registerMemory(reg({ name: "snap-x", description: "快照前的记忆" }));
+        const m1 = mkMsg();
+        injectMemory(m1, "m2-sess-D");
+        const frozen = m1[0].content;
+        registerMemory(reg({ name: "snap-y", description: "快照后的记忆" }));
+        const m2 = mkMsg();
+        injectMemory(m2, "m2-sess-D");
+        assert.equal(m2[0].content, frozen, "未释放前维持冻结");
+        clearMemorySnapshot("m2-sess-D");
+        const m3 = mkMsg();
+        injectMemory(m3, "m2-sess-D");
+        assert.ok(m3[0].content.includes("**snap-y**"), "释放后重新实时读（等效新会话）");
     });
 });
 

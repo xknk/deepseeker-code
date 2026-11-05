@@ -31,6 +31,7 @@ import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
 import { appendBatchBoundary } from "@/batch/sync/boundary.ts";
 import { activeProvider } from "@/llm/model.ts";
 import { markRunStart, markRunEnd, registerWakeDriverIfAbsent, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
+import { clearMemorySnapshot } from "@/memory/inject.ts";
 
 /** 出站消息发送函数（非 SSE 渠道使用）。 */
 type OutboundSender = (outbound: UnifiedOutboundMessage) => Promise<void>;
@@ -297,6 +298,9 @@ const handleUnifiedChatRun = async (
     // ★ SessionEnd hook（观察）。store 与 transcript 已物理隔离（<id>.state.json / <id>.jsonl），
     //   hook 现在可安全持久化到 state.json；transcript 永远只追加、不被覆盖。
     await dispatch('SessionEnd', { sessionId, cwd: process.cwd() }).catch(() => { });
+
+    // ★ M2（缓存塌方治理）：会话结束释放记忆索引快照（防长驻 serve 进程 Map 随历史会话数无界增长）
+    clearMemorySnapshot(sessionId);
 
     await emitTrace({
         sessionId,

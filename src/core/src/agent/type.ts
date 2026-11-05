@@ -125,6 +125,33 @@ export interface RunAgentOptions {
 }
 
 /**
+ * 单轮窗口治理判定快照（缓存塌方治理 M1，2026-11-04）：
+ * ensureFitsWindow 每轮判定产出（含 noop），经 onWindowCheck 回调交 runAgent 存为 lastWindowCheck，
+ * 随本轮 llm.request 落 trace（estReal / thresholdAtSend / correctionRatioUsed 三值）——
+ * 「回算不触发却触发了」类口径出入（2026-11-04 r53 实例）靠这三值当场可判。
+ * decision≠noop 时 ensureFitsWindow 另发 context.check / context.decay trace 事件（字段同源）。
+ */
+export interface WindowCheckInfo {
+    /** 校准后真实口径估算（estimateTokens × correctionRatio + toolsTokens）。 */
+    estReal: number;
+    /** 本轮生效压缩阈值（modelWindow × effectiveRatio，四舍五入）。 */
+    threshold: number;
+    /** 本轮使用的估算校准系数。 */
+    correctionRatio: number;
+    /** 本轮生效工具 schema 常数项（token）。 */
+    toolsTokens: number;
+    /** 判定时缓存命中率；无上一轮真实 usage 时 null。 */
+    hitRate: number | null;
+    /** 判定时缓存感知阈值系数（∈[0.9,1.1]；无 usage 时 1.0）。 */
+    cacheFactor: number;
+    /** 判定动作：noop=未触发治理 / compact=LLM 压缩（M3-1 后 decay 只是其预处理步骤，
+     *  不再是独立判定——衰减生效以 decayed=true 标注）/ selfCompact=仅摘要自收敛（无新归档）。 */
+    decision: 'noop' | 'compact' | 'selfCompact';
+    /** 本轮免费衰减是否改写过历史（compact 的预衰减步骤置 true——衰减+压缩合并为一次历史改写，M3-1）。 */
+    decayed?: boolean;
+}
+
+/**
  * ensureFitsWindow（上下文窗口压缩）所需参数。
  */
 export interface ensureOptions  {
@@ -168,6 +195,9 @@ export interface ensureOptions  {
     compactTrigger?: 'auto' | 'manual',
     /** 辅助模型用量上报（成本信任链 P0-2）：压缩摘要调用的 aux usage 经此回传 runAgent 计价入账。 */
     onAuxUsage?: AuxUsageReporter,
+    /** ★ 单轮窗口治理判定出口（缓存塌方治理 M1，2026-11-04）：每轮判定（含 noop）经此回调产出
+     *  WindowCheckInfo——runAgent 存为 lastWindowCheck 随 llm.request 落 trace 三值。缺省不回调，零影响。 */
+    onWindowCheck?: (check: WindowCheckInfo) => void,
 }
 
 /**

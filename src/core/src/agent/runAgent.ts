@@ -22,7 +22,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
 import { getCalibration, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
-import { AgentEvent, RunAgentOptions } from "./type.ts";
+import { AgentEvent, RunAgentOptions, WindowCheckInfo } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { ToolCallContext } from "./toolExecution.ts";
 import { createRepeatBreaker } from "./repeatBreaker.ts";
@@ -286,6 +286,9 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 yield { type: 'inbox.claimed', texts: inboxTexts };
             }
             yield { type: 'round.start', round };
+            // ★ M1（缓存塌方治理，2026-11-04）：本轮窗口治理判定快照——ensureFitsWindow 每轮必经
+            //   onWindowCheck 产出（含 noop，全路径覆盖），随下方 streamInference 的 llm.request 落 trace 三值。
+            let lastWindowCheck: WindowCheckInfo | undefined;
             try {
                 // 判断是否需要压缩上下文并触发摘要
                 await ensureFitsWindow(
@@ -306,6 +309,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                         onAuxUsage: reportAuxUsage,
                         // ★ H1：旁路数 compact.done 供 context.usage.compactCount（透传不拦截）
                         onUIEvent: (evt) => { if (evt.type === 'compact.done') runCompactCount++; options.onUIEvent?.(evt); },
+                        // ★ M1：判定快照出口（含 noop；抛异常路径不回调——那轮推理本就不发生）
+                        onWindowCheck: (check) => { lastWindowCheck = check; },
                     }
 
                 );
@@ -337,6 +342,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 events, keepRecentUnits, compactRatio, modelWindow, toolsTokens,
                 onUIEvent: options.onUIEvent,
                 onAuxUsage: reportAuxUsage,
+                windowCheck: lastWindowCheck,
             });
             if (infResult.kind === 'aborted') {
                 // partialText 由 streamInference 在仅文本无半截 tool_call 时落盘后带回；异常路径中止则空，回落 lastContent
