@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.66
+
+挂机流水线打磨第一批 + 多入口工单流水线 P3（webhook 入口）——定时形态上线后暴露的缺口全收（与 VSCode 端 1.0.76 同批 core，流水线代码由 CLI 包承载）：
+
+- **P3 webhook 入口（`POST /hooks/:channel`）**：内网 CI 失败钩子 / 测试流程 POST 即建票，与 `batch sync` 走完全同一条管线（引用块边界、accept 四档同闸、附件三态、`.sync.lock` 互斥、sync-state 去重、每日上限）。鉴权复用 `DEEPSEEKER_CODE_TOKEN`；去重键=内容哈希（CI 同内容重推幂等 duplicate）；每 channel 固定窗口限流缺省 5 票/分钟（环境变量 `DEEPSEEKER_CODE_WEBHOOK_RATE` 可调）+ `maxTicketsPerDay` 共享配额；被忽略的外部 accept 字段票内注记不静默。配置面**零新键**（sync.json 被旧版 CLI 定时器共读，未知键=拒载停摆——webhook 经 `loadSyncConfig {allowNoSource}` 复用既有键，webhook-only 用户可不配拉模式源）。守门 batch-webhook.test.ts 21 例（含路由级 401→建票→重推 duplicate 冒烟与 import 白名单源码扫描）。
+- **sync 建票 `defaultSetup`**：sync.json 新键——定时自动建票没人补 `setup: pnpm install` 的票，每晚必因装不上依赖被缓存成 baseline-broken 空转，现建票自动附带；`defaultAccept` 同口径 fail-closed 校验，`--check` doctor 加「未配置」⚠ 非阻断提示。★时序：本地 sync.json 补此键必须晚于本版 CLI 装机（旧版读到未知键会拒载整份配置）。
+- **改动清单交接**：任务收尾把 `git diff --cached --numstat` 固化进报告 frontmatter（`changed-file: <path> (+N/-M)`，封顶 30 条带余量省略行，二进制标 (binary)、改名按 git 原样），续修票摘要自动注入【前次改动文件】段——续修不用重新探索上票改了什么；「每票新会话 / 预算隔离 / 不续接旧对话」红线不动。
+- **PR 正文小修**：外发文件清单剥掉 name-status 状态前缀（试点 PR #4 实证 `M⇥README.md` 漏进正文），控制台预览保留状态列；numstat/name-status 两处 diff 加 `core.quotepath=false`——中文路径不再被 git 转成八进制串进报告与 PR 正文（守门测试以中文文件名端到端钉死）。
+
 ## 1.0.65
 
 多入口工单流水线全量上车（issue → 修复 → 验收 → PR；与 VSCode 端 1.0.75 同批 core，流水线代码由 CLI 包承载）：

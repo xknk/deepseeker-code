@@ -1,3 +1,12 @@
+## 1.0.76
+
+**多入口流水线 P3（webhook 入口）+ 挂机打磨第一批（defaultSetup / 改动清单交接 / PR 正文小修），随 CLI 1.0.66 同批 core 发版**——流水线代码由 CLI npm 包承载，扩展侧无行为变化，本条为对齐记录：
+
+- **P3 `POST /hooks/:channel`**：内网 CI 钩子 POST 即建票入挂机队列，与 `batch sync` 同闸同管线（引用块边界 / accept 四档 / 附件三态 / 锁互斥 / 内容哈希去重 / 每 channel 限流 + 每日上限共享配额），鉴权复用 serve token，配置面零新键。
+- **`defaultSetup` 配置键**：定时建票自动附带环境准备命令——没人补 setup 的票不再每晚 baseline-broken 空转。
+- **改动清单交接**：报告固化 `changed-file:` 清单、续修票注入【前次改动文件】段，续修免重新探索上票改动。
+- **PR 正文**：剥 name-status 状态前缀 + 中文路径 quotepath 修复（八进制串不再进正文）。
+
 ## 1.0.75
 
 **多入口工单流水线 P1+P2：`batch sync` 拉单 + `batch pr` 交付——GitHub/GitLab issue → 挂机票 → agent 修复 → 验收 → 草稿 PR**。真仓闭环实证两单：本仓库 issue #2（dogfood，修的正是流水线自己的遗留「batch clean 不清附件目录」）一单走通——sync 建票 → 基线校验（setup 装依赖 + 干净树探针）→ agent 26 轮 ¥0.38 缓存命中 96% → 验收 exit 0 → 产物分支 → 人工采纳关单：
