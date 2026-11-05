@@ -152,6 +152,26 @@ schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
 - **`testPathPatterns`**（sync.json，可选）——在内置测试路径启发式（`tests?/`、`__tests__/`、`*.test.*`、`*.spec.*`）之上追加自定义正则；验收通过但改过测试路径的票会被标 `needs-review`，`batch pr` 拒绝交付。
 - **代理**：`batch pr` 的 push 走你的**本地 git 配置**。网络需要代理访问远端时自行配置，如 `git config http.proxy http://127.0.0.1:7897`（或 `https.proxy`）——工具绝不默认往命令里拼代理参数。
 
+### webhook 入口（L2 高级）
+
+内网 CI 失败钩子 / 测试流程可以直接 POST 到本地 serve 的 `/hooks/:channel` 端点建票（走与 `batch sync` 完全同一建票管线：accept 四档同闸、引用块边界、附件三态、`.sync.lock` 临界区、sync-state 去重、`maxTicketsPerDay` 日上限）。**端点只在 serve 进程运行时活着**，默认监听 `127.0.0.1:3000`：
+
+```bash
+# 1) 在目标项目根目录启动 serve，并固定鉴权 token（跨重启稳定）
+export DEEPSEEKER_CODE_TOKEN=换成一串你自己的随机值
+npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
+
+# 2) CI 侧两行示例（同项目根；created/duplicate 都回 200，票 id 在响应 ticketId 里）
+curl -s -X POST http://127.0.0.1:3000/hooks/ci-alert -H "Authorization: Bearer $DEEPSEEKER_CODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"login 套件挂了","body":"3 例红，重试同样红，日志见附件","accept":"npm test","source-url":"https://ci.example.com/runs/42"}'
+```
+
+- **响应语义**：`200 {ok:true,status:"created"|"duplicate",ticketId}`；`400` 字段形态错/缺验收（附一句怎么补——**格式错是明确的 400 报错，不是静默忽略**）；`401` 鉴权失败；`429` 限流（每 channel 每分钟 5 票，环境变量 `DEEPSEEKER_CODE_WEBHOOK_RATE` 可调）/超 `maxTicketsPerDay`/sync 锁忙（稍后重试）。
+- **复用 sync.json 既有配置键**（`defaultAccept`/`defaultSetup`/`defaultBudgetYuan`/`maxTicketsPerDay`/`allowExternalAccept`/`maxBodyLength`/`testPathPatterns`），**不新增键**；不配 GitHub/GitLab 源也能用。请求体里的 `accept` 字段默认忽略（与 issue 内 accept 块同闸），需 sync.json 显式 `"allowExternalAccept": true` 才采信（且强制 `needs-review`）。
+- **附件**：请求体 `attachments: [{url, name?}]`（最多 10 个），无鉴权头普通 HTTP GET 下载；文本内联（保尾 8KB）/落盘 `batch/attachments/<票id>/` 给绝对路径/读不了标「未读取 + 原因」三态；含图票强制 `needs-review`。
+- **交付**：`batch pr` 只认 GitHub/GitLab 来源的票——webhook 票验收通过后走**人工 push**（`batch pr` 会拒绝并说明）。
+- 零协议备选：手工往 `.deepseeker-code/batch/pending/` 放工单文件（格式见 `batch add` 帮助）依旧可用，不需要 serve 与 token。
+
 ---
 
 ## 架构（Monorepo）

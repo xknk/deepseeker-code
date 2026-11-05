@@ -152,6 +152,26 @@ schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
 - **`testPathPatterns`** (sync.json, optional) — extends the built-in test-path heuristic (`tests?/`, `__tests__/`, `*.test.*`, `*.spec.*`) with extra regexes; a passed ticket that touched test paths gets flagged `needs-review` and `batch pr` refuses it.
 - **Proxy**: `batch pr` push uses your **local git config**. If your network needs a proxy for the remote, configure it yourself, e.g. `git config http.proxy http://127.0.0.1:7897` (or `https.proxy`) — the tool never injects proxy flags into commands by default.
 
+### Webhook entry (L2, advanced)
+
+Intranet CI failure hooks / test pipelines can POST directly to the local serve endpoint `/hooks/:channel` to create tickets (the exact same ticket pipeline as `batch sync`: four-tier accept gate, quote-block boundary, three-state attachments, `.sync.lock` critical section, sync-state dedup, `maxTicketsPerDay` cap). **The endpoint is alive only while the serve process runs**, listening on `127.0.0.1:3000` by default:
+
+```bash
+# 1) Start serve at the target project root and pin the auth token (stable across restarts)
+export DEEPSEEKER_CODE_TOKEN=some-random-value-you-picked
+npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
+
+# 2) Two-line CI-side example (same project root; both created/duplicate return 200, ticket id in ticketId)
+curl -s -X POST http://127.0.0.1:3000/hooks/ci-alert -H "Authorization: Bearer $DEEPSEEKER_CODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"login suite failing","body":"3 red, same after retry, logs attached","accept":"npm test","source-url":"https://ci.example.com/runs/42"}'
+```
+
+- **Response semantics**: `200 {ok:true,status:"created"|"duplicate",ticketId}`; `400` malformed field / missing acceptance (with a one-line fix hint — **bad input is an explicit 400, never silently ignored**); `401` auth failed; `429` rate limited (5 tickets/min per channel, tunable via `DEEPSEEKER_CODE_WEBHOOK_RATE`) / over `maxTicketsPerDay` / sync lock busy (retry later).
+- **Reuses existing sync.json keys** (`defaultAccept`/`defaultSetup`/`defaultBudgetYuan`/`maxTicketsPerDay`/`allowExternalAccept`/`maxBodyLength`/`testPathPatterns`) — **no new keys**; works without any GitHub/GitLab source configured. The request body's `accept` field is ignored by default (same gate as in-issue accept blocks); set `"allowExternalAccept": true` in sync.json to trust it (forcing `needs-review`).
+- **Attachments**: request body `attachments: [{url, name?}]` (at most 10), downloaded via plain unauthenticated HTTP GET; three states — text inlined (tail, 8KB) / saved to `batch/attachments/<ticket-id>/` with absolute path / marked "not read + reason"; tickets with images are forced `needs-review`.
+- **Delivery**: `batch pr` only accepts tickets sourced from GitHub/GitLab — webhook tickets are pushed **manually** after acceptance passes (`batch pr` refuses and says so).
+- Zero-protocol fallback: dropping ticket files into `.deepseeker-code/batch/pending/` by hand (format in `batch add` help) still works — no serve, no token needed.
+
 ---
 
 ## Architecture (monorepo)

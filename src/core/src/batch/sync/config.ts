@@ -122,8 +122,13 @@ export const DEFAULT_MAX_BODY_LENGTH = 50_000;
 /**
  * 解析并校验 sync 配置（fail-closed：任何形态偏差拒绝并给人话提示）。
  * @param raw 文本（测试可直传）；不传则读 SYNC_CONFIG_PATH()。
+ * @param opts.allowNoSource 跳过「未配置任何源」拒绝——webhook 入口（P3）复用本文件的全部策略键
+ *        （defaultAccept/defaultSetup/defaultBudgetYuan/maxTicketsPerDay/allowExternalAccept/
+ *        maxBodyLength/testPathPatterns），webhook-only 用户可以一个源都不配。拉模式 sync 不传
+ *        此项，行为零变化；未知键/形态校验对 webhook 同样生效（配置面刻意零新键：本地 sync.json
+ *        被旧版全局 CLI 定时器共读，加新键 = 旧版 fail-closed 拒载整份配置 = 定时器停摆）。
  */
-export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale }): Promise<{ ok: true; config: SyncConfig } | { ok: false; error: string }> => {
+export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale; allowNoSource?: boolean }): Promise<{ ok: true; config: SyncConfig } | { ok: false; error: string }> => {
     const locale = opts?.locale ?? "zh";
     let raw = opts?.raw;
     if (raw === undefined) {
@@ -170,7 +175,7 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale 
         if (TOKEN_SHAPE.test(gl.tokenEnv)) return { ok: false, error: cfgMsg(locale, "tokenLooksReal") };
         config.gitlab = { baseUrl: gl.baseUrl, projects: gl.projects, label: gl.label, tokenEnv: gl.tokenEnv };
     }
-    if (config.github === undefined && config.gitlab === undefined) {
+    if (config.github === undefined && config.gitlab === undefined && !opts?.allowNoSource) {
         return { ok: false, error: cfgMsg(locale, "noSource") };
     }
     if (obj.defaultAccept !== undefined) {
