@@ -18,6 +18,8 @@ export type BatchArgv =
     | { sub: "add"; files: string[] }
     | { sub: "run"; waitWindow?: string; maxTotalYuan?: number; unknownFlag?: string }
     | { sub: "sync"; source?: "github" | "gitlab"; dryRun: boolean; check: boolean; unknownFlag?: string }
+    | { sub: "pr"; ticketId?: string }
+    | { sub: "status"; extraArg?: string }
     | { sub: "list" }
     | { sub: "clean" }
     | { sub: "help" };
@@ -79,6 +81,20 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
         }
         return { sub: "run", waitWindow, maxTotalYuan, unknownFlag };
     }
+    if (sub === "pr") {
+        // ★ P2 交付（§6.1）：显式命令 = 天然审批。票 id 必填；多余参数 fail-closed（ticketId 置空
+        //   让 handler 打用法）。pr.ts 与 add/list/clean 同级轻模块（零 LLM），pre-key 派发成立。
+        //   旗标形 token（- 开头）不当票 id：本命令无豁免旗标（needs-review 一律拒），拼错就打用法。
+        const rest = argv.slice(2);
+        if (rest.length !== 1 || rest[0].startsWith("-")) return { sub: "pr", ticketId: undefined };
+        return { sub: "pr", ticketId: rest[0] };
+    }
+    if (sub === "status") {
+        // P2 挂机账本汇总（§5.2.3 注）：零参数命令；收到多余参数 fail-closed 报用法。
+        const rest = argv.slice(2);
+        if (rest.length > 0) return { sub: "status", extraArg: rest[0] };
+        return { sub: "status" };
+    }
     if (sub === "list") return { sub: "list" };
     if (sub === "clean") return { sub: "clean" };
     return { sub: "help" };
@@ -118,6 +134,43 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
             emit(`🚫 ${r.error}`);
             process.exitCode = 1;
         }
+        return;
+    }
+    if (b.sub === "pr") {
+        // P2 交付：动态 import（与本文件其余命令一致的轻模块加载时机）；失败退出码 1（挂机脚本可感知）。
+        if (!b.ticketId) {
+            emit(T.prBadArgs);
+            emit(T.prUsage);
+            process.exitCode = 2;
+            return;
+        }
+        const { runBatchPr } = await import("@/batch/pr.ts");
+        const r = await runBatchPr(b.ticketId, { locale: getLocale() });
+        if (!r.ok) process.exitCode = 1;
+        return;
+    }
+    if (b.sub === "status") {
+        // P2 挂机账本汇总：滚动 7 天窗口 + 三态队列现状（同 list 的快照，一处看全）。
+        if (b.extraArg !== undefined) {
+            emit(T.statusBadArgs);
+            emit(T.statusUsage);
+            process.exitCode = 2;
+            return;
+        }
+        const { summarizeLedger } = await import("@/batch/ledger.ts");
+        const s = await summarizeLedger();
+        if (s.runs === 0) {
+            emit(T.statusEmpty);
+        } else {
+            emit(T.statusHead(s.since));
+            emit(T.statusLine(s.runs, s.tickets, s.green, s.red, s.costYuan.toFixed(4)));
+            if (s.badLines > 0) emit(T.statusBadLines(s.badLines));
+        }
+        const q = await snapshotQueue();
+        if (q.pending.length > 0) emit(T.listPendingHead(q.pending.length));
+        for (const f of q.pending) emit(`  ${f.replace(/\.md$/, "")}`);
+        if (q.running.length > 0) emit(T.listRunningHead);
+        for (const f of q.running) emit(`  ${f.replace(/\.md$/, "")}`);
         return;
     }
     if (b.sub === "add") {

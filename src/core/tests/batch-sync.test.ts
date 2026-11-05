@@ -45,7 +45,7 @@ const writeConfig = async (dir: string, obj: any): Promise<void> => {
     await fs.writeFile(path.join(dir, "sync.json"), JSON.stringify(obj), "utf-8");
 };
 
-const GH_CALL_ARGS = ["issue", "list", "-R", "o/r", "--label", "agent", "--state", "open", "--json", "number,title,body,url,updatedAt,author"];
+const GH_CALL_ARGS = ["issue", "list", "-R", "o/r", "--label", "agent", "--state", "open", "--json", "number,title,body,url,updatedAt,author,comments"];
 const mkIssue = (n: number, over: Partial<{ title: string; body: string }> = {}) => ({
     number: n, title: over.title ?? `bug ${n}`, body: over.body ?? `修复它 ${n}`, url: `https://github.com/o/r/issues/${n}`,
     updatedAt: "2026-11-04T10:00:00Z", author: { login: "alice" },
@@ -262,14 +262,35 @@ test("全链路：首 sync 建票（frontmatter + 引用块 body + state work）
         if (r.ok) assert.deepEqual([r.summary.added, r.summary.skipped], [0, 1]);
         assert.equal((await queue.snapshotQueue()).pending.length, 1);
 
-        // 正文变化 → changed 记录 + 跳过（P1 不自动续修）
+        // 正文变化 → P2 续修判定：前票还在 pending（没跑完）→ transient（保旧指纹，下轮重试）
         lines.length = 0;
         r = await runSync({ exec: mkExec([mkIssue(42, { body: "修复它 42（更新：还有崩溃）" })]), out, now: () => new Date("2026-11-04T12:10:00") });
         assert.equal(r.ok, true);
         if (r.ok) assert.deepEqual([r.summary.added, r.summary.skipped], [0, 1]);
-        assert.match(lines.join("\n"), /续修随 P2|continuation/);
-        assert.equal((await queue.snapshotQueue()).pending.length, 1);
-        assert.equal((await state.loadSyncState()).get("github:o/r#42")?.verdict, "changed");
+        assert.match(lines.join("\n"), /还在队列中|still queued/);
+        assert.equal((await queue.snapshotQueue()).pending.length, 1, "transient 不建续修票");
+        const transient = (await state.loadSyncState()).get("github:o/r#42");
+        assert.equal(transient?.verdict, "changed");
+        assert.equal(transient?.fingerprint, state.syncFingerprint("bug 42", "修复它 42"), "transient 保【旧】指纹——票跑完后的下轮以新指纹再进续修分支");
+    });
+});
+
+test("全链路：P1 存量指纹迁移（无 v2 前缀）→ 只刷新不续修；verdict/ticketId 随新指纹保留", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeConfig(path.dirname(SYNC_CONFIG_PATH()), { github: { repos: ["o/r"], label: "agent" }, defaultAccept: "pnpm test" });
+        // 预置 P1 时代 state：无 v2 前缀的指纹 + work verdict
+        await state.appendSyncState({ sourceId: "github:o/r#42", ticketId: "t-prev", seenAt: "2026-11-01T00:00:00Z", fingerprint: "deadbeef-p1", verdict: "work", title: "bug 42" });
+        const lines: string[] = [];
+        const mkExec = async () => ({ code: 0, stdout: JSON.stringify([mkIssue(42)]), stderr: "" });
+        const r = await runSync({ exec: mkExec, out: (s) => lines.push(s), now: () => new Date("2026-11-04T12:00:00") });
+        assert.equal(r.ok, true);
+        if (r.ok) assert.deepEqual([r.summary.added, r.summary.skipped, r.summary.continued], [0, 1, 0], "迁移只刷新，不建票不续修");
+        assert.match(lines.join("\n"), /迁移|migration/);
+        assert.equal((await queue.snapshotQueue()).pending.length, 0);
+        const st = (await state.loadSyncState()).get("github:o/r#42");
+        assert.equal(st?.verdict, "work");
+        assert.equal(st?.ticketId, "t-prev");
+        assert.match(st?.fingerprint ?? "", /^v2:/, "指纹已刷新为 v2——下轮起的指纹变化走正常续修");
     });
 });
 

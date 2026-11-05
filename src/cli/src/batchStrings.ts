@@ -20,6 +20,8 @@ const ZH = {
   list                             查看 pending / running / done 三态队列
   run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
                                    执行队列（串行，逐任务出报告；--wait-window 到点再开跑；--max-total-yuan 本批总花费上限，超限停在下一票之前）
+  pr <票id>                        交付已验收通过的票（重建审查 worktree → push agent/<票id> → 建 Draft PR/MR；落后主干或 needs-review 票一律拒绝；push 走本地 git 配置，代理见 README）
+  status                           汇总最近 7 天挂机账本（run 数/票数/花费）与队列现状
   clean                            清空 done/（已读过的报告与工单存档），并回收对应/孤儿附件目录（attachments/）
 
 工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
@@ -70,6 +72,23 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     runUsage: "用法：deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
     runBadFlag: (f: string) => `❌ 未知参数或非法值："${f}"`,
     budgetStop: (spent: string, cap: string, id: string) => `💰 本批已花 ¥${spent} / 上限 ¥${cap}，已停在票 \`${id}\` 之前`,
+
+    // —— P2 交付与续修（batch pr / status；编排文案在 core pr/ledger 模块内） ——
+    prUsage: "用法：deepseeker-code batch pr <票id>\n前置：票已跑完且验收通过；needs-review 票一律拒绝（无豁免旗标）。\n注：push 走本地 git 配置——需要代理时先配好 git 的 http.proxy（见 README「交付与 PR」节）。",
+    prBadArgs: "用法：deepseeker-code batch pr <票id>（票 id 必填，不支持其它参数）",
+    statusUsage: "用法：deepseeker-code batch status（汇总最近 7 天挂机账本与队列现状）",
+    statusBadArgs: "用法：deepseeker-code batch status（本子命令不收参数）",
+    statusHead: (since: string) => `📊 最近 7 天（自 ${since}）：`,
+    statusLine: (runs: number, tickets: number, green: number, red: number, cost: string) => `   ${runs} 次 run / ${tickets} 票：✔ ${green} ✘ ${red} · 花费 ¥${cost}`,
+    statusBadLines: (n: number) => `   （账本损坏行 ${n} 条已跳过）`,
+    statusEmpty: "📊 最近 7 天无挂机记录——batch run 一次后这里会有数字。",
+    contBaseNote: (branch: string) => `续修基座 = 前票产物分支 ${branch}`,
+    contBaseBranchGone: (branch: string) => `前票产物分支 ${branch} 已不存在`,
+    contBaseNoBranch: "前票报告无产物分支",
+    contBaseFallback: (prevId: string, why: string) => `续修基座回退 HEAD（continues ${prevId}：${why}）——改动可能与前次修复重叠，验收时留意`,
+    downgradedNote: (n: number) => `改测试即降级：触碰 ${n} 个测试文件，票已标 needs-review——batch pr 将拒绝本票，请人工复核`,
+    testPatternsNote: (n: number) => `🧪 测试路径启发式扩展：sync.json testPathPatterns 追加 ${n} 条`,
+    ledgerFail: (e: string) => `挂机账本写入失败（不影响本次结果）：${e}`,
 
     // —— batchRunner 控制台进度 ——
     ticketRejected: (id: string, err: string) => `🚫 [${id}] 工单被拒：${err}`,
@@ -181,6 +200,8 @@ Usage: deepseeker-code batch <subcommand>
   list                               Show the pending / running / done queue
   run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
                                      Run the queue (serial, one report per task; --wait-window waits for the window; --max-total-yuan caps total batch spend, stops before the next ticket)
+  pr <ticket-id>                     Deliver a passed ticket (rebuild review worktree → push agent/<ticket-id> → open a draft PR/MR; behind-mainline or needs-review tickets are always refused; push uses local git config, proxy per README)
+  status                             Summarize the last 7 days of the batch ledger (runs / tickets / cost) and the queue
   clean                              Clear done/ (reports and ticket archives you've read) and reclaim matching/orphan attachment dirs (attachments/)
 
 Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, no enqueue):
@@ -231,6 +252,23 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     runUsage: "Usage: deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
     runBadFlag: (f) => `❌ Unknown flag or invalid value: "${f}"`,
     budgetStop: (spent, cap, id) => `💰 Batch spent ¥${spent} / cap ¥${cap} — stopped before ticket \`${id}\``,
+
+    // —— P2 delivery & continuation (batch pr / status; orchestration copy lives in core pr/ledger modules) ——
+    prUsage: "Usage: deepseeker-code batch pr <ticket-id>\nPrereq: ticket finished and acceptance passed; needs-review tickets are always refused (no override flag).\nNote: push uses your local git config — configure git http.proxy first if you need one (see README \"Delivery & PR\").",
+    prBadArgs: "Usage: deepseeker-code batch pr <ticket-id> (ticket id required; no other args supported)",
+    statusUsage: "Usage: deepseeker-code batch status (summarizes the last 7 days of the batch ledger and the queue)",
+    statusBadArgs: "Usage: deepseeker-code batch status (this subcommand takes no arguments)",
+    statusHead: (since) => `📊 Last 7 days (since ${since}):`,
+    statusLine: (runs, tickets, green, red, cost) => `   ${runs} run(s) / ${tickets} ticket(s): ✔ ${green} ✘ ${red} · cost ¥${cost}`,
+    statusBadLines: (n) => `   (${n} corrupted ledger lines skipped)`,
+    statusEmpty: "📊 No batch activity in the last 7 days — numbers appear here after a batch run.",
+    contBaseNote: (branch) => `continuation base = previous artifact branch ${branch}`,
+    contBaseBranchGone: (branch) => `previous artifact branch ${branch} no longer exists`,
+    contBaseNoBranch: "previous report has no artifact branch",
+    contBaseFallback: (prevId, why) => `continuation base falls back to HEAD (continues ${prevId}: ${why}) — changes may overlap the previous fix; watch acceptance carefully`,
+    downgradedNote: (n) => `test-touch downgrade: ${n} test file(s) touched — ticket marked needs-review; batch pr will refuse it, review manually`,
+    testPatternsNote: (n) => `🧪 Test-path heuristic extended: sync.json testPathPatterns adds ${n} pattern(s)`,
+    ledgerFail: (e) => `Failed to write the batch ledger (this run is unaffected): ${e}`,
 
     ticketRejected: (id, err) => `🚫 [${id}] Ticket rejected: ${err}`,
     taskMeta: (budget, timeoutMin, accept) => `   Budget ${budget !== undefined ? `¥${budget}` : "uncapped"} · timeout ${timeoutMin}min · accept \`${accept}\``,

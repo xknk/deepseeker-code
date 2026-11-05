@@ -4,8 +4,11 @@
  *
  *  - 每行一条 {sourceId, ticketId?, seenAt, fingerprint, verdict, title?, updatedAt?, reason?}；
  *    同 sourceId 多行时以【最后一行】为准（append-only + last-wins，无需原地改写）。
- *  - fingerprint = sha256(标题 + "\n" + 正文)。P1 只认正文变化（§4.2 评审修订①）：
- *    新评论不改 issue 正文 → 指纹不变 → skip，续修永不在 P1 触发（P2 才把评论纳指纹）。
+ *  - fingerprint（P2 v2）= "v2:" + sha256(标题 + "\n" + 正文 + "\n" + 评论轨迹)——评论轨迹为
+ *    最近 N 条 (id, updatedAt) 的 canonical JSON（§6.2：新评论/重开触发续修）。
+ *    ★ 迁移：P1 存量指纹无 "v2:" 前缀（且评论轨迹未知）——needsFingerprintMigration 判出后，
+ *      sync 只刷新指纹不触发续修（否则升级后首跑会把所有已见 issue 误判 changed，续修票洪水）。
+ *    P1 只认正文变化的历史语义由 v1 指纹（无前缀）天然承载，读取侧不再区分。
  *  - 三态判定（deduceVerdict）：未见 → new（候选）；已见未变 → skip；已见且变 → changed
  *    （P1 只记 state + 日志提示，不自动续修）。
  *  - verdict 还记录规则闸结论（reject / missing-accept），防同一灌水 issue 每次 sync 重复处理。
@@ -20,6 +23,22 @@ import { batchQueueRoot } from "../queue.ts";
 /** 规则闸/Gatekeeper 结论 + 建票结果（state 的 verdict 段）。 */
 export type SyncVerdict = "work" | "skip" | "changed" | "reject" | "missing-accept";
 
+/** 纳入指纹的评论轨迹条数（§6.2「最近 N 条」；N=5：翻页成本与触发灵敏度折中）。 */
+export const COMMENTS_IN_FINGERPRINT = 5;
+
+/** 指纹版本前缀：v2 = 标题+正文+评论轨迹。无前缀 = P1 存量（升级迁移判定用）。 */
+const FP_V2_PREFIX = "v2:";
+
+/** 评论轨迹条目（适配器归一输出；id 取字符串，updatedAt ISO 或空串）。 */
+export interface SyncCommentRef {
+    id: string;
+    updatedAt: string;
+}
+
+/** canonical 评论轨迹序列化（缺省空数组——无评论也是稳定形态）。 */
+export const commentsTrail = (comments?: SyncCommentRef[]): string =>
+    JSON.stringify((comments ?? []).slice(-COMMENTS_IN_FINGERPRINT));
+
 export interface SyncStateEntry {
     /** 身份键（平台:仓库:编号，如 github:owner/repo#42）。 */
     sourceId: string;
@@ -27,7 +46,7 @@ export interface SyncStateEntry {
     ticketId?: string;
     /** 记录时刻（ISO）。 */
     seenAt: string;
-    /** sha256(标题 + "\n" + 正文)。 */
+    /** "v2:" + sha256(标题+"\n"+正文+"\n"+评论轨迹)；P1 存量条目无前缀（迁移判定 needsFingerprintMigration）。 */
     fingerprint: string;
     verdict: SyncVerdict;
     /** reject / missing-accept 的人话原因（规则闸结论），防重复处理时无从判断。 */
@@ -40,9 +59,13 @@ export interface SyncStateEntry {
 
 export const syncStatePath = (): string => path.join(batchQueueRoot(), "sync-state.jsonl");
 
-/** 指纹：只含标题+正文（P1 不含评论——评论不触发任何动作，§4.2 评审修订①）。 */
-export const syncFingerprint = (title: string, body: string): string =>
-    createHash("sha256").update(`${title}\n${body}`, "utf-8").digest("hex");
+/** 指纹（P2 v2）：标题+正文+评论轨迹（新评论/编辑评论 → 指纹变化 → 续修，§6.2）。 */
+export const syncFingerprint = (title: string, body: string, comments?: SyncCommentRef[]): string =>
+    FP_V2_PREFIX + createHash("sha256").update(`${title}\n${body}\n${commentsTrail(comments)}`, "utf-8").digest("hex");
+
+/** P1 存量指纹（无 v2 前缀）：评论轨迹未知——sync 只刷新指纹，不触发续修（防升级洪水）。 */
+export const needsFingerprintMigration = (entry: SyncStateEntry | undefined): boolean =>
+    !!entry && !entry.fingerprint.startsWith(FP_V2_PREFIX);
 
 /** 读全部状态，按 sourceId last-wins 归并；损坏行跳过（手工改动不炸同步）。 */
 export const loadSyncState = async (): Promise<Map<string, SyncStateEntry>> => {

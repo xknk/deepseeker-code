@@ -182,17 +182,44 @@ export const cleanOrphanAttachments = async (clearedDoneIds: Iterable<string> = 
 
 /**
  * 清空 done/ 并回收附件目录（batch clean）：返回存档数与附件目录数。
- * pending/running 的票及其附件一律不动。
+ * pending/running 的票及其附件一律不动；顺带清掉 .pr.json 交付标记（batch pr 的幂等凭据，
+ * 票存档都没了标记自然作废，不留孤儿文件）。
  */
 export const cleanDone = async (): Promise<CleanResult> => {
     const files = await listState("done");
     for (const f of (await fs.readdir(stateDir("done")).catch(() => [] as string[]))) {
-        if (f.endsWith(".md") || f.endsWith(".report.md")) {
+        if (f.endsWith(".md") || f.endsWith(".report.md") || f.endsWith(".pr.json")) {
             await fs.rm(path.join(stateDir("done"), f), { force: true }).catch(() => { });
         }
     }
     const attachments = await cleanOrphanAttachments(files.map((f) => f.replace(/\.md$/, "")));
     return { tasks: files.length, attachments };
+};
+
+/**
+ * 票标 needs-review（§9-8 P2 动作半边）：改测试触碰启发式 / 交付预检冲突等来源统一走此写入。
+ * 只动 frontmatter——已有 needs-review 行改值为 true，没有则在 frontmatter 末插入一行；
+ * 正文原样保留（工单是存档，改写必须可审计地小）。
+ * @returns true=本次写入生效；false=已标过或文件没有合法 frontmatter（不写）。
+ */
+export const markTicketNeedsReview = async (ticketPath: string): Promise<boolean> => {
+    let source: string;
+    try {
+        source = await fs.readFile(ticketPath, "utf-8");
+    } catch {
+        return false;
+    }
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(source);
+    if (!m) return false;
+    const fmRaw = m[1];
+    if (/^needs-review:\s*true\s*$/m.test(fmRaw)) return false; // 已标过：幂等
+    const lines = fmRaw.split(/\r?\n/);
+    const idx = lines.findIndex((l) => /^needs-review:\s*/.test(l));
+    if (idx >= 0) lines[idx] = "needs-review: true";
+    else lines.push("needs-review: true");
+    const updated = source.replace(m[0], `---\n${lines.join("\n")}\n---`);
+    await fs.writeFile(ticketPath, updated, "utf-8");
+    return true;
 };
 
 // ============ 运行锁（并发=0 红线：同一项目同时只允许一个 runner） ============

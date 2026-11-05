@@ -76,9 +76,11 @@ test("gitlab：增量 updated_after 透传；X-Next-Page 翻页；上限护栏",
     const { calls, respond } = fakeFetchFactory();
     process.env.TEST_GL_TOKEN = "t";
     try {
-        // 两页：第一页带 X-Next-Page=2，第二页空（结束）
+        // 两页：第一页带 X-Next-Page=2，第二页空（结束）。P2 起 fetchGitlabIssues 逐 issue 拉 notes
+        // 轨迹（续修指纹）——断言只数 issues 翻页调用，notes 走同一 fetch 面（URL 含 /notes）。
         const cfg = { baseUrl: "https://gitlab.example.com", projects: [9], label: "agent", tokenEnv: "TEST_GL_TOKEN" };
         const fetch2 = async (url: string, init?: { headers?: Record<string, string> }) => {
+            if (url.includes("/notes")) return { status: 200, body: "[]", headers: {} };
             const page = new URL(url).searchParams.get("page");
             if (page === "1") return respond([GL_ISSUE(1)], { "x-next-page": "2" })(url, init);
             return respond([GL_ISSUE(2)])(url, init);
@@ -86,10 +88,12 @@ test("gitlab：增量 updated_after 透传；X-Next-Page 翻页；上限护栏",
         const r = await gl.fetchGitlabIssues(cfg, 9, { fetchImpl: fetch2, updatedAfter: "2026-11-01T00:00:00Z" });
         assert.equal(r.length, 2);
         assert.equal(r[1].sourceId, "gitlab:9#2");
-        const u1 = new URL(calls[0].url);
+        const issueCalls = calls.filter((c) => c.url.includes("/issues?"));
+        const u1 = new URL(issueCalls[0].url);
         assert.equal(u1.searchParams.get("updated_after"), "2026-11-01T00:00:00Z");
-        assert.equal(new URL(calls[1].url).searchParams.get("page"), "2");
-        assert.equal(calls.length, 2, "第二页无 next 停止");
+        assert.equal(new URL(issueCalls[1].url).searchParams.get("page"), "2");
+        assert.equal(issueCalls.length, 2, "第二页无 next 停止");
+        assert.ok(calls.every((c) => c.url.includes("/issues?") || c.url.includes("/notes")), "全部调用都是 issues 翻页或 notes 轨迹");
     } finally {
         delete process.env.TEST_GL_TOKEN;
     }
@@ -171,12 +175,22 @@ test("--source gitlab 过滤：只拉 gitlab（github 不发起 exec 调用）",
         process.env.TEST_GL_TOKEN = "t";
         try {
             let ghCalls = 0;
-            const exec = async () => { ghCalls++; return { code: 0, stdout: "[]", stderr: "" }; };
-            const fetch = async () => ({ status: 200, body: JSON.stringify([GL_ISSUE(3)]), headers: {} });
+            let gitCalls = 0;
+            const exec = async (file: string) => {
+                if (file === "gh") ghCalls++;
+                else gitCalls++; // P2：git remote -v 仓库一致性探测（不算 gh）
+                return { code: 0, stdout: file === "gh" ? "[]" : "", stderr: "" };
+            };
+            const fetch = async (url: string) => {
+                if (url.includes("/notes")) return { status: 200, body: "[]", headers: {} };
+                if (url.includes("/issues?")) return { status: 200, body: JSON.stringify([GL_ISSUE(3)]), headers: {} };
+                return { status: 200, body: JSON.stringify({ path_with_namespace: "g/p", default_branch: "main" }), headers: {} };
+            };
             const r = await runSync({ source: "gitlab", exec, fetchImpl: fetch, out: () => { }, now: () => new Date("2026-11-04T12:00:00") });
             assert.equal(r.ok, true);
             if (r.ok) assert.equal(r.summary.added, 1);
             assert.equal(ghCalls, 0, "--source gitlab 不发起 gh 调用");
+            assert.equal(gitCalls, 1, "P2 一致性探测恰一次 git remote -v（按 host 缓存）");
             // 增量游标：第二次跑 updated_after 来自 state 的 updatedAt
             const calls: string[] = [];
             const fetchCap = async (url: string) => { calls.push(url); return { status: 200, body: "[]", headers: {} }; };

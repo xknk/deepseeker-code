@@ -175,19 +175,26 @@ const kindLabel = (kind: Kind, locale: SyncLocale): string => {
 
 export const attachmentDir = (ticketId: string): string => path.join(attachmentsRoot(), ticketId);
 
+/** 平台无关的附件输入项（GitHub/GitLab 适配器各自从正文提取后归一成此形状）。 */
+export interface AttachmentItem {
+    url: string;
+    /** 原始文件名（从 URL 尾段推断；安全化在处理侧统一做）。 */
+    rawName: string;
+}
+
 /**
- * 处理一个 issue 的全部附件（下载 + 判型 + 三态标注）。单附件失败只影响该附件（标未读取），
- * 不阻塞建票；整体意外失败由调用方兜底成一条「未读取」段。
+ * 处理附件清单（下载 + 判型 + 三态标注）——平台无关内核（§5.2.2 对齐 GitHub/GitLab 三态）。
+ * 单附件失败只影响该附件（标未读取），不阻塞建票；整体意外失败由调用方兜底成一条「未读取」段。
  */
-export const processAttachments = async (args: { issueBody: string; ticketId: string; locale?: SyncLocale; download?: DownloadFile }): Promise<SyncAttachmentResult> => {
+export const processAttachmentList = async (args: { items: AttachmentItem[]; ticketId: string; locale?: SyncLocale; download?: DownloadFile }): Promise<SyncAttachmentResult> => {
     const locale = args.locale ?? "zh";
     const download = args.download ?? defaultDownloadFile;
-    const urls = extractUserAttachments(args.issueBody);
-    if (urls.length === 0) return { section: "", needsReview: false, anyAttachment: false };
+    const items = args.items;
+    if (items.length === 0) return { section: "", needsReview: false, anyAttachment: false };
 
     const dir = attachmentDir(args.ticketId);
     await fs.mkdir(dir, { recursive: true });
-    const lines: string[] = [msg(locale, "head", urls.length)];
+    const lines: string[] = [msg(locale, "head", items.length)];
     let needsReview = false;
     let ticketBytes = 0;
     let inlineBudget = INLINE_TICKET_MAX;
@@ -195,9 +202,10 @@ export const processAttachments = async (args: { issueBody: string; ticketId: st
     let imageCount = 0;
     let n = 0;
 
-    for (const url of urls) {
+    for (const item of items) {
+        const url = item.url;
         n++;
-        const rawName = url.split("?")[0].split("/").pop() ?? "";
+        const rawName = item.rawName || url.split("?")[0].split("/").pop() || "";
         const fallback = `attachment-${n}`;
         const ext = (rawName.includes(".") ? rawName.split(".").pop()! : "").toLowerCase();
         let kind = kindOf(ext);
@@ -290,4 +298,12 @@ export const processAttachments = async (args: { issueBody: string; ticketId: st
     // 多图票成本提示（§5.2.2 落地要求 4）：单图约 1500 token，避免模型逐张全读。
     if (imageCount > 1) lines.splice(1, 0, msg(locale, "multiImage", imageCount));
     return { section: lines.join("\n"), needsReview, dir: savedAny ? dir : undefined, anyAttachment: true };
+};
+
+/**
+ * 处理一个 GitHub issue 的全部附件（user-attachments 链接 → 三态）。P1 入口，内核见 processAttachmentList。
+ */
+export const processAttachments = async (args: { issueBody: string; ticketId: string; locale?: SyncLocale; download?: DownloadFile }): Promise<SyncAttachmentResult> => {
+    const items = extractUserAttachments(args.issueBody).map((url) => ({ url, rawName: url.split("?")[0].split("/").pop() ?? "" }));
+    return processAttachmentList({ ...args, items });
 };

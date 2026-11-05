@@ -142,6 +142,14 @@ schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
 
 > To have the machine wake up for the nightly window: open Task Scheduler → the task's Properties → Conditions → tick **"Wake the computer to run this task"**. Keep "Run only when user is logged on" for interactive-safe defaults; `batch run` needs the same environment (API key) your normal shell has.
 
+### Delivery & PR (`batch pr`), ledger (`batch status`), continuations
+
+- **`deepseeker-code batch pr <ticket-id>`** — deliver a finished ticket whose acceptance passed. It rebuilds a review worktree from the artifact branch, re-checks the latest mainline (a mandatory `git fetch` + behind/conflict precheck), pushes the branch as `agent/<ticket-id>`, and opens a **draft** PR (GitHub: `gh pr create --draft` with `fixes #N`; GitLab: a draft MR with `Closes #iid`). Explicit command = explicit approval; nothing is ever pushed automatically. Refusals: ticket not passed, flagged `needs-review` (test files touched / image attachments / repo mismatch — no override), already delivered (idempotent marker `done/<id>.pr.json`), behind mainline (v1 does **not** auto-rebase; it prints manual rebase commands and flags the ticket), or merge conflicts.
+- **`deepseeker-code batch status`** — summarizes the last 7 days of the append-only batch ledger (`.deepseeker-code/batch/ledger.jsonl`, one line per run: tickets / passed / failed / cost) plus the live queue.
+- **Continuations** — when a synced issue changes after its ticket finished (new comment, reopen, body edit), the next `batch sync` creates a continuation ticket (`continues: <prev-id>`): it inherits the previous ticket's accept/setup/budget and checks out the previous artifact branch as its code base. The previous report summary is embedded; external content stays quoted as data. Fingerprint v2 covers title + body + last 5 comments; P1-era state entries migrate to v2 on first sight without creating continuations (no upgrade flood).
+- **`testPathPatterns`** (sync.json, optional) — extends the built-in test-path heuristic (`tests?/`, `__tests__/`, `*.test.*`, `*.spec.*`) with extra regexes; a passed ticket that touched test paths gets flagged `needs-review` and `batch pr` refuses it.
+- **Proxy**: `batch pr` push uses your **local git config**. If your network needs a proxy for the remote, configure it yourself, e.g. `git config http.proxy http://127.0.0.1:7897` (or `https.proxy`) — the tool never injects proxy flags into commands by default.
+
 ---
 
 ## Architecture (monorepo)

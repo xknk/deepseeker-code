@@ -3,5 +3,6 @@
   "gitlab": { "baseUrl": "https://gitlab.example.com", "projects": [123], "label": "agent", "tokenEnv": "GITLAB_TOKEN" },
   "defaultAccept": "pnpm test",
   "defaultBudgetYuan": 1.0,
-  "maxTicketsPerDay": 5
+  "maxTicketsPerDay": 5,
+  "testPathPatterns": ["(^|/)e2e/", "\\.cy\\.(ts|js)$"]
 }

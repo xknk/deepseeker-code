@@ -30,7 +30,11 @@ import { readUsageRecords } from "@/observability/usageLog.ts";
 import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
-import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket } from "@/batch/queue.ts";
+import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket, markTicketNeedsReview } from "@/batch/queue.ts";
+import { continuationBaseBranch, doneTicketPath } from "@/batch/continuation.ts";
+import { appendLedgerEntry } from "@/batch/ledger.ts";
+import { compileTestPatterns, isTestPath } from "@/batch/sync/testpaths.ts";
+import { loadSyncConfig } from "@/batch/sync/config.ts";
 import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
@@ -105,8 +109,12 @@ const runAcceptCommand = async (cmd: string, cwd: string): Promise<{ code: numbe
 
 // ============ 基线三态校验辅助（§5.2.1，仅外部源工单；git 直调零 shell） ============
 
-/** 测试文件路径启发式（§9.8 P1 信息标注，不参与状态判定）。 */
-const TEST_PATH_RE = /(^|[\\/])(tests?|__tests__)([\\/]|$)|\.(test|spec)\.[cm]?[jt]sx?$/i;
+/**
+ * 测试路径启发式扩展（§9-8 P2）：sync.json testPathPatterns 编译结果，每 run 由 runBatchQueue
+ * 装载一次（sync.json 不存在/非法时为空 = 只用内建启发式，降级安全）。模块级传递——runOneTask
+ * 签名保持稳定，批内所有任务共用同一配置快照（一次 run 内不漂移）。
+ */
+let extraTestPatterns: RegExp[] = [];
 
 /** git 只跑短命令（shell:false，无注入面）；失败返回 null（探测/列举失败不致命）。 */
 const gitSimple = (args: string[], cwd: string): Promise<string | null> =>
@@ -124,11 +132,11 @@ const mainRepoRootOf = async (wtPath: string): Promise<string> => {
     return common ? path.dirname(path.resolve(wtPath, common)) : process.cwd();
 };
 
-/** diff 相对 baseSha 的已改动文件清单（harvestDiff 同口径：全量已暂存）→ 过滤测试路径。 */
+/** diff 相对 baseSha 的已改动文件清单（harvestDiff 同口径：全量已暂存）→ 过滤测试路径（内建 ∪ sync.json 扩展，与 sync 共用 core 事实源）。 */
 const touchedTestFiles = async (wtPath: string, baseSha: string): Promise<string[]> => {
     const out = await gitSimple(["diff", "--cached", "--name-only", baseSha], wtPath);
     if (!out) return [];
-    return out.split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => TEST_PATH_RE.test(f));
+    return out.split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => isTestPath(f, extraTestPatterns));
 };
 
 // ============ 结算单聚合（usageLog 真实回传数字，可对账） ============
@@ -240,7 +248,7 @@ budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
----
+${ticket.continues ? `continues: ${ticket.continues}\n` : ""}---
 
 ${T.reportTitle(ticket.title)}
 
@@ -345,7 +353,25 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     //   会让第二个任务必撞名（冒烟已抓到）。任务 id 含时间戳+随机 → 分支唯一且可溯源。
     let wt: WorktreeHandle | null = null;
     try {
-        wt = await createWorktree(sessionId, task.id);
+        // P2 续修链（§6.2）：代码基座 = 前票产物分支（前次修复已在树里，不从 main 重做）。
+        // 分支解析不出（前票未跑完/报告丢失/分支已被删）→ 回退 HEAD 并在控制台注明——宁可基座退化，
+        // 不能让续修票卡死在建 worktree 这一步。
+        let baseRef = "HEAD";
+        if (t.continues) {
+            const prevBranch = await continuationBaseBranch(t.continues);
+            if (prevBranch) {
+                const verify = await gitSimple(["rev-parse", "--verify", "--quiet", `refs/heads/${prevBranch}`], process.cwd());
+                if (verify !== null) {
+                    baseRef = prevBranch;
+                    emit(`🌿 [${task.id}] ${T.contBaseNote(prevBranch)}`);
+                } else {
+                    emit(`⚠️ [${task.id}] ${T.contBaseFallback(t.continues, T.contBaseBranchGone(prevBranch))}`);
+                }
+            } else {
+                emit(`⚠️ [${task.id}] ${T.contBaseFallback(t.continues, T.contBaseNoBranch)}`);
+            }
+        }
+        wt = await createWorktree(sessionId, task.id, baseRef);
     } catch (e: any) {
         const msg = T.wtCreateFail(e?.message ?? e);
         const cost = await collectSessionCost(sessionId);
@@ -622,6 +648,14 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     else if (commit.error) emit(T.commitFail(commit.error));
     const diff = await harvestDiff(wt);
     const touched = await touchedTestFiles(wt.path, wt.baseSha); // §9.8：报告列触碰的测试文件（P1 信息标注）
+    // §9-8 P2 动作半边（长牙齿）：验收通过但触碰了测试路径 → 票标 needs-review（报告 fm + 票档
+    // 双写）——`batch pr` 见标记一律拒绝。报告侧由 ticket.needsReview 渲染 fm，票档在 finishTicket
+    // 搬入 done/ 之后补标（markTicketNeedsReview 只动 frontmatter，幂等）。
+    let downgraded = false;
+    if (status === "passed" && touched.length > 0 && !t.needsReview) {
+        t.needsReview = true;
+        downgraded = true;
+    }
     const cost = await collectSessionCost(sessionId);
     await finishTicket(task.id, buildReport({
         id: task.id, ticket: t, status, budgetTruncated, cost, receipt, finalText,
@@ -630,6 +664,10 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         touchedTestFiles: touched.length > 0 ? touched : undefined,
         imagesRead,
     }));
+    if (downgraded) {
+        await markTicketNeedsReview(doneTicketPath(task.id)).catch(() => { });
+        emit(`⚠️ [${task.id}] ${T.downgradedNote(touched.length)}`);
+    }
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);
     emit(T.artifactLine(wt.path, wt.branch));
     return { status, cost, budgetTruncated };
@@ -701,6 +739,14 @@ export const runBatchQueue = async (opts?: { waitWindow?: string; maxTotalYuan?:
     let costTasks = 0;
     let budgetStopped = false;
     const failedIds: string[] = [];
+    // §9-8：测试路径启发式扩展装载（每 run 一次快照；sync.json 不存在/非法 → 只用内建清单）
+    try {
+        const cfg = await loadSyncConfig({ locale: getLocale() });
+        if (cfg.ok && cfg.config.testPathPatterns?.length) {
+            extraTestPatterns = compileTestPatterns(cfg.config.testPathPatterns);
+            emit(T.testPatternsNote(cfg.config.testPathPatterns.length));
+        }
+    } catch { /* 无 sync.json：纯 manual 用法，正常态 */ }
     try {
         for (;;) {
             // M6 总量硬闸（§5.2.3）：每票开始【前】检查——超限停在下一张票之前，绝不开跑半张票
@@ -726,6 +772,12 @@ export const runBatchQueue = async (opts?: { waitWindow?: string; maxTotalYuan?:
         }
     } finally {
         await releaseRunLock();
+        // P2 账本（§5.2.3 注）：每 run 一行（零任务也落——定时器节奏可见）；账本失败只提示不影响结果。
+        try {
+            await appendLedgerEntry({ at: new Date().toISOString(), tickets: total, green: passed, red: total - passed, costYuan: Number(costSum.toFixed(4)) });
+        } catch (e: any) {
+            emit(`⚠️ ${T.ledgerFail(String(e?.message ?? e))}`);
+        }
     }
 
     if (total === 0) {

@@ -7,6 +7,8 @@
  *  - 输出 JSON 解析失败/gh 非零退出 → SyncPullError（人话 + gh stderr 尾部），fail-closed 不建票。
  */
 import type { SyncExec } from "./exec.ts";
+import type { SyncCommentRef } from "./state.ts";
+import { COMMENTS_IN_FINGERPRINT } from "./state.ts";
 import type { SyncLocale } from "./config.ts";
 
 /** 统一候选（两平台适配器输出同一形状，下游去重/闸门/建票不分支）。 */
@@ -21,6 +23,8 @@ export interface SyncCandidate {
     author: string;
     /** 候选端最后更新时刻（ISO）。 */
     updatedAt: string;
+    /** 最近 N 条评论的 (id, updatedAt) 轨迹（P2 续修指纹；拉取失败/无评论 = 空轨迹，不阻塞建票）。 */
+    comments?: SyncCommentRef[];
 }
 
 /** 拉取失败（人话原因进 CLI 控制台；state 不记录——拉取失败不是候选级结论）。 */
@@ -39,7 +43,7 @@ const GH_MSG: Record<SyncLocale, Record<string, (...args: any[]) => string>> = {
     },
 };
 
-/** gh issue list 的输出行（--json 字段子集）。 */
+/** gh issue list 的输出行（--json 字段子集；comments 取 (id, updatedAt) 子集入指纹轨迹）。 */
 interface GhIssue {
     number: number;
     title: string;
@@ -47,10 +51,12 @@ interface GhIssue {
     url: string;
     updatedAt: string;
     author?: { login?: string } | null;
+    comments?: { id?: number | string; updatedAt?: string }[] | null;
 }
 
 /**
  * 拉取一个仓库的准入 issue（open + label）。exec 由调用方注入（缺省真 gh）。
+ * P2：--json 增加 comments，取最近 N 条 (id, updatedAt) 作续修指纹轨迹（旧 gh / 缺字段 → 空轨迹）。
  */
 export const fetchGithubIssues = async (repo: string, label: string, exec: SyncExec, locale: SyncLocale = "zh"): Promise<SyncCandidate[]> => {
     const msg = GH_MSG[locale] ?? GH_MSG.zh;
@@ -59,7 +65,7 @@ export const fetchGithubIssues = async (repo: string, label: string, exec: SyncE
         "-R", repo,
         "--label", label,
         "--state", "open",
-        "--json", "number,title,body,url,updatedAt,author",
+        "--json", "number,title,body,url,updatedAt,author,comments",
     ]);
     if (r.code !== 0) {
         const detail = r.stderr.trim().split("\n").slice(-3).join(" | ") || "（无 stderr）";
@@ -79,5 +85,8 @@ export const fetchGithubIssues = async (repo: string, label: string, exec: SyncE
         body: i.body ?? "",
         author: i.author?.login ?? "",
         updatedAt: i.updatedAt ?? "",
+        comments: (Array.isArray(i.comments) ? i.comments : [])
+            .slice(-COMMENTS_IN_FINGERPRINT)
+            .map((c) => ({ id: String(c?.id ?? ""), updatedAt: c?.updatedAt ?? "" })),
     }));
 };

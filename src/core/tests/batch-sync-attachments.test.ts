@@ -147,7 +147,7 @@ test("失败面：下载失败/超单文件限/扩展名与内容不符 → 逐�
     });
 });
 
-test("dry-run 零下载 + 盘点提示；GitLab 候选不触发附件链；入队失败清孤儿目录；preId 生效", async () => {
+test("dry-run 零下载 + 盘点提示；GitLab 候选不走 github 下载面（uploads 提取与 user-attachments 链接互不相认）；入队失败清孤儿目录；preId 生效", async () => {
     await withTempBatchDir(async (dir) => {
         await fs.mkdir(path.dirname(state.syncStatePath()), { recursive: true });
         await fs.writeFile(
@@ -180,17 +180,18 @@ test("dry-run 零下载 + 盘点提示；GitLab 候选不触发附件链；入�
         const attDir = await fs.readdir(path.join(dir, "attachments", snap.pending[0].replace(/\.md$/, "")));
         assert.deepEqual(attDir.sort(), ["abcd-1234.png", "error.log"]);
 
-        // GitLab 候选带同样的 user-attachments 链接：不触发下载链（M5 仅 GitHub）
-        const { fetchGitlabIssues } = await import("@/batch/sync/gitlab.ts");
+        // GitLab 候选带同样的 user-attachments 链接：P2 附件链走 uploads 提取 + gitlabDownload 面，
+        // user-attachments（无 /uploads/ 段）不被误收 → 票内无附件段；fetchImpl 只承载 notes/项目详情（P2 新增）
         const glCalls: string[] = [];
         process.env.TEST_GL_TOKEN = "t";
         try {
             const fetchImpl = async (url: string) => {
-                if (url.includes("/issues")) {
+                if (url.includes("/notes")) return { status: 200, body: "[]", headers: {} };
+                if (url.includes("/issues?")) {
                     return { status: 200, body: JSON.stringify([{ iid: 7, title: "gl 票", description: `看图 ${U_PNG_ASSET}`, web_url: "https://gitlab.example.com/g/p/-/issues/7", updated_at: "2026-11-04T10:00:00Z", author: { username: "a" } }]), headers: {} };
                 }
                 glCalls.push(url);
-                return { status: 200, body: "", headers: {} };
+                return { status: 200, body: JSON.stringify({ path_with_namespace: "g/p", default_branch: "main" }), headers: {} };
             };
             await fs.writeFile(
                 path.join(path.dirname(state.syncStatePath()), "sync.json"),
@@ -199,7 +200,15 @@ test("dry-run 零下载 + 盘点提示；GitLab 候选不触发附件链；入�
             );
             const gl = await runSync({ source: "gitlab", fetchImpl, download: dl, out: () => { }, now: () => new Date("2026-11-04T12:02:00") });
             assert.equal(gl.ok, true);
-            assert.equal(glCalls.length, 0, "GitLab 候选不触发附件下载（GitLab 附件随 P2）");
+            if (gl.ok) assert.equal(gl.summary.added, 1);
+            assert.equal(calls.length, 2, "github 下载面计数不变（gitlab 候选不借用）");
+            assert.ok(glCalls.length >= 1, "P2：项目详情（一致性标注期望键）经 fetchImpl 发起");
+            const snap2 = await queue.snapshotQueue();
+            const glTicket = (await Promise.all(snap2.pending.map(async (f) => ({ f, t: await fs.readFile(path.join(dir, "pending", f), "utf-8") }))))
+                .find((x) => x.t.includes("source-id: gitlab:55#7"));
+            assert.ok(glTicket, "gitlab 票已建");
+            assert.doesNotMatch(glTicket?.t ?? "", /^attachments:/m, "user-attachments 链接不算 gitlab uploads → 无 attachments fm");
+            assert.doesNotMatch(glTicket?.t ?? "", /### 附件/, "无附件段（不误走 github 资产链）");
         } finally {
             delete process.env.TEST_GL_TOKEN;
         }

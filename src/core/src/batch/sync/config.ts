@@ -45,6 +45,9 @@ export interface SyncConfig {
     blockedKeywords?: string[];
     /** 规则闸：正文超长拒绝（防巨型 issue 撑爆上下文）；缺省 50000 字符。 */
     maxBodyLength?: number;
+    /** §9-8 改测试即降级的启发式扩展（正则源串数组，case-insensitive 追加到内建清单；
+     *  内建：tests?/、__tests__/、*.test.*、*.spec.*。非法正则 fail-closed 拒绝。 */
+    testPathPatterns?: string[];
 }
 
 /** 同步面文案语言（与 batch 队列同一 BatchLocale 语义；错误文案进 CLI 控制台）。 */
@@ -70,6 +73,7 @@ const SYNC_CFG_MSG: Record<SyncLocale, Record<string, any>> = {
         badAllowlist: (v: string) => `authorAllowlist 非法（${v}）：须为非空字符串数组。`,
         badKeywords: (v: string) => `blockedKeywords 非法（${v}）：须为非空字符串数组。`,
         badMaxBody: (v: string) => `maxBodyLength 非法（${v}）：须为正整数（字符数）。`,
+        badTestPatterns: (v: string) => `testPathPatterns 非法（${v}）：每项须为合法正则源串（case-insensitive 追加到测试路径启发式）。`,
     },
     en: {
         readFail: (e: string) => `Failed to read sync.json: ${e}`,
@@ -90,6 +94,7 @@ const SYNC_CFG_MSG: Record<SyncLocale, Record<string, any>> = {
         badAllowlist: (v: string) => `Invalid authorAllowlist (${v}): must be a non-empty array of strings.`,
         badKeywords: (v: string) => `Invalid blockedKeywords (${v}): must be a non-empty array of strings.`,
         badMaxBody: (v: string) => `Invalid maxBodyLength (${v}): must be a positive integer (characters).`,
+        badTestPatterns: (v: string) => `Invalid testPathPatterns (${v}): each entry must be a valid regex source string (appended case-insensitively to the built-in test-path heuristic).`,
     },
 };
 const cfgMsg = (locale: SyncLocale, key: string, ...args: any[]): string => {
@@ -99,7 +104,7 @@ const cfgMsg = (locale: SyncLocale, key: string, ...args: any[]): string => {
 
 export const SYNC_CONFIG_PATH = (): string => path.join(batchQueueRoot(), "sync.json");
 
-const ALLOWED_KEYS = ["github", "gitlab", "defaultAccept", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength"].join(", ");
+const ALLOWED_KEYS = ["github", "gitlab", "defaultAccept", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength", "testPathPatterns"].join(", ");
 const REPO_SHAPE = /^[\w.-]+\/[\w.-]+$/;
 const ENV_NAME_SHAPE = /^[A-Z_][A-Z0-9_]*$/i;
 const TOKEN_SHAPE = /glpat-|ghp_|github_pat_|gho_/;
@@ -195,6 +200,20 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale 
         const n = Number(obj.maxBodyLength);
         if (!Number.isInteger(n) || n <= 0) return { ok: false, error: cfgMsg(locale, "badMaxBody", String(obj.maxBodyLength)) };
         config.maxBodyLength = n;
+    }
+    if (obj.testPathPatterns !== undefined) {
+        // §9-8 扩展项：正则源串数组，逐项编译校验（非法正则拼进匹配器会静默失效，fail-closed）
+        if (!Array.isArray(obj.testPathPatterns) || obj.testPathPatterns.length === 0 || !obj.testPathPatterns.every((p: unknown) => isStr(p))) {
+            return { ok: false, error: cfgMsg(locale, "badTestPatterns", JSON.stringify(obj.testPathPatterns)) };
+        }
+        for (const p of obj.testPathPatterns as string[]) {
+            try {
+                new RegExp(p, "i");
+            } catch {
+                return { ok: false, error: cfgMsg(locale, "badTestPatterns", p) };
+            }
+        }
+        config.testPathPatterns = obj.testPathPatterns as string[];
     }
     return { ok: true, config };
 };

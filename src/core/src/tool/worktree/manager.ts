@@ -58,12 +58,13 @@ const isNotARepoError = (e: any): boolean => {
 };
 
 /**
- * 创建一个从主仓当前 HEAD 检出的独立 worktree（新临时分支）。
+ * 创建一个从主仓检出（缺省当前 HEAD）的独立 worktree（新临时分支）。
+ * @param baseRef 检出基座（P2 续修链：传前票产物分支名，代码基座=前次修复成果；缺省 HEAD 不变）。
  * @throws 非 git 仓库 / worktree add 失败时抛错（run_workflow 捕获后该步骤标失败）
  */
-export const createWorktree = async (sessionId: string, stepId: string): Promise<WorktreeHandle> => {
-    // 主仓 HEAD 作为 worktree 基座与 diff 基准
-    const { stdout: shaOut } = await runMainGit(["rev-parse", "HEAD"]);
+export const createWorktree = async (sessionId: string, stepId: string, baseRef = "HEAD"): Promise<WorktreeHandle> => {
+    // 检出基座作为 worktree 基座与 diff 基准（先解析成 SHA：baseRef 可能是分支名）
+    const { stdout: shaOut } = await runMainGit(["rev-parse", baseRef]);
     const baseSha = shaOut.trim();
 
     const wtPath = worktreeDir(sessionId, stepId);
@@ -72,19 +73,19 @@ export const createWorktree = async (sessionId: string, stepId: string): Promise
     const branch = `dsc-wt-${shortId}-${stepId}`;
 
     await fs.promises.mkdir(path.dirname(wtPath), { recursive: true });
-    // -b：新建分支；HEAD：从主仓当前 HEAD 检出。worktree 路径须不存在（mkdir 只建到父级）。
+    // -b：新建分支；baseRef：从指定基座检出（缺省 HEAD）。worktree 路径须不存在（mkdir 只建到父级）。
     try {
-        await runMainGit(["worktree", "add", "-b", branch, wtPath, "HEAD"]);
+        await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
     } catch (e: any) {
         // 残留目录兜底：若上次崩溃留了空目录，清后重试一次
         if (e?.code === "ENOENT" || /already exists|not a working tree/i.test(`${e?.stderr || ""} ${e?.message || ""}`)) {
             await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
-            await runMainGit(["worktree", "add", "-b", branch, wtPath, "HEAD"]);
+            await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
         } else {
             throw e;
         }
     }
-    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}）`);
+    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}${baseRef === "HEAD" ? "" : ` ← ${baseRef}`}）`);
     return { path: wtPath, branch, baseSha };
 };
 
@@ -135,6 +136,8 @@ export interface WorktreeCommit {
     noChanges: boolean;
     /** 提交失败原因（git 报错原文截断，单行）；成功或无改动时缺省。 */
     error?: string;
+    /** true=agent 自 commit 被补打了 Batch-Trace 尾注（amend 改写）；快照自提的 commit 尾注随消息自带，不置位。 */
+    trailerAdded?: boolean;
 }
 
 /**
@@ -148,26 +151,47 @@ export interface WorktreeCommit {
  *   - `-c commit.gpgsign=false`：开着签名会在无 tty 时等口令直至超时；
  *   - 显式 `user.name/email`：干净机器 / CI 常无 git 身份，缺省直接 commit 失败。
  * ★ 失败不抛错：改动还在 worktree 里（当下能看），只是重启会丢——由调用方写进报告。
+ *
+ * @param trailer 溯源尾注（P2：`Batch-Trace: <票id>`）——快照自提时直接拼进提交消息；agent 已
+ *   自己 commit 过时（committed=false 且有改动）对 HEAD 补打尾注（amend，同样关闭钩子/签名，
+ *   只动消息不动内容）。补打失败不影响交付（分支与内容都在），只是溯源降级为票报告。
  */
-export const commitWorktreeChanges = async (wt: WorktreeHandle, message: string): Promise<WorktreeCommit> => {
+export const commitWorktreeChanges = async (wt: WorktreeHandle, message: string, trailer?: string): Promise<WorktreeCommit> => {
     const readHead = async (): Promise<string> => {
         const { stdout } = await runInWorktree(wt.path, ["rev-parse", "HEAD"]);
         return stdout.trim();
     };
+    const identityFlags = [
+        "-c", "commit.gpgsign=false",
+        "-c", "user.name=deepseeker-code",
+        "-c", "user.email=deepseeker-code@localhost",
+    ];
     try {
         await runInWorktree(wt.path, ["add", "-A"]);
         const { stdout: status } = await runInWorktree(wt.path, ["status", "--porcelain"]);
         if (!status.trim()) {
             // 无未提交改动：agent 可能自己 commit 过（HEAD 已前移），也可能全程没动文件
-            const head = await readHead();
-            return { committed: false, sha: head, noChanges: head === wt.baseSha };
+            let head = await readHead();
+            const noChanges = head === wt.baseSha;
+            let trailerAdded = false;
+            if (!noChanges && trailer) {
+                // agent 自 commit：补打溯源尾注（amend 只改消息；失败不致命，降级为票报告溯源）
+                try {
+                    const { stdout: logMsg } = await runInWorktree(wt.path, ["log", "-1", "--format=%B"]);
+                    if (!logMsg.includes(trailer)) {
+                        const merged = `${logMsg.replace(/\s+$/, "")}\n\n${trailer}\n`;
+                        await runInWorktree(wt.path, [...identityFlags, "commit", "--no-verify", "--amend", "-m", merged]);
+                        trailerAdded = true;
+                        head = await readHead();
+                    }
+                } catch (e: any) {
+                    console.warn(`⚠️ [worktree] Batch-Trace 尾注补打失败（不影响交付）: ${`${e?.stderr || e?.message || e}`.trim().slice(0, 160)}`);
+                }
+            }
+            return { committed: false, sha: head, noChanges, trailerAdded: trailerAdded || undefined };
         }
-        await runInWorktree(wt.path, [
-            "-c", "commit.gpgsign=false",
-            "-c", "user.name=deepseeker-code",
-            "-c", "user.email=deepseeker-code@localhost",
-            "commit", "--no-verify", "-m", message,
-        ]);
+        const finalMessage = trailer ? `${message.replace(/\s+$/, "")}\n\n${trailer}\n` : message;
+        await runInWorktree(wt.path, [...identityFlags, "commit", "--no-verify", "-m", finalMessage]);
         return { committed: true, sha: await readHead(), noChanges: false };
     } catch (e: any) {
         const text = `${e?.stderr || ""} ${e?.message || e}`.trim().replace(/\s+/g, " ");
