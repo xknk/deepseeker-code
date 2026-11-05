@@ -1,8 +1,3 @@
-// 本文件为示例配置（复制到 <项目>/.deepseeker-code/batch/sync.json 后按需修改；JSON 不支持注释，
-// 拷贝时请删掉这些 // 行）。★ webhook 入口（P3）复用下面全部策略键，不新增任何键——本地 sync.json
-// 会被旧版全局 CLI 的定时器共读，加未知键会被 fail-closed 拒载整份配置（定时器停摆）。
-// webhook 只用到：defaultAccept / defaultSetup / defaultBudgetYuan / maxTicketsPerDay /
-// allowExternalAccept / maxBodyLength / testPathPatterns；github/gitlab 两段不配也能用 webhook。
 {
   "github": { "repos": ["owner/repo"], "label": "agent" },
   "gitlab": { "baseUrl": "https://gitlab.example.com", "projects": [123], "label": "agent", "tokenEnv": "GITLAB_TOKEN" },
