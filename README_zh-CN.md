@@ -24,8 +24,13 @@ DeepSeeker-Code 是 **单人本地 AI coding 工具**——运行在开发者本
 
 ### VS Code 插件
 
+已上架 **VS Code Marketplace**：[deepseeker-code.deepseeker-code](https://marketplace.visualstudio.com/items?itemName=deepseeker-code.deepseeker-code)。在扩展面板（`Ctrl+Shift+X`）搜索 **"DeepSeeker-Code"** 安装，或用命令行安装：
+
 ```bash
-# 安装 .vsix（或上架后从市场装）
+# 从 VS Code Marketplace 安装
+code --install-extension deepseeker-code.deepseeker-code
+
+# 备选：安装本地 .vsix（离线 / 预发布版本）
 code --install-extension deepseeker-code-<version>.vsix
 ```
 

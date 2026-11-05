@@ -24,8 +24,13 @@ All three are feature-equivalent (same core engine, same tools / approvals / pla
 
 ### VS Code extension
 
+Published on the **VS Code Marketplace**: [deepseeker-code.deepseeker-code](https://marketplace.visualstudio.com/items?itemName=deepseeker-code.deepseeker-code). Search for **"DeepSeeker-Code"** in the Extensions panel (`Ctrl+Shift+X`), or install from the command line:
+
 ```bash
-# Install the .vsix (or install from the marketplace once published)
+# Install from the VS Code Marketplace
+code --install-extension deepseeker-code.deepseeker-code
+
+# Fallback: install a local .vsix (offline / pre-release builds)
 code --install-extension deepseeker-code-<version>.vsix
 ```
 
