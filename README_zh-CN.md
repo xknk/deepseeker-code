@@ -101,6 +101,8 @@ deepseeker-code batch run --max-total-yuan 5
 
 定时**检测与开工分两个钟**（方案 §2.3）：sync 钟跑得勤，run 钟对准电价谷期。`sync` 自带单飞锁——定时器重叠时后一个直接退出；`batch run --wait-window 01:00-07:00` 也可以只配一个钟、把延迟交给 run 自己。
 
+**`defaultSetup`**（sync.json，可选）——`batch sync` 建票时自动写进票 frontmatter `setup:` 的默认环境准备命令。定时建票没人手工补 setup，需要 `pnpm install` 的仓库会每晚因装不上环境被缓存成 `baseline-broken`——流水线空转还占当日建票额度。续修票不受影响（本来就继承前票 setup）。
+
 **Linux（cron）**——`crontab -e`：
 
 ```cron

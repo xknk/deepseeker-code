@@ -125,6 +125,14 @@ const BRANCH_RE = /^[\w][\w./-]*$/;
 /** 变更文件清单封顶（PR 正文四要素之一；超出部分计数字提示）。 */
 const FILE_LIST_CAP = 20;
 
+/**
+ * name-status 行 → 纯路径（剥状态列）：`M\ta.ts` → `a.ts`；改名 `R100\t{a => b}` 路径按 git 原样。
+ * name-status 行至少两列（状态 + 路径），pop 恒取路径列。导出供守门测试钉形态；控制台预览不走
+ * 此处（状态列人看有用），只有外发正文剥（试点 PR #4 实证 `M\tREADME.md` 漏进正文）。
+ */
+export const nameStatusToPaths = (rows: string[]): string[] =>
+    rows.map((line) => line.split(/\t/).pop() ?? line).filter(Boolean);
+
 /** PR 正文（四要素：标题 / 状态与成本 / 变更文件清单 / 成本；外发红线：diff 与验收输出永不进正文）。 */
 export const buildPrBody = (args: { ticketId: string; title: string; status: string; costYuan: string; files: string[]; issueNumber?: number; locale?: SyncLocale }): string => {
     const lines = [
@@ -294,7 +302,9 @@ export const runBatchPr = async (ticketId: string, opts: BatchPrOptions = {}): P
         if (files.length > FILE_LIST_CAP) out(`  ${M("moreFiles", files.length - FILE_LIST_CAP)}`);
         if (shortstat.code === 0 && shortstat.stdout.trim()) out(`  ${shortstat.stdout.trim()}`);
 
-        // 12. PR 正文（四要素；github 附 fixes #N）
+        // 12. PR 正文（四要素；github 附 fixes #N）。外发清单剥掉 name-status 的状态列（试点 PR #4
+        //     实证 `M\tREADME.md` 漏进正文——观感差且泄露命令细节）；控制台预览保留状态列（人看有用）。
+        const filePaths = nameStatusToPaths(files);
         const bodyTmp = path.join(os.tmpdir(), `dsc-pr-body-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
         try {
             await fs.writeFile(bodyTmp, buildPrBody({
@@ -302,7 +312,7 @@ export const runBatchPr = async (ticketId: string, opts: BatchPrOptions = {}): P
                 title: ticket.title,
                 status,
                 costYuan: fm("cost-yuan") || "0",
-                files,
+                files: filePaths,
                 issueNumber: gh ? Number(gh[2]) : undefined,
             }), "utf-8");
 

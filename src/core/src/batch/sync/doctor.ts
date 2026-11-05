@@ -21,6 +21,8 @@ export interface SyncCheckItem {
     text: string;
     /** ✗ 时的修复指引（一句话，可照抄的命令优先）。 */
     fix?: string;
+    /** 非阻断提示（⚠）：不计入失败数，整体仍算通过（如 defaultSetup 未配置）。 */
+    warn?: boolean;
 }
 
 export interface SyncCheckOptions {
@@ -53,6 +55,12 @@ export const runSyncCheck = async (opts?: SyncCheckOptions): Promise<{ ok: boole
     } else {
         items.push({ ok: true, text: M("chkCfgOk") });
         const config = cfg.config;
+
+        // defaultSetup 未配置：非阻断提示（⚠ 不计失败）——需装依赖的仓库不配它，建出的票会因
+        // 环境缺失在基线探测处被缓存成 baseline-broken，每晚空转还占建票额度。
+        if (config.defaultSetup === undefined) {
+            items.push({ ok: true, text: M("chkSetupMissing"), warn: true, fix: M("fixSetup") });
+        }
 
         // 2. GitHub：gh 存在且可鉴权 → 逐仓可达 → label 存在（带创建命令）
         if (config.github) {
@@ -128,12 +136,13 @@ export const runSyncCheck = async (opts?: SyncCheckOptions): Promise<{ ok: boole
         }
     }
 
-    // 渲染：每项一行 ✓/✗，✗ 追加「怎么修」；末尾汇总一行
+    // 渲染：每项一行 ✓/✗/⚠（warn 非阻断，同样带修复指引），✗ 追加「怎么修」；末尾汇总一行
     for (const it of items) {
-        out(`${it.ok ? "✓" : "✗"} ${it.text}`);
-        if (!it.ok && it.fix) out(M("chkFixLine", it.fix));
+        out(`${it.warn ? "⚠" : it.ok ? "✓" : "✗"} ${it.text}`);
+        if ((!it.ok || it.warn) && it.fix) out(M("chkFixLine", it.fix));
     }
     const fails = items.filter((i) => !i.ok).length;
-    out(fails === 0 ? M("chkPass", items.length) : M("chkFail", fails, items.length));
+    const hard = items.filter((i) => !i.warn).length; // 汇总口径：warn 提示不计入「全绿」项数
+    out(fails === 0 ? M("chkPass", hard) : M("chkFail", fails, hard));
     return { ok: fails === 0, items };
 };

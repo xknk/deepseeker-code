@@ -14,7 +14,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-const { runBatchPr, buildPrBody } = await import("@/batch/pr.ts");
+const { runBatchPr, buildPrBody, nameStatusToPaths } = await import("@/batch/pr.ts");
 const { defaultSyncExec } = await import("@/batch/sync/exec.ts");
 const { SYNC_CONFIG_PATH } = await import("@/batch/sync/config.ts");
 type PrFetch = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ status: number; body: string; headers: Record<string, string> }>;
@@ -146,7 +146,9 @@ test("batch pr happy path：全流程交付（幂等标记 + PR 正文四要素 
         assert.match(st.ghBody, /^## sandbox ticket$/m);
         assert.match(st.ghBody, /acceptance \*\*passed\*\*/);
         assert.match(st.ghBody, /Cost: 0\.42 CNY/);
-        assert.match(st.ghBody, /- `A\tsrc-feature\.ts`/, "变更清单带 git 状态字母（name-status 原样，重命名行不失真）");
+        assert.match(st.ghBody, /- `src-feature\.ts`/, "正文清单是纯路径（状态列已剥）");
+        assert.match(st.ghBody, /- `shared\.txt`/);
+        assert.doesNotMatch(st.ghBody, /`[MAD]\t|^[A-D]\t/m, "状态字母不进正文（试点 PR #4 实证 M\\t 漏进正文，已剥）");
         assert.match(st.ghBody, /fixes #42\s*$/);
         assert.doesNotMatch(st.ghBody, /验收输出|npm test 全部通过/, "验收输出永不外发");
         assert.doesNotMatch(st.ghBody, /from branch|base\\n|\+\+\+/, "diff 内容永不外发");
@@ -160,7 +162,9 @@ test("batch pr happy path：全流程交付（幂等标记 + PR 正文四要素 
         // worktree 用完即弃
         await assert.rejects(fs.stat(path.join(wtRoot, TICKET_ID)));
         assert.equal(await fs.readFile(path.join(dir, "done", `${TICKET_ID}.md`), "utf-8").then((t) => t.includes("needs-review")), false, "成功交付不标 needs-review");
-        void lines;
+        // 控制台预览保留 name-status 状态列（人看有用）——与外发正文剥前缀相反
+        const preview = lines.filter((l) => l.includes("src-feature.ts") || l.includes("shared.txt"));
+        assert.ok(preview.some((l) => /^\s+A\tsrc-feature\.ts$/.test(l)), `预览带 A\\t 状态列：${preview.join(" | ")}`);
         await fs.rm(sb.root, { recursive: true, force: true });
     });
 });
@@ -306,4 +310,19 @@ test("buildPrBody：四要素 + 封顶 20 文件 + 空清单兜底 + fixes 仅 g
     assert.doesNotMatch(b2, /fixes #/, "无 issue 号不写 fixes（GitLab 用 Closes 替换）");
     const b3 = buildPrBody({ ...base, files: [] });
     assert.match(b3, /\(no file changes recorded\)/);
+});
+
+test("nameStatusToPaths：剥状态列（M/A/D 单列 / R100 改名原样 / 二进制 D 列）；正文不得含状态前缀", () => {
+    assert.deepEqual(
+        nameStatusToPaths(["M\tREADME.md", "A\tsrc/new.ts", "D\told.ts"]),
+        ["README.md", "src/new.ts", "old.ts"],
+        "单列状态行 pop 取路径列",
+    );
+    assert.deepEqual(
+        nameStatusToPaths(["R100\tsrc/{old => new}.ts"]),
+        ["src/{old => new}.ts"],
+        "改名行多列，pop 仍取路径列（{a => b} 按 git 原样）",
+    );
+    const body = buildPrBody({ ticketId: "t", title: "T", status: "passed", costYuan: "0", files: nameStatusToPaths(["M\tREADME.md", "A\ta.ts"]) });
+    assert.doesNotMatch(body, /[MAD]\t/, "剥完的清单进正文不含状态前缀");
 });

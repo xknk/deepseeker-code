@@ -55,9 +55,15 @@ export const continuationBaseBranch = async (prevId: string): Promise<string | n
     return branch && /^[\w][\w./-]*$/.test(branch) ? branch : null;
 };
 
+/** 前次改动文件清单封顶（与 batchRunner 生成端同口径；超出末尾补省略行带余量）。 */
+const CHANGED_FILE_CAP = 30;
+const CHANGED_MORE_NOTE = (n: number): string => `…（其余 ${n} 个略）`;
+
 /**
- * 前次报告摘要（进续修票 body 的「前次结果摘要」段）：状态 + 花费 + 分支 + 模型收尾汇报（截断）。
- * 报告头尾与验收输出/diff 都不进——续修票 body 要小（撑爆上下文与引用块边界都无益）。
+ * 前次报告摘要（进续修票 body 的「前次结果摘要」段）：状态 + 花费 + 分支 + 改动文件清单 + 模型收尾汇报（截断）。
+ * 改动清单收报告 frontmatter 全部 `changed-file:` 行（batchRunner 固化的 git numstat 事实）——续修票
+ * 不用重新探索上票改了什么；与 1200 字截断分开计（那是对模型收尾汇报段的限制）。报告头尾与验收
+ * 输出/diff 都不进——续修票 body 要小（撑爆上下文与引用块边界都无益）。
  */
 export const extractPrevReportSummary = (report: string | null, locale: SyncLocale = "zh", maxChars = 1200): string => {
     if (!report) return locale === "zh" ? "（前次报告已不存在——存档可能被 clean 清理）" : "(previous report unavailable — archive may have been cleaned)";
@@ -70,6 +76,13 @@ export const extractPrevReportSummary = (report: string | null, locale: SyncLoca
         `- 花费 / cost: ${fm("cost-yuan") || "?"} 元`,
         `- 产物分支 / branch: ${fm("branch") || "?"}`,
     ];
+    // 前次改动文件段（2026-11-05 打磨第一批）：旧报告没有 changed-file 行时整段不加（不炸）。
+    const changedAll = [...report.matchAll(/^changed-file:\s*(.+)$/gm)].map((m) => m[1].trim());
+    if (changedAll.length > 0) {
+        const shown = changedAll.slice(0, CHANGED_FILE_CAP);
+        if (changedAll.length > CHANGED_FILE_CAP) shown.push(CHANGED_MORE_NOTE(changedAll.length - CHANGED_FILE_CAP));
+        lines.push("", "【前次改动文件 / previous changed files】", "", ...shown.map((f) => `- ${f}`));
+    }
     // 模型收尾汇报段（zh/en 两种报告头都认；取到下一个 ## 为止）
     const sec = /^## (?:模型收尾汇报|Model final report)\s*$/m.exec(report);
     if (sec) {

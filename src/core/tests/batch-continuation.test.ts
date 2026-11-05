@@ -108,6 +108,37 @@ test("continuation：extractPrevReportSummary 取状态/花费/分支 + 收尾�
     assert.match(en, /previous model final report/i);
 });
 
+// ============ 前次改动文件清单注入（2026-11-05 打磨第一批） ============
+
+test("continuation：报告含 changed-file 清单 → 摘要含清单段；超 30 条截断标注；旧报告无清单不加段", () => {
+    // 有清单：全量收集 + 独立段（与状态/花费/分支分开，不挤 1200 字截断）
+    const withList = [
+        "---", "id: t1", "status: passed", "cost-yuan: 0.5", "branch: b1",
+        "changed-file: src/a.ts (+42/-3)", "changed-file: src/b.ts (+1/-0)", "changed-file: bin.dat (binary)", "---", "",
+        "## 模型收尾汇报", "", "修好了。", "",
+    ].join("\n");
+    const s1 = cont.extractPrevReportSummary(withList, "zh");
+    assert.match(s1, /【前次改动文件 \/ previous changed files】/);
+    assert.match(s1, /- src\/a\.ts \(\+42\/-3\)/);
+    assert.match(s1, /- src\/b\.ts \(\+1\/-0\)/);
+    assert.match(s1, /- bin\.dat \(binary\)/, "二进制行按生成端渲染原样收进");
+
+    // 超 30 条：显示前 30 + 末尾截断标注
+    const many = Array.from({ length: 35 }, (_, i) => `changed-file: f${i}.ts (+1/-0)`).join("\n");
+    const report35 = `---\nid: t2\nstatus: passed\nbranch: b2\n${many}\n---\n`;
+    const s2 = cont.extractPrevReportSummary(report35, "zh");
+    const seg = s2.slice(s2.indexOf("【前次改动文件"));
+    assert.equal((seg.match(/^- f\d+\.ts/gm) ?? []).length, 30, "清单封顶 30 条");
+    assert.match(seg, /其余 5 个略/, "截断标注带余量");
+    assert.doesNotMatch(seg, /- f30\.ts/);
+
+    // 旧报告无 changed-file 行：整段不加、不报错（1200 字收尾段照常）
+    const legacy = "---\nid: t3\nstatus: passed\ncost-yuan: 0.1\nbranch: b3\n---\n\n## 模型收尾汇报\n\n旧格式汇报。\n";
+    const s3 = cont.extractPrevReportSummary(legacy, "zh");
+    assert.doesNotMatch(s3, /前次改动文件/);
+    assert.match(s3, /旧格式汇报/);
+});
+
 // ============ done 档检索与分支解析 ============
 
 test("continuation：findDoneTicketIdBySourceId 取最近一张；continuationBaseBranch 拒绝占位串", async () => {

@@ -133,6 +133,8 @@ export const buildSyncTicketSource = (candidate: SyncCandidate, acc: AcceptResol
         "---",
         `title: ${sanitizeTitle(candidate.title)}`,
         `accept: ${acc.accept}`,
+        // defaultSetup（定时时代真缺口）：配置了才写 setup 行（未配置不写，手工票/老行为零变化）；续修票不走此处（本来继承前票 setup）。
+        config.defaultSetup ? `setup: ${config.defaultSetup}` : null,
         `source: ${candidate.sourceId.split(":")[0]}`,
         candidate.url ? `source-url: ${candidate.url}` : null,
         `source-id: ${candidate.sourceId}`,

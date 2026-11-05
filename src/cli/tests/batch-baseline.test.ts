@@ -75,3 +75,38 @@ test("报告：触碰的测试文件段 + needs-review 头字段（双语词表�
     const noImgs = buildReport({ ...base, status: "passed" });
     assert.match(noImgs, /图片读取：0 张/, "缺省 0 张也可见（0 且票里有图 = 疑似无视觉未读）");
 });
+
+test("报告：changed-file 清单固化进 frontmatter（改动清单交接，2026-11-05 打磨第一批）", async () => {
+    const { buildReport, numstatToChangedFiles } = await import("../src/batchRunner.ts");
+    const base = {
+        id: "t1", ticket: { title: "x", accept: "npm test", body: "正文", source: "github" as const, sourceId: "github:o/r#1" }, budgetTruncated: false,
+        cost: { rounds: 1, mainRounds: 1, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, toolCostYuan: 0, auxCostYuan: 0, partialPrice: false, durationMs: 1000 },
+        receipt: undefined, finalText: "",
+        deniedTools: [] as { tool: string; detail: string }[], diff: "（无）", wt: null,
+        accept: { cmd: "npm test", code: 0, output: "ok", timedOut: false },
+    };
+    // numstat 原始输出 → 行：普通 / 二进制 / 改名（git 原样）
+    assert.deepEqual(
+        numstatToChangedFiles(["12\t3\tsrc/a.ts", "-\t-\tbin.dat", "1\t0\tsrc/{old => new}.ts"].join("\n")),
+        ["src/a.ts (+12/-3)", "bin.dat (binary)", "src/{old => new}.ts (+1/-0)"],
+    );
+    // frontmatter 固化：branch/continues 之后、闭合 --- 之前；无改动不写行
+    const fmOf = (report: string): string => {
+        const m = /^---\n([\s\S]*?)\n---/.exec(report);
+        return m?.[1] ?? "";
+    };
+    const withChanged = buildReport({ ...base, status: "passed", changedFiles: ["src/a.ts (+12/-3)", "bin.dat (binary)"] });
+    const fm1 = fmOf(withChanged);
+    assert.match(fm1, /^changed-file: src\/a\.ts \(\+12\/-3\)$/m);
+    assert.match(fm1, /^changed-file: bin\.dat \(binary\)$/m);
+    assert.ok(fm1.indexOf("changed-file:") > fm1.indexOf("branch:") && fm1.indexOf("changed-file:") < fm1.length, "changed-file 在 branch 之后（frontmatter 内）");
+    const none = buildReport({ ...base, status: "passed" });
+    assert.doesNotMatch(fmOf(none), /^changed-file:/m, "无改动路径不写行");
+
+    // 封顶 30：超出末尾省略行带余量
+    const many = Array.from({ length: 33 }, (_, i) => `f${i}.ts (+1/-0)`);
+    const capped = buildReport({ ...base, status: "passed", changedFiles: many });
+    const fm2 = fmOf(capped);
+    assert.equal((fm2.match(/^changed-file: f\d+\.ts/gm) ?? []).length, 30, "清单封顶 30 条");
+    assert.match(fm2, /^changed-file: …（其余 3 个略）$/m, "省略行带余量");
+});

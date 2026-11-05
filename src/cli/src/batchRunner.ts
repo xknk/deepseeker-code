@@ -139,6 +139,24 @@ const touchedTestFiles = async (wtPath: string, baseSha: string): Promise<string
     return out.split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => isTestPath(f, extraTestPatterns));
 };
 
+/** 报告 frontmatter changed-file 清单封顶：超出部分不丢信息——末尾一条省略行带余量。 */
+const CHANGED_FILE_CAP = 30;
+
+/**
+ * `git diff --cached --numstat <baseSha>` 原始输出 → changed-file 行（改动清单交接，2026-11-05 打磨第一批）。
+ * 行形态 `<+N>\t<-M>\t<path>`；二进制行是 `-	-	<path>` → 渲染 `(binary)`；改名 `{old => new}` 按 git 原样。
+ * 纯函数（无 IO），导出供守门测试直接验证。
+ */
+export const numstatToChangedFiles = (raw: string): string[] =>
+    raw.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
+        const cols = line.split("\t");
+        const file = cols.pop() ?? "?";
+        const added = cols[0] ?? "-";
+        const removed = cols[1] ?? "-";
+        const counts = added === "-" && removed === "-" ? "(binary)" : `(+${added}/-${removed})`;
+        return `${file} ${counts}`;
+    });
+
 // ============ 结算单聚合（usageLog 真实回传数字，可对账） ============
 
 interface SessionCost {
@@ -231,6 +249,8 @@ export const buildReport = (args: {
     touchedTestFiles?: string[];
     /** 本任务 read_image 调用次数（§5.2.2 落地要求 6：图片读取可见性——人要能判断该翻案还是换模型）。 */
     imagesRead?: number;
+    /** 改动清单（numstatToChangedFiles 所得；写进报告 frontmatter changed-file:，续修票注入用。空/缺省不写行）。 */
+    changedFiles?: string[];
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
     const T = batchT(getLocale());
@@ -238,6 +258,10 @@ export const buildReport = (args: {
     const testFilesSection = args.touchedTestFiles?.length
         ? `\n${T.testFilesH}\n\n${T.testFilesNote(args.touchedTestFiles.length)}\n${args.touchedTestFiles.map((f) => `- \`${f}\``).join("\n")}\n`
         : "";
+    // 改动清单 frontmatter 段（封顶 30，超出末尾省略行带余量——清单是 git 产出的事实，不丢只截）。
+    const changed = args.changedFiles ?? [];
+    const changedFm = changed.length === 0 ? "" : changed.slice(0, CHANGED_FILE_CAP).map((f) => `changed-file: ${f}\n`).join("")
+        + (changed.length > CHANGED_FILE_CAP ? `changed-file: ${T.changedMore(changed.length - CHANGED_FILE_CAP)}\n` : "");
     return `---
 id: ${id}
 title: ${ticket.title}
@@ -248,7 +272,7 @@ budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
-${ticket.continues ? `continues: ${ticket.continues}\n` : ""}---
+${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${changedFm}---
 
 ${T.reportTitle(ticket.title)}
 
@@ -648,6 +672,10 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     else if (commit.error) emit(T.commitFail(commit.error));
     const diff = await harvestDiff(wt);
     const touched = await touchedTestFiles(wt.path, wt.baseSha); // §9.8：报告列触碰的测试文件（P1 信息标注）
+    // 改动清单采集（2026-11-05 打磨第一批）：收尾提交已入索引，diff --cached 对 baseSha 仍见全量
+    // （与 touchedTestFiles 同位置同口径）；固化进报告 frontmatter changed-file:，续修票免重新探索。
+    const changedNumstat = await gitSimple(["diff", "--cached", "--numstat", wt.baseSha], wt.path);
+    const changedFiles = changedNumstat ? numstatToChangedFiles(changedNumstat) : undefined;
     // §9-8 P2 动作半边（长牙齿）：验收通过但触碰了测试路径 → 票标 needs-review（报告 fm + 票档
     // 双写）——`batch pr` 见标记一律拒绝。报告侧由 ticket.needsReview 渲染 fm，票档在 finishTicket
     // 搬入 done/ 之后补标（markTicketNeedsReview 只动 frontmatter，幂等）。
@@ -663,6 +691,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         watchdogLines: buildWatchdogLines(wdSnapshots, cost.costYuan) ?? undefined,
         touchedTestFiles: touched.length > 0 ? touched : undefined,
         imagesRead,
+        changedFiles,
     }));
     if (downgraded) {
         await markTicketNeedsReview(doneTicketPath(task.id)).catch(() => { });

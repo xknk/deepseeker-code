@@ -116,7 +116,33 @@ test("doctor：gh 鉴权失败 → ✗ + 修复指引，且不再发起仓库/la
         const auth = r.items.find((i) => i.text.includes("gh"));
         assert.ok(auth && !auth.ok);
         assert.match(auth.fix ?? "", /gh auth login/);
-        assert.equal(r.items.length, 2, "配置 + gh 两项（仓库检查跳过）");
+        assert.equal(r.items.length, 3, "配置 + gh 两项 + defaultSetup 提示（warn 项恒在）");
+    });
+});
+
+// ============ defaultSetup 提示（非阻断 ⚠，2026-11-05 打磨第一批） ============
+
+test("doctor：defaultSetup 未配置 → ⚠ 非阻断提示（ok=true 不计失败、带修复指引）；配置后无提示", async () => {
+    await withTempBatchDir(async (dir) => {
+        const cfgDir = path.dirname(state.syncStatePath());
+        // 未配置：warn 项存在但整体仍通过（r.ok=true）
+        await writeConfig(cfgDir, GITHUB_CFG);
+        const { exec } = fakeGh();
+        const lines: string[] = [];
+        const r1 = await runSyncCheck({ exec, out: (s) => lines.push(s) });
+        assert.equal(r1.ok, true, "缺 defaultSetup 只是提示，不挡 --check 通过");
+        const warn = r1.items.find((i) => i.warn);
+        assert.ok(warn, "warn 项存在");
+        assert.equal(warn.ok, true);
+        assert.match(warn.text, /defaultSetup 未配置|defaultSetup not configured/);
+        assert.match(warn.fix ?? "", /defaultSetup/);
+        assert.match(lines.join("\n"), /⚠ defaultSetup/, "渲染用 ⚠（区别于 ✗）");
+        assert.doesNotMatch(lines.join("\n"), /--check 未过|--check failed/, "warn 不计入失败汇总");
+
+        // 配置了：无 warn 项
+        await writeConfig(cfgDir, { ...GITHUB_CFG, defaultSetup: "pnpm install" });
+        const r2 = await runSyncCheck({ exec: fakeGh().exec });
+        assert.equal(r2.items.some((i) => i.warn), false, "配置后提示消失");
     });
 });
 

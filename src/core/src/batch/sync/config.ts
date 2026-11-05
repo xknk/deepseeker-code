@@ -33,6 +33,9 @@ export interface SyncConfig {
     gitlab?: GitlabSourceConfig;
     /** 本地缺省验收命令（accept 解析序第一优先，§5.2 第 4 步）。 */
     defaultAccept?: string;
+    /** 建票自动附带的默认环境准备命令（写进票 frontmatter setup 字段；定时建票时代真缺口：
+     *  没人手工补 setup 的票每晚因装不上依赖被缓存成 baseline-broken 空转）。 */
+    defaultSetup?: string;
     /** sync 建票的默认单票预算（元）→ 写进工单 budget-yuan。 */
     defaultBudgetYuan?: number;
     /** 单日建票上限（M6 总量硬闸）：超限停止建票并在摘要写明。 */
@@ -67,6 +70,7 @@ const SYNC_CFG_MSG: Record<SyncLocale, Record<string, any>> = {
         badTokenEnv: (v: string) => `gitlab.tokenEnv 非法（"${v}"）：须是环境变量名（大写字母/数字/下划线）——不要把 token 本体写进文件（sync.json 设计为可提交，§3.2）。`,
         tokenLooksReal: 'gitlab.tokenEnv 的值像 token 本体（glpat-/ghp_/github_pat_ 前缀）：这里只收环境变量【名】，token 放环境变量里。',
         badDefaultAccept: (v: string) => `defaultAccept 非法（${v}）：须为非空单行 shell 命令字符串。`,
+        badDefaultSetup: (v: string) => `defaultSetup 非法（${v}）：须为非空单行 shell 命令字符串。`,
         badBudget: (v: string) => `defaultBudgetYuan 非法（${v}）：须为正数（元）。`,
         badMaxPerDay: (v: string) => `maxTicketsPerDay 非法（${v}）：须为正整数。`,
         badBool: (k: string, v: string) => `${k} 非法（${v}）：须为 true 或 false。`,
@@ -88,6 +92,7 @@ const SYNC_CFG_MSG: Record<SyncLocale, Record<string, any>> = {
         badTokenEnv: (v: string) => `Invalid gitlab.tokenEnv ("${v}"): must be an environment variable NAME (A-Z/0-9/_) — never the token itself (sync.json is designed to be committable).`,
         tokenLooksReal: "gitlab.tokenEnv looks like a real token (glpat-/ghp_/github_pat_ prefix): only the env var NAME goes here; the token lives in the environment.",
         badDefaultAccept: (v: string) => `Invalid defaultAccept (${v}): must be a non-empty single-line shell command string.`,
+        badDefaultSetup: (v: string) => `Invalid defaultSetup (${v}): must be a non-empty single-line shell command string.`,
         badBudget: (v: string) => `Invalid defaultBudgetYuan (${v}): must be a positive number (yuan).`,
         badMaxPerDay: (v: string) => `Invalid maxTicketsPerDay (${v}): must be a positive integer.`,
         badBool: (k: string, v: string) => `Invalid ${k} (${v}): must be true or false.`,
@@ -104,7 +109,7 @@ const cfgMsg = (locale: SyncLocale, key: string, ...args: any[]): string => {
 
 export const SYNC_CONFIG_PATH = (): string => path.join(batchQueueRoot(), "sync.json");
 
-const ALLOWED_KEYS = ["github", "gitlab", "defaultAccept", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength", "testPathPatterns"].join(", ");
+const ALLOWED_KEYS = ["github", "gitlab", "defaultAccept", "defaultSetup", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength", "testPathPatterns"].join(", ");
 const REPO_SHAPE = /^[\w.-]+\/[\w.-]+$/;
 const ENV_NAME_SHAPE = /^[A-Z_][A-Z0-9_]*$/i;
 const TOKEN_SHAPE = /glpat-|ghp_|github_pat_|gho_/;
@@ -173,6 +178,12 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale 
             return { ok: false, error: cfgMsg(locale, "badDefaultAccept", JSON.stringify(obj.defaultAccept)) };
         }
         config.defaultAccept = obj.defaultAccept.trim();
+    }
+    if (obj.defaultSetup !== undefined) {
+        if (!isStr(obj.defaultSetup) || !obj.defaultSetup.trim() || /\r|\n/.test(obj.defaultSetup)) {
+            return { ok: false, error: cfgMsg(locale, "badDefaultSetup", JSON.stringify(obj.defaultSetup)) };
+        }
+        config.defaultSetup = obj.defaultSetup.trim();
     }
     if (obj.defaultBudgetYuan !== undefined) {
         const n = Number(obj.defaultBudgetYuan);

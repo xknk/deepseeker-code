@@ -101,6 +101,8 @@ deepseeker-code batch run --max-total-yuan 5
 
 Schedule **detection and work as two separate clocks** (§2.3 of the design doc): sync often, run in your off-peak window. `sync` holds its own lock — an overlapping run just exits — and `batch run --wait-window 01:00-07:00` can also defer a single schedule instead of a second clock.
 
+**`defaultSetup`** (sync.json, optional) — a setup command stamped into every ticket `batch sync` creates (frontmatter `setup:`). With scheduled tickets nobody is around to fill in `setup:`, so a repo that needs `pnpm install` would fail its baseline probe nightly and get cached as `baseline-broken` — the pipeline idles while burning the daily ticket quota. Continuation tickets are unaffected (they inherit the previous ticket's setup).
+
 **Linux (cron)** — `crontab -e`:
 
 ```cron

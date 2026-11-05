@@ -374,6 +374,41 @@ test("全链路：建出的工单源文本 round-trip 通过 parseBatchTicket（
     }
 });
 
+test("defaultSetup：配置→票源含 setup 行 / 未配置→无该行 / 非法值→loadSyncConfig 拒绝（fail-closed）", async () => {
+    // 三态之一：配置了 → setup 行紧跟 accept、先于 source（round-trip 可解析）
+    const { parseBatchTicket } = await import("@/batch/ticket.ts");
+    const withSetup = buildSyncTicketSource(
+        { sourceId: "github:o/r#4", url: "https://github.com/o/r/issues/4", title: "t4", body: "b", author: "a", updatedAt: "x" },
+        { ok: true, accept: "pnpm test", origin: "config", needsReview: false },
+        { defaultAccept: "pnpm test", defaultSetup: "pnpm install" },
+        "zh",
+    );
+    assert.match(withSetup, /^accept: pnpm test\nsetup: pnpm install\nsource: github$/m, "setup 行位置：accept 之后、source 之前");
+    const parsed = parseBatchTicket(withSetup);
+    assert.equal(parsed.ok, true, `带 setup 的票必须能过解析：${parsed.ok ? "" : parsed.error}`);
+    if (parsed.ok) assert.equal(parsed.ticket.setup, "pnpm install");
+
+    // 三态之二：未配置 → 无 setup 行（老行为零变化）
+    const without = buildSyncTicketSource(
+        { sourceId: "github:o/r#5", url: "https://github.com/o/r/issues/5", title: "t5", body: "b", author: "a", updatedAt: "x" },
+        { ok: true, accept: "npm test", origin: "config", needsReview: false },
+        {},
+        "zh",
+    );
+    assert.doesNotMatch(without, /^setup:/m, "未配置不写 setup 行");
+
+    // 三态之三：非法值 → loadSyncConfig 拒绝且文案可读（空串 / 含换行 / 非字符串）
+    for (const bad of ["", "a\nb", "a\r\nb", 42, null]) {
+        const r = await loadSyncConfig({ raw: JSON.stringify({ github: { repos: ["o/r"], label: "agent" }, defaultSetup: bad }) });
+        assert.equal(r.ok, false, `应拒收 defaultSetup=${JSON.stringify(bad)}`);
+        if (!r.ok) assert.match(r.error, /defaultSetup 非法|Invalid defaultSetup/);
+    }
+    // 合法值放行且 trim
+    const ok = await loadSyncConfig({ raw: JSON.stringify({ github: { repos: ["o/r"], label: "agent" }, defaultSetup: "  pnpm install  " }) });
+    assert.equal(ok.ok, true);
+    if (ok.ok) assert.equal(ok.config.defaultSetup, "pnpm install");
+});
+
 test("全链路：某仓库拉取失败不建票、不影响其余仓库（适配器互相独立）", async () => {
     await withTempBatchDir(async () => {
         await writeConfig(path.dirname(SYNC_CONFIG_PATH()), {

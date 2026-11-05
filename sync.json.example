@@ -2,6 +2,7 @@
   "github": { "repos": ["owner/repo"], "label": "agent" },
   "gitlab": { "baseUrl": "https://gitlab.example.com", "projects": [123], "label": "agent", "tokenEnv": "GITLAB_TOKEN" },
   "defaultAccept": "pnpm test",
+  "defaultSetup": "pnpm install",
   "defaultBudgetYuan": 1.0,
   "maxTicketsPerDay": 5,
   "testPathPatterns": ["(^|/)e2e/", "\\.cy\\.(ts|js)$"]
