@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.65
+
+多入口工单流水线全量上车（issue → 修复 → 验收 → PR；与 VSCode 端 1.0.75 同批 core，流水线代码由 CLI 包承载）：
+
+- **P1 `batch sync`（拉单）**：打了准入 label 的 GitHub/GitLab issue 自动拉成本地挂机工单。零 LLM 轻模块（不配 API key 也能同步/体检）：三态去重 sync-state.jsonl + 规则闸（作者白名单/屏蔽关键词/正文超长/同标题重复）+ accept 四档（本地配置 > issue 的 accept 块默认完全忽略、显式开启也只收单命令+强制人工复核 > 自动探测 package.json/Makefile/go.mod > 拒建票）+ **基线三态**（agent 开跑前干净树先跑验收：环境装不上=setup-failed 不缓存、基线红=baseline-broken 当日缓存、超时=疑似 watch 单列——**基线红的仓库零 agent 花费**）+ GitHub 附件链三态（内联/落盘+绝对路径/标未读取，含图强制 needs-review）+ 总量硬闸（`batch run --max-total-yuan` 停在票前；sync.json `maxTicketsPerDay`）+ `.sync.lock` 单飞 + `--check` 逐项体检 + `--dry-run` 预演 + 注入边界双层（issue 正文引用块 + batch 会话 system「数据非指令」段）+ 仓库一致性标注（fork 工作流任一 remote 匹配不误报）。README 双语三平台（cron/launchd/任务计划）双时钟定时示例 + sync.json.example。
+- **P2 `batch pr`（交付）与续修链**：验收通过的票经显式命令交付为**草稿 PR**——预检（报告+passed → needs-review 闸无豁免 → 幂等标记 `done/<id>.pr.json`）→ 产物分支重建审查 worktree → 强制 fetch 主干 + 落后/merge-tree 冲突预检（首版**不自动 rebase**：拒付+手工命令+打标）→ diff 预览 → push `agent/<票id>` → GitHub `gh pr create --draft`（fixes #N）/ GitLab Draft MR（Closes #iid）；**PR 正文四要素脱敏**（标题/状态与成本/改动文件清单/花费——diff 与验收输出永不外发）。**改测试即降级**：测试路径启发式（`tests?/`、`__tests__/`、`*.test.*`、`*.spec.*`）+ sync.json `testPathPatterns` 可扩展 → needs-review → 拒交付。**续修链**：指纹 v2=标题+正文+近 5 条评论 (id,updatedAt)，issue 变化 → 续修票（continues 前票、继承 accept/setup/budget、以前次产物分支为代码基座；旧状态首见迁移 v2 无升级洪水）。**账本**：`batch/ledger.jsonl` 每 run 追加，`batch status` 汇总近 7 天 + 队列实况。**GitLab 补齐**：附件链与仓库一致性标注。`batch clean` 同步回收附件目录（孤儿 10 分钟宽限防误删在途 sync）。
+- **随带**：batch worktree 收尾 commit 快照（改动固化为 dsc-wt-* 分支 commit，跨重启不丢——原「保留待处置」只活到下次进程启动）；sync 票 id 统一按注入时钟预生成（修双源排序随 CI 时区漂移翻车）。
+- **真仓实证**：issue #2（¥0.38，26 轮，修复经人工 cherry-pick 采纳关单）与 issue #3 → 草稿 PR #4（¥0.028，4 轮，batch pr 全流程含四要素脱敏/幂等标记）两单全链路闭环。
+
 ## 1.0.60
 
 随 core 重打包（2026-10-22）：携带 Agent 内核打磨 A/B 两批（与 VSCode 端 1.0.70 同源）——runLedger 成本账本收拢（runAgent 六个跨轮账目状态 + 子 run 成本中继收拢为每 run 一实例的闭包模块，纯结构收拢零控制流变化，runAgent 净瘦身 62 行；预算硬线 1.2× 单点化为 BUDGET_HARD_LIMIT_RATIO；结算单金额/usage.jsonl 行/预算截断文案经回放驱动对照与改前逐字节同形）+ 成功路径 [DSC-DIAG] 日志治理（streamInference 每轮统计行与 trace 事件全量重复，长会话纯刷屏，删除；错误路径保留并改写为「❌ 推理失败（round N）」风格，run 死因 stdout 可观测性不丢）。**CLI 自身代码无改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：长会话不再每轮刷诊断统计行，失败时 stdout 直显死因）。

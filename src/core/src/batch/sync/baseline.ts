@@ -2,7 +2,7 @@
  * @file batch/sync/baseline.ts
  * @description 多入口工单流水线 P1-M4：基线三态校验的缓存与归类（§5.2.1）——纯逻辑，零 LLM、零执行。
  *
- *  ★ 三态分离：setup-broken（环境装不上，瞬态，不缓存——重试可能就好）与 baseline-broken
+ *  ★ 三态分离：setup-failed（环境装不上，瞬态，不缓存——重试可能就好；票终态字面值见 batchRunner/batchStrings）与 baseline-broken
  *  （干净树上验收就红，当天再票也不必再花安装+测试的时间，缓存）分开报。
  *  ★ 缓存键 = sha256(仓库根|HEAD SHA|accept 命令)：命令或代码一变即失效，不会拿旧结论盖新代码。
  *  ★ 缓存只存探测结论（ok / baseline-broken / watch-suspect），当天有效（本地日历日），写时顺手清旧。

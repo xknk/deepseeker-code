@@ -142,6 +142,14 @@ schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
 
 > 要让机器到点自动唤醒跑夜间窗口：任务计划程序 → 该任务 → 属性 → 条件 → 勾选**「唤醒计算机运行此任务」**。「只在用户登录时运行」保持默认即可；`batch run` 需要与你普通 shell 相同的环境变量（API key）。
 
+### 交付与 PR（`batch pr`）、账本（`batch status`）与续修
+
+- **`deepseeker-code batch pr <票id>`**——交付一张验收通过的票。从产物分支重建审查 worktree，核对最新主干（强制 `git fetch` + 落后/冲突预检），把分支推为 `agent/<票id>` 并开**草稿** PR（GitHub：`gh pr create --draft` 带 `fixes #N`；GitLab：Draft MR 带 `Closes #iid`）。显式命令 = 显式审批，任何东西都不会被自动外发。拒绝交付的情形：票未通过验收、带 `needs-review` 标记（改过测试 / 含图附件 / 仓库不一致——无豁免）、已交付过（幂等标记 `done/<id>.pr.json`）、落后主干（首版**不自动 rebase**——打印手工 rebase 命令并给票打标）、存在合并冲突。
+- **`deepseeker-code batch status`**——汇总最近 7 天的追加式账本（`.deepseeker-code/batch/ledger.jsonl`，每 run 一行：票数 / 通过 / 失败 / 花费）与当前队列实况。
+- **续修链**——同步过的 issue 在票跑完后又变了（新评论、重开、正文编辑），下一次 `batch sync` 会生成续修票（`continues: <前票id>`）：继承前票的 accept/setup/budget，并以前次产物分支为代码基座检出（不从 main 重做）。票内嵌前次报告摘要，外部内容仍以引用块当数据。指纹 v2 覆盖标题 + 正文 + 最近 5 条评论；P1 时代的旧状态首见自动迁移到 v2、不生成续修票（无升级洪水）。
+- **`testPathPatterns`**（sync.json，可选）——在内置测试路径启发式（`tests?/`、`__tests__/`、`*.test.*`、`*.spec.*`）之上追加自定义正则；验收通过但改过测试路径的票会被标 `needs-review`，`batch pr` 拒绝交付。
+- **代理**：`batch pr` 的 push 走你的**本地 git 配置**。网络需要代理访问远端时自行配置，如 `git config http.proxy http://127.0.0.1:7897`（或 `https.proxy`）——工具绝不默认往命令里拼代理参数。
+
 ---
 
 ## 架构（Monorepo）
