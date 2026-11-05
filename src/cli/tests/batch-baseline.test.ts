@@ -85,6 +85,8 @@ test("报告：changed-file 清单固化进 frontmatter（改动清单交接，2
         deniedTools: [] as { tool: string; detail: string }[], diff: "（无）", wt: null,
         accept: { cmd: "npm test", code: 0, output: "ok", timedOut: false },
     };
+    // numstat 调用带 core.quotepath=false：中文等非 ASCII 路径不转 \344 八进制串（清单要人可读）
+    assert.match(RUNNER_SRC, /gitSimple\(\["-c", "core\.quotepath=false", "diff", "--cached", "--numstat"/, "numstat 采集必须剥 quotepath 转义");
     // numstat 原始输出 → 行：普通 / 二进制 / 改名（git 原样）
     assert.deepEqual(
         numstatToChangedFiles(["12\t3\tsrc/a.ts", "-\t-\tbin.dat", "1\t0\tsrc/{old => new}.ts"].join("\n")),

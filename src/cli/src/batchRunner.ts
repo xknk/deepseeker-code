@@ -674,7 +674,8 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     const touched = await touchedTestFiles(wt.path, wt.baseSha); // §9.8：报告列触碰的测试文件（P1 信息标注）
     // 改动清单采集（2026-11-05 打磨第一批）：收尾提交已入索引，diff --cached 对 baseSha 仍见全量
     // （与 touchedTestFiles 同位置同口径）；固化进报告 frontmatter changed-file:，续修票免重新探索。
-    const changedNumstat = await gitSimple(["diff", "--cached", "--numstat", wt.baseSha], wt.path);
+    // core.quotepath=false：中文等非 ASCII 路径不被 git 转成 \344\270\255 八进制转义串（清单要人可读）。
+    const changedNumstat = await gitSimple(["-c", "core.quotepath=false", "diff", "--cached", "--numstat", wt.baseSha], wt.path);
     const changedFiles = changedNumstat ? numstatToChangedFiles(changedNumstat) : undefined;
     // §9-8 P2 动作半边（长牙齿）：验收通过但触碰了测试路径 → 票标 needs-review（报告 fm + 票档
     // 双写）——`batch pr` 见标记一律拒绝。报告侧由 ticket.needsReview 渲染 fm，票档在 finishTicket

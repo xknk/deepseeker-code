@@ -294,7 +294,8 @@ export const runBatchPr = async (ticketId: string, opts: BatchPrOptions = {}): P
         }
 
         // 11. diff 预览（人过目的清单：文件级 + 规模行；diff 内容只进报告存档，不外发）
-        const nst = await g(["diff", "--name-status", `${mergeBase}..${branch}`]);
+        //     core.quotepath=false：中文等非 ASCII 路径保持原样，不转 \344\270\255 八进制串进 PR 正文。
+        const nst = await g(["-c", "core.quotepath=false", "diff", "--name-status", `${mergeBase}..${branch}`]);
         const shortstat = await g(["diff", "--shortstat", `${mergeBase}..${branch}`]);
         const files = nst.code === 0 ? nst.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
         out(M("reviewHeader", files.length));

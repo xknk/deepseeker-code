@@ -93,12 +93,14 @@ const setupSandbox = async () => {
     return { root, remotePath, workPath, git };
 };
 
-/** 产物分支：从 main 分叉并提交两文件（含 shared.txt 供冲突场景改写）。 */
+/** 产物分支：从 main 分叉并提交三文件（含 shared.txt 供冲突场景改写；中文文件名钉 quotepath 链路）。 */
 const makeArtifactBranch = async (workPath: string, git: (dir: string, args: string[]) => Promise<string>): Promise<void> => {
     await git(workPath, ["checkout", "-b", BRANCH]);
     await fs.writeFile(path.join(workPath, "src-feature.ts"), "export const x = 1;\n", "utf-8");
     await fs.writeFile(path.join(workPath, "shared.txt"), "from branch\n", "utf-8");
-    await git(workPath, ["add", "src-feature.ts", "shared.txt"]);
+    await fs.mkdir(path.join(workPath, "docs"), { recursive: true });
+    await fs.writeFile(path.join(workPath, "docs", "接口文档.md"), "# 接口\n", "utf-8");
+    await git(workPath, ["add", "src-feature.ts", "shared.txt", "docs/接口文档.md"]);
     await git(workPath, ["commit", "-m", "fix: feature"]);
     await git(workPath, ["checkout", "main"]);
 };
@@ -148,6 +150,8 @@ test("batch pr happy path：全流程交付（幂等标记 + PR 正文四要素 
         assert.match(st.ghBody, /Cost: 0\.42 CNY/);
         assert.match(st.ghBody, /- `src-feature\.ts`/, "正文清单是纯路径（状态列已剥）");
         assert.match(st.ghBody, /- `shared\.txt`/);
+        assert.match(st.ghBody, /- `docs\/接口文档\.md`/, "中文路径原样进正文（core.quotepath=false，不转 \\344 八进制串）");
+        assert.doesNotMatch(st.ghBody, /\\3[0-7]\d/, "正文无八进制转义串（quotepath 缺省时中文路径会变成天书）");
         assert.doesNotMatch(st.ghBody, /`[MAD]\t|^[A-D]\t/m, "状态字母不进正文（试点 PR #4 实证 M\\t 漏进正文，已剥）");
         assert.match(st.ghBody, /fixes #42\s*$/);
         assert.doesNotMatch(st.ghBody, /验收输出|npm test 全部通过/, "验收输出永不外发");
