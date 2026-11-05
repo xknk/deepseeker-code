@@ -149,8 +149,8 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
         return;
     }
     if (b.sub === "clean") {
-        const n = await cleanDone();
-        emit(T.cleaned(n));
+        const r = await cleanDone();
+        emit(T.cleaned(r.tasks, r.attachments));
         return;
     }
 };

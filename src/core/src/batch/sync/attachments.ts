@@ -17,7 +17,7 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import { spawn } from "child_process";
-import { batchQueueRoot } from "../queue.ts";
+import { attachmentsRoot } from "../queue.ts";
 import { quoteLines } from "./boundary.ts";
 import type { SyncLocale } from "./config.ts";
 
@@ -173,7 +173,7 @@ const kindLabel = (kind: Kind, locale: SyncLocale): string => {
     return ((locale === "en" ? en : zh) as Record<string, string>)[kind] ?? kind;
 };
 
-export const attachmentDir = (ticketId: string): string => path.join(batchQueueRoot(), "attachments", ticketId);
+export const attachmentDir = (ticketId: string): string => path.join(attachmentsRoot(), ticketId);
 
 /**
  * 处理一个 issue 的全部附件（下载 + 判型 + 三态标注）。单附件失败只影响该附件（标未读取），

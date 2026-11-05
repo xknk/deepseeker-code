@@ -7,6 +7,8 @@
  *  - 幂等：工单按 pending → running → done 一路搬家；runner 崩溃残留 running/ 的工单，
  *    下次 run 启动时重排队（requeueStaleRunning）——配合 worktree 启动期 sweep 兜底，重跑不丢任务。
  *  - 并发闸：.lock 文件（O_EXCL）防两个 runner 同时跑（挂机第一版并发=0）；持有者 pid 死亡时可被接管。
+ *  - 清理：clean 清 done/ 时同步回收附件目录（<batch>/attachments/<票id>，M5 附件链）——
+ *    本次清掉的票直接删，其余无票可依的孤儿按宽限期删（防误删在途 sync 的下载目录）。
  *  - 目录覆盖可用 env DEEPSEEKER_CODE_BATCH_DIR 重定向（测试/诊断用），调用时实时读（不冻结）。
  */
 import fs from "fs/promises";
@@ -130,15 +132,67 @@ export const finishTicket = async (id: string, reportMd: string): Promise<void> 
     }
 };
 
-/** 清空 done/（batch clean）：返回删除文件数。 */
-export const cleanDone = async (): Promise<number> => {
+/** 附件落盘根目录（M5 附件链：<batch>/attachments/<票id>/）。 */
+export const attachmentsRoot = (): string => path.join(batchQueueRoot(), "attachments");
+
+/**
+ * 附件目录孤儿宽限期：sync 是「先落盘附件、后入队建票」，两件事之间有下载窗口。
+ * 太新的「无票目录」可能属于一次在途 sync（clean 与 sync 可以同时跑），10 分钟内不动它——
+ * 宁可晚清一次，不误删在途附件。超过宽限期的无票目录才算真孤儿。
+ */
+export const ORPHAN_GRACE_MS = 10 * 60 * 1000;
+
+/** batch clean 结果：清掉的任务存档数 + 附件目录数。 */
+export interface CleanResult {
+    tasks: number;
+    attachments: number;
+}
+
+/**
+ * 回收附件目录（batch clean 的附件半边）：目录名即票 id，凡票已不在 pending/running 的，
+ *  - 属于本次刚清掉的 done 票 → 直接删（存档都没了，附件留着就是孤儿）；
+ *  - 完全无票可依的真孤儿 → 仅在目录 mtime 早于宽限期时删（见 ORPHAN_GRACE_MS）。
+ * 异常一律吞：清理失败不能击垮 clean 命令。
+ * @param clearedDoneIds 本次 clean 刚清掉的 done 票 id（免除宽限期判定）。
+ */
+export const cleanOrphanAttachments = async (clearedDoneIds: Iterable<string> = []): Promise<number> => {
+    const root = attachmentsRoot();
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null);
+    if (!entries) return 0; // 无附件根 = 没跑过带附件 sync（正常态）
+
+    const active = new Set<string>();
+    for (const s of ["pending", "running", "done"] as BatchState[]) {
+        for (const f of await listState(s)) active.add(f.replace(/\.md$/, ""));
+    }
+    const cleared = new Set(clearedDoneIds);
+    const now = Date.now();
+    let removed = 0;
+    for (const e of entries) {
+        if (!e.isDirectory() || active.has(e.name)) continue; // 队列里还有票 = 不动（含附件目录同名的保护段语义）
+        const abs = path.join(root, e.name);
+        if (!cleared.has(e.name)) {
+            const st = await fs.stat(abs).catch(() => null);
+            if (!st || now - st.mtimeMs < ORPHAN_GRACE_MS) continue; // 可能是在途 sync 刚建的
+        }
+        const ok = await fs.rm(abs, { recursive: true, force: true }).then(() => true, () => false);
+        if (ok) removed++;
+    }
+    return removed;
+};
+
+/**
+ * 清空 done/ 并回收附件目录（batch clean）：返回存档数与附件目录数。
+ * pending/running 的票及其附件一律不动。
+ */
+export const cleanDone = async (): Promise<CleanResult> => {
     const files = await listState("done");
     for (const f of (await fs.readdir(stateDir("done")).catch(() => [] as string[]))) {
         if (f.endsWith(".md") || f.endsWith(".report.md")) {
             await fs.rm(path.join(stateDir("done"), f), { force: true }).catch(() => { });
         }
     }
-    return files.length;
+    const attachments = await cleanOrphanAttachments(files.map((f) => f.replace(/\.md$/, "")));
+    return { tasks: files.length, attachments };
 };
 
 // ============ 运行锁（并发=0 红线：同一项目同时只允许一个 runner） ============

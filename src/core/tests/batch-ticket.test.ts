@@ -2,7 +2,8 @@
  * @file tests/batch-ticket.test.ts
  * @description 挂机批处理工单解析（batch/ticket.ts）与队列操作（batch/queue.ts，成本信任链第四环 F1）守门测试：
  *  frontmatter 解析 / accept 必填（缺验收拒绝入队红线）/ 数字字段校验 / tools 清单归一 / title 回退 /
- *  三态目录流转（pending→running→done）/ 崩溃残留重排队 / 运行锁互斥与死锁接管。
+ *  三态目录流转（pending→running→done）/ 崩溃残留重排队 / 运行锁互斥与死锁接管 /
+ *  clean 清 done 时回收附件目录（pending/running 保留、真孤儿按宽限期清）。
  *  队列目录经 DEEPSEEKER_CODE_BATCH_DIR 重定向到临时目录（batchQueueRoot 调用时实时读 env，非冻结）。
  */
 import { test } from "node:test";
@@ -133,8 +134,58 @@ test("队列三态流转：入队→取走→收尾；崩溃残留 running 重�
         assert.equal(await queue.readReport(enq.id), `---\nid: ${enq.id}\nstatus: passed\n---\n报告正文`);
 
         // clean：清 done
-        assert.equal(await queue.cleanDone(), 1);
+        const cleaned = await queue.cleanDone();
+        assert.equal(cleaned.tasks, 1);
+        assert.equal(cleaned.attachments, 0);
         assert.equal((await queue.snapshotQueue()).done.length, 0);
+    } finally {
+        delete process.env.DEEPSEEKER_CODE_BATCH_DIR;
+        await fs.rm(dir, { recursive: true, force: true });
+    }
+});
+
+test("clean：清 done 时回收附件目录（pending/running 保留；真孤儿按宽限期清）", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-batch-clean-att-"));
+    process.env.DEEPSEEKER_CODE_BATCH_DIR = dir;
+    try {
+        // 三态各一张票（queue 只按文件名认票，直接落文件即可）
+        const doneId = "20260101-000000-aaaa";
+        const pendingId = "20260101-000000-bbbb";
+        const runningId = "20260101-000000-cccc";
+        for (const [state, id] of [["done", doneId], ["pending", pendingId], ["running", runningId]] as const) {
+            await fs.mkdir(path.join(dir, state), { recursive: true });
+            await fs.writeFile(path.join(dir, state, `${id}.md`), "---\naccept: t\n---\n正文", "utf-8");
+        }
+        await fs.writeFile(path.join(dir, "done", `${doneId}.report.md`), "报告", "utf-8");
+
+        // 附件目录：done 票 / pending 票 / running 票 / 老孤儿 / 新孤儿（可能是在途 sync 刚建的）
+        const mkAtt = async (id: string, ageMs = 0): Promise<string> => {
+            const d = path.join(dir, "attachments", id);
+            await fs.mkdir(d, { recursive: true });
+            await fs.writeFile(path.join(d, "a.txt"), "x", "utf-8");
+            if (ageMs > 0) {
+                const t = new Date(Date.now() - ageMs);
+                await fs.utimes(d, t, t); // 目录 mtime 回拨（写文件会把 mtime 顶成现在）
+            }
+            return d;
+        };
+        const exists = async (p: string): Promise<boolean> => fs.stat(p).then(() => true, () => false);
+        const dDone = await mkAtt(doneId);
+        const dPending = await mkAtt(pendingId);
+        const dRunning = await mkAtt(runningId);
+        const dOldOrphan = await mkAtt("20260101-000000-dddd", 2 * 60 * 60 * 1000);
+        const dFreshOrphan = await mkAtt("20260101-000000-eeee");
+
+        const r = await queue.cleanDone();
+        assert.equal(r.tasks, 1, "done/ 的工单存档被清掉");
+        assert.equal(r.attachments, 2, "done 票的附件 + 老孤儿被清掉");
+        assert.equal(await exists(dDone), false, "刚清掉的 done 票附件应删除");
+        assert.equal(await exists(dOldOrphan), false, "超宽限期的无票孤儿应删除");
+        assert.equal(await exists(dPending), true, "pending 票附件不得动");
+        assert.equal(await exists(dRunning), true, "running 票附件不得动");
+        assert.equal(await exists(dFreshOrphan), true, "新目录可能是 inflight sync 的，宽限期内保留");
+        assert.equal((await queue.snapshotQueue()).pending.length, 1);
+        assert.equal((await queue.snapshotQueue()).running.length, 1);
     } finally {
         delete process.env.DEEPSEEKER_CODE_BATCH_DIR;
         await fs.rm(dir, { recursive: true, force: true });

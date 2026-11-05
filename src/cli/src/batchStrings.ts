@@ -20,7 +20,7 @@ const ZH = {
   list                             查看 pending / running / done 三态队列
   run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
                                    执行队列（串行，逐任务出报告；--wait-window 到点再开跑；--max-total-yuan 本批总花费上限，超限停在下一票之前）
-  clean                            清空 done/（已读过的报告与工单存档）
+  clean                            清空 done/（已读过的报告与工单存档），并回收对应/孤儿附件目录（attachments/）
 
 工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
   ---
@@ -60,7 +60,7 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     listRunningHead: "▶ 运行中：",
     listPendingHead: (n: number) => `⏳ 待跑 ${n}：`,
     listDoneHead: (n: number) => `✔ 已完成 ${n}：`,
-    cleaned: (n: number) => `🧹 已清空 done/（${n} 个任务存档）。pending/running 不受影响。`,
+    cleaned: (n: number, attachments: number) => `🧹 已清空 done/（${n} 个任务存档，${attachments} 个附件目录）。pending/running 不受影响。`,
     reportMissing: "（报告缺失）",
 
     // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
@@ -181,7 +181,7 @@ Usage: deepseeker-code batch <subcommand>
   list                               Show the pending / running / done queue
   run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
                                      Run the queue (serial, one report per task; --wait-window waits for the window; --max-total-yuan caps total batch spend, stops before the next ticket)
-  clean                              Clear done/ (reports and ticket archives you've read)
+  clean                              Clear done/ (reports and ticket archives you've read) and reclaim matching/orphan attachment dirs (attachments/)
 
 Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, no enqueue):
 ---
@@ -222,7 +222,7 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     listRunningHead: "▶ Running:",
     listPendingHead: (n) => `⏳ Pending ${n}:`,
     listDoneHead: (n) => `✔ Done ${n}:`,
-    cleaned: (n) => `🧹 Cleared done/ (${n} task archives). pending/running untouched.`,
+    cleaned: (n, attachments) => `🧹 Cleared done/ (${n} task archives, ${attachments} attachment dirs). pending/running untouched.`,
     reportMissing: "(report missing)",
 
     syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
