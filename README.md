@@ -172,6 +172,38 @@ curl -s -X POST http://127.0.0.1:3000/hooks/ci-alert -H "Authorization: Bearer $
 - **Delivery**: `batch pr` only accepts tickets sourced from GitHub/GitLab — webhook tickets are pushed **manually** after acceptance passes (`batch pr` refuses and says so).
 - Zero-protocol fallback: dropping ticket files into `.deepseeker-code/batch/pending/` by hand (format in `batch add` help) still works — no serve, no token needed.
 
+### Feishu entry (L2, advanced: ticket from a phone message + card approvals)
+
+With no computer around, just @-mention the bot in Feishu with "fix the login page date parsing" and a ticket is created; when a batch run hits a risky operation (e.g. `run_command`), an approval card is pushed to your direct chat — **tap "Approve" on your phone to allow it** (30 minutes with no tap = auto-deny, fail-closed). It runs as a resident long connection via `batch listen feishu`, configured in a separate `feishu.json` (**sync.json untouched** — the old global CLI's timer still reads it). Step by step:
+
+```bash
+# 1) Create a custom enterprise app: https://open.feishu.cn/app → create, get App ID / App Secret
+# 2) Set user-level env vars; credentials live only in env vars, never in files
+setx FEISHU_APP_ID "cli_xxx" & setx FEISHU_APP_SECRET "your-secret"
+
+# 3) Grant minimal permissions: "read & send direct/group messages" (im:message)
+#    + "read messages users send to the bot in direct chat" + image/file resource upload/download;
+#    subscription mode = 【long connection】 (no public callback URL needed)
+# 4) Event subscriptions: add im.message.receive_v1 (messages); card callback v4.0: enable your own cards (card.action.trigger)
+# 5) Publish an app version (nothing arrives before publishing); add the bot to the target group
+# 6) Install the SDK globally (optional dependency — not bundled, not in the vsix)
+npm install -g @larksuiteoapi/node-sdk
+
+# 7) Whitelist config: copy feishu.json.example from the repo root to <project>/.deepseeker-code/batch/feishu.json,
+#    fill chats (group chat_ids) and users (your open_id). Group messages need @bot by default;
+#    budget is forced to min(budgetYuan, sync.defaultBudgetYuan), IM tickets default to a small 0.5 yuan cap
+# 8) Start the resident listener (a schtasks auto-start entry is recommended)
+deepseeker-code batch listen feishu
+```
+
+- **⚠️ Single-client limit (hard constraint)**: multiple long connections on one app **do not broadcast** — messages reach only one random connection. Only **one** `batch listen feishu` process is allowed system-wide; a second start detects the fresh heartbeat and refuses with the running pid.
+- **Whitelist gate**: group messages must have chat_id ∈ `chats` and @bot (`mentionOnlyInGroup`, default true); direct messages must be from an open_id ∈ `users`. Out-of-list messages are always rejected (reason logged — fix the config and resend). `users` doubles as the **card-approver whitelist** — taps from anyone else have no effect.
+- **Same ticket pipeline**: identical to sync/webhook — content-hash dedup (resending the same text = duplicate), four-tier accept gate (an IM ticket cannot be created without a configured `defaultAccept` — never guessing), `maxTicketsPerDay` cap, three-state attachments (images/files land via the bot resource API, never silent), quote-block data boundary. A bare image/file message with no one-line description is rejected (no guessing).
+- **Card approvals**: the runner only enters the card wait when the listener is alive (90s fresh heartbeat + non-empty `users`); with the listener absent it keeps the current behavior (auto-deny + record — zero behavior change). Approval = **allow-once**, single use, never widens the tool allowlist; cards never contain diffs or acceptance output.
+- **Reconcile fallback**: events during a disconnection window are not replayed by the platform — the listener keeps a time cursor (`feishu-cursor.json`) and periodically pulls incremental messages to backfill missed tickets (seen ones dedupe idempotently). Without the history-read permission it degrades to a visible notice (telling you how to recover), while live messaging keeps working. Logs go to `.deepseeker-code/batch/feishu-listen.log`.
+- **Optional LLM gatekeeper** (`feishu.json` `gatekeeper: true`): each message first gets one LLM verdict (work/reject) before the rule gate (needs `DEEP_SEEK_API_KEY`; a failed verdict passes through with a logged warning). Off by default.
+- **Health check**: the listener should run resident with the machine; check the process with `tasklist /FI "IMAGENAME eq node.exe"` and the log tail for liveness (a heartbeat every 30s plus periodic reconcile lines).
+
 ---
 
 ## Architecture (monorepo)

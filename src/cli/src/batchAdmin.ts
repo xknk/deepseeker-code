@@ -22,6 +22,7 @@ export type BatchArgv =
     | { sub: "status"; extraArg?: string }
     | { sub: "list" }
     | { sub: "clean" }
+    | { sub: "listen"; target?: string }
     | { sub: "help" };
 
 /** 输出助手：直接写 stdout（main 的 console 静默不影响；headless 下 Ink 未启动无光标追踪问题）。 */
@@ -97,6 +98,12 @@ export const parseBatchArgv = (argv: string[]): BatchArgv | null => {
     }
     if (sub === "list") return { sub: "list" };
     if (sub === "clean") return { sub: "clean" };
+    if (sub === "listen") {
+        // ★ P4 飞书监听（§1/§2）：目标必填且只认 feishu；多余参数 fail-closed（target 置空打用法）。
+        const rest = argv.slice(2);
+        if (rest.length !== 1 || rest[0].startsWith("-")) return { sub: "listen", target: undefined };
+        return { sub: "listen", target: rest[0] };
+    }
     return { sub: "help" };
 };
 
@@ -134,6 +141,26 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
             emit(`🚫 ${r.error}`);
             process.exitCode = 1;
         }
+        return;
+    }
+    if (b.sub === "listen") {
+        // ★ 多入口流水线 P4（§1/§2）：常驻飞书监听。轻模块链（core batch/feishu 零静态 SDK/LLM import，
+        //   SDK 走变量 specifier 动态加载）→ 与 add/list/clean 同级 pre-key 派发成立。
+        //   缺 env / 缺 feishu.json / 缺 SDK 的三句人话退出都在 runFeishuListen 内（exit code 1）。
+        if (!b.target) {
+            emit(T.listenUsage);
+            process.exitCode = 2;
+            return;
+        }
+        if (b.target !== "feishu") {
+            emit(T.listenBadTarget(b.target));
+            emit(T.listenUsage);
+            process.exitCode = 2;
+            return;
+        }
+        const { runFeishuListen } = await import("@/batch/feishu/listen.ts");
+        const r = await runFeishuListen({ locale: getLocale() });
+        if (r.code !== 0) process.exitCode = r.code;
         return;
     }
     if (b.sub === "pr") {

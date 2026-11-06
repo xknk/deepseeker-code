@@ -1,0 +1,7 @@
+{
+  "chats": ["oc_xxxxxxxxxxxxxxxxxxxxxxxx"],
+  "users": ["ou_xxxxxxxxxxxxxxxxxxxxxxxx"],
+  "mentionOnlyInGroup": true,
+  "budgetYuan": 0.5,
+  "gatekeeper": false
+}

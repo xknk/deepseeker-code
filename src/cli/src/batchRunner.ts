@@ -35,6 +35,7 @@ import { continuationBaseBranch, doneTicketPath } from "@/batch/continuation.ts"
 import { appendLedgerEntry } from "@/batch/ledger.ts";
 import { compileTestPatterns, isTestPath } from "@/batch/sync/testpaths.ts";
 import { loadSyncConfig } from "@/batch/sync/config.ts";
+import { requestCardApproval } from "@/batch/feishu/approval.ts"; // P4 卡片审批（轻模块：纯 fs 协议零 SDK/LLM）
 import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
@@ -517,6 +518,30 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
             },
         }) : null;
         wd?.start();
+        // ★ P4 飞书卡片审批叠加（§5）：白名单外的高危审批先试卡片路径——listen 存活（心跳保鲜 +
+        //   canApprove）才落 pending 等点卡（30min 超时 = deny，fail-closed）；不存活 → 立即 deny +
+        //   记录（现状路径，零输出零回归）。等待期挂看门狗 PAUSED（同 setup 语义：卡片等待最长
+        //   30min 无事件，R3 断流判定会误杀）。批准 = allow-once 单次生效，不改 allowApproval 白名单。
+        const requestApprovalWithCard = async (detail: string, meta: { toolName: string }): Promise<"allow-once" | "deny"> => {
+            if (allowApproval.has(meta.toolName)) return "allow-once";
+            wd?.setPaused(true);
+            let card: "allow-once" | "deny";
+            try {
+                card = await requestCardApproval({
+                    tool: meta.toolName,
+                    detail,
+                    ticketId: task.id,
+                    ticketTitle: t.title,
+                    locale: getLocale(),
+                    out: (l) => emit(`📮 [${task.id}] ${l}`),
+                });
+            } finally {
+                wd?.setPaused(false);
+            }
+            if (card === "allow-once") return "allow-once";
+            deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
+            return "deny";
+        };
         wd?.setPaused(true); // setup 命令执行期挂 PAUSED 豁免判定（事件流静默不算断流）
 
         // ★ 环境 setup（可选，2026-10-16 首跑教训）：worktree 是干净检出（无 node_modules 等），验收命令
@@ -565,11 +590,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                     },
                     wakeAc.signal,
                     {
-                        requestApproval: async (detail, meta) => {
-                            if (allowApproval.has(meta.toolName)) return "allow-once";
-                            deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
-                            return "deny";
-                        },
+                        requestApproval: requestApprovalWithCard, // 唤醒续跑同款：wd 已 stop，setPaused 为无害空转
                         onUIEvent: (evt: UIEvent) => {
                             if (evt.type === "run.receipt") receipt = evt;
                         },
@@ -596,11 +617,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                 },
                 roundAc.signal,
                 {
-                    requestApproval: async (detail, meta) => {
-                        if (allowApproval.has(meta.toolName)) return "allow-once";
-                        deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
-                        return "deny";
-                    },
+                    requestApproval: requestApprovalWithCard,
                     onUIEvent: (evt: UIEvent) => {
                         if (evt.type === "run.receipt") receipt = evt;
                     },

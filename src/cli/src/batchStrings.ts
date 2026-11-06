@@ -23,6 +23,7 @@ const ZH = {
   pr <票id>                        交付已验收通过的票（重建审查 worktree → push agent/<票id> → 建 Draft PR/MR；落后主干或 needs-review 票一律拒绝；push 走本地 git 配置，代理见 README）
   status                           汇总最近 7 天挂机账本（run 数/票数/花费）与队列现状
   clean                            清空 done/（已读过的报告与工单存档），并回收对应/孤儿附件目录（attachments/）
+  listen feishu                    常驻飞书监听（长连接收消息建票 + 卡片审批高危操作；全系统只允许一个进程，配置 .deepseeker-code/batch/feishu.json）
 
 工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
   ---
@@ -68,6 +69,9 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
     syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
     syncBadFlag: (f: string) => `❌ 未知参数："${f}"`,
+    // P4 飞书监听（listen feishu）：编排文案在 core batch/feishu 内；此处只管 CLI 用法
+    listenUsage: "用法：deepseeker-code batch listen feishu\n前置：环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET + 配置 .deepseeker-code/batch/feishu.json + 全局安装 @larksuiteoapi/node-sdk（可选依赖，不随主包装）\n注意：同应用多客户端不广播——全系统只允许一个监听进程（详见 README「飞书入口」节）",
+    listenBadTarget: (t: string) => `❌ 暂只支持 batch listen feishu（收到 "${t}"）`,
     // M6 总量硬闸（§5.2.3）：run 侧解析 fail-closed + 每票开始前检查花费上限
     runUsage: "用法：deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
     runBadFlag: (f: string) => `❌ 未知参数或非法值："${f}"`,
@@ -204,6 +208,7 @@ Usage: deepseeker-code batch <subcommand>
   pr <ticket-id>                     Deliver a passed ticket (rebuild review worktree → push agent/<ticket-id> → open a draft PR/MR; behind-mainline or needs-review tickets are always refused; push uses local git config, proxy per README)
   status                             Summarize the last 7 days of the batch ledger (runs / tickets / cost) and the queue
   clean                              Clear done/ (reports and ticket archives you've read) and reclaim matching/orphan attachment dirs (attachments/)
+  listen feishu                      Resident Feishu listener (long-connection ticket intake + card approval for risky operations; only one process system-wide; config .deepseeker-code/batch/feishu.json)
 
 Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, no enqueue):
 ---
@@ -249,6 +254,9 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
 
     syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
     syncBadFlag: (f) => `❌ Unknown flag: "${f}"`,
+    // P4 Feishu listener (listen feishu): orchestration copy lives in core batch/feishu; this is CLI usage only
+    listenUsage: "Usage: deepseeker-code batch listen feishu\nPrereqs: env vars FEISHU_APP_ID / FEISHU_APP_SECRET + config .deepseeker-code/batch/feishu.json + globally installed @larksuiteoapi/node-sdk (optional dependency, not bundled)\nNote: multiple clients on one app do not broadcast — only one listener process is allowed system-wide (see the README Feishu section)",
+    listenBadTarget: (t) => `❌ Only 'batch listen feishu' is supported (got "${t}")`,
     // M6 total-spend hard cap (§5.2.3): fail-closed run parsing + per-ticket pre-check of the spend cap
     runUsage: "Usage: deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
     runBadFlag: (f) => `❌ Unknown flag or invalid value: "${f}"`,

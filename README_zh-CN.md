@@ -172,6 +172,37 @@ curl -s -X POST http://127.0.0.1:3000/hooks/ci-alert -H "Authorization: Bearer $
 - **交付**：`batch pr` 只认 GitHub/GitLab 来源的票——webhook 票验收通过后走**人工 push**（`batch pr` 会拒绝并说明）。
 - 零协议备选：手工往 `.deepseeker-code/batch/pending/` 放工单文件（格式见 `batch add` 帮助）依旧可用，不需要 serve 与 token。
 
+### 飞书入口（L2 高级：手机上发消息建票 + 卡片点审批）
+
+不想开电脑时，直接在飞书里 @机器人 说一句「修复登录页日期解析」就能建票；跑批遇到高危操作（如 `run_command`）会推一张审批卡到你私聊，**手机上点「批准」才放行**（30 分钟不点 = 自动拒绝，fail-closed）。走 `batch listen feishu` 常驻长连接，配置独立在 `feishu.json`（**不动 sync.json**——旧版全局 CLI 的定时器还共读它）。跟着点：
+
+```bash
+# 1) 建企业自建应用：https://open.feishu.cn/app → 创建企业自建应用，拿到 App ID / App Secret
+# 2) 设环境变量（用户级），密钥只走环境变量，绝不写进文件
+setx FEISHU_APP_ID "cli_xxx" & setx FEISHU_APP_SECRET "你的secret"
+
+# 3) 开权限（最小集）：「获取与发送单聊、群组消息」（im:message）+ 「读取用户发给机器人的单聊消息」
+#    + 「上传/下载图片或文件资源」；订阅方式选【长连接】（无需公网回调地址）
+# 4) 事件订阅：添加 im.message.receive_v1（收消息）；卡片回调 v4.0：启用自己的卡片并回调（card.action.trigger）
+# 5) 发布应用版本（不发布收不到任何事件）；把机器人拉进目标群
+# 6) 全局装 SDK（可选依赖，不随主包装、不进 vsix）
+npm install -g @larksuiteoapi/node-sdk
+
+# 7) 配置白名单：复制仓库根 feishu.json.example 到 <项目>/.deepseeker-code/batch/feishu.json，
+#    填 chats（群 chat_id）与 users（你的 open_id）。群白名单默认仅 @机器人 出票；
+#    预算强制取 min(budgetYuan, sync.defaultBudgetYuan)，IM 票默认小额 0.5 元
+# 8) 启动常驻监听（建议再配一条 schtasks 开机自启）
+deepseeker-code batch listen feishu
+```
+
+- **⚠️ 单客户端限制（硬约束）**：同一应用多条长连接**不广播**——消息只会随机送达一个连接。全系统只允许**一个** `batch listen feishu` 进程；启动时检测到心跳新鲜会拒绝二开并提示 pid。
+- **白名单闸**：群消息须 chat_id ∈ `chats` 且 @机器人（`mentionOnlyInGroup`，默认 true）；私聊须发送者 open_id ∈ `users`。名单外消息一律拒收（原因留日志，改好配置重发即可）。`users` 同时是**审批点卡人白名单**——不在名单的人点卡片不会生效。
+- **建票同闸**：与 sync/webhook 完全同一管线——内容哈希去重（同内容重发 = duplicate）、accept 四档同闸（IM 票没配 `defaultAccept` 就建不了票，宁可不猜）、`maxTicketsPerDay` 日上限、附件三态（图片/文件经机器人资源 API 落盘，绝不静默）、引用块数据边界。纯图片/文件消息没有一句话说明会被拒（不猜任务）。
+- **卡片审批**：runner 检测到监听存活（90s 心跳保鲜 + `users` 非空）才走卡片等待；监听不在 = 维持现状自动拒绝 + 记录（零行为变化）。批准 = **allow-once 单次生效**，不改工具白名单；卡片内容不含 diff 与验收输出。
+- **对账兜底**：长连接断线窗口内的事件平台不补推——监听维护时间游标（`feishu-cursor.json`）周期增量拉消息补漏票（已见过的幂等跳过）。缺「读历史消息」权限时降级为明示提示（教你怎么补票），不影响实时收消息。日志落 `.deepseeker-code/batch/feishu-listen.log`。
+- **可选 LLM 把关**（`feishu.json` 的 `gatekeeper: true`）：每条消息先经一次 LLM 判定 work/reject 再过规则闸（需 `DEEP_SEEK_API_KEY`；判定失败按放行处理并留日志）。默认关。
+- **停机检查**：监听进程应随机器常驻；`tasklist /FI "IMAGENAME eq node.exe"` 看进程，日志尾部看存活（每 30s 心跳 + 周期对账行）。
+
 ---
 
 ## 架构（Monorepo）
