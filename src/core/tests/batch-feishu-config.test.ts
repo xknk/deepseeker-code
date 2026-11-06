@@ -80,6 +80,14 @@ test("坏 JSON / 非对象 / 未知键 → fail-closed 各一句人话", async (
         assert.match(unknown.error, /gatkeeper/, "报错点名拼错的键");
         assert.match(unknown.error, /gatekeeper/, "并列出可用键");
     }
+
+    // 前缀/空键形态：字符串 includes 时代这些全会被放行（合法键前缀命中拼接串）——
+    // 数组精确匹配后必须全拦（"chat" 漏 s 曾静默把群白名单清空，2026-11-06 复审修）。
+    for (const k of ["chat", "user", "budget", "gat", ""]) {
+        const pfx = await loadFeishuConfig({ raw: JSON.stringify({ chats: ["oc_a"], [k]: 1 }) });
+        assert.equal(pfx.ok, false, `前缀/畸形键 "${k}" 必须拒绝`);
+        if (!pfx.ok) assert.match(pfx.error, /未知配置键/);
+    }
 });
 
 test("白名单全空 / chats·users 形态 / budgetYuan / 布尔 → fail-closed", async () => {

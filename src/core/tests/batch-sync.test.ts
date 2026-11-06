@@ -67,6 +67,13 @@ test("config：未知键拒绝（拼写错静默失效防护）；坏 JSON / 非
     const typo = await loadSyncConfig({ raw: JSON.stringify({ github: { repos: ["o/r"], label: "agent" }, lable: "x" }) });
     assert.equal(typo.ok, false);
     if (!typo.ok) assert.match(typo.error, /未知配置键/);
+    // 前缀错字形态：字符串 includes 会放行合法键的任何前缀（"defaultBudget" → 预算上限静默失效、
+    // "maxTickets" → 日上限静默失效）——数组精确匹配后必须全拦（2026-11-06 复审修，P1 起潜伏）。
+    for (const k of ["defaultBudget", "maxTickets", "defaultSetu", "githu", ""]) {
+        const pfx = await loadSyncConfig({ raw: JSON.stringify({ github: { repos: ["o/r"], label: "agent" }, [k]: 1 }) });
+        assert.equal(pfx.ok, false, `前缀/畸形键 "${k}" 必须拒绝`);
+        if (!pfx.ok) assert.match(pfx.error, /未知配置键/);
+    }
     assert.equal((await loadSyncConfig({ raw: "{broken" })).ok, false);
     assert.equal((await loadSyncConfig({ raw: "[]" })).ok, false);
 });

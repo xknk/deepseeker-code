@@ -64,7 +64,10 @@ const cfgMsg = (locale: SyncLocale, key: string, ...args: any[]): string => {
     return typeof v === "function" ? v(...args) : v;
 };
 
-const ALLOWED_KEYS = ["chats", "users", "mentionOnlyInGroup", "budgetYuan", "gatekeeper"].join(", ");
+// ★ 键校验必须是数组精确匹配（KEY_LIST.includes(k)），不许 join 后字符串 includes——
+//   字符串子串匹配会把任何合法键的前缀错字放行（"chat"/"budget" 实证漏网），安全网本身失效。
+const ALLOWED_KEY_LIST = ["chats", "users", "mentionOnlyInGroup", "budgetYuan", "gatekeeper"];
+const ALLOWED_KEYS = ALLOWED_KEY_LIST.join(", ");
 /** 白名单 id 形态：单行、无空白（oc_xxx/ou_xxx 前缀不硬校验——平台 id 形态可能演进，只挡空白类明显错误）。 */
 const ID_SHAPE = /^\S+$/;
 const isStrArrayOk = (v: unknown): v is string[] =>
@@ -95,7 +98,7 @@ export const loadFeishuConfig = async (opts?: { raw?: string; locale?: SyncLocal
         return { ok: false, error: cfgMsg(locale, "notObject") };
     }
     for (const k of Object.keys(obj)) {
-        if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: cfgMsg(locale, "unknownKey", k, ALLOWED_KEYS) };
+        if (!ALLOWED_KEY_LIST.includes(k)) return { ok: false, error: cfgMsg(locale, "unknownKey", k, ALLOWED_KEYS) };
     }
 
     let chats: string[] = [];

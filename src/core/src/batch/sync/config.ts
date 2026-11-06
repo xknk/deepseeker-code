@@ -109,7 +109,11 @@ const cfgMsg = (locale: SyncLocale, key: string, ...args: any[]): string => {
 
 export const SYNC_CONFIG_PATH = (): string => path.join(batchQueueRoot(), "sync.json");
 
-const ALLOWED_KEYS = ["github", "gitlab", "defaultAccept", "defaultSetup", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength", "testPathPatterns"].join(", ");
+// ★ 键校验必须是数组精确匹配（KEY_LIST.includes(k)），不许 join 后字符串 includes——
+//   字符串子串匹配会把任何合法键的前缀错字放行（"defaultBudget"/"maxTickets" 实证漏网：
+//   预算上限/日上限静默失效），安全网本身失效。P1 起潜伏，2026-11-06 复审修。
+const ALLOWED_KEY_LIST = ["github", "gitlab", "defaultAccept", "defaultSetup", "defaultBudgetYuan", "maxTicketsPerDay", "allowExternalAccept", "authorAllowlist", "blockedKeywords", "maxBodyLength", "testPathPatterns"];
+const ALLOWED_KEYS = ALLOWED_KEY_LIST.join(", ");
 const REPO_SHAPE = /^[\w.-]+\/[\w.-]+$/;
 const ENV_NAME_SHAPE = /^[A-Z_][A-Z0-9_]*$/i;
 const TOKEN_SHAPE = /glpat-|ghp_|github_pat_|gho_/;
@@ -148,7 +152,7 @@ export const loadSyncConfig = async (opts?: { raw?: string; locale?: SyncLocale;
         return { ok: false, error: cfgMsg(locale, "notObject") };
     }
     for (const k of Object.keys(obj)) {
-        if (!ALLOWED_KEYS.includes(k)) return { ok: false, error: cfgMsg(locale, "unknownKey", k, ALLOWED_KEYS) };
+        if (!ALLOWED_KEY_LIST.includes(k)) return { ok: false, error: cfgMsg(locale, "unknownKey", k, ALLOWED_KEYS) };
     }
 
     const config: SyncConfig = {};
