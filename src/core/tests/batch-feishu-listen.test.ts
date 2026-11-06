@@ -235,6 +235,32 @@ test("生命周期信号走构造器回调：onReady → started 日志；onErro
     });
 });
 
+test("停机必须打断长睡：onError 终态失败后立刻收尾，不准被对账长睡拖住（缺省真实 sleep 实测）", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        const { sdk, state } = makeFakeSdk();
+        // 不注入 sleep（打断语义只有真睡才测得出）；复刻真 SDK：握手后 300ms onError 终态失败。
+        // 旧缺陷形态：requestStop 只设标志，对账循环睡 reconcileMs 醒不来 → 进程滞留 60s+。
+        sdk.WSClient = function (this: any, cfg: any) {
+            this.start = (args: any) => {
+                state.dispatcher = args.eventDispatcher;
+                setTimeout(() => cfg.onError?.(new Error("retries exhausted")), 300);
+                return Promise.resolve();
+            };
+        } as any;
+        const lines: string[] = [];
+        const t0 = Date.now();
+        const r = await runFeishuListen({
+            env: ENV, loadSdk: async () => sdk, log: (l) => lines.push(l), registerSignals: false,
+            reconcileMs: 60_000, // 长睡标本：不打断则 Promise.all 要等满 60s
+        });
+        const elapsed = Date.now() - t0;
+        assert.equal(r.code, 1);
+        assert.match(lines.join("\n"), /长连接建立失败/);
+        assert.ok(elapsed < 5000, `终态失败必须立刻收尾（实际 ${elapsed}ms——睡眠打断失效）`);
+    });
+});
+
 // ============ 冒烟：假 SDK 全链路 ============
 
 test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外点卡拒绝 / pending 推审批卡 / 心跳 / 单实例 / gatekeeper 透传 / SDK 资源下载", async () => {

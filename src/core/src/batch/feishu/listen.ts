@@ -122,8 +122,11 @@ const defaultLoadSdk = async (): Promise<any> => {
     return await import(spec);
 };
 
-/** sleep 的默认真实实现。 */
-const defaultSleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+/** sleep 的默认真实实现（定时器 unref：停机打断后不许这个输家 timer 拖住进程退出）。 */
+const defaultSleep = (ms: number): Promise<void> => new Promise((res) => {
+    const t = setTimeout(res, ms);
+    if (typeof t?.unref === "function") t.unref();
+});
 
 /** 缺省日志：stdout + 追加 <batch>/feishu-listen.log（一行一事；打不开文件只降级 stdout）。 */
 const makeDefaultLog = (): ((line: string) => void) => {
@@ -366,8 +369,28 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     // —— 3.5 停机原语与 WS 生命周期钩子（必须先于 SDK 构造：onReady/onError 是 WSClient 的
     //        构造器回调，{...hooks} 展开发生在构造时刻——构造后再赋值传不进去）——
     let stopReason: string | null = null;
+    // 睡眠打断：requestStop 必须能唤醒正在长睡的循环（对账缺省睡 10min——不唤醒的话 Ctrl+C /
+    // ws 终态失败后进程最长滞留 10 分钟才收尾，1.0.68 冒烟实锤：扫描循环 75s 退了、进程还活着）。
+    // ★ 多路唤醒：扫描/对账两循环并发睡眠，单槽 res 会互相覆盖（扫描的唤醒钩子被顶掉 =
+    //    唤醒丢失）；每个睡眠者注册自己的 res、在自己的 finally 里摘除，唤醒时全量触发。
+    const sleepers = new Set<() => void>();
+    const sleepInterruptible = async (ms: number): Promise<void> => {
+        let mine: (() => void) | undefined;
+        try {
+            await Promise.race([
+                sleep(ms),
+                new Promise<void>((res) => {
+                    mine = res;
+                    sleepers.add(res);
+                }),
+            ]);
+        } finally {
+            if (mine) sleepers.delete(mine); // race 双边结算都要摘本轮回调（防悬挂 res 漏进下一轮）
+        }
+    };
     const requestStop = (why: string): void => {
         if (stopReason === null) stopReason = why;
+        for (const res of [...sleepers]) res(); // Promise res 幂等，重复触发无副作用
     };
     let wsExitCode = 0;
     const wsHooks: WsHooks = {
@@ -494,7 +517,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         const pull = makeSdkPull(client, fcfg, log, locale, () => [...learnedP2pChats]);
         let first = true;
         for (; ; ) {
-            if (!first) await sleep(reconcileMs);
+            if (!first) await sleepInterruptible(reconcileMs); // 停机可打断（见步骤 3.5）
             first = false;
             if (shouldStop() || stopReason !== null) return;
             await runReconcile({
@@ -531,7 +554,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                     if (ok) pushed.add(p.approvalId);
                 }
             } catch { /* 扫描异常下轮重试 */ }
-            await sleep(scanMs);
+            await sleepInterruptible(scanMs); // 停机可打断
         }
     };
 
