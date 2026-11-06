@@ -5,7 +5,7 @@
  *  覆盖：游标读写往返与损坏/缺失=首跑语义（60min 回看窗）/ 增量拉取逐条 handle、补建计数 /
  *  游标推进语义（见过即推进——白名单外消息不会造成重拉风暴；拉到更晚消息推到 max，
  *  空窗推进到 endMs）/ 权限缺失 = 游标推进 + 明示降级文案（fail-visible，不对账风暴）/
- *  普通拉取失败 = 游标不动下轮重试 / 私聊登记存储（recordP2pChat 去重幂等、loadP2pChats 往返、
+ *  普通拉取失败 = 游标不动下轮重试 / 会话登记存储（recordKnownChat 去重幂等、loadKnownChats 往返+旧版迁移、
  *  与游标文件互不干扰）。pull/handle 全注入零网络。
  */
 import { test } from "node:test";
@@ -14,7 +14,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-const { runReconcile, loadCursor, saveCursor, cursorPath, loadP2pChats, recordP2pChat, FIRST_RUN_WINDOW_MS } = await import("@/batch/feishu/reconcile.ts");
+const { runReconcile, loadCursor, saveCursor, cursorPath, loadKnownChats, recordKnownChat, FIRST_RUN_WINDOW_MS } = await import("@/batch/feishu/reconcile.ts");
 const { normalizeMessageEvent } = await import("@/batch/feishu/message.ts");
 
 const withTempBatchDir = async (fn: () => Promise<void>): Promise<void> => {
@@ -177,22 +177,31 @@ test("对账→建票管线串测：handle 走真 handleFeishuMessage——已�
     });
 });
 
-// ============ 私聊登记存储（复审加固 2026-11-06：白名单私聊纳入对账拉取） ============
+// ============ 会话登记存储（1.0.70：私聊+群聊统一登记——群聊不学习则断线窗口必漏票，真机联调实锤） ============
 
-test("私聊登记：recordP2pChat 去重幂等 / loadP2pChats 往返 / 损坏文件=空（重学即可）/ 与游标文件互不干扰", async () => {
+test("会话登记：recordKnownChat 去重幂等 / loadKnownChats 往返 / 旧版 p2p 文件迁移 / 损坏=空 / 与游标互不干扰", async () => {
     await withTempBatchDir(async () => {
-        assert.deepEqual(await loadP2pChats(), [], "无文件 = 空登记");
-        assert.equal(await recordP2pChat("oc_dm_1"), true, "新登记 = true");
-        assert.equal(await recordP2pChat("oc_dm_1"), false, "重复登记 = false（零写入）");
-        assert.equal(await recordP2pChat("oc_dm_2"), true);
-        assert.deepEqual(await loadP2pChats(), ["oc_dm_1", "oc_dm_2"], "往返一致（保序）");
+        assert.deepEqual(await loadKnownChats(), [], "无文件 = 空登记");
 
-        await fs.writeFile(path.join(process.env.DEEPSEEKER_CODE_BATCH_DIR!, "feishu-p2p-chats.json"), "{broken", "utf-8");
-        assert.deepEqual(await loadP2pChats(), [], "损坏 = 空登记（幂等重学，不炸调用方）");
+        // 旧版迁移：≤1.0.69 的 feishu-p2p-chats.json 在新文件为空时被继承
+        await fs.writeFile(path.join(process.env.DEEPSEEKER_CODE_BATCH_DIR!, "feishu-p2p-chats.json"),
+            JSON.stringify({ chats: ["oc_legacy_dm"], updatedAt: "2026-11-06T00:00:00.000Z" }), "utf-8");
+        assert.deepEqual(await loadKnownChats(), ["oc_legacy_dm"], "旧文件迁移读出（新文件为空时）");
+
+        // 首次登记基于迁移集合并写入新文件（旧私聊登记不丢）
+        assert.equal(await recordKnownChat("oc_dm_1"), true, "新登记 = true");
+        assert.deepEqual(await loadKnownChats(), ["oc_legacy_dm", "oc_dm_1"], "登记合并旧迁移集");
+        assert.equal(await recordKnownChat("oc_dm_1"), false, "重复登记 = false（零写入）");
+        assert.equal(await recordKnownChat("oc_grp_1"), true, "群聊与私聊同一登记面");
+        assert.deepEqual(await loadKnownChats(), ["oc_legacy_dm", "oc_dm_1", "oc_grp_1"], "往返一致（保序）");
+
+        // 新文件损坏 → 回落旧文件（重学即可，不炸调用方）
+        await fs.writeFile(path.join(process.env.DEEPSEEKER_CODE_BATCH_DIR!, "feishu-known-chats.json"), "{broken", "utf-8");
+        assert.deepEqual(await loadKnownChats(), ["oc_legacy_dm"], "新文件损坏回落旧文件");
 
         // 与游标互不干扰：登记写入不动游标值
         await saveCursor("1730800000000", now());
-        await recordP2pChat("oc_dm_3");
+        await recordKnownChat("oc_dm_3");
         const c = await loadCursor();
         assert.equal(c?.cursor, "1730800000000", "游标值原样");
     });

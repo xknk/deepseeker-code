@@ -28,7 +28,7 @@ import {
     writeListenerHeartbeat, readListenerHeartbeat, listPendingApprovals, sweepStaleApprovals,
     writeApprovalDecision, acquireListenLock, releaseListenLock, APPROVAL_POLL_MS, HEARTBEAT_WRITE_INTERVAL_MS,
 } from "./approval.ts";
-import { runReconcile, loadP2pChats, recordP2pChat, type FeishuPull } from "./reconcile.ts";
+import { runReconcile, loadKnownChats, recordKnownChat, type FeishuPull } from "./reconcile.ts";
 import type { DownloadFile } from "../sync/attachments.ts";
 import type { SyncLocale } from "../sync/config.ts";
 
@@ -52,7 +52,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         botInfoFail: (e: string) => `⚠️ 获取机器人 open_id 失败（${e}）：mentionOnlyInGroup=true 下群消息将全部拒收，请检查应用权限或把 mentionOnlyInGroup 配为 false。`,
         msgSkip: (why: string) => `⏭️ [feishu] 跳过消息：${why}`,
         msgFail: (e: string) => `❌ [feishu] 消息处理异常（不中断监听）：${e}`,
-        p2pLearned: (chatId: string) => `💬 私聊会话已纳入断线对账（${chatId.slice(0, 12)}…）：此后断线窗口内该会话漏票可回补`,
+        chatLearned: (chatId: string) => `💬 会话已纳入断线对账（${chatId.slice(0, 12)}…）：此后断线窗口内该会话漏票可回补`,
         cardDenied: (who: string) => `🚫 点卡人不在 users 白名单，拒绝审批：${who}`,
         cardOk: (id: string, d: string) => `🎴 审批决定已落盘 [${id.slice(0, 8)}…] ${d}`,
         cardFail: (e: string) => `⚠️ 卡片决定写入失败：${e}`,
@@ -71,7 +71,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         botInfoFail: (e: string) => `⚠️ Failed to fetch bot open_id (${e}): with mentionOnlyInGroup=true all group messages will be rejected — check app permissions or set mentionOnlyInGroup=false.`,
         msgSkip: (why: string) => `⏭️ [feishu] message skipped: ${why}`,
         msgFail: (e: string) => `❌ [feishu] message handling error (listener keeps running): ${e}`,
-        p2pLearned: (chatId: string) => `💬 direct chat registered for reconcile backfill (${chatId.slice(0, 12)}…): missed tickets in this chat are now recoverable after reconnects`,
+        chatLearned: (chatId: string) => `💬 chat registered for reconcile backfill (${chatId.slice(0, 12)}…): missed tickets in this chat are now recoverable after reconnects`,
         cardDenied: (who: string) => `🚫 clicker not in the users whitelist, approval refused: ${who}`,
         cardOk: (id: string, d: string) => `🎴 approval decision recorded [${id.slice(0, 8)}…] ${d}`,
         cardFail: (e: string) => `⚠️ failed to write the approval decision: ${e}`,
@@ -201,7 +201,7 @@ const makeSdkDownload = (client: any): DownloadFile => async (url: string, destA
 };
 
 /**
- * 增量拉取（§6 对账）：逐白名单群 + 已登记私聊（chat_id 从首条实时消息学习，见 recordP2pChat）
+ * 增量拉取（§6 对账）：逐白名单群 + 已登记会话（私聊/群聊 chat_id 从首条实时消息学习，见 recordKnownChat）
  * 按时间窗翻页（im/v1/messages list），权限缺失归一为 permissionDenied。
  * extraChatIds 缺省空函数——测试/纯群场景不传即可。
  */
@@ -427,9 +427,10 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         return { code: 1 };
     }
 
-    // —— 4.6 私聊 chat_id 学习集：启动载入已登记会话，实时白名单私聊消息持续登记（§6 补充）——
-    const learnedP2pChats = new Set<string>();
-    for (const c of await loadP2pChats()) learnedP2pChats.add(c);
+    // —— 4.6 会话 chat_id 学习集（私聊+群聊）：启动载入已登记会话，实时过白名单消息持续登记
+    //        （群聊 1.0.70 起与私聊对称——实时建票不依赖 chats 配置，不学习的群断线必漏票）——
+    const learnedChats = new Set<string>();
+    for (const c of await loadKnownChats()) learnedChats.add(c);
 
     // —— 5. 建票/审批/对账的公共 deps ——
     const handleDeps = {
@@ -453,12 +454,13 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                     log(msg(locale, "msgSkip", `类型不支持或形态异常（${type}）`));
                     return;
                 }
-                // 白名单私聊：登记 chat_id 纳入断线对账（先于建票闸——会话注册与单条消息的票结果无关）
-                if (candidate.chatType === "p2p" && candidate.chatId && fcfg.users.includes(candidate.senderOpenId)) {
-                    const learned = await recordP2pChat(candidate.chatId).catch(() => false);
+                // 过白名单发送者的会话（私聊/群聊）：登记 chat_id 纳入断线对账（先于建票闸——
+                // 会话注册与单条消息的票结果无关；对账拉回的消息仍走完整闸门，无白名单绕行）
+                if (candidate.chatId && fcfg.users.includes(candidate.senderOpenId)) {
+                    const learned = await recordKnownChat(candidate.chatId).catch(() => false);
                     if (learned) {
-                        learnedP2pChats.add(candidate.chatId);
-                        log(msg(locale, "p2pLearned", candidate.chatId));
+                        learnedChats.add(candidate.chatId);
+                        log(msg(locale, "chatLearned", candidate.chatId));
                     }
                 }
                 const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
@@ -514,7 +516,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
 
     // —— 10. 启动对账（补上次进程断线窗口）+ 周期对账循环（§6）——
     const reconcileLoop = async (): Promise<void> => {
-        const pull = makeSdkPull(client, fcfg, log, locale, () => [...learnedP2pChats]);
+        const pull = makeSdkPull(client, fcfg, log, locale, () => [...learnedChats]);
         let first = true;
         for (; ; ) {
             if (!first) await sleepInterruptible(reconcileMs); // 停机可打断（见步骤 3.5）

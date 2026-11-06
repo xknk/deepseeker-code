@@ -54,35 +54,45 @@ export const saveCursor = async (cursor: string, now: Date = new Date()): Promis
     await fs.rename(tmp, cursorPath());
 };
 
-// ============ 私聊会话登记（白名单私聊纳入对账拉取：群白名单是配置态 chat_id，私聊只有 open_id，
-// chat_id 必须从首条实时消息学习——学习后断线窗口内该会话的漏票才可回补。从未私聊过机器人的
-// 会话无从得知 chat_id，无法覆盖（README 与降级文案均明示此边界）。） ============
+// ============ 会话登记（私聊+群聊纳入对账拉取。群白名单 chats 是配置态，但实时建票不依赖它
+// （WS 全量事件+闸门过滤）→ 只 @ 过一次的群若不在 chats 里，断线窗口内漏票必丢（1.0.69 真机
+// 联调实锤）。私聊只有 open_id 无从配置、群聊懒得配 chats——两者都从首条过白名单发送者的实时
+// 消息自动学习登记。从未给机器人发过消息的会话无从得知 chat_id，无法覆盖（README 与降级文案
+// 均明示此边界）。） ============
 
-export const p2pChatsPath = (): string => path.join(batchQueueRoot(), "feishu-p2p-chats.json");
+export const knownChatsPath = (): string => path.join(batchQueueRoot(), "feishu-known-chats.json");
+/** 旧版登记文件（≤1.0.69 只存私聊）：新文件为空时迁移读一次，首次登记后写入新文件。 */
+const legacyP2pChatsPath = (): string => path.join(batchQueueRoot(), "feishu-p2p-chats.json");
 
-/** 读已登记私聊 chat_id（无文件/损坏 = 空数组，重新学习即可——登记是幂等的）。 */
-export const loadP2pChats = async (): Promise<string[]> => {
+const readChatsFile = async (p: string): Promise<string[]> => {
     try {
-        const raw = JSON.parse(await fs.readFile(p2pChatsPath(), "utf-8")) as { chats?: unknown };
+        const raw = JSON.parse(await fs.readFile(p, "utf-8")) as { chats?: unknown };
         return Array.isArray(raw?.chats) ? raw.chats.filter((x): x is string => typeof x === "string") : [];
     } catch {
         return [];
     }
 };
 
+/** 读已登记会话 chat_id（新文件无/损坏 → 回落旧文件迁移；都无 = 空数组，重新学习即可——登记幂等）。 */
+export const loadKnownChats = async (): Promise<string[]> => {
+    const known = await readChatsFile(knownChatsPath());
+    if (known.length > 0) return known;
+    return readChatsFile(legacyP2pChatsPath());
+};
+
 /**
- * 登记一个私聊 chat_id（已登记 = false 零写入；新登记 = true）。
+ * 登记一个会话 chat_id（已登记 = false 零写入；新登记 = true）。
  * 读-并-写整文件原子替换：与游标写各自独立文件，最坏并发丢一次登记（下条消息重学，幂等），
  * 游标语义不受任何影响。
  */
-export const recordP2pChat = async (chatId: string): Promise<boolean> => {
-    const chats = await loadP2pChats();
+export const recordKnownChat = async (chatId: string): Promise<boolean> => {
+    const chats = await loadKnownChats();
     if (chats.includes(chatId)) return false;
     const next = { chats: [...chats, chatId], updatedAt: new Date().toISOString() };
-    await fs.mkdir(path.dirname(p2pChatsPath()), { recursive: true });
-    const tmp = `${p2pChatsPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.mkdir(path.dirname(knownChatsPath()), { recursive: true });
+    const tmp = `${knownChatsPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
-    await fs.rename(tmp, p2pChatsPath());
+    await fs.rename(tmp, knownChatsPath());
     return true;
 };
 

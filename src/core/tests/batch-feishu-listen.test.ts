@@ -398,9 +398,9 @@ test("对账：启动即拉一轮（游标增量）——缺历史权限 → 明
 
 // ============ 复审加固（2026-11-06）：私聊对账 + 单实例锁 ============
 
-test("私聊对账：白名单私聊首条消息登记 chat_id → 对账拉取覆盖该会话；陌生私聊不登记", async () => {
+test("会话对账：白名单首条消息（私聊+群聊）登记 chat_id → 对账拉取覆盖该会话；陌生发送者不登记", async () => {
     await withTempBatchDir(async (dir) => {
-        await writeFeishuConfig(dir, { users: ["ou_alice"], chats: ["oc_grp"], mentionOnlyInGroup: false });
+        await writeFeishuConfig(dir, { users: ["ou_alice"], chats: [], mentionOnlyInGroup: true });
         await writeSyncConfig(dir, { defaultAccept: "npm test" });
         const { sdk, state } = makeFakeSdk(); // list 返回空 items（code 0）
         const lines: string[] = [];
@@ -423,12 +423,26 @@ test("私聊对账：白名单私聊首条消息登记 chat_id → 对账拉取�
             sender: { sender_id: { open_id: "ou_alice" } },
         });
         await until(async () => {
-            const raw = await fs.readFile(path.join(dir, "feishu-p2p-chats.json"), "utf-8").catch(() => "");
+            const raw = await fs.readFile(path.join(dir, "feishu-known-chats.json"), "utf-8").catch(() => "");
             return raw.includes("oc_dm_alice");
         }, "私聊登记落盘");
         assert.ok(lines.some((l) => /纳入断线对账/.test(l)), "登记有可见日志（fail-visible）");
 
-        // 陌生私聊：不登记（发送者不在 users 白名单）
+        // ★ 群聊学习（1.0.70 真机联调实锤修复）：群不在 chats 配置里，首个过白名单发送者的群消息
+        //   也必须登记——否则该群断线窗口内漏票永远补不回来（实时建票不依赖 chats，对账只认它）
+        state.registered["im.message.receive_v1"]({
+            message: {
+                message_id: "om_grp1", chat_id: "oc_grp_learn", chat_type: "group", message_type: "text",
+                content: JSON.stringify({ text: "@机器人 修 bug" }), create_time: String(Date.now()),
+            },
+            sender: { sender_id: { open_id: "ou_alice" } },
+        });
+        await until(async () => {
+            const raw = await fs.readFile(path.join(dir, "feishu-known-chats.json"), "utf-8").catch(() => "");
+            return raw.includes("oc_grp_learn");
+        }, "群聊登记落盘（chats 未配置也学习）");
+
+        // 陌生发送者：私聊/群聊都不登记
         state.registered["im.message.receive_v1"]({
             message: {
                 message_id: "om_dm2", chat_id: "oc_dm_x", chat_type: "p2p", message_type: "text",
@@ -437,14 +451,14 @@ test("私聊对账：白名单私聊首条消息登记 chat_id → 对账拉取�
             sender: { sender_id: { open_id: "ou_stranger" } },
         });
         await tick();
-        const raw = await fs.readFile(path.join(dir, "feishu-p2p-chats.json"), "utf-8");
+        const raw = await fs.readFile(path.join(dir, "feishu-known-chats.json"), "utf-8");
         assert.ok(!raw.includes("oc_dm_x"), "白名单外私聊不登记");
 
-        // 后续对账拉取覆盖已登记私聊（群 + 私聊都翻页）
+        // 后续对账拉取覆盖已登记会话（配置群 + 学习私聊 + 学习群都翻页）
         await until(async () => {
             const ids = new Set(state.listCalls.map((p: any) => p.container_id));
-            return ids.has("oc_grp") && ids.has("oc_dm_alice");
-        }, "对账覆盖私聊会话");
+            return ids.has("oc_dm_alice") && ids.has("oc_grp_learn");
+        }, "对账覆盖已登记会话");
         stop = true;
         const r = await running;
         assert.equal(r.code, 0);
