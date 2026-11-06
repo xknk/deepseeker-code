@@ -114,6 +114,30 @@ test("normalize：list item 形态（对账路径）与事件形态产出同 sou
     assert.equal(a.messageType, "text");
 });
 
+test("normalize：list item 真机形态（2026-11-06 实锤）——类型字段是 msg_type、mentions.id 是字符串 open_id；deleted 消息拒收", () => {
+    // 逐字段复刻真机 im/v1/messages item（断线三连第一轮实锤：只认 message_type/type 会恒判形态异常）
+    const real = {
+        body: { content: JSON.stringify({ text: "@_user_1 随便看看今天改了啥" }) },
+        chat_id: "oc_cfa9e3e881c6764feaee8e2521118239",
+        chat_type: "group",
+        create_time: "1793950228131",
+        deleted: false,
+        mentions: [{ id: "ou_749ca280b2b2218a872b812203fd69ed", id_type: "open_id", key: "@_user_1", name: "DeepSeeker-Code" }],
+        message_id: "om_x100b61ec6f8da888cf95e1cf512675c",
+        msg_type: "text",
+        sender: { id: "ou_d34ecba9d8724e05f69dc00cb17f89e3", id_type: "open_id", sender_type: "user" },
+    };
+    const c = normalizeMessageEvent(real)!;
+    assert.ok(c, "真机 list item 必须归一成功（msg_type 不是 message_type/type）");
+    assert.equal(c.chatType, "group");
+    assert.equal(c.messageType, "text");
+    assert.equal(c.createTimeMs, "1793950228131");
+    assert.match(c.text, /随便看看今天改了啥/);
+    assert.deepEqual(c.mentions, [{ openId: "ou_749ca280b2b2218a872b812203fd69ed", key: "@_user_1" }], "mentions.id 字符串形态归一到 openId");
+    // deleted=true → null（列表路可能含已删除消息）
+    assert.equal(normalizeMessageEvent({ ...real, deleted: true }), null, "已删除消息不建票");
+});
+
 test("normalize：post 富文本取 text/a 与 title；image/file 收资源；音视频/坏 JSON → null", () => {
     const post = normalizeMessageEvent({
         message: {

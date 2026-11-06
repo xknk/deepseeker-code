@@ -77,17 +77,18 @@ test("对账：增量拉取逐条 handle——补建计数、跳过计数、游�
 test("对账：已见消息（duplicate/skipped）也推进游标——白名单外消息不会造成重拉风暴；空窗推进到 endMs", async () => {
     await withTempBatchDir(async () => {
         let secondPull = false;
+        const lines: string[] = [];
         const r = await runReconcile({
             pull: async () => secondPull
                 ? { ok: true, messages: [] }
                 : (secondPull = true, { ok: true, messages: [candidate(String(NOW - 10 * 60_000)), candidate(String(NOW - 9 * 60_000))] }),
-            handle: async () => ({ ok: true, action: "duplicate" }),
+            handle: async () => ({ ok: true, action: "skipped", reason: "今日建票已达上限 5（maxTicketsPerDay）" }),
             now,
-            out: () => { },
+            out: (l) => lines.push(l),
         });
         assert.deepEqual([r.pulled, r.created, r.skipped], [2, 0, 2]);
+        assert.match(lines.join("\n"), /补票跳过：今日建票已达上限/, "非建票结果带拒因必须留痕（日上限静默跳过盲区，真机实锤）");
         assert.equal((await loadCursor())?.cursor, String(NOW - 9 * 60_000), "见过即推进");
-        const lines: string[] = [];
         const r2 = await runReconcile({
             pull: async (start) => {
                 assert.equal(start, String(NOW - 9 * 60_000), "下轮从游标续拉");

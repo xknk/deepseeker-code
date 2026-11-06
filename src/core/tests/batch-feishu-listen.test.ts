@@ -89,13 +89,14 @@ const makeFakeSdk = () => {
 };
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 4));
-/** 轮询直到断言成立（常驻进程异步抵达用）；超时抛出。 */
-const until = async (probe: () => Promise<boolean> | boolean, what: string): Promise<void> => {
-    for (let i = 0; i < 250; i++) {
+/** 轮询直到断言成立（常驻进程异步抵达用）；时间预算制（CI 慢机上 4ms tick 会被拖长，按次数算会假超时）；超时抛出。 */
+const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 8000): Promise<void> => {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
         if (await probe()) return;
+        if (Date.now() > deadline) throw new Error(`等待超时：${what}`);
         await tick();
     }
-    throw new Error(`等待超时：${what}`);
 };
 
 // ============ 启动三缺（一句人话退出，不触后续步骤） ============
@@ -412,6 +413,7 @@ test("会话对账：白名单首条消息（私聊+群聊）登记 chat_id → 
             scanMs: 5, reconcileMs: 30, // 30ms 一轮：登记后很快被拉取覆盖
             sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
         });
+        try { // ★中途断言失败也必须停监听：僵尸监听在 env 删除后继续跑，游标会写进后续测试的临时目录（CI 实锤）
         await until(() => !!state.dispatcher, "dispatcher 注册");
 
         // 白名单私聊首条消息 → 登记 chat_id（票照常走建票闸）
@@ -462,6 +464,10 @@ test("会话对账：白名单首条消息（私聊+群聊）登记 chat_id → 
         stop = true;
         const r = await running;
         assert.equal(r.code, 0);
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
     });
 });
 
@@ -507,7 +513,7 @@ test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过�
                 return {
                     code: 0,
                     data: {
-                        items: [{ message_id: "om_backfill1", chat_id: "oc_dm_alice", chat_type: "p2p", message_type: "text", create_time: String(Date.now() - 60_000), content: JSON.stringify({ text: "断线补票任务" }), sender: { id: "ou_alice", id_type: "open_id" } }],
+                        items: [{ message_id: "om_backfill1", chat_id: "oc_dm_alice", chat_type: "p2p", msg_type: "text", create_time: String(Date.now() - 60_000), body: { content: JSON.stringify({ text: "断线补票任务" }) }, sender: { id: "ou_alice", id_type: "open_id" } }],
                         has_more: false,
                     },
                 };
@@ -523,6 +529,7 @@ test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过�
             scanMs: 5, reconcileMs: 30,
             sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
         });
+        try { // ★同上：防僵尸监听
         // 私聊腿照常工作：漏票补建
         await until(() => lines.some((l) => /新票/.test(l) && /断线补票任务/.test(l)), "私聊腿补票");
         // 群腿降级明示：点名会话 + 权限归因（230027 从 SDK 吞掉的错误体里提出来）
@@ -537,6 +544,10 @@ test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过�
         stop = true;
         const r = await running;
         assert.equal(r.code, 0);
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
     });
 });
 
@@ -562,11 +573,16 @@ test("对账全部腿失败（非权限，如网络错）→ 整轮失败：游�
             scanMs: 5, reconcileMs: 30,
             sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
         });
+        try { // ★同上：防僵尸监听
         await until(() => lines.filter((l) => /对账跳过会话/.test(l)).length >= 2, "两条腿都降级明示");
         await until(() => lines.some((l) => /对账拉取失败/.test(l)), "整轮失败（游标不动）");
         await tick();
         assert.ok(!fsSync.existsSync(path.join(dir, "feishu-cursor.json")), "全腿失败游标不落——下轮重试同窗口");
         stop = true;
         await running;
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
     });
 });

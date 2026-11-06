@@ -73,7 +73,9 @@ export const feishuResourceUrl = (messageId: string, r: FeishuResource): string 
  *
  * 形态兼容两路（字段名归一）：
  * - 事件路：{ message: { message_type, content, chat_id, chat_type, mentions }, sender: { sender_id: { open_id } } }
- * - 列表路（im/v1/messages 对账拉取 item）：{ type, body: { content }, chat_id, sender: { id, id_type } }
+ * - 列表路（im/v1/messages 对账拉取 item，2026-11-06 真机实锤字段名）：{ msg_type, body: { content },
+ *   chat_id, chat_type, mentions[{id:"ou_…",id_type,key}] , sender: { id, id_type } }——类型字段叫
+ *   **msg_type**（非 type/message_type）；mentions.id 是字符串 open_id（非事件路的 {open_id} 对象）。
  */
 export const normalizeMessageEvent = (data: any): FeishuMessageCandidate | null => {
     const m = data?.message ?? data; // 事件包一层 message；列表 item 本身就是消息体
@@ -83,8 +85,11 @@ export const normalizeMessageEvent = (data: any): FeishuMessageCandidate | null 
         ?? (data?.sender?.id_type === "open_id" || data?.sender?.idType === "open_id" ? data?.sender?.id : undefined)
         ?? (m?.sender?.sender_id?.open_id ?? (m?.sender?.id_type === "open_id" ? m?.sender?.id : undefined));
     if (!m || typeof m.message_id !== "string" || typeof m.chat_id !== "string" || !senderOpenId) return null;
+    if (m.deleted === true) return null; // 列表路可能含已删除消息（真机 item 带 deleted 标志）
     const chatType: "p2p" | "group" = m.chat_type === "group" ? "group" : "p2p";
-    const type = typeof m.message_type === "string" ? m.message_type : typeof m.type === "string" ? m.type : "";
+    const type = typeof m.message_type === "string" ? m.message_type // 事件路
+        : typeof m.msg_type === "string" ? m.msg_type // 列表路（真机实锤）
+            : typeof m.type === "string" ? m.type : "";
     const mentions: { openId?: string; key?: string }[] = Array.isArray(m.mentions)
         ? m.mentions.map((x: any) => ({ openId: x?.id?.open_id ?? x?.id?.openId ?? (x?.id_type === "open_id" ? x?.id : undefined), key: typeof x?.key === "string" ? x.key : undefined }))
         : [];

@@ -112,12 +112,14 @@ const RECONCILE_MSG: Record<SyncLocale, Record<string, any>> = {
         pullFail: (r: string) => `⚠️ 对账拉取失败（游标不推进，下轮重试）：${r}`,
         summary: (pulled: number, created: number, skipped: number) => `🔁 对账完成：拉到 ${pulled} 条，补建 ${created} 票，跳过 ${skipped} 条`,
         empty: "🔁 对账完成：窗口内无新消息",
+        backfillSkip: (why: string) => `⏭️ [feishu] 补票跳过：${why}`,
     },
     en: {
         permissionDenied: "⚠️ Reconciliation unavailable (missing im:message history permission): group and registered direct-chat messages sent while disconnected may not become tickets (chats that never messaged the bot cannot be backfilled) — check chat history, re-@ the bot for important ones, or run `batch add` manually. Granting the \"read & send messages\" permission to the app on the Feishu open platform clears this notice.",
         pullFail: (r: string) => `⚠️ Reconcile pull failed (cursor not advanced; will retry next cycle): ${r}`,
         summary: (pulled: number, created: number, skipped: number) => `🔁 Reconcile done: pulled ${pulled}, created ${created}, skipped ${skipped}`,
         empty: "🔁 Reconcile done: no new messages in window",
+        backfillSkip: (why: string) => `⏭️ [feishu] backfill skipped: ${why}`,
     },
 };
 const msg = (locale: SyncLocale, key: string, ...args: any[]): string => {
@@ -176,7 +178,12 @@ export const runReconcile = async (args: {
         if (Number.isFinite(t) && t > Number.parseInt(maxCreateTime, 10)) maxCreateTime = m.createTimeMs;
         const r = await args.handle(m);
         if (r.ok && r.action === "created") created++;
-        else skipped++;
+        else {
+            skipped++;
+            // 静默计数是盲区（2026-11-06 三连实锤：日上限拒补票无任何日志，只能靠探针定位）——拒因必须留痕
+            const why = (r as any)?.reason ?? (r as any)?.error;
+            if (why) out(msg(locale, "backfillSkip", String(why).slice(0, 160)));
+        }
     }
     await saveCursor(maxCreateTime > startMs ? maxCreateTime : endMs, now());
     if (pulled.messages.length === 0) out(msg(locale, "empty"));
