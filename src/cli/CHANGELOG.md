@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.67
+
+多入口工单流水线 P4——飞书入口（`batch listen feishu` 长连接 + 卡片审批），遥控入口延伸到手机：
+
+- **飞书长连接监听**：企业自建应用经官方 SDK WSClient 建立出站长连接（免公网 IP/域名/内网穿透，不开任何监听端口）；群里 @机器人一句话 / 白名单私聊直接建挂机票，与 sync/webhook 完全同一条建票管线（引用块边界、accept 四档同闸、附件三态经 `im.message.resource` 下载、`.sync.lock` 互斥、内容哈希去重、`maxTicketsPerDay` 共享配额）。text/post/图片/文件四类消息支持，@提及占位符剔除不污染标题。
+- **卡片审批**：`batch run` 撞高危操作 → 交互卡推到私聊（新版卡片 JSON，behaviors callback）→ **手机点批准 = allow-once 单次生效**（不改工具白名单），30 分钟没点 = 自动拒绝（fail-closed）；点卡人必须在 `users` 白名单；回调 3 秒内 toast 应答；卡片不含 diff 与验收输出。跨进程文件协议（pending→decision 原子写 + approvalId 比对 + 一个 pending 只决定一次），runner 按心跳判活——listen 不存活时行为与旧版完全一致（deny + 记录，零回归），卡片等待期看门狗挂 PAUSED 防断流误杀。
+- **断线对账**：时间游标（`feishu-cursor.json`）+ 周期增量拉取补漏票（验收硬项「断网重连不丢票」）；私聊 chat_id 从首条消息学习登记（`feishu-p2p-chats.json`）；缺历史权限时明示降级文案，不静默。**单实例约束**：飞书同应用多客户端不广播（消息随机送达一条连接），全系统只允许一个 listen 进程（`.listen.lock` 原子锁 + 心跳双重防护）。
+- **配置面零 sync.json 触碰**：飞书配置走独立 `feishu.json`（白名单 chats/users、`mentionOnlyInGroup` 缺省 true、`budgetYuan` 缺省 0.5 元 IM 强制小额、`gatekeeper` LLM 准入缺省关），凭证只走 `FEISHU_APP_ID`/`FEISHU_APP_SECRET` 环境变量；SDK 为可选依赖**不随主包装**（首次使用按提示 `npm install -g @larksuiteoapi/node-sdk`）。README 双语「飞书入口」跟着点。真机联调进行中，问题走后续小版本。
+- **顺手修一个 P1 起潜伏真 bug**：sync.json 未知键校验原为字符串子串匹配——`defaultBudget`/`maxTickets` 等合法键前缀错字能静默漏过（预算帽/日上限静默失效），改数组精确匹配并守门测试钉死前缀错字形态；`batch pr` 补边界口径（只认 github/gitlab 来源票，feishu/webhook 票验收后人工交付）。
+
 ## 1.0.66
 
 挂机流水线打磨第一批 + 多入口工单流水线 P3（webhook 入口）——定时形态上线后暴露的缺口全收（与 VSCode 端 1.0.76 同批 core，流水线代码由 CLI 包承载）：
