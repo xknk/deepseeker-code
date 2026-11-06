@@ -481,3 +481,86 @@ test("单实例锁：持有者存活 → 拒绝且报 pid、不建第二条连�
         void dir;
     });
 });
+
+// ============ 对账逐腿隔离（1.0.71 真机实锤：群腿缺 im:message.group_msg → 400/230027，
+// 旧代码整轮 return 失败把私聊腿连坐死，每轮对账全灭）============
+
+test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过，私聊腿照常拉取建票、游标照常推进", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"], chats: ["oc_grp_prem"], mentionOnlyInGroup: true });
+        await writeSyncConfig(dir, { defaultAccept: "npm test" });
+        await fs.writeFile(path.join(dir, "feishu-known-chats.json"), JSON.stringify({ chats: ["oc_dm_alice"], updatedAt: "2026-11-06T00:00:00.000Z" }), "utf-8");
+        const { sdk, state } = makeFakeSdk();
+        // 复刻真机形态：SDK 把群腿 HTTP 400 抛成 Error（message 只有状态码），飞书错误体在 response.data。
+        // im 挂在 Client 实例上——包一层构造器在实例上打补丁
+        const origClient = sdk.Client;
+        sdk.Client = function (this: any, cfg: any) {
+            const inst: any = new (origClient as any)(cfg);
+            inst.im.message.list = async (args: any) => {
+                if (String(args.params.container_id).startsWith("oc_grp")) {
+                    const err: any = new Error("Request failed with status code 400");
+                    err.response = { data: { code: 230027, msg: "Lack of necessary permissions" } };
+                    throw err;
+                }
+                return {
+                    code: 0,
+                    data: {
+                        items: [{ message_id: "om_backfill1", chat_id: "oc_dm_alice", chat_type: "p2p", message_type: "text", create_time: String(Date.now() - 60_000), content: JSON.stringify({ text: "断线补票任务" }), sender: { id: "ou_alice", id_type: "open_id" } }],
+                        has_more: false,
+                    },
+                };
+            };
+            return inst;
+        };
+        const lines: string[] = [];
+        let stop = false;
+        const deadline = Date.now() + 20_000;
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, reconcileMs: 30,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        // 私聊腿照常工作：漏票补建
+        await until(() => lines.some((l) => /新票/.test(l) && /断线补票任务/.test(l)), "私聊腿补票");
+        // 群腿降级明示：点名会话 + 权限归因（230027 从 SDK 吞掉的错误体里提出来）
+        assert.ok(lines.some((l) => /对账跳过会话 oc_grp_prem/.test(l)), "群腿降级日志点名会话");
+        assert.ok(lines.some((l) => /230027/.test(l) && /权限/.test(l)), "错误体提取 + 权限归因");
+        // 有腿成功 = 整轮成功：游标照常推进（失败腿窗口按设计明示放弃，不对账风暴）
+        await until(async () => fsSync.existsSync(path.join(dir, "feishu-cursor.json")), "游标推进");
+        stop = true;
+        const r = await running;
+        assert.equal(r.code, 0);
+    });
+});
+
+test("对账全部腿失败（非权限，如网络错）→ 整轮失败：游标不动下轮重试（全灭语义保持）", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"], chats: ["oc_grp_prem"], mentionOnlyInGroup: true });
+        await fs.writeFile(path.join(dir, "feishu-known-chats.json"), JSON.stringify({ chats: ["oc_dm_alice"], updatedAt: "2026-11-06T00:00:00.000Z" }), "utf-8");
+        const { sdk } = makeFakeSdk();
+        const origClient2 = sdk.Client;
+        sdk.Client = function (this: any, cfg: any) {
+            const inst: any = new (origClient2 as any)(cfg);
+            inst.im.message.list = async () => {
+                throw new Error("ECONNRESET"); // 非权限错误：文案正则不中、无错码 → 普通失败
+            };
+            return inst;
+        };
+        const lines: string[] = [];
+        let stop = false;
+        const deadline = Date.now() + 20_000;
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, reconcileMs: 30,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        await until(() => lines.filter((l) => /对账跳过会话/.test(l)).length >= 2, "两条腿都降级明示");
+        await until(() => lines.some((l) => /对账拉取失败/.test(l)), "整轮失败（游标不动）");
+        await tick();
+        assert.ok(!fsSync.existsSync(path.join(dir, "feishu-cursor.json")), "全腿失败游标不落——下轮重试同窗口");
+        stop = true;
+        await running;
+    });
+});

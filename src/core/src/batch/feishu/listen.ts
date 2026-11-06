@@ -53,6 +53,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         msgSkip: (why: string) => `⏭️ [feishu] 跳过消息：${why}`,
         msgFail: (e: string) => `❌ [feishu] 消息处理异常（不中断监听）：${e}`,
         chatLearned: (chatId: string) => `💬 会话已纳入断线对账（${chatId.slice(0, 12)}…）：此后断线窗口内该会话漏票可回补`,
+        legSkip: (chatId: string, why: string, permission: boolean) => `⚠️ [feishu] 对账跳过会话 ${chatId.slice(0, 12)}…：${why}${permission ? "（缺「获取与发送单聊、群组消息」权限）" : ""}——该会话断线窗口内漏票无法自动回补，重要内容请重新 @机器人`,
         cardDenied: (who: string) => `🚫 点卡人不在 users 白名单，拒绝审批：${who}`,
         cardOk: (id: string, d: string) => `🎴 审批决定已落盘 [${id.slice(0, 8)}…] ${d}`,
         cardFail: (e: string) => `⚠️ 卡片决定写入失败：${e}`,
@@ -72,6 +73,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         msgSkip: (why: string) => `⏭️ [feishu] message skipped: ${why}`,
         msgFail: (e: string) => `❌ [feishu] message handling error (listener keeps running): ${e}`,
         chatLearned: (chatId: string) => `💬 chat registered for reconcile backfill (${chatId.slice(0, 12)}…): missed tickets in this chat are now recoverable after reconnects`,
+        legSkip: (chatId: string, why: string, permission: boolean) => `⚠️ [feishu] reconcile skipped chat ${chatId.slice(0, 12)}…: ${why}${permission ? " (missing the read & send messages scope)" : ""} — tickets missed in this chat during disconnects cannot be backfilled; re-@ the bot for important ones`,
         cardDenied: (who: string) => `🚫 clicker not in the users whitelist, approval refused: ${who}`,
         cardOk: (id: string, d: string) => `🎴 approval decision recorded [${id.slice(0, 8)}…] ${d}`,
         cardFail: (e: string) => `⚠️ failed to write the approval decision: ${e}`,
@@ -200,16 +202,34 @@ const makeSdkDownload = (client: any): DownloadFile => async (url: string, destA
     }
 };
 
+/** SDK 抛错提错误体：larksuite SDK 把 HTTP 4xx 抛成 Error 且 message 只有状态码——飞书 code/msg 在 response.data，提取不到回退 message（230027 群权限实锤被吞过）。 */
+const sdkErrWhy = (e: any): string => {
+    const d = e?.response?.data;
+    return d?.code !== undefined && d?.msg ? `${d.code} ${d.msg}` : String(e?.message ?? e);
+};
+/** 权限缺失归一：飞书权限错码（99991672 会话列表、230027 群消息历史）+ 数字前缀兜底 + 文案正则。 */
+const isPermissionDeny = (why: string, e?: any): boolean => {
+    const c = Number(e?.response?.data?.code ?? /^\d+/.exec(why)?.[0] ?? 0);
+    return c === 99991672 || c === 230027 || /permission|权限|denied|forbidden/i.test(why);
+};
+
 /**
  * 增量拉取（§6 对账）：逐白名单群 + 已登记会话（私聊/群聊 chat_id 从首条实时消息学习，见 recordKnownChat）
  * 按时间窗翻页（im/v1/messages list），权限缺失归一为 permissionDenied。
+ * ★ 逐腿隔离（1.0.71 真机实锤：群腿缺 im:message.group_msg 权限报 400/230027，旧代码整轮 return
+ *   失败——私聊腿被连坐，每轮对账死在第一步）：单腿失败降级明示并跳过（legSkip），其余腿照常拉；
+ *   只有全部腿失败才整轮失败（游标不动下轮重试）。
  * extraChatIds 缺省空函数——测试/纯群场景不传即可。
  */
 const makeSdkPull = (client: any, cfg: FeishuConfig, log: (l: string) => void, locale: SyncLocale, extraChatIds: () => string[] = () => []): FeishuPull => async (startMs, endMs) => {
     const out: FeishuMessageCandidate[] = [];
     const chatIds = [...new Set([...cfg.chats, ...extraChatIds()])];
+    const failed: { why: string; permission: boolean }[] = [];
+    let okLegs = 0;
     for (const chatId of chatIds) {
         let pageToken: string | undefined = undefined;
+        let legOk = false;
+        let legFail: { why: string; permission: boolean } | null = null;
         for (let page = 0; page < 20; page++) { // 翻页上限 20×50=1000 条：对账窗口异常巨大时截断（日志可见）
             let r: any;
             try {
@@ -225,14 +245,16 @@ const makeSdkPull = (client: any, cfg: FeishuConfig, log: (l: string) => void, l
                     },
                 });
             } catch (e: any) {
-                const why = String(e?.message ?? e);
-                return { ok: false, reason: why, permissionDenied: /permission|权限|denied|forbidden|403/i.test(why) };
+                legFail = { why: sdkErrWhy(e), permission: isPermissionDeny(sdkErrWhy(e), e) };
+                break;
             }
             const code = r?.code ?? 0;
             if (code !== 0) {
                 const why = `${code} ${r?.msg ?? ""}`.trim();
-                return { ok: false, reason: why, permissionDenied: code === 99991672 || /permission|权限|denied|forbidden/i.test(why) };
+                legFail = { why, permission: isPermissionDeny(why, r) };
+                break;
             }
+            legOk = true;
             for (const item of r?.data?.items ?? []) {
                 const c = normalizeMessageEvent(item);
                 if (c) out.push(c);
@@ -241,6 +263,15 @@ const makeSdkPull = (client: any, cfg: FeishuConfig, log: (l: string) => void, l
             pageToken = r?.data?.page_token;
             if (!r?.data?.has_more || !pageToken) break;
         }
+        if (legFail) {
+            failed.push(legFail);
+            log(msg(locale, "legSkip", chatId, legFail.why, legFail.permission)); // 逐腿降级明示（不连坐其他会话）
+        } else if (legOk) {
+            okLegs++;
+        }
+    }
+    if (okLegs === 0 && failed.length > 0) {
+        return { ok: false, reason: failed[0].why, permissionDenied: failed.some((f) => f.permission) };
     }
     out.sort((a, b) => (Number.parseInt(a.createTimeMs, 10) || 0) - (Number.parseInt(b.createTimeMs, 10) || 0));
     return { ok: true, messages: out };

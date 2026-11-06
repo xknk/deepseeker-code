@@ -45,13 +45,18 @@ export const loadCursor = async (): Promise<FeishuCursor | null> => {
     }
 };
 
-/** 写游标（temp + rename 原子；调用频率低，不做节流）。 */
+/** 写游标（temp + rename 原子；调用频率低，不做节流）。rename 失败必须自净 tmp（曾泄漏 1 万+个）。 */
 export const saveCursor = async (cursor: string, now: Date = new Date()): Promise<void> => {
     const value: FeishuCursor = { cursor, updatedAt: now.toISOString() };
     await fs.mkdir(path.dirname(cursorPath()), { recursive: true });
     const tmp = `${cursorPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-    await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf-8");
-    await fs.rename(tmp, cursorPath());
+    try {
+        await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf-8");
+        await fs.rename(tmp, cursorPath());
+    } catch (e) {
+        await fs.unlink(tmp).catch(() => { });
+        throw e;
+    }
 };
 
 // ============ 会话登记（私聊+群聊纳入对账拉取。群白名单 chats 是配置态，但实时建票不依赖它
@@ -91,8 +96,13 @@ export const recordKnownChat = async (chatId: string): Promise<boolean> => {
     const next = { chats: [...chats, chatId], updatedAt: new Date().toISOString() };
     await fs.mkdir(path.dirname(knownChatsPath()), { recursive: true });
     const tmp = `${knownChatsPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-    await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
-    await fs.rename(tmp, knownChatsPath());
+    try {
+        await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
+        await fs.rename(tmp, knownChatsPath());
+    } catch (e) {
+        await fs.unlink(tmp).catch(() => { }); // tmp 自净（与 saveCursor 同一泄漏教训）
+        throw e;
+    }
     return true;
 };
 
