@@ -21,13 +21,16 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { batchQueueRoot } from "../queue.ts";
+import { batchQueueRoot, snapshotQueue } from "../queue.ts";
 import { loadFeishuConfig, type FeishuConfig } from "./config.ts";
-import { handleFeishuMessage, normalizeMessageEvent, type FeishuMessageCandidate } from "./message.ts";
+import { handleFeishuMessage, handleFeishuFollowup, feishuGateVerdict, feishuTitleOf, normalizeMessageEvent, type FeishuMessageCandidate, type FeishuTicketResult } from "./message.ts";
 import {
     writeListenerHeartbeat, readListenerHeartbeat, listPendingApprovals, sweepStaleApprovals,
     writeApprovalDecision, acquireListenLock, releaseListenLock, APPROVAL_POLL_MS, HEARTBEAT_WRITE_INTERVAL_MS,
 } from "./approval.ts";
+import {
+    lookupMsgMap, recordMsgMap, listPendingNotifications, clearNotification, bumpNotificationRetries, notifyText,
+} from "./notify.ts";
 import { runReconcile, loadKnownChats, recordKnownChat, type FeishuPull } from "./reconcile.ts";
 import type { DownloadFile } from "../sync/attachments.ts";
 import type { SyncLocale } from "../sync/config.ts";
@@ -479,6 +482,57 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         locale,
     };
 
+    // —— 5.5 处理 + 回执 wrapper（实时/对账两路共用）：聊天入口必须有反馈——建票成败都回话，
+    //        静默 = 黑洞（2026-11-06 真机联调实锤：配额拒收静默、建票成功也无回执，用户无从判断）。
+    //        回执发送失败只留日志不重试——票已建/已拒，回执是增益不是关键路径。 ——
+    const replyAck = async (candidate: FeishuMessageCandidate, r: FeishuTicketResult, source: "live" | "reconcile"): Promise<void> => {
+        let text: string | null = null;
+        let ticketId: string | undefined;
+        if (!r.ok) text = notifyText.ackSkipped(locale, r.error.slice(0, 160));
+        else if (r.action === "created") {
+            ticketId = r.ticketId;
+            const snap = await snapshotQueue().catch(() => ({ pending: [] as string[], running: [] as string[], done: [] as string[] }));
+            text = notifyText.ackCreated(locale, r.ticketId, feishuTitleOf(candidate.text), Math.max(0, snap.pending.length - 1));
+        } else if (r.action === "appended") {
+            ticketId = r.ticketId;
+            text = notifyText.ackAppended(locale, r.ticketId, r.title);
+        } else if (r.action === "followup-created") {
+            ticketId = r.ticketId;
+            text = notifyText.ackFollowupCreated(locale, r.ticketId, r.prevId);
+        } else if (r.action === "duplicate") {
+            // 对账重拉的 duplicate 不回话（用户没新动作，凭空冒提示反而困惑）；实时重发 = 用户在问，必回
+            if (source === "live") text = notifyText.ackDuplicate(locale, r.ticketId);
+        } else if (r.action === "skipped") {
+            text = notifyText.ackSkipped(locale, r.reason.slice(0, 200));
+        }
+        if (!text) return;
+        const at = candidate.chatType === "group" ? `<at user_id="${candidate.senderOpenId}"></at> ` : "";
+        const sentId = await sendText(client, candidate.chatId, `${at}${text}`);
+        if (sentId && ticketId) await recordMsgMap(sentId, ticketId); // 回复回执消息 = 同票追加/续修
+    };
+
+    const handleAndReply = async (candidate: FeishuMessageCandidate, source: "live" | "reconcile"): Promise<FeishuTicketResult> => {
+        // 回复路由先行：parent_id 命中映射表且回复者在 users 白名单 → 追加/续修那张票。
+        // 免 @（回复关系即触发——群里话题式跟进不该被 mentionOnly 拦住）；白名单外的回复不走路由，
+        // 落到下面的闸 = 静默（不给陌生会话回话）。
+        if (candidate.parentId && fcfg.users.includes(candidate.senderOpenId)) {
+            const prevId = await lookupMsgMap(candidate.parentId).catch(() => null);
+            if (prevId) {
+                const r = await handleFeishuFollowup(candidate, prevId, fcfg, handleDeps);
+                if (r) {
+                    await replyAck(candidate, r, source);
+                    return r;
+                }
+                // null = 前票执行中/无踪迹：回落正常建票流（回执口径同新建票）
+            }
+        }
+        const gate = feishuGateVerdict(candidate, fcfg, handleDeps.botOpenId);
+        if (!gate.ok) return { ok: true, action: "skipped", reason: gate.reason };
+        const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+        await replyAck(candidate, r, source);
+        return r;
+    };
+
     // —— 6. 消息事件（im.message.receive_v1）：归一 → 建票管线；异常只留日志不击垮监听 ——
     dispatcher.register({
         "im.message.receive_v1": async (data: any) => {
@@ -498,9 +552,9 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                         log(msg(locale, "chatLearned", candidate.chatId));
                     }
                 }
-                const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+                const r = await handleAndReply(candidate, "live");
                 if (!r.ok) log(msg(locale, "msgFail", r.error));
-                else if (r.action === "skipped") log(msg(locale, "msgSkip", r.reason));
+                else if (r.action === "skipped" && r.reason) log(msg(locale, "msgSkip", r.reason));
             } catch (e: any) {
                 log(msg(locale, "msgFail", String(e?.message ?? e)));
             }
@@ -559,7 +613,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             if (shouldStop() || stopReason !== null) return;
             await runReconcile({
                 pull,
-                handle: (c) => handleFeishuMessage(c, fcfg, handleDeps),
+                handle: (c) => handleAndReply(c, "reconcile"),
                 now,
                 locale,
                 out: log,
@@ -591,6 +645,18 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                     if (ok) pushed.add(p.approvalId);
                 }
             } catch { /* 扫描异常下轮重试 */ }
+            // —— 11.5 完成通知推送（runner 经 finishTicket 落盘 → 此处发送）：监听不在 = 文件留存
+            //        等回来补推（断线不丢通知）；连败 NOTIFY_MAX_RETRIES 次放弃（会话不可达）——
+            for (const n of await listPendingNotifications().catch(() => [] as Awaited<ReturnType<typeof listPendingNotifications>>)) {
+                const sentId = await sendText(client, n.chatId, notifyText.finish(locale, n));
+                if (sentId !== null) {
+                    await recordMsgMap(sentId, n.ticketId); // 回复报告消息 = 续修该票
+                    await clearNotification(n.ticketId);
+                } else {
+                    const giveUp = await bumpNotificationRetries(n);
+                    if (giveUp) log(notifyText.notifyGiveUp(locale, n.ticketId));
+                }
+            }
             await sleepInterruptible(scanMs); // 停机可打断
         }
     };
@@ -602,6 +668,20 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     await releaseListenLock();
     log(msg(locale, "stopped"));
     return { code: stopReason === "ws error" ? 1 : 0 };
+};
+
+/** 发一条文本消息到会话（回执/完成推送共用；成功返回消息 id 供回复路由登记，失败 null 不抛）。 */
+const sendText = async (client: any, chatId: string, text: string): Promise<string | null> => {
+    try {
+        const r = await client.im.message.create({
+            params: { receive_id_type: "chat_id" },
+            data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text }) },
+        });
+        if ((r?.code ?? 0) !== 0) return null;
+        return typeof r?.data?.message_id === "string" ? r.data.message_id : null;
+    } catch {
+        return null;
+    }
 };
 
 /** 推一张审批卡到 users 白名单的每个私聊（users 为空由启动日志与心跳 canApprove=false 兜底）。 */

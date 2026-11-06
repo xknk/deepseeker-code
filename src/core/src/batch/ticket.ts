@@ -18,6 +18,9 @@
  *  needs-review: true          ← 可选：accept 为自动探测/外部来源时置 true（人工复核提示）
  *  continues: <前 ticketId>    ← 可选（P2）：续修链审计
  *  attachments: batch/attachments/<id> ← 可选：入口附件落盘目录（相对 .deepseeker-code）
+ *  feishu-chat: oc_xxx         ← 可选（P4 反馈闭环）：回执/报告推送目标会话 chat_id
+ *  feishu-msg: om_xxx          ← 可选：触发本票的飞书消息 id（审计/回复路由）
+ *  feishu-sender: ou_xxx       ← 可选：触发者 open_id（群聊回执 @ 用）
  *  ---
  *  ★ 红线（§4.1 评审修订）：以上新字段全部不进模型上下文——batchRunner 只把 body 作为 user 消息；
  *    字段是给人、给 batch pr、给续修与基线策略用的。非法值 fail-closed 拒收。
@@ -56,6 +59,12 @@ export interface BatchTicket {
     continues?: string;
     /** 入口附件落盘目录（相对 .deepseeker-code；body 里有对应绝对路径注记）。 */
     attachments?: string;
+    /** 回执/报告推送目标会话（P4 反馈闭环：票建成功回执 + finishTicket 完成推送；不进模型上下文）。 */
+    feishuChat?: string;
+    /** 触发本票的飞书消息 id（审计/回复路由；不进模型上下文）。 */
+    feishuMsg?: string;
+    /** 触发者 open_id（群聊回执 @ 前缀用；不进模型上下文）。 */
+    feishuSender?: string;
     /** 任务正文（Markdown，喂给 agent 的 user 消息）。 */
     body: string;
 }
@@ -83,6 +92,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         badNeedsReview: (v: string) => `needs-review 非法（"${v}"）：须为 true 或 false。`,
         badContinues: (v: string) => `continues 非法（"${v}"）：须为前次工单 id（单行、无空白）。`,
         badAttachments: (v: string) => `attachments 非法（"${v}"）：须为相对 .deepseeker-code 的目录路径（禁绝对路径与 .. 上跳）。`,
+        badFeishuField: (k: string, v: string) => `${k} 非法（"${v}"）：须为单行无空白的飞书 id（feishu-chat=oc_ 会话 / feishu-msg=om_ 消息 / feishu-sender=ou_ 用户）。`,
         emptyBody: "任务正文为空：frontmatter 之后应写任务描述。",
         untitled: "(未命名任务)",
         readFail: (e: string) => `读工单失败：${e}`,
@@ -100,6 +110,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         badNeedsReview: (v: string) => `Invalid needs-review ("${v}"): must be true or false.`,
         badContinues: (v: string) => `Invalid continues ("${v}"): must be the previous ticket id (single line, no whitespace).`,
         badAttachments: (v: string) => `Invalid attachments ("${v}"): must be a directory path relative to .deepseeker-code (no absolute paths, no ".." segments).`,
+        badFeishuField: (k: string, v: string) => `Invalid ${k} ("${v}"): must be a single-line Feishu id with no whitespace (feishu-chat=oc_ chat / feishu-msg=om_ message / feishu-sender=ou_ user).`,
         emptyBody: "Empty task body: write the task description after the frontmatter.",
         untitled: "(untitled task)",
         readFail: (e: string) => `Failed to read ticket: ${e}`,
@@ -214,6 +225,22 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
         }
     }
 
+    // ============ P4 反馈闭环字段：回执/推送目标与回复路由（全可选；单行无空白，fail-closed） ============
+    // 含空白的值 = frontmatter 夹带自由文本（可被当成第二个正文注入），拒收整票。
+    const badFeishu = (key: string): string => (ticketMsg(locale, "badFeishuField") as (k: string, v: string) => string)(key, fm[key]);
+    const parseFeishuId = (key: string): { v?: string; err?: string } => {
+        if (fm[key] === undefined) return {};
+        const v = fm[key].trim();
+        if (!v) return {};
+        return /\s/.test(v) ? { err: badFeishu(key) } : { v };
+    };
+    const fc = parseFeishuId("feishu-chat");
+    if (fc.err) return { ok: false, error: fc.err };
+    const fmId = parseFeishuId("feishu-msg");
+    if (fmId.err) return { ok: false, error: fmId.err };
+    const fsn = parseFeishuId("feishu-sender");
+    if (fsn.err) return { ok: false, error: fsn.err };
+
     const body = bodyRaw.trim();
     if (!body) return { ok: false, error: ticketMsg(locale, "emptyBody") };
 
@@ -223,7 +250,9 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
         ticket: {
             title, accept, setup, budgetYuan, timeoutMin, retry,
             tools: tools && tools.length > 0 ? tools : undefined,
-            source: ticketSource, sourceUrl, sourceId, needsReview, continues, attachments, body,
+            source: ticketSource, sourceUrl, sourceId, needsReview, continues, attachments,
+            feishuChat: fc.v, feishuMsg: fmId.v, feishuSender: fsn.v,
+            body,
         },
     };
 };

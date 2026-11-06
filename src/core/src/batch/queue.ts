@@ -13,7 +13,8 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { generateBatchId, readBatchTicket, type BatchLocale } from "./ticket.ts";
+import { generateBatchId, readBatchTicket, parseBatchTicket, type BatchLocale } from "./ticket.ts";
+import { writeFinishNotification } from "./feishu/notify.ts";
 
 /** 锁错误文案（直接进 runner 控制台；缺省 zh 向后兼容）。 */
 const LOCK_MSG: Record<BatchLocale, Record<string, any>> = {
@@ -121,12 +122,27 @@ export const requeueStaleRunning = async (): Promise<number> => {
 
 /**
  * 收尾：报告写 done/，工单 running → done/。任一步失败不抛（收尾失败不能击垮汇总打印）。
+ * P4 反馈闭环：飞书票（frontmatter 带 feishu-chat）在此落完成通知文件（listen 扫描发送）——
+ * 成功失败都通知；非飞书票零行为变化。通知失败不抛（通知是增益，报告才是事实源）。
  */
 export const finishTicket = async (id: string, reportMd: string): Promise<void> => {
     try {
         await fs.mkdir(stateDir("done"), { recursive: true });
         await fs.writeFile(reportPath(id), reportMd, "utf-8");
         await fs.rename(path.join(stateDir("running"), `${id}.md`), path.join(stateDir("done"), `${id}.md`)).catch(() => { });
+        const ticketSrc = await fs.readFile(path.join(stateDir("done"), `${id}.md`), "utf-8").catch(() => null)
+            ?? await fs.readFile(path.join(stateDir("running"), `${id}.md`), "utf-8").catch(() => null);
+        if (ticketSrc !== null) {
+            const parsed = parseBatchTicket(ticketSrc);
+            if (parsed.ok && parsed.ticket.feishuChat) {
+                await writeFinishNotification({
+                    ticketId: id, reportMd,
+                    chatId: parsed.ticket.feishuChat,
+                    senderOpenId: parsed.ticket.feishuSender,
+                    title: parsed.ticket.title,
+                });
+            }
+        }
     } catch (e: any) {
         console.warn(`⚠️ [batch] 报告落盘失败（任务结果以控制台输出为准）: ${e?.message ?? e}`);
     }

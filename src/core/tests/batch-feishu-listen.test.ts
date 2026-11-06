@@ -283,6 +283,7 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
             sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
             gatekeeperJudge: async ({ title }) => { judgeCalls.push(title); return { verdict: "work" as const }; },
         });
+        try { // ★中途断言失败也必须停监听：僵尸监听在 env 删除后写脏后续测试目录（同 11/65/68 号防线）
 
         // 1. 假连接建立：dispatcher 被捕获
         await until(() => !!state.dispatcher, "dispatcher 注册");
@@ -307,6 +308,13 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         assert.ok(state.resources.length >= 1, "附件走 SDK 资源下载（feishu:// 合成 url → im.message resource）");
         assert.ok(judgeCalls.length >= 1, "gatekeeper judge 被透传调用");
 
+        // 3.5 建票回执（P4 反馈闭环）：text 消息回来源会话，带票号与排队位——静默建票=黑洞，已真机实锤拒收
+        await until(() => state.cards.some((c: any) => c.data?.msg_type === "text"), "建票回执发送");
+        const ackRaw = state.cards.find((c: any) => c.data?.msg_type === "text");
+        assert.equal(ackRaw.params.receive_id_type, "chat_id", "回执发来源会话（私聊/群聊同一 receive 面）");
+        assert.equal(ackRaw.data.receive_id, "ou_alice");
+        assert.match(JSON.parse(ackRaw.data.content).text, /已建票/, "回执带票号语义");
+
         // 4. 点卡：白名单内点卡人 → 决定落盘 + success toast
         const pendings = await listPendingApprovals(new Date());
         const approvalId = "test-appr-id";
@@ -317,8 +325,8 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         }), "utf-8");
 
         // 5. pending → 推审批卡（按钮直放 body.elements——2.0 实测形态红线；action/note/update_multi 全禁）
-        await until(async () => state.cards.length >= 1, "审批卡推送");
-        const cardRaw = state.cards[0];
+        await until(() => state.cards.some((c: any) => c.data?.msg_type === "interactive"), "审批卡推送");
+        const cardRaw = state.cards.find((c: any) => c.data?.msg_type === "interactive");
         assert.equal(cardRaw.params.receive_id_type, "open_id");
         assert.equal(cardRaw.data.msg_type, "interactive");
         const card = JSON.parse(cardRaw.data.content);
@@ -358,6 +366,10 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         assert.equal(r.code, 0);
         assert.match(lines.join("\n"), /飞书监听已退出/);
         assert.ok(!fsSync.existsSync(path.join(approvalsDir(), ".listen.lock")), "优雅退出释放单实例锁");
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
     });
 });
 
@@ -580,6 +592,98 @@ test("对账全部腿失败（非权限，如网络错）→ 整轮失败：游�
         assert.ok(!fsSync.existsSync(path.join(dir, "feishu-cursor.json")), "全腿失败游标不落——下轮重试同窗口");
         stop = true;
         await running;
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
+    });
+});
+
+// ============ 反馈闭环（P4）：建票回执 → 回复路由追加 → 完成通知推送 全链 ============
+
+test("反馈闭环全链：建票即回执（带票号）；回复回执消息=追加原票；完成通知经扫描循环推送并清除", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+        const { sdk, state } = makeFakeSdk();
+        // create 回带 message_id：回执/通知消息 id 才能进映射表（回复即续修的路由键）
+        let msgSeq = 0;
+        const origCreate = sdk.Client; // 保留构造断言，包一层回 message_id
+        sdk.Client = function (this: any, cfg: any) {
+            origCreate.call(this, cfg);
+            const inner = this.im.message.create;
+            this.im.message.create = async (args: any) => {
+                msgSeq += 1;
+                const r = await inner(args);
+                return { ...r, data: { ...r.data, message_id: `om_out_${msgSeq}` } };
+            };
+        } as any;
+        const lines: string[] = [];
+        let stop = false;
+        // 全量套件并行时 CPU 争抢会拉长每段循环（单跑 ~2s、全量下 8s 预算曾两轮连续假超时）：
+        // 三段全链测试单独放宽预算；正常路径仍是秒级，只有真卡死才会撞上限。
+        const LOOP_BUDGET = 30_000;
+        const deadline = Date.now() + 90_000;
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 5, reconcileMs: 1000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        try {
+            await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
+
+            // 1. 私聊消息 → 建票 + 文本回执（带票号与排队位）
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: "om_in1", chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
+                    create_time: String(Date.now()), content: JSON.stringify({ text: "修复导出乱码" }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+            const readMap = async (): Promise<Record<string, string>> => JSON.parse(await fs.readFile(path.join(dir, "feishu-msg-map.json"), "utf-8")).map;
+            await until(async () => {
+                const mp = await readMap().catch(() => ({}) as Record<string, string>);
+                return Object.keys(mp).length >= 2;
+            }, "建票回执 + 映射登记（原消息与回执消息都路由）", LOOP_BUDGET);
+            const ack = state.cards.find((c: any) => c.data?.msg_type === "text");
+            const ackText = JSON.parse(ack.data.content).text;
+            assert.match(ackText, /已建票/, "回执带票号语义");
+            const m = /已建票 (2026\d{4}-[\w-]+)「/.exec(ackText);
+            assert.ok(m, "票号可从回执解析");
+            const ticketId = m![1];
+            const map = await readMap();
+            assert.equal(map["om_in1"], ticketId, "原消息 id 路由到票");
+            assert.equal(map["om_out_1"], ticketId, "回执消息 id 也路由到票");
+
+            // 2. 用户回复那条回执（parent_id=回执消息 id，免 @）→ 并入原票 + 追加回执
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: "om_in2", chat_id: "ou_alice", chat_type: "p2p", message_type: "text", parent_id: "om_out_1",
+                    create_time: String(Date.now()), content: JSON.stringify({ text: "补充：CSV 编码用 UTF-8" }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已并入")), "追加回执", LOOP_BUDGET);
+            const ticketSrc = await fs.readFile(path.join(dir, "pending", `${ticketId}.md`), "utf-8");
+            assert.match(ticketSrc, /CSV 编码用 UTF-8/, "回复内容并入原票正文");
+            assert.equal((await (await import("@/batch/queue.ts")).snapshotQueue()).pending.length, 1, "未另开新票");
+
+            // 3. 完成通知（runner 侧 finishTicket 落盘的文件）→ 扫描循环推送 + 清除 + 映射登记
+            const { writeFinishNotification, lookupMsgMap } = await import("@/batch/feishu/notify.ts");
+            await writeFinishNotification({
+                ticketId, chatId: "ou_alice", senderOpenId: "ou_alice", title: "修复导出乱码",
+                reportMd: `---\nid: ${ticketId}\nstatus: passed\ncost-yuan: 0.35\nbranch: dsc-batch/${ticketId}\nchanged-file: src/x.ts (+3/-1)\n---\n\n## 模型收尾汇报\n\n修好了。\n`,
+            });
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("验收通过")), "完成通知推送", LOOP_BUDGET);
+            const finAck = state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text).find((t: string) => t.includes("验收通过"))!;
+            assert.match(finAck, new RegExp(ticketId.slice(0, 8)), "推送带票号");
+            assert.match(finAck, /¥0\.35/, "推送带花费");
+            assert.match(finAck, /回复本条消息/, "续修指引");
+            await until(async () => !(await fs.readFile(path.join(dir, "notifications", `${ticketId}.json`), "utf-8").then(() => true, () => false)), "通知文件发送后清除", LOOP_BUDGET);
+            // 本测试 create 共 3 次：建票回执/追加回执/完成推送 → 通知消息 id = om_out_3（回复它=续修该票）
+            await until(async () => (await readMap().catch(() => ({}) as Record<string, string>))["om_out_3"] === ticketId, "通知消息 id 进映射表", LOOP_BUDGET);
+            assert.equal(await lookupMsgMap("om_out_3"), ticketId, "通知消息 id 可被回复路由");
         } finally {
             stop = true;
             await running.catch(() => { });

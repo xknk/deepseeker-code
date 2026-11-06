@@ -215,3 +215,31 @@ test("运行锁：互斥持有 + 持有者死亡可接管 + 释放", async () =>
         await fs.rm(dir, { recursive: true, force: true });
     }
 });
+
+// ============ P4 反馈闭环字段（feishu-chat/msg/sender：回执路由与完成推送） ============
+
+test("feishu 回执字段：合法单行 id 解析往返；含空白 = fail-closed 拒整票；缺省向后兼容", () => {
+    const ok = parseBatchTicket("---\ntitle: t\naccept: npm test\nsource: feishu\nfeishu-chat: oc_chat1\nfeishu-msg: om_9\nfeishu-sender: ou_alice\n---\n正文");
+    assert.equal(ok.ok, true);
+    if (!ok.ok) return;
+    assert.equal(ok.ticket.feishuChat, "oc_chat1");
+    assert.equal(ok.ticket.feishuMsg, "om_9");
+    assert.equal(ok.ticket.feishuSender, "ou_alice");
+
+    // 含空白 = frontmatter 夹带自由文本（可被当第二个正文注入），拒收。
+    // 注：frontmatter 按行解析，值里出现换行结构上不可能（换行即断行、余下行当裸键忽略），只测同行空白。
+    for (const bad of ["feishu-chat: oc_x aaa", "feishu-msg: om_x\tfake", "feishu-sender: ou_x y"]) {
+        const r = parseBatchTicket(`---\ntitle: t\naccept: npm test\n${bad}\n---\n正文`);
+        assert.equal(r.ok, false, `非法值必须拒收：${JSON.stringify(bad)}`);
+        if (!r.ok) assert.match(r.error, /feishu-(chat|msg|sender)/, "错误文案指明字段");
+    }
+
+    // 缺省：老工单/其他来源工单零影响
+    const plain = parseBatchTicket("---\naccept: npm test\n---\n正文");
+    assert.equal(plain.ok, true);
+    if (plain.ok) {
+        assert.equal(plain.ticket.feishuChat, undefined);
+        assert.equal(plain.ticket.feishuMsg, undefined);
+        assert.equal(plain.ticket.feishuSender, undefined);
+    }
+});

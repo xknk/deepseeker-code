@@ -22,8 +22,10 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { createHash } from "crypto";
-import { batchQueueRoot, enqueueTicketFile } from "../queue.ts";
-import { generateBatchId } from "../ticket.ts";
+import { batchQueueRoot, enqueueTicketFile, readReport, acquireRunLock, releaseRunLock } from "../queue.ts";
+import { generateBatchId, parseBatchTicket, type BatchTicket } from "../ticket.ts";
+import { doneTicketPath, extractPrevReportSummary } from "../continuation.ts";
+import { recordMsgMap } from "./notify.ts";
 import { loadSyncConfig, type SyncConfig, type SyncLocale } from "../sync/config.ts";
 import { acquireSyncLock, releaseSyncLock } from "../sync/lock.ts";
 import { loadSyncState, appendSyncState, syncFingerprint, todayTicketCount, type SyncStateEntry } from "../sync/state.ts";
@@ -60,6 +62,9 @@ export interface FeishuMessageCandidate {
     resources: FeishuResource[];
     /** 原始 message_type（不支持的类型跳过并留日志，不静默）。 */
     messageType: string;
+    /** 回复目标消息 id（用户在会话里「回复」某条消息时平台带的 parent_id；普通消息无此字段）。
+     *  回复即续修的路由键：命中消息映射表（notify.ts）→ 追加/续修那张票。 */
+    parentId?: string;
 }
 
 /** 合成资源下载 url（DownloadFile 消费；listen 侧解析回 messageId/fileKey 调 SDK）。 */
@@ -139,6 +144,7 @@ export const normalizeMessageEvent = (data: any): FeishuMessageCandidate | null 
         createTimeMs: String(m.create_time ?? ""),
         resources,
         messageType: type,
+        parentId: typeof m.parent_id === "string" && m.parent_id ? m.parent_id : undefined,
     };
 };
 
@@ -209,6 +215,8 @@ export const buildFeishuTicketSource = (args: {
     att?: SyncAttachmentResult;
     preId?: string;
     locale: SyncLocale;
+    /** 反馈闭环（P4）：回执/报告推送目标会话与回复路由键（票跑完 finishTicket 按此落通知）。 */
+    feishu?: { chatId: string; messageId: string; senderOpenId: string };
 }): string => {
     const c = args.config;
     const lines = [
@@ -218,6 +226,9 @@ export const buildFeishuTicketSource = (args: {
         c.defaultSetup ? `setup: ${c.defaultSetup}` : null,
         "source: feishu",
         `source-id: ${args.sourceId}`,
+        args.feishu ? `feishu-chat: ${args.feishu.chatId}` : null,
+        args.feishu ? `feishu-msg: ${args.feishu.messageId}` : null,
+        args.feishu ? `feishu-sender: ${args.feishu.senderOpenId}` : null,
         args.needsReview ? "needs-review: true" : null,
         `budget-yuan: ${args.budgetYuan}`,
         args.att?.dir && args.preId ? `attachments: batch/attachments/${args.preId}` : null,
@@ -308,6 +319,8 @@ export type FeishuTicketResult =
     | { ok: true; action: "created"; ticketId: string }
     | { ok: true; action: "duplicate"; ticketId?: string }
     | { ok: true, action: "skipped"; reason: string }
+    | { ok: true; action: "appended"; ticketId: string; title: string; reason: string }
+    | { ok: true; action: "followup-created"; ticketId: string; prevId: string; reason: string }
     | { ok: false; error: string };
 
 /** 读策略配置原文：queueRoot 下 sync.json；文件不存在 = 全缺省（复用既有键零新键，webhook 同法）。 */
@@ -452,7 +465,10 @@ export const handleFeishuMessage = async (candidate: FeishuMessageCandidate, fcf
         // —— 11. 建票入队（预算 = min(feishu.budgetYuan, sync.defaultBudgetYuan)，IM 强制小额 §9.6）——
         const budgetYuan = config.defaultBudgetYuan !== undefined ? Math.min(fcfg.budgetYuan, config.defaultBudgetYuan) : fcfg.budgetYuan;
         const needsReview = acc.needsReview || att?.needsReview === true;
-        const source = buildFeishuTicketSource({ title, body: candidate.text, acc, sourceId, needsReview, config, budgetYuan, att, preId, locale });
+        const source = buildFeishuTicketSource({
+            title, body: candidate.text, acc, sourceId, needsReview, config, budgetYuan, att, preId, locale,
+            feishu: { chatId: candidate.chatId, messageId: candidate.messageId, senderOpenId: candidate.senderOpenId },
+        });
         const tmp = path.join(os.tmpdir(), `dsc-feishu-ticket-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
         let enq: { ok: true; id: string; title: string } | { ok: false; error: string };
         try {
@@ -473,9 +489,178 @@ export const handleFeishuMessage = async (candidate: FeishuMessageCandidate, fcf
         } catch (e: any) {
             out(msg(locale, "stateFail", String(e?.message ?? e)));
         }
+        // —— 12.5 回复路由登记：用户回复这条原消息 = 追加/续修本票（notify.ts 映射表）——
+        await recordMsgMap(candidate.messageId, enq.id);
         out(msg(locale, "created", enq.id, title));
         return { ok: true, action: "created", ticketId: enq.id };
     } finally {
         await releaseSyncLock();
     }
+};
+
+// ============ 回复即续修（P4 反馈闭环：连续需求不丢上下文） ============
+
+/**
+ * 追加段构造（前票还在排队：内容并入原票正文）。引用块包裹 = §4.3 数据边界红线——
+ * 追加内容与首票正文同等对待（外部数据非指令），frontmatter 一律不动。
+ */
+const buildAppendSection = (title: string, body: string, atIso: string, locale: SyncLocale): string => {
+    const head = locale === "zh"
+        ? `## 追加需求（飞书回复 · ${atIso.slice(0, 16).replace("T", " ")}）`
+        : `## Follow-up (Feishu reply · ${atIso.slice(0, 16).replace("T", " ")})`;
+    const label = locale === "zh" ? "feishu 回复" : "feishu reply";
+    return `\n---\n\n${head}\n\n${buildQuotedExternalBody(QUOTE_PREAMBLE[locale], label, title, body)}`;
+};
+
+/**
+ * 续修票源文本（前票已跑完：新票接前票产物分支，不重做）。验收/预算/超时/环境是「这个任务怎么算
+ * 修好」的本地事实，从前票 frontmatter 继承（同 P2 续修链三硬约定）；body 注入前次报告摘要。
+ */
+const buildFeishuFollowupSource = (args: {
+    prev: BatchTicket; prevId: string; prevSummary: string;
+    title: string; body: string; sourceId: string; candidate: FeishuMessageCandidate; locale: SyncLocale;
+}): string => {
+    const zh = args.locale === "zh";
+    const head = zh
+        ? `【续修票】本票续修前票 ${args.prevId}（同任务有新需求）。代码基座为前票产物分支：前次修复已包含在待检出的代码里，勿重做；只处理下方新需求。本次为全新会话，前次对话上下文不可见。`
+        : `[Continuation] This ticket continues ${args.prevId} (new requirements on the same task). The code base is the previous ticket's artifact branch: the previous fix is already in the checked-out tree — do NOT redo it; only handle the new requirements below. Fresh session; previous conversation is not visible.`;
+    const label = zh ? "feishu 新需求" : "feishu new requirement";
+    const lines = [
+        "---",
+        `title: ${args.title}`,
+        `accept: ${args.prev.accept}`,
+        args.prev.setup ? `setup: ${args.prev.setup}` : null,
+        args.prev.budgetYuan !== undefined ? `budget-yuan: ${args.prev.budgetYuan}` : null,
+        args.prev.timeoutMin !== undefined ? `timeout-min: ${args.prev.timeoutMin}` : null,
+        "source: feishu",
+        `source-id: ${args.sourceId}`,
+        `continues: ${args.prevId}`,
+        `feishu-chat: ${args.candidate.chatId}`,
+        `feishu-msg: ${args.candidate.messageId}`,
+        `feishu-sender: ${args.candidate.senderOpenId}`,
+        args.prev.needsReview ? "needs-review: true" : null,
+        "---",
+        "",
+        head,
+        "",
+        "## " + (zh ? "前次结果摘要" : "Previous result summary"),
+        "",
+        args.prevSummary,
+        "",
+        buildQuotedExternalBody(QUOTE_PREAMBLE[args.locale], label, args.title, args.body),
+    ];
+    return lines.filter((l) => l !== null).join("\n") + "\n";
+};
+
+/**
+ * 处理一条「回复」（parent_id 命中消息映射表 → 路由到那张票）：
+ *  - 前票还在 pending → 内容追加进原票正文（一个任务半夜一次跑完；runner 取票竞态用运行锁封窗）；
+ *  - 前票已 done → 走 P2 续修链：新票 continues=前票，基座=前票产物分支，验收/预算继承；
+ *  - 前票正被 runner 执行（running）或已无踪迹 → 返回 null，调用方回落正常建票流。
+ * 幂等：state 去重先行（对账重拉同一条回复 → duplicate，不重复追加）。
+ * ★ 调用方（listen）必须先确认 sender ∈ users 白名单——回复关系不是白名单的替代。
+ */
+export const handleFeishuFollowup = async (candidate: FeishuMessageCandidate, prevTicketId: string, fcfg: FeishuConfig, deps?: FeishuDeps): Promise<FeishuTicketResult | null> => {
+    const locale = deps?.locale ?? "zh";
+    const out = deps?.out ?? ((line: string) => process.stdout.write(line + "\n"));
+    const now = deps?.now ?? (() => new Date());
+    void fcfg; // 白名单校验在调用方（见文件头注）；本函数只管票的合并与续接
+
+    const title = feishuTitleOf(candidate.text);
+    const sourceId = feishuSourceId(candidate.senderOpenId, candidate.text);
+    const fingerprint = syncFingerprint(title, candidate.text, []);
+
+    // —— 1. 去重先行（对账重拉同一条回复不重复追加/续修）——
+    const state = await loadSyncState();
+    const existing = state.get(sourceId) as SyncStateEntry | undefined;
+    if (existing && existing.fingerprint === fingerprint) {
+        if (existing.verdict === "work") return { ok: true, action: "duplicate", ticketId: existing.ticketId };
+        return { ok: true, action: "skipped", reason: existing.reason ? `已见过（曾拒绝：${existing.reason}）` : "已见过（曾拒绝）" };
+    }
+
+    // —— 2. 文本闸（空文本回复与首票同规：不猜任务）——
+    if (!candidate.text.trim()) return { ok: true, action: "skipped", reason: msg(locale, "badBody") };
+
+    const pendingFile = path.join(batchQueueRoot(), "pending", `${prevTicketId}.md`);
+    const runningFile = path.join(batchQueueRoot(), "running", `${prevTicketId}.md`);
+
+    // —— 3. 前票还在排队：并入原票（运行锁封「读-改-写 vs runner 取票」竞态窗，毫秒级持锁）——
+    const runLock = await acquireRunLock(locale);
+    if (runLock.ok) {
+        try {
+            let src: string | null = null;
+            try {
+                src = await fs.readFile(pendingFile, "utf-8");
+            } catch { /* 不在 pending：走 4/5 */ }
+            if (src !== null) {
+                const updated = src + buildAppendSection(title, candidate.text, now().toISOString(), locale);
+                const tmp = `${pendingFile}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+                await fs.writeFile(tmp, updated, "utf-8");
+                await fs.rename(tmp, pendingFile); // 原子换：锁内无取票竞争，rename 即成
+                await appendSyncState({ sourceId, ticketId: prevTicketId, seenAt: now().toISOString(), fingerprint, verdict: "work", title }).catch(() => { });
+                await recordMsgMap(candidate.messageId, prevTicketId);
+                const prevTitle = titleOfTicketSource(src) ?? prevTicketId;
+                out(`➕ [feishu] 回复并入排队票 [${prevTicketId}] ${prevTitle}`);
+                return {
+                    ok: true, action: "appended", ticketId: prevTicketId, title: prevTitle,
+                    reason: locale === "zh" ? `已并入排队中的票 ${prevTicketId}` : `appended to queued ticket ${prevTicketId}`,
+                };
+            }
+        } finally {
+            await releaseRunLock();
+        }
+    }
+
+    // —— 4. 前票正在被 runner 执行：不并（半途塞内容 runner 看不见），回落正常建票 ——
+    try {
+        await fs.access(runningFile);
+        return null;
+    } catch { /* 不在 running：继续 */ }
+
+    // —— 5. 前票已跑完：续修链（新票继承验收/预算，基座=前票产物分支）——
+    let prevSrc: string;
+    try {
+        prevSrc = await fs.readFile(doneTicketPath(prevTicketId), "utf-8");
+    } catch {
+        return null; // 无踪迹（存档被 clean 等）→ 调用方回落正常建票
+    }
+    const parsed = parseBatchTicket(prevSrc, locale);
+    if (!parsed.ok) return null; // 前票损坏：不当续修建，回落正常流
+    const prev = parsed.ticket;
+
+    // 日上限同闸（续修票也占配额——与 handleFeishuMessage 同一把尺）
+    const cfg = await loadSyncConfig({ raw: await readConfigRaw(deps?.queueRoot ?? batchQueueRoot()), locale, allowNoSource: true });
+    if (!cfg.ok) return { ok: false, error: msg(locale, "configFail", cfg.error) };
+    if (cfg.config.maxTicketsPerDay !== undefined && (await todayTicketCount(now())) >= cfg.config.maxTicketsPerDay) {
+        return { ok: true, action: "skipped", reason: locale === "zh" ? `今日建票已达上限 ${cfg.config.maxTicketsPerDay}（maxTicketsPerDay）` : `daily ticket cap reached (${cfg.config.maxTicketsPerDay}, maxTicketsPerDay)` };
+    }
+
+    const prevSummary = extractPrevReportSummary(await readReport(prevTicketId), locale);
+    const preId = generateBatchId(now());
+    const source = buildFeishuFollowupSource({ prev, prevId: prevTicketId, prevSummary, title, body: candidate.text, sourceId, candidate, locale });
+    const tmp = path.join(os.tmpdir(), `dsc-feishu-followup-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
+    let enq: { ok: true; id: string; title: string } | { ok: false; error: string };
+    try {
+        await fs.writeFile(tmp, source, "utf-8");
+        enq = await enqueueTicketFile(tmp, locale, preId);
+    } finally {
+        await fs.rm(tmp, { force: true }).catch(() => { });
+    }
+    if (!enq.ok) {
+        out(msg(locale, "enqueueFail", enq.error));
+        return { ok: false, error: msg(locale, "enqueueFail", enq.error) };
+    }
+    await appendSyncState({ sourceId, ticketId: enq.id, seenAt: now().toISOString(), fingerprint, verdict: "work", title }).catch(() => { });
+    await recordMsgMap(candidate.messageId, enq.id);
+    out(`🔁 [feishu] 续修票 [${enq.id}]（接 ${prevTicketId}）${title}`);
+    return {
+        ok: true, action: "followup-created", ticketId: enq.id, prevId: prevTicketId,
+        reason: locale === "zh" ? `续修票 ${enq.id}（接 ${prevTicketId}）已建` : `continuation ticket ${enq.id} (after ${prevTicketId}) created`,
+    };
+};
+
+/** 从票源文本取 title frontmatter（追加回执显示原票标题用；取不到回退 null）。 */
+const titleOfTicketSource = (src: string): string | null => {
+    const m = /^title:\s*(.*)$/m.exec(src);
+    return m ? m[1].trim() || null : null;
 };

@@ -20,9 +20,10 @@ import { fileURLToPath } from "url";
 
 const {
     normalizeMessageEvent, feishuGateVerdict, feishuSourceId, feishuTitleOf,
-    handleFeishuMessage, buildFeishuTicketSource, feishuResourceUrl,
+    handleFeishuMessage, handleFeishuFollowup, buildFeishuTicketSource, feishuResourceUrl,
 } = await import("@/batch/feishu/message.ts");
 const { loadFeishuConfig } = await import("@/batch/feishu/config.ts");
+const { lookupMsgMap } = await import("@/batch/feishu/notify.ts");
 const queue = await import("@/batch/queue.ts");
 
 const CORE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -432,4 +433,117 @@ test("守门：feishu 目录四文件零 SDK import；message/config/approval/re
     assert.ok(!/from\s+["']@larksuiteoapi/.test(listen), "listen.ts 不得静态 import SDK（必须变量 specifier 动态加载）");
     assert.ok(/import\(spec\)/.test(listen), "listen.ts 必须走变量 specifier 动态 import（esbuild 保留运行时解析）");
     assert.ok(!/from\s+["']@\/(agent|llm|tool|serve)\//.test(listen), "listen.ts 不得静态 import LLM/agent 链（gatekeeper 走动态 import）");
+});
+
+// ============ 回复即续修（P4 反馈闭环：连续需求不丢上下文） ============
+
+test("normalize：回复消息带 parent_id（事件路与列表路都提取；普通消息 undefined）", () => {
+    const ev = normalizeMessageEvent(evP2p({ message: { ...(evP2p() as any).message, parent_id: "om_parent" } }))!;
+    assert.equal(ev.parentId, "om_parent", "事件路 parent_id");
+    const listForm = normalizeMessageEvent({
+        message_id: "om_l9", chat_id: "oc_grp1", chat_type: "group", msg_type: "text",
+        body: { content: JSON.stringify({ text: "hi" }) }, create_time: "1730800002000",
+        sender: { id: "ou_alice", id_type: "open_id" }, parent_id: "om_p2",
+    })!;
+    assert.equal(listForm.parentId, "om_p2", "列表路 parent_id");
+    assert.equal(normalizeMessageEvent(evP2p())!.parentId, undefined, "普通消息无 parentId");
+});
+
+const replyOf = (text: string, parent: string, id = "om_reply1"): any => ({
+    message: {
+        message_id: id, chat_id: "ou_alice", chat_type: "p2p", message_type: "text", parent_id: parent,
+        create_time: "1730800010000", content: JSON.stringify({ text }),
+    },
+    sender: { sender_id: { open_id: "ou_alice" } },
+});
+
+test("续修-追加路：前票在排队 → 回复并入原票正文（引用块边界）；幂等重拉=duplicate；映射表可路由", async () => {
+    await withTempBatchDir(async (dir) => {
+        const root = await emptyRoot();
+        try {
+            await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+            // 前票：正常建票
+            const r0 = await handleFeishuMessage(normalizeMessageEvent(evP2p())!, fcfg, baseDeps(dir, root));
+            assert.equal(r0.ok && r0.action, "created");
+            const prevId = r0.ok && r0.action === "created" ? r0.ticketId : "";
+
+            const r = await handleFeishuFollowup(normalizeMessageEvent(replyOf("导出格式改成 CSV", "om_ack1"))!, prevId, fcfg, baseDeps(dir, root));
+            assert.ok(r?.ok && r.action === "appended", `追加成功（实际 ${JSON.stringify(r)}）`);
+            if (r?.ok && r.action === "appended") assert.equal(r.ticketId, prevId);
+
+            const src = await sourceOf(dir, prevId);
+            assert.match(src, /追加需求（飞书回复/, "正文带追加段标题");
+            assert.match(src, /导出格式改成 CSV/, "追加内容在正文");
+            assert.match(src, /> \*\*飞书回复\*\*|feishu 回复/, "追加内容走引用块（§4.3 数据边界）");
+            assert.ok(!/^title:/m.test(src.split("---")[2] ?? ""), "frontmatter 不被追加段污染");
+
+            // 幂等：对账重拉同一条回复 → duplicate 不重复追加
+            const r2 = await handleFeishuFollowup(normalizeMessageEvent(replyOf("导出格式改成 CSV", "om_ack1"))!, prevId, fcfg, baseDeps(dir, root));
+            assert.equal(r2?.ok && r2.action, "duplicate", "重拉=duplicate");
+            assert.equal((await sourceOf(dir, prevId)).match(/追加需求（飞书回复/g)?.length, 1, "只追加一次（按段标题计——引用块内 title+body 各含一次正文文本）");
+
+            // 映射表：回复消息 id → 前票 id（listen 路由回执/原消息都指向同票）
+            assert.equal(await lookupMsgMap("om_reply1"), prevId);
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+});
+
+test("续修-续修票路：前票已跑完 → 新票 continues=前票、验收继承、基座=前票产物分支", async () => {
+    await withTempBatchDir(async (dir) => {
+        const root = await emptyRoot();
+        try {
+            await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100, defaultSetup: "pnpm install" });
+            const r0 = await handleFeishuMessage(normalizeMessageEvent(evP2p())!, fcfg, baseDeps(dir, root));
+            const prevId = r0.ok && r0.action === "created" ? r0.ticketId : "";
+            // 前票跑完：pending → done + 报告（branch 字段 = 续修基座）
+            await fs.mkdir(path.join(dir, "done"), { recursive: true });
+            await fs.rename(path.join(dir, "pending", `${prevId}.md`), path.join(dir, "done", `${prevId}.md`));
+            await fs.writeFile(path.join(dir, "done", `${prevId}.report.md`), `---\nid: ${prevId}\nstatus: passed\ncost-yuan: 0.4\nbranch: dsc-batch/${prevId}\nchanged-file: src/a.ts (+2/-1)\n---\n\n## 模型收尾汇报\n\n修好了。\n`, "utf-8");
+
+            const r = await handleFeishuFollowup(normalizeMessageEvent(replyOf("再补个单测", "om_ack2", "om_reply2"))!, prevId, fcfg, baseDeps(dir, root));
+            assert.ok(r?.ok && r.action === "followup-created", `续修票创建（实际 ${JSON.stringify(r)}）`);
+            if (!r?.ok || r.action !== "followup-created") return;
+            assert.equal(r.prevId, prevId);
+
+            const src = await sourceOf(dir, r.ticketId);
+            assert.match(src, new RegExp(`continues: ${prevId}`));
+            assert.match(src, /accept: npm test/, "验收从前票继承（本地事实不重猜）");
+            assert.match(src, /setup: pnpm install/, "setup 继承");
+            assert.match(src, /feishu-chat: ou_alice/, "回执目标继承到续修票");
+            assert.match(src, /前次结果摘要/, "前次报告摘要在 body");
+            assert.match(src, /dsc-batch\//, "摘要含产物分支");
+            assert.match(src, /勿重做/, "不重做红线文案");
+            assert.equal(await lookupMsgMap("om_reply2"), r.ticketId);
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+});
+
+test("续修-回落路：前票正在执行=running → null；无踪迹 → null；空文本回复 → skipped", async () => {
+    await withTempBatchDir(async (dir) => {
+        const root = await emptyRoot();
+        try {
+            await writeSyncConfig(dir, { defaultAccept: "npm test" });
+            const r0 = await handleFeishuMessage(normalizeMessageEvent(evP2p())!, fcfg, baseDeps(dir, root));
+            const prevId = r0.ok && r0.action === "created" ? r0.ticketId : "";
+
+            // running：runner 正在执行
+            await fs.mkdir(path.join(dir, "running"), { recursive: true });
+            await fs.rename(path.join(dir, "pending", `${prevId}.md`), path.join(dir, "running", `${prevId}.md`));
+            assert.equal(await handleFeishuFollowup(normalizeMessageEvent(replyOf("加急", "om_a"))!, prevId, fcfg, baseDeps(dir, root)), null, "执行中回落");
+
+            // 无踪迹：从 running 挪走且无 done 存档
+            await fs.rm(path.join(dir, "running", `${prevId}.md`), { force: true });
+            assert.equal(await handleFeishuFollowup(normalizeMessageEvent(replyOf("加急2", "om_b"))!, prevId, fcfg, baseDeps(dir, root)), null, "无踪迹回落");
+
+            // 空文本回复（如纯图片回复）：不猜任务
+            const r = await handleFeishuFollowup(normalizeMessageEvent(replyOf("", "om_c"))!, "any-id", fcfg, baseDeps(dir, root));
+            assert.ok(r?.ok && r.action === "skipped", "空文本=skipped");
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
 });
