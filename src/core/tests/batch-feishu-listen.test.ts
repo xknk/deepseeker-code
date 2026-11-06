@@ -493,10 +493,12 @@ test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过�
         const { sdk, state } = makeFakeSdk();
         // 复刻真机形态：SDK 把群腿 HTTP 400 抛成 Error（message 只有状态码），飞书错误体在 response.data。
         // im 挂在 Client 实例上——包一层构造器在实例上打补丁
+        const seenWin: string[] = []; // 捕获查询窗口参数——钉死「秒单位」红线
         const origClient = sdk.Client;
         sdk.Client = function (this: any, cfg: any) {
             const inst: any = new (origClient as any)(cfg);
             inst.im.message.list = async (args: any) => {
+                seenWin.push(String(args.params.start_time), String(args.params.end_time));
                 if (String(args.params.container_id).startsWith("oc_grp")) {
                     const err: any = new Error("Request failed with status code 400");
                     err.response = { data: { code: 230027, msg: "Lack of necessary permissions" } };
@@ -528,6 +530,10 @@ test("对账单腿失败隔离：群腿 230027 缺权限 → 降级明示跳过�
         assert.ok(lines.some((l) => /230027/.test(l) && /权限/.test(l)), "错误体提取 + 权限归因");
         // 有腿成功 = 整轮成功：游标照常推进（失败腿窗口按设计明示放弃，不对账风暴）
         await until(async () => fsSync.existsSync(path.join(dir, "feishu-cursor.json")), "游标推进");
+        // ★ 时间单位守门（1.0.72 真机实锤）：list 的 start_time/end_time 是【秒】——传毫秒=公元 3 万年
+        //   的未来窗、查询恒空（补票功能从没工作过）。游标/内部比较仍统一毫秒，只在查询边界换秒。
+        assert.ok(seenWin.length >= 2 && seenWin.every((w) => /^\d{10}$/.test(w)),
+            `list 查询窗口必须是 10 位秒（got: ${seenWin.slice(0, 2).join(", ")}）`);
         stop = true;
         const r = await running;
         assert.equal(r.code, 0);

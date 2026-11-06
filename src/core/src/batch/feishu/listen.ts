@@ -219,12 +219,16 @@ const isPermissionDeny = (why: string, e?: any): boolean => {
  * ★ 逐腿隔离（1.0.71 真机实锤：群腿缺 im:message.group_msg 权限报 400/230027，旧代码整轮 return
  *   失败——私聊腿被连坐，每轮对账死在第一步）：单腿失败降级明示并跳过（legSkip），其余腿照常拉；
  *   只有全部腿失败才整轮失败（游标不动下轮重试）。
+ * ★ 时间单位红线（1.0.72 真机实锤：list 的 start_time/end_time 是【秒】，传毫秒=公元 3 万年的
+ *   未来窗、查询恒空——补票从来没工作过；窗内游标/内部比较统一毫秒，只在查询边界换秒）。
  * extraChatIds 缺省空函数——测试/纯群场景不传即可。
  */
 const makeSdkPull = (client: any, cfg: FeishuConfig, log: (l: string) => void, locale: SyncLocale, extraChatIds: () => string[] = () => []): FeishuPull => async (startMs, endMs) => {
     const out: FeishuMessageCandidate[] = [];
     const chatIds = [...new Set([...cfg.chats, ...extraChatIds()])];
     const failed: { why: string; permission: boolean }[] = [];
+    const startSec = String(Math.floor(Number(startMs) / 1000));
+    const endSec = String(Math.floor(Number(endMs) / 1000));
     let okLegs = 0;
     for (const chatId of chatIds) {
         let pageToken: string | undefined = undefined;
@@ -237,8 +241,8 @@ const makeSdkPull = (client: any, cfg: FeishuConfig, log: (l: string) => void, l
                     params: {
                         container_id_type: "chat",
                         container_id: chatId,
-                        start_time: startMs,
-                        end_time: endMs,
+                        start_time: startSec,
+                        end_time: endSec,
                         sort_type: "ByCreateTimeAsc",
                         page_size: 50,
                         ...(pageToken ? { page_token: pageToken } : {}),
