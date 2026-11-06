@@ -4,6 +4,10 @@
  *
  *  覆盖：缺凭证一句人话退出（不触 SDK 加载）/ 缺 feishu.json 退出（配置检查先于 SDK）/
  *  缺 SDK = 安装提示退出（照抄可装）/ SDK 形态不对同提示 / WSClient start 拒绝 → code 1 /
+ *  ★ start() 语义红线守门：start() 立即 resolve（SDK 1.76 实锤）→ 监听必须常驻心跳持续；
+ *    onReady → started 日志；onError → code 1 停机（生命周期信号只走构造器回调）/
+ *    审批卡 2.0 实测形态：按钮直放 body.elements，禁 action/note 容器与 config.update_multi；
+ *    bot open_id 走通用 request + /bot/v3/info /
  *  冒烟：假 SDK 全链路——消息事件 → 建票；卡片回调（白名单点卡人）→ 决定落盘 + toast 3s 内返回；
  *  白名单外点卡 → 拒绝不写决定；pending → 推审批卡（behaviors callback + value 对象）；
  *  心跳可批；单实例（心跳新鲜 → 二开拒绝；.listen.lock 持有者存活 → 拒绝不建第二条连接）；私聊对账
@@ -43,11 +47,15 @@ const ENV = { appId: "cli_fake_app", secret: "fake-secret-not-real" };
 
 /** 假 SDK：捕获 dispatcher 与全部 API 调用（构造器语义只能用 function）。 */
 const makeFakeSdk = () => {
-    const state: any = { dispatcher: null, cards: [], resources: [], listCalls: [], startCalls: 0 };
+    const state: any = { dispatcher: null, cards: [], resources: [], listCalls: [], requests: [], startCalls: 0 };
     const Client = function (this: any, cfg: any) {
         assert.equal(cfg.appId, ENV.appId);
         assert.equal(cfg.appSecret, ENV.secret, "凭证只进 SDK 构造（不进日志）");
-        this.bot = { info: async () => ({ code: 0, data: { open_id: "ou_bot" } }) };
+        // bot info 走通用 request（SDK 无 bot 命名空间；真 SDK 返回 axios 包装，body 在 data 里）
+        this.request = async (payload: any) => {
+            state.requests.push(payload);
+            return { data: { bot: { open_id: "ou_bot" } } };
+        };
         this.im = {
             message: {
                 create: async (args: any) => {
@@ -70,6 +78,7 @@ const makeFakeSdk = () => {
         this.start = (args: any) => {
             state.startCalls++;
             state.dispatcher = args.eventDispatcher;
+            state.startCfg = cfg;
             return new Promise<void>(() => { }); // 长连接挂起 = 进程常驻
         };
     } as any;
@@ -156,6 +165,76 @@ test("缺 SDK / SDK 形态不对 → 安装提示一句可照抄，code 1；WSCl
     });
 });
 
+// ============ start() 语义红线（1.0.67 实锤修复守门） ============
+
+test("start() 立即 resolve ≠ 连接关闭（SDK 1.76 实锤）：监听必须常驻、心跳持续刷新，不准首轮退出", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        const { sdk, state } = makeFakeSdk();
+        // 复刻真 SDK 1.76：start() 校验完凭证立即 resolve（连接由内部循环持有，假 SDK 没有内部循环）
+        sdk.WSClient = function (this: any) {
+            this.start = (args: any) => {
+                state.dispatcher = args.eventDispatcher;
+                return Promise.resolve();
+            };
+        } as any;
+        const lines: string[] = [];
+        const deadline = Date.now() + 1500;
+        let stop = false;
+        let exited = false;
+        const running = runFeishuListen({
+            env: ENV, loadSdk: async () => sdk, log: (l) => lines.push(l), registerSignals: false,
+            shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 20, reconcileMs: 5000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        }).then((r) => { exited = true; return r; });
+        await new Promise((res) => setTimeout(res, 400));
+        assert.ok(!exited, "start() resolve 后监听必须继续常驻——.then(requestStop) 旧语义已除");
+        const hb = path.join(approvalsDir(), ".listener-heartbeat");
+        const stamps = new Set<number>();
+        for (let i = 0; i < 12 && Date.now() < deadline; i++) {
+            try { stamps.add((await fs.stat(hb)).mtimeMs); } catch { /* 心跳被删即退出，不该走到 */ }
+            await new Promise((res) => setTimeout(res, 25));
+        }
+        assert.ok(stamps.size >= 3, `心跳持续刷新（实际采到 ${stamps.size} 个不同 mtime）`);
+        stop = true;
+        const r = await running;
+        assert.equal(r.code, 0);
+    });
+});
+
+test("生命周期信号走构造器回调：onReady → started 日志；onError → code 1 停机（不准依赖 start() 返回值）", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        const { sdk, state } = makeFakeSdk();
+        // 复刻真 SDK：onReady/onError 是 WSClient 构造器回调，握手成功后异步触发 onReady
+        sdk.WSClient = function (this: any, cfg: any) {
+            this.start = (args: any) => {
+                state.dispatcher = args.eventDispatcher;
+                state.startCfg = cfg;
+                setTimeout(() => cfg.onReady?.(), 8);
+                return Promise.resolve();
+            };
+        } as any;
+        const lines: string[] = [];
+        let stop = false;
+        const deadline = Date.now() + 5000;
+        const running = runFeishuListen({
+            env: ENV, loadSdk: async () => sdk, log: (l) => lines.push(l), registerSignals: false,
+            shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 20, reconcileMs: 5000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        await until(() => lines.join("\n").includes("长连接已建立"), "onReady → started 日志");
+        await until(() => typeof state.startCfg?.onError === "function", "onError 已接线（start 时 cfg 内可见）");
+        state.startCfg.onError(new Error("retries exhausted"));
+        const r = await running;
+        assert.equal(r.code, 1);
+        assert.match(lines.join("\n"), /长连接建立失败/);
+        stop = true;
+    });
+});
+
 // ============ 冒烟：假 SDK 全链路 ============
 
 test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外点卡拒绝 / pending 推审批卡 / 心跳 / 单实例 / gatekeeper 透传 / SDK 资源下载", async () => {
@@ -210,7 +289,7 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
             expiresAt: new Date(Date.now() + 600_000).toISOString(),
         }), "utf-8");
 
-        // 5. pending → 推审批卡（behaviors callback + value 对象——新版卡片红线）
+        // 5. pending → 推审批卡（按钮直放 body.elements——2.0 实测形态红线；action/note/update_multi 全禁）
         await until(async () => state.cards.length >= 1, "审批卡推送");
         const cardRaw = state.cards[0];
         assert.equal(cardRaw.params.receive_id_type, "open_id");
@@ -218,8 +297,11 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         const card = JSON.parse(cardRaw.data.content);
         assert.equal(card.schema, "2.0");
         assert.equal(card.header.title.content, "🔐 挂机任务高危操作审批");
-        const btn = card.body.elements.find((el: any) => el.tag === "action").actions[0];
+        assert.ok(!("config" in card), "update_multi 被 API 拒（300302）——不准出现 config");
+        assert.ok(card.body.elements.every((el: any) => el.tag !== "action" && el.tag !== "note"), "action/note 容器被 API 拒（200861）——按钮只准直放 elements");
+        const btn = card.body.elements.find((el: any) => el.tag === "button");
         assert.deepEqual(btn.behaviors, [{ type: "callback", value: { approvalId, decision: "allow" } }]);
+        assert.ok(state.requests.some((rq: any) => String(rq?.url ?? "").includes("/bot/v3/info")), "bot open_id 走 v3 info 路径（client.bot 不存在）");
         assert.ok(!cardRaw.data.content.includes("diff"), "卡片不含 diff（外发红线）");
 
         const toast1 = await state.registered["card.action.trigger"]({ action: { value: { approvalId, decision: "allow" } }, operator: { open_id: "ou_alice" } });

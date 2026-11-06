@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.68
+
+飞书入口真机联调修复线（SDK 1.76 实锤三连修，全部经真机 API/监听复现定位）：
+
+- **致命：长连接生命周期语义修正**——SDK 的 `wsClient.start()` 校验完凭证后**立即 resolve**（连接由内部重连循环持有），返回值不是连接生命周期；1.0.67 把它当「关闭信号」用（`.then(stop)`）导致扫描/对账循环首轮即退、进程在 `start + 对账间隔` 准时自杀（心跳只写一次 → runner 判死 → 卡片审批静默回退 deny）。改为生命周期信号走 WSClient **构造器回调**：`onReady` = 连接建立（🟢 started 日志恢复，1.0.67 该日志从未出现即同根因）；`onError` = 终态失败（重试耗尽/不可重试）才停机；运行期断线由 SDK 自动重连，进程不因断线自杀（runner 侧心跳过期判定仍是外部看门狗）。守门测试复刻立即 resolve 语义钉死。
+- **审批卡在真机 API 上整卡被拒（230099）**——卡片 JSON 2.0 下 `tag:"action"` 容器与 `tag:"note"` 组件均不再支持（ErrCode 200861），`config.update_multi` 也被拒（300302）；按真机实测定型重写：**按钮直接作为 `body.elements` 元素**（实测 code 0），提示语并入 markdown。behaviors callback 回调值与点卡白名单闸不变。
+- **机器人 open_id 获取修复**——SDK 未暴露 `client.bot` 命名空间（`bot.info is not a function`），改走通用 `request` 直打 `/open-apis/bot/v3/info`（v4 路径 404 是旧文档误导）；`mentionOnlyInGroup=true` 下群 @建票恢复正常。
+
 ## 1.0.67
 
 多入口工单流水线 P4——飞书入口（`batch listen feishu` 长连接 + 卡片审批），遥控入口延伸到手机：

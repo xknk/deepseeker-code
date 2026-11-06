@@ -282,7 +282,7 @@ const msg = (locale: SyncLocale, key: string, ...args: any[]): string => {
 // ============ 注入面与主入口（纯逻辑，零 SDK / 零网络） ============
 
 export interface FeishuDeps {
-    /** bot open_id（群 @机器人判定；listen 启动时经 bot.info 取，取不到传 undefined = 群 mention 档拒收）。 */
+    /** bot open_id（群 @机器人判定；listen 启动时经通用 request 打 /bot/v3/info 取，取不到传 undefined = 群 mention 档拒收）。 */
     botOpenId?: string;
     /** 飞书资源下载器（listen 注入 SDK 实现；缺省全部标「未读取」不静默）。 */
     download?: DownloadFile;

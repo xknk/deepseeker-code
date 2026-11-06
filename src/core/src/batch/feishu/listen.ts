@@ -14,6 +14,8 @@
  *  ★ 单实例红线（spike 硬限制 5）：同应用多客户端不广播（随机一个收消息）→ 只允许一个 listen
  *    进程——心跳新鲜挡 90s 内旧进程残留，.listen.lock（wx 独占创建 = 原子）挡并发双开竞态；
  *    锁拒绝发生在 wsClient.start 之前，输家绝不产生第二条连接。
+ *  ★ start() 语义红线（1.0.67 实锤）：SDK 的 wsClient.start() 校验完凭证立即 resolve，返回值不是
+ *    连接生命周期——生命周期信号只走构造器回调 onReady/onError（见 WsHooks 注释）。
  *  ★ 密钥红线：FEISHU_APP_ID/FEISHU_APP_SECRET 只读环境变量（deps.env 注入测试），永不入日志。
  *  ★ 回调 3 秒约束（spike 硬限制 4）：card.action.trigger 处理器只做一次小文件写，立即回 toast。
  */
@@ -140,16 +142,31 @@ interface SdkBundle {
     botOpenId?: string;
 }
 
-const bootSdk = async (sdk: any, appId: string, secret: string, locale: SyncLocale, log: (l: string) => void): Promise<SdkBundle | null> => {
+/**
+ * WS 生命周期钩子（构造器回调）。
+ * ★ SDK 1.76 语义红线：`wsClient.start()` 校验完凭证后立即 resolve（连接由内部 reConnect 循环
+ * 持有），返回值【不是】连接生命周期——把它当「连接关闭信号」用（.then(stop)）会让扫描/对账
+ * 循环在首轮就退出（1.0.67 实锤：进程在 start+reconcileMs 准时自杀）。生命周期信号只走这里：
+ * onReady=首次握手成功；onError=终态失败（不可重试/重试耗尽）。断线由 SDK 自动重连，不算终态。
+ */
+interface WsHooks {
+    onReady?: () => void;
+    onError?: (err: Error) => void;
+}
+
+const bootSdk = async (sdk: any, appId: string, secret: string, locale: SyncLocale, log: (l: string) => void, hooks?: WsHooks): Promise<SdkBundle | null> => {
     if (!sdk?.Client || !sdk?.WSClient || !sdk?.EventDispatcher) return null;
     const client = new sdk.Client({ appId, appSecret: secret });
     const loggerLevel = sdk.LoggerLevel?.info ?? "info";
-    const wsClient = new sdk.WSClient({ appId, appSecret: secret, loggerLevel });
+    const wsClient = new sdk.WSClient({ appId, appSecret: secret, loggerLevel, ...(hooks ?? {}) });
     const dispatcher = new sdk.EventDispatcher({});
     let botOpenId: string | undefined;
     try {
-        const info = await client.bot.info();
-        botOpenId = info?.data?.open_id ?? info?.open_id ?? info?.data?.bot?.open_id;
+        // bot info：SDK 未暴露 bot 命名空间（client.bot.info 不存在）→ 通用 request 直打
+        // /open-apis/bot/v3/info（v4 路径 404；返回体顶层即 bot 对象，防御性兼容包一层 data）。
+        const resp = await client.request({ method: "GET", url: "/open-apis/bot/v3/info" });
+        const body = resp?.data ?? resp;
+        botOpenId = body?.bot?.open_id ?? body?.open_id ?? body?.data?.bot?.open_id;
     } catch (e: any) {
         log(msg(locale, "botInfoFail", String(e?.message ?? e)));
     }
@@ -252,9 +269,15 @@ const makeDefaultJudge = async (): Promise<NonNullable<FeishuListenDeps["gatekee
 };
 
 /** 新版交互卡（§5：behaviors callback，value 只收对象类型；卡片固定 zh，不含 diff 与验收输出）。 */
+/**
+ * 审批卡（卡片 JSON 2.0）。★ 形态为 2026-11-06 真机 API 实测定型（错一个就 230099 整卡被拒）：
+ *   - `tag:"action"` 容器 ✗（ErrCode 200861 "unsupported tag action"——那是旧版 JSON 1.0 组件）；
+ *   - `tag:"note"` ✗（同 200861）；`config.update_multi` ✗（ErrCode 300302 "update_multi is false"）；
+ *   - 按钮【直接】作为 body.elements 元素 ✓（实测 code 0）；markdown ✓。
+ * 回调值经 behaviors callback 原样回到 card.action.trigger（见步骤 7 处理器）。
+ */
 const buildApprovalCard = (p: { approvalId: string; tool: string; summary: string; ticketId?: string; ticketTitle?: string; expiresAt: string }): string => JSON.stringify({
     schema: "2.0",
-    config: { update_multi: false },
     header: { title: { tag: "plain_text", content: "🔐 挂机任务高危操作审批" }, template: "red" },
     body: {
         elements: [
@@ -265,26 +288,21 @@ const buildApprovalCard = (p: { approvalId: string; tool: string; summary: strin
                     `**工具**：${p.tool}`,
                     `**请求**：${p.summary.slice(0, 200)}`,
                     `**期限**：${p.expiresAt}（超时自动拒绝，fail-closed）`,
+                    `批准 = allow-once 单次生效，不改变工具白名单。`,
                 ].join("\n"),
             },
             {
-                tag: "action",
-                actions: [
-                    {
-                        tag: "button",
-                        text: { tag: "plain_text", content: "批准（仅本票本次）" },
-                        type: "primary",
-                        behaviors: [{ type: "callback", value: { approvalId: p.approvalId, decision: "allow" } }],
-                    },
-                    {
-                        tag: "button",
-                        text: { tag: "plain_text", content: "拒绝" },
-                        type: "danger",
-                        behaviors: [{ type: "callback", value: { approvalId: p.approvalId, decision: "deny" } }],
-                    },
-                ],
+                tag: "button",
+                text: { tag: "plain_text", content: "批准（仅本票本次）" },
+                type: "primary",
+                behaviors: [{ type: "callback", value: { approvalId: p.approvalId, decision: "allow" } }],
             },
-            { tag: "note", elements: [{ tag: "plain_text", content: "批准 = allow-once 单次生效，不改变工具白名单。" }] },
+            {
+                tag: "button",
+                text: { tag: "plain_text", content: "拒绝" },
+                type: "danger",
+                behaviors: [{ type: "callback", value: { approvalId: p.approvalId, decision: "deny" } }],
+            },
         ],
     },
 });
@@ -345,6 +363,22 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         return { code: 1 };
     }
 
+    // —— 3.5 停机原语与 WS 生命周期钩子（必须先于 SDK 构造：onReady/onError 是 WSClient 的
+    //        构造器回调，{...hooks} 展开发生在构造时刻——构造后再赋值传不进去）——
+    let stopReason: string | null = null;
+    const requestStop = (why: string): void => {
+        if (stopReason === null) stopReason = why;
+    };
+    let wsExitCode = 0;
+    const wsHooks: WsHooks = {
+        onReady: () => log(msg(locale, "started")),
+        onError: (e: Error) => {
+            log(msg(locale, "wsFail", String(e?.message ?? e)));
+            wsExitCode = 1;
+            requestStop("ws error");
+        },
+    };
+
     // —— 4. SDK（动态加载；缺包一句安装提示）——
     let sdk: any;
     try {
@@ -353,7 +387,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         log(`${SDK_INSTALL_HINT}${e?.code ? `（${e.code}）` : ""}`);
         return { code: 1 };
     }
-    const bundle = await bootSdk(sdk, env.appId, env.secret, locale, log);
+    const bundle = await bootSdk(sdk, env.appId, env.secret, locale, log, wsHooks);
     if (!bundle) {
         log(SDK_INSTALL_HINT);
         return { code: 1 };
@@ -384,10 +418,6 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         queueRoot: deps?.queueRoot,
         projectRoot: deps?.projectRoot,
         locale,
-    };
-    let stopReason: string | null = null;
-    const requestStop = (why: string): void => {
-        if (stopReason === null) stopReason = why;
     };
 
     // —— 6. 消息事件（im.message.receive_v1）：归一 → 建票管线；异常只留日志不击垮监听 ——
@@ -438,10 +468,12 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         },
     });
 
-    // —— 8. 长连接：失败 → 停机；正常关闭 → 停机 ——
-    let wsExitCode = 0;
-    const wsStart = bundle.wsClient.start({ eventDispatcher: dispatcher });
-    void wsStart.then(() => requestStop("ws closed")).catch((e: any) => {
+    // —— 8. 长连接：生命周期信号走构造器回调（步骤 3.5 的 wsHooks）。★ start() 返回值不是连接
+    //        生命周期（校验完凭证立即 resolve）——绝不能 .then(requestStop)：那会让两个循环首轮
+    //        即退（1.0.67 实锤）。断线由 SDK 自动重连；终态失败（重试耗尽/不可重试）走 onError 停机，
+    //        runner 侧心跳过期判定是外部看门狗，进程内不因断线自杀。——
+    void bundle.wsClient.start({ eventDispatcher: dispatcher }).catch((e: any) => {
+        // start() 自身的同步校验拒绝（凭证形态错等）；运行期终态失败走上面 onError
         log(msg(locale, "wsFail", String(e?.message ?? e)));
         wsExitCode = 1;
         requestStop("ws error");
