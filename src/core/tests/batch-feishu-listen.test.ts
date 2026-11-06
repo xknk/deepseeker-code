@@ -6,7 +6,8 @@
  *  缺 SDK = 安装提示退出（照抄可装）/ SDK 形态不对同提示 / WSClient start 拒绝 → code 1 /
  *  冒烟：假 SDK 全链路——消息事件 → 建票；卡片回调（白名单点卡人）→ 决定落盘 + toast 3s 内返回；
  *  白名单外点卡 → 拒绝不写决定；pending → 推审批卡（behaviors callback + value 对象）；
- *  心跳可批；单实例（心跳新鲜 → 二开拒绝）；gatekeeper judge 注入透传；附件走 SDK 资源下载。
+ *  心跳可批；单实例（心跳新鲜 → 二开拒绝；.listen.lock 持有者存活 → 拒绝不建第二条连接）；私聊对账
+ *  （白名单私聊首条消息登记 chat_id → 对账拉取覆盖；陌生私聊不登记）；gatekeeper judge 注入透传；附件走 SDK 资源下载。
  *  ★ 密钥红线：env 全部显式注入假值，严禁读真 FEISHU_*（本机有真凭证）。
  */
 import { test } from "node:test";
@@ -247,6 +248,7 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         const r = await running;
         assert.equal(r.code, 0);
         assert.match(lines.join("\n"), /飞书监听已退出/);
+        assert.ok(!fsSync.existsSync(path.join(approvalsDir(), ".listen.lock")), "优雅退出释放单实例锁");
     });
 });
 
@@ -283,5 +285,77 @@ test("对账：启动即拉一轮（游标增量）——缺历史权限 → 明
         stop = true;
         const r = await running;
         assert.equal(r.code, 0, "降级不是致命：监听继续");
+    });
+});
+
+// ============ 复审加固（2026-11-06）：私聊对账 + 单实例锁 ============
+
+test("私聊对账：白名单私聊首条消息登记 chat_id → 对账拉取覆盖该会话；陌生私聊不登记", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"], chats: ["oc_grp"], mentionOnlyInGroup: false });
+        await writeSyncConfig(dir, { defaultAccept: "npm test" });
+        const { sdk, state } = makeFakeSdk(); // list 返回空 items（code 0）
+        const lines: string[] = [];
+        let stop = false;
+        const deadline = Date.now() + 20_000;
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, reconcileMs: 30, // 30ms 一轮：登记后很快被拉取覆盖
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        await until(() => !!state.dispatcher, "dispatcher 注册");
+
+        // 白名单私聊首条消息 → 登记 chat_id（票照常走建票闸）
+        state.registered["im.message.receive_v1"]({
+            message: {
+                message_id: "om_dm1", chat_id: "oc_dm_alice", chat_type: "p2p", message_type: "text",
+                content: JSON.stringify({ text: "私聊修复 bug" }), create_time: String(Date.now()),
+            },
+            sender: { sender_id: { open_id: "ou_alice" } },
+        });
+        await until(async () => {
+            const raw = await fs.readFile(path.join(dir, "feishu-p2p-chats.json"), "utf-8").catch(() => "");
+            return raw.includes("oc_dm_alice");
+        }, "私聊登记落盘");
+        assert.ok(lines.some((l) => /纳入断线对账/.test(l)), "登记有可见日志（fail-visible）");
+
+        // 陌生私聊：不登记（发送者不在 users 白名单）
+        state.registered["im.message.receive_v1"]({
+            message: {
+                message_id: "om_dm2", chat_id: "oc_dm_x", chat_type: "p2p", message_type: "text",
+                content: JSON.stringify({ text: "陌生人说话" }), create_time: String(Date.now()),
+            },
+            sender: { sender_id: { open_id: "ou_stranger" } },
+        });
+        await tick();
+        const raw = await fs.readFile(path.join(dir, "feishu-p2p-chats.json"), "utf-8");
+        assert.ok(!raw.includes("oc_dm_x"), "白名单外私聊不登记");
+
+        // 后续对账拉取覆盖已登记私聊（群 + 私聊都翻页）
+        await until(async () => {
+            const ids = new Set(state.listCalls.map((p: any) => p.container_id));
+            return ids.has("oc_grp") && ids.has("oc_dm_alice");
+        }, "对账覆盖私聊会话");
+        stop = true;
+        const r = await running;
+        assert.equal(r.code, 0);
+    });
+});
+
+test("单实例锁：持有者存活 → 拒绝且报 pid、不建第二条连接（wsClient.start 零调用）、不动别人的锁", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await fs.mkdir(approvalsDir(), { recursive: true });
+        await fs.writeFile(path.join(approvalsDir(), ".listen.lock"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), "utf-8");
+        const { sdk, state } = makeFakeSdk();
+        const lines: string[] = [];
+        const r = await runFeishuListen({ env: ENV, loadSdk: async () => sdk, log: (l) => lines.push(l), registerSignals: false });
+        assert.equal(r.code, 1);
+        assert.match(lines.join("\n"), /已有飞书监听进程/);
+        assert.ok(lines.join("\n").includes(String(process.pid)), "拒绝信息报出持有者 pid");
+        assert.equal(state.startCalls, 0, "锁拒绝发生在 wsClient.start 之前——绝不产生第二条连接");
+        assert.ok(fsSync.existsSync(path.join(approvalsDir(), ".listen.lock")), "拒绝方不动持有者的锁");
+        void dir;
     });
 });

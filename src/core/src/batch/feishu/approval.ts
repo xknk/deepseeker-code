@@ -11,6 +11,8 @@
  *
  *  - 存活探测：listen 周期写 .listener-heartbeat（pid + 是否具备推送能力）；runner 只在
  *    「存活且可推送」时进入卡片等待，否则维持现状（自动应答器 deny + 记录，零回归零新输出）。
+ *  - 单实例：listen 启动抢 .listen.lock（wx 独占创建 = 原子，挡心跳 check-then-act 的并发双开）；
+ *    死 pid/损坏锁自愈接管，崩溃残留不锁死。
  *  - 决定文件带 approvalId 比对（防错配）；写决定走「临时文件 + rename」原子化；
  *    一个 pending 只决定一次（decision.json 已存在即拒绝——check-then-act 与仓库既有锁语义一致）。
  *  - 残留清理带 10min 宽限（sweepStaleApprovals）：过期的 pending 不立刻删——可能是 runner
@@ -142,6 +144,65 @@ export const readListenerHeartbeat = async (now: Date = new Date(), maxAgeMs = H
 export const isListenerAlive = async (now: Date = new Date(), maxAgeMs = HEARTBEAT_MAX_AGE_MS): Promise<boolean> => {
     const hb = await readListenerHeartbeat(now, maxAgeMs);
     return !!hb && hb.canApprove === true;
+};
+
+// ============ 单实例锁（listen 启动独占：wx 原子创建，挡心跳检查的 check-then-act 竞态窗口） ============
+//  心跳是「读新鲜 → 后续初始化」的 check-then-act：两个 listen 同时启动可双双通过 → 双开建连 →
+//  飞书同应用不广播（消息随机送达一条连接）→ 半丢票且无报错。锁是串行化点：wx 独占创建在
+//  POSIX/Windows 上都原子，输家拿 EEXIST 即拒绝（拒绝发生在 wsClient.start 之前，绝不产生第二条连接）。
+
+/** 锁文件：<batch>/approvals/.listen.lock（内容 {pid, at}；句柄即写即关，不持有——Windows 删除不受阻）。 */
+export const listenLockPath = (): string => path.join(approvalsDir(), ".listen.lock");
+
+export interface ListenLockFile {
+    pid: number;
+    at: string;
+}
+
+/** pid 存活探测（signal 0）。EPERM 视为存活（保守：宁可误拒不可误双开）。导出供测试钉死两形态。 */
+export const pidAlive = (pid: number): boolean => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e: any) {
+        return e?.code === "EPERM";
+    }
+};
+
+/**
+ * 抢锁。成功 = {ok:true}（调用方退出时必须 releaseListenLock）；失败 = {ok:false, holderPid}
+ * （持有者存活，含持有者是自己 pid 的异常残留——fail-closed，手动删文件或进程重启后接管）。
+ * 死 pid / 损坏文件 → 删除接管（崩溃残留自愈）；接管后 wx 仍 EEXIST = 真并发对手刚重建 → 拒绝。
+ */
+export const acquireListenLock = async (): Promise<{ ok: true } | { ok: false; holderPid: number }> => {
+    await fs.mkdir(approvalsDir(), { recursive: true });
+    const writeLock = async (): Promise<void> => {
+        const fh = await fs.open(listenLockPath(), "wx");
+        try {
+            await fh.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() } satisfies ListenLockFile, null, 2), "utf-8");
+        } finally {
+            await fh.close();
+        }
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            await writeLock();
+            return { ok: true };
+        } catch (e: any) {
+            if (e?.code !== "EEXIST") throw e;
+            const holder = await readJson<ListenLockFile>(listenLockPath());
+            if (typeof holder?.pid === "number" && pidAlive(holder.pid)) return { ok: false, holderPid: holder.pid };
+            await fs.rm(listenLockPath(), { force: true }).catch(() => { }); // 死 pid/损坏 → 接管
+        }
+    }
+    const again = await readJson<ListenLockFile>(listenLockPath());
+    return { ok: false, holderPid: typeof again?.pid === "number" ? again.pid : 0 };
+};
+
+/** 释放锁（listen 退出清理调用；不存在 = 静默）。崩溃残留由下一次 acquire 的死 pid 接管自愈。 */
+export const releaseListenLock = async (): Promise<void> => {
+    await fs.rm(listenLockPath(), { force: true }).catch(() => { });
 };
 
 // ============ runner 侧：落 pending + 轮询决定 ============

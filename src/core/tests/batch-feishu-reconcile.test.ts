@@ -5,7 +5,8 @@
  *  覆盖：游标读写往返与损坏/缺失=首跑语义（60min 回看窗）/ 增量拉取逐条 handle、补建计数 /
  *  游标推进语义（见过即推进——白名单外消息不会造成重拉风暴；拉到更晚消息推到 max，
  *  空窗推进到 endMs）/ 权限缺失 = 游标推进 + 明示降级文案（fail-visible，不对账风暴）/
- *  普通拉取失败 = 游标不动下轮重试。pull/handle 全注入零网络。
+ *  普通拉取失败 = 游标不动下轮重试 / 私聊登记存储（recordP2pChat 去重幂等、loadP2pChats 往返、
+ *  与游标文件互不干扰）。pull/handle 全注入零网络。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,7 +14,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-const { runReconcile, loadCursor, saveCursor, cursorPath, FIRST_RUN_WINDOW_MS } = await import("@/batch/feishu/reconcile.ts");
+const { runReconcile, loadCursor, saveCursor, cursorPath, loadP2pChats, recordP2pChat, FIRST_RUN_WINDOW_MS } = await import("@/batch/feishu/reconcile.ts");
 const { normalizeMessageEvent } = await import("@/batch/feishu/message.ts");
 
 const withTempBatchDir = async (fn: () => Promise<void>): Promise<void> => {
@@ -173,5 +174,26 @@ test("对账→建票管线串测：handle 走真 handleFeishuMessage——已�
         const snap = await queue.snapshotQueue();
         assert.equal(snap.pending.length, 3, "断网重连不丢票：共 3 张");
         await fs.rm(deps.projectRoot, { recursive: true, force: true });
+    });
+});
+
+// ============ 私聊登记存储（复审加固 2026-11-06：白名单私聊纳入对账拉取） ============
+
+test("私聊登记：recordP2pChat 去重幂等 / loadP2pChats 往返 / 损坏文件=空（重学即可）/ 与游标文件互不干扰", async () => {
+    await withTempBatchDir(async () => {
+        assert.deepEqual(await loadP2pChats(), [], "无文件 = 空登记");
+        assert.equal(await recordP2pChat("oc_dm_1"), true, "新登记 = true");
+        assert.equal(await recordP2pChat("oc_dm_1"), false, "重复登记 = false（零写入）");
+        assert.equal(await recordP2pChat("oc_dm_2"), true);
+        assert.deepEqual(await loadP2pChats(), ["oc_dm_1", "oc_dm_2"], "往返一致（保序）");
+
+        await fs.writeFile(path.join(process.env.DEEPSEEKER_CODE_BATCH_DIR!, "feishu-p2p-chats.json"), "{broken", "utf-8");
+        assert.deepEqual(await loadP2pChats(), [], "损坏 = 空登记（幂等重学，不炸调用方）");
+
+        // 与游标互不干扰：登记写入不动游标值
+        await saveCursor("1730800000000", now());
+        await recordP2pChat("oc_dm_3");
+        const c = await loadCursor();
+        assert.equal(c?.cursor, "1730800000000", "游标值原样");
     });
 });

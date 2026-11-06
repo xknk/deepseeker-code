@@ -7,7 +7,8 @@
  *  allow → "allow-once" + pending 清理；deny 同清理；approvalId 比对防错配；超时 = deny fail-closed）/
  *  writeApprovalDecision（pending 缺失拒 / 已决定拒——一个 pending 只决定一次 / 原子写成功）/
  *  listPendingApprovals 跳过过期与损坏 / sweepStaleApprovals 宽限语义（宽限内不动、过期+宽限连 decision 一起清、
- *  只剩 decision 残留也可清）。全注入时钟与 sleep（零真等）；DEEPSEEKER_CODE_BATCH_DIR 重定向零碰真队列。
+ *  只剩 decision 残留也可清）/ 单实例锁（存活持有者拒绝、损坏与死 pid 自愈接管、释放删除）。
+ *  全注入时钟与 sleep（零真等）；DEEPSEEKER_CODE_BATCH_DIR 重定向零碰真队列。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ import { randomUUID } from "crypto";
 const {
     writeListenerHeartbeat, readListenerHeartbeat, isListenerAlive,
     requestCardApproval, writeApprovalDecision, listPendingApprovals, sweepStaleApprovals,
+    acquireListenLock, releaseListenLock, pidAlive, listenLockPath,
     approvalsDir, APPROVAL_TIMEOUT_MIN, APPROVAL_SWEEP_GRACE_MIN, HEARTBEAT_MAX_AGE_MS,
 } = await import("@/batch/feishu/approval.ts");
 
@@ -216,5 +218,41 @@ test("心跳残留不清理：sweep 不碰 .listener-heartbeat 与 tmp 文件", 
         const names = await fs.readdir(approvalsDir());
         assert.ok(names.includes(".listener-heartbeat"), "心跳保留");
         assert.ok(names.includes("x.pending.json.tmp-123-abc"), "tmp 由原子写自净，sweep 不碰");
+    });
+});
+
+// ============ 单实例锁（wx 独占创建 = 原子；挡心跳 check-then-act 的并发双开竞态） ============
+
+test("listen 锁：存活持有者拒绝（报 pid）/ 损坏接管 / 死 pid 接管 / 释放删除 / pidAlive 两形态", async () => {
+    await withClock(async () => {
+        await fs.mkdir(approvalsDir(), { recursive: true });
+
+        // 1) 持有者存活（用测试进程自身 pid——确定性存活）：拒绝且报出 pid（含「持有者是自己」的异常残留）
+        await fs.writeFile(listenLockPath(), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), "utf-8");
+        assert.deepEqual(await acquireListenLock(), { ok: false, holderPid: process.pid });
+
+        // 2) 损坏文件 → 接管成功，锁内容归我
+        await fs.writeFile(listenLockPath(), "not-json", "utf-8");
+        assert.deepEqual(await acquireListenLock(), { ok: true });
+        const mine = JSON.parse(await fs.readFile(listenLockPath(), "utf-8"));
+        assert.equal(mine.pid, process.pid);
+
+        // 3) 死 pid → 接管（刚退出的子进程 pid + 前提自检，排除 pid 复用极小概率翻车）
+        const { spawn } = await import("child_process");
+        const child = spawn(process.execPath, ["-e", "process.exit(0)"]);
+        await new Promise<void>((res) => child.on("exit", () => res()));
+        assert.ok(child.pid);
+        assert.equal(pidAlive(child.pid), false, "前提自检：刚退出的子进程必须判死");
+        await fs.writeFile(listenLockPath(), JSON.stringify({ pid: child.pid, at: new Date().toISOString() }), "utf-8");
+        assert.deepEqual(await acquireListenLock(), { ok: true }, "崩溃残留（死 pid）→ 自愈接管");
+
+        // 4) 释放删除
+        await releaseListenLock();
+        assert.equal(await fs.stat(listenLockPath()).then(() => true, () => false), false, "释放后锁文件不存在");
+
+        // 5) pidAlive 边界（导出面钉死：非正整数判死）
+        assert.equal(pidAlive(process.pid), true);
+        assert.equal(pidAlive(0), false);
+        assert.equal(pidAlive(-1), false);
     });
 });

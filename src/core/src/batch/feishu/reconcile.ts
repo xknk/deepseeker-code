@@ -54,15 +54,47 @@ export const saveCursor = async (cursor: string, now: Date = new Date()): Promis
     await fs.rename(tmp, cursorPath());
 };
 
+// ============ 私聊会话登记（白名单私聊纳入对账拉取：群白名单是配置态 chat_id，私聊只有 open_id，
+// chat_id 必须从首条实时消息学习——学习后断线窗口内该会话的漏票才可回补。从未私聊过机器人的
+// 会话无从得知 chat_id，无法覆盖（README 与降级文案均明示此边界）。） ============
+
+export const p2pChatsPath = (): string => path.join(batchQueueRoot(), "feishu-p2p-chats.json");
+
+/** 读已登记私聊 chat_id（无文件/损坏 = 空数组，重新学习即可——登记是幂等的）。 */
+export const loadP2pChats = async (): Promise<string[]> => {
+    try {
+        const raw = JSON.parse(await fs.readFile(p2pChatsPath(), "utf-8")) as { chats?: unknown };
+        return Array.isArray(raw?.chats) ? raw.chats.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+        return [];
+    }
+};
+
+/**
+ * 登记一个私聊 chat_id（已登记 = false 零写入；新登记 = true）。
+ * 读-并-写整文件原子替换：与游标写各自独立文件，最坏并发丢一次登记（下条消息重学，幂等），
+ * 游标语义不受任何影响。
+ */
+export const recordP2pChat = async (chatId: string): Promise<boolean> => {
+    const chats = await loadP2pChats();
+    if (chats.includes(chatId)) return false;
+    const next = { chats: [...chats, chatId], updatedAt: new Date().toISOString() };
+    await fs.mkdir(path.dirname(p2pChatsPath()), { recursive: true });
+    const tmp = `${p2pChatsPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
+    await fs.rename(tmp, p2pChatsPath());
+    return true;
+};
+
 const RECONCILE_MSG: Record<SyncLocale, Record<string, any>> = {
     zh: {
-        permissionDenied: "⚠️ 对账不可用（缺 im:message 历史权限）：断线窗口内的群/私聊消息可能漏票——请翻聊天记录，重要内容重新 @机器人 或手动 batch add。去飞书开放平台给应用补「获取与发送单聊、群组消息」权限可消除本提示。",
+        permissionDenied: "⚠️ 对账不可用（缺 im:message 历史权限）：断线窗口内的群聊与已登记私聊消息可能漏票（从未私聊过机器人的会话无法回补）——请翻聊天记录，重要内容重新 @机器人 或手动 batch add。去飞书开放平台给应用补「获取与发送单聊、群组消息」权限可消除本提示。",
         pullFail: (r: string) => `⚠️ 对账拉取失败（游标不推进，下轮重试）：${r}`,
         summary: (pulled: number, created: number, skipped: number) => `🔁 对账完成：拉到 ${pulled} 条，补建 ${created} 票，跳过 ${skipped} 条`,
         empty: "🔁 对账完成：窗口内无新消息",
     },
     en: {
-        permissionDenied: "⚠️ Reconciliation unavailable (missing im:message history permission): messages sent while disconnected may not become tickets — check chat history, re-@ the bot for important ones, or run `batch add` manually. Granting the \"read & send messages\" permission to the app on the Feishu open platform clears this notice.",
+        permissionDenied: "⚠️ Reconciliation unavailable (missing im:message history permission): group and registered direct-chat messages sent while disconnected may not become tickets (chats that never messaged the bot cannot be backfilled) — check chat history, re-@ the bot for important ones, or run `batch add` manually. Granting the \"read & send messages\" permission to the app on the Feishu open platform clears this notice.",
         pullFail: (r: string) => `⚠️ Reconcile pull failed (cursor not advanced; will retry next cycle): ${r}`,
         summary: (pulled: number, created: number, skipped: number) => `🔁 Reconcile done: pulled ${pulled}, created ${created}, skipped ${skipped}`,
         empty: "🔁 Reconcile done: no new messages in window",

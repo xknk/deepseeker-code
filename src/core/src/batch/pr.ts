@@ -126,9 +126,10 @@ const BRANCH_RE = /^[\w][\w./-]*$/;
 const FILE_LIST_CAP = 20;
 
 /**
- * name-status 行 → 纯路径（剥状态列）：`M\ta.ts` → `a.ts`；改名 `R100\t{a => b}` 路径按 git 原样。
- * name-status 行至少两列（状态 + 路径），pop 恒取路径列。导出供守门测试钉形态；控制台预览不走
- * 此处（状态列人看有用），只有外发正文剥（试点 PR #4 实证 `M\tREADME.md` 漏进正文）。
+ * name-status 行 → 纯路径（剥状态列）：`M\ta.ts` → `a.ts`。改名为三列 `R100\told\tnew`
+ * （`{a => b}` 是 numstat 的形态，别混），pop 恒取最后一列 = 新路径——旧路径刻意丢弃，
+ * 清单只看最终路径。导出供守门测试钉形态；控制台预览不走此处（状态列人看有用），只有
+ * 外发正文剥（试点 PR #4 实证 `M\tREADME.md` 漏进正文）。
  */
 export const nameStatusToPaths = (rows: string[]): string[] =>
     rows.map((line) => line.split(/\t/).pop() ?? line).filter(Boolean);
