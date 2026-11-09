@@ -41,7 +41,10 @@ export type AutoVerdict = 'allow' | 'deny' | 'ask';
  *  调用方（toolExecution）从匹配到的工具对象读出声明后经 decl 参数传入；未传/未声明 = 恒 ask（fail-closed）。
  */
 export type AutoApprovalDecl = {
-    autoApproval?: 'file' | 'command' | 'aggressive';
+    /** ★ 'loopback'（A3，2026-11-09）：http_request 字面回环免审——与 CustomTool.function.autoApproval
+     *  （tool/type.ts:222）同一联合；漏扩会让 runAutoCheck 的 loopback 分支比较被 TS2367 判死、
+     *  守门测试的显式 decl 报 TS2345（真机验收会话实锤 14 条）。 */
+    autoApproval?: 'file' | 'command' | 'aggressive' | 'loopback';
     pathArgs?: string[];
     primaryArg?: string;
     /** ★ P0-3（裁定 B 方案）：文件类二元分类读工具声明的安全等级与 undo 策略——

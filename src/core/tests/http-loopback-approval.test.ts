@@ -66,7 +66,7 @@ describe("runAutoCheck loopback 作用域（A3）", () => {
 });
 
 describe("processToolCall 端到端接线（A3）", () => {
-    const httpRequestTool = httpTools.find(t => t.function.name === "http_request")!;
+    const httpRequestTool = httpTools.find((t: any) => t.function.name === "http_request")!;
     const mkCtx = () => ({
         sessionId: "sess-loopback", cwd: SANDBOX, depth: 0, round: 1, startTime: performance.now(),
         llmDecisionSource: "tool" as any, rawTools: [httpRequestTool], events: (() => { }) as any,
@@ -87,7 +87,7 @@ describe("processToolCall 端到端接线（A3）", () => {
             mkCtx() as any));
         assert.match(outcome.resultForModel, /安全熔断/, "外网目标未获免审 → 转人工审批 → 未注入审批通道默认拒绝");
         // SSRF 回归：绕过审批层直调 execute——工具内元数据端点硬拦在连接前命中（checkHost step 0，离线确定性）
-        const res = await httpRequestTool.function.execute({ url: "http://169.254.169.254/latest/meta-data/" }, { cwd: SANDBOX } as any);
+        const res = await httpRequestTool.function.execute({ url: "http://169.254.169.254/latest/meta-data/" }, { cwd: SANDBOX } as any) as any;
         assert.equal(res.status, "failed");
         assert.match(res.content, /元数据/, "工具内 SSRF 闸未受 A3 影响");
     });

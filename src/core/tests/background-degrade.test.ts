@@ -236,7 +236,7 @@ describe("run_command 自动转后台（auto-degrade）", () => {
 
 describe("stop_background_task 声明钉住（2026-11-09 审批降噪）", () => {
     it("safetyLevel=SAFE——本会话自起任务的对称收尾免审（execute 内 sessionId 硬闸兜底）；误改回 MUTATION/DANGER 即重新恒问", () => {
-        const stop = backgroundTools.find(t => t.function.name === "stop_background_task");
+        const stop = backgroundTools.find((t: any) => t.function.name === "stop_background_task");
         assert.ok(stop, "stop_background_task 应在注册表");
         assert.equal(stop!.function.safetyLevel, ToolSafetyLevel.SAFE,
             "SAFE 是有意的降噪声明（重放实证 4 次无信息量点击），改动须 conscious 更新此处与 background.ts 注释");
