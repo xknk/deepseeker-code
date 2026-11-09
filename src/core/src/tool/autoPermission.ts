@@ -401,7 +401,8 @@ export const isReadOnlyCommand = (cmd: string): boolean => {
 /**
  * ★ A2（2026-11-09 审批降噪）：runner 族命令的「入口前缀」归一化——供 permissions.buildScopedAllowRule
  *  把供应链族（npm/pnpm/yarn/npx/corepack 整族，SCRIPT_RUNNER_HEADS，整族拦截不拆）的
- *  allow-always / allow-session 从【精确命令串】升级为【入口前缀】规则 `run_command(<前缀>*)`。
+ *  allow-always / allow-session 从【精确命令串】升级为【入口前缀】规则 `run_command(<前缀> *)`
+ *  （尾随 `空格*` = token 边界，防入口 token 无分隔延续的换文件变体，见 buildScopedAllowRule 注释）。
  *
  *  归一化步骤：
  *   1. 含命令替换（`$(` / 反引号）→ null（执行期才展开的内容不进规则，宁窄勿宽）；

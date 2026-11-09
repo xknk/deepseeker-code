@@ -271,7 +271,8 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *    作用域过宽 = 把 prompt 注入驱动的危险变体也静默放行（checkPermission='allow' → needApproval=false）。
  *   - 命令类（run_command/run_in_background，argKey=command）：分轨（★ A2，2026-11-09 审批降噪）——
  *       ① runner 族（npm/pnpm/yarn/npx/corepack 整族，scriptRunnerEntryPrefix 命中）：落【入口前缀】规则
- *          `run_command(<解释器+入口脚本>*)`，如 `run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx*)`。
+ *          `run_command(<解释器+入口脚本> *)`（尾随 `空格*` = token 边界），如
+ *          `run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx *)`。
  *          动机：同一入口形状的变体（batch status / batch sync --check / 尾随 2>&1 | head）执行的是同一份
  *          入口脚本代码，逐变体确认零安全增益、纯摩擦（2026-11-05 trace：~21 次点击全是同一入口的变体）。
  *          供应链「首次人工确认」语义保留——每个入口形状第一次仍问；SCRIPT_RUNNER_HEADS 整族拦截不拆，
@@ -298,8 +299,13 @@ export const buildScopedAllowRule = (toolName: string, args: any, primaryArg?: s
         const cmd = val.trim();
         if (!cmd) return null;
         // ★ A2：runner 族落「入口前缀」规则（见上方函数注释的分轨论证）；其余精确串现状不变。
+        //   ★ 尾随 ` *`（带空格，2026-11-09 验证补口）：globToRegex 的裸 `*` → `.*`，若写成 `main.tsx*`
+        //     会连 `main.tsx.evil.mjs`（换了脚本文件、入口 token 的无分隔延续）一并静默放行——注入链
+        //     实证：先 edit_file 写 evil 变体（文件快路径放行）再套前缀规则执行，M5 同款病灶复活。
+        //     空格 = token 边界：变体必须形如「同入口 + 空格 + 运行期参数」才命中；bare 入口（无尾参）
+        //     不命中、重新首验一次（罕见形态，代价可接受）。
         const prefix = scriptRunnerEntryPrefix(cmd);
-        if (prefix) return `${toolName}(${prefix}*)`;
+        if (prefix) return `${toolName}(${prefix} *)`;
         return `${toolName}(${cmd})`; // 精确命令串：杜绝跨子命令 / 链式注入的静默放行
     }
     // ★ 第 17 项补丁（2026-10-21）：'src' 分支已退役——move_file 主参数改称 'source' 后，全仓再无

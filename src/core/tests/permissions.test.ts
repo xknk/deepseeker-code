@@ -105,14 +105,14 @@ describe("compileRule：DANGER 命令工具裸名 allow 拒绝（P0-2 供应链�
 describe("buildScopedAllowRule A2：runner 族入口前缀规则（2026-11-09）", () => {
     it("runner 裸命令与 cd 前缀链生成同一入口前缀；run_in_background 同享", () => {
         const bare = buildScopedAllowRule("run_command", { command: "npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status" }, "command");
-        assert.equal(bare, "run_command(npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx*)");
+        assert.equal(bare, "run_command(npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx *)", "尾随 ` *` = token 边界（防 main.tsx.evil.mjs 延续命中，2026-11-09 验证补口）");
         const cdForm = buildScopedAllowRule("run_command", { command: "cd src/cli && npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status" }, "command");
         assert.equal(cdForm, bare, "剥 cd 前缀后同一入口前缀（trace：92 条中 22 条带 cd 前缀）");
         // trace 真实形状：2>&1 | head 尾巴 + echo 收尾
         const chained = buildScopedAllowRule("run_command", { command: 'cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check 2>&1 | head -30; echo "EXIT=${PIPESTATUS[0]}"' }, "command");
-        assert.equal(chained, "run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx*)");
+        assert.equal(chained, "run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx *)");
         assert.equal(buildScopedAllowRule("run_in_background", { command: "cd src/core && npx tsx src/main.tsx x" }, "command"),
-            "run_in_background(npx tsx src/main.tsx*)");
+            "run_in_background(npx tsx src/main.tsx *)");
     });
 
     it("非 runner / runner 无入口 token → 精确串（M5 现状不变；绝不落 npm install* 包名通配）", () => {
@@ -135,6 +135,23 @@ describe("buildScopedAllowRule A2：runner 族入口前缀规则（2026-11-09）
             null, "不同入口脚本不命中");
         assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch status 2>&1 | head -40" }, "command", sess),
             "allow", "trace 实弹形状（尾随管道）命中");
+    });
+
+    it("token 边界守门：入口 token 无分隔延续的换文件变体不得命中（2026-11-09 验证补口）", () => {
+        const sess = "sess-a2-boundary";
+        const rule = buildScopedAllowRule("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch status" }, "command")!;
+        assert.ok(rule.endsWith(" *)"), `规则必须以「空格*」收尾（token 边界）：${rule}`);
+        assert.ok(addSessionPermissionRule(rule, "allow", sess));
+        // 注入链实证形态：入口 token 后无空格直接续文件名（main.tsx.evil.mjs 是另一个脚本文件，
+        // 可由 prompt 注入先经 edit_file 快路径写入、再套前缀规则执行——裸 `*` 会把它当 main.tsx 的延续静默放行）
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx.evil.mjs exfil" }, "command", sess),
+            null, "换脚本文件的延续变体不命中（重新审批）");
+        // bare 入口（无尾参）无空格边界 → 不命中、重新首验一次（罕见形态，代价可接受）
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx" }, "command", sess),
+            null, "bare 入口不命中（重新首验）");
+        // 同入口 + 空格 + 运行期参数仍命中（降噪目标不受影响）
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch run" }, "command", sess),
+            "allow", "同入口带参变体仍命中");
     });
 
     it("优先级回归：deny 规则先于前缀 allow；COMMAND_DENY 硬闸不依赖 allow 独立生效", () => {
