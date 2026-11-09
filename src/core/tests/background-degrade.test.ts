@@ -16,7 +16,7 @@ import { commandTools } from "@/tool/registry/command.ts";
 import { backgroundTools, resolveWinShell, clampWaitSeconds, BG_WAIT_SECONDS_CAP } from "@/tool/registry/background.ts";
 import { appConfig } from "@/config/index.ts";
 import { claimSessionInbox } from "@/agent/inbox.ts";
-import { ToolContext, ToolExecutionResultStatus, type ToolExecuteResult } from "@/tool/type.ts";
+import { ToolContext, ToolExecutionResultStatus, ToolSafetyLevel, type ToolExecuteResult } from "@/tool/type.ts";
 
 const runCommand = commandTools.find((t: any) => t.function.name === "run_command")!;
 const runBg = backgroundTools.find((t: any) => t.function.name === "run_in_background")!;
@@ -231,6 +231,15 @@ describe("run_command 自动转后台（auto-degrade）", () => {
         assert.equal(inbox.length, 1, "非零退出应 pushSessionInbox（下轮模型可见）");
         assert.match(inbox[0]!, /后台任务失败/);
         assert.match(inbox[0]!, /get_background_output/);
+    });
+});
+
+describe("stop_background_task 声明钉住（2026-11-09 审批降噪）", () => {
+    it("safetyLevel=SAFE——本会话自起任务的对称收尾免审（execute 内 sessionId 硬闸兜底）；误改回 MUTATION/DANGER 即重新恒问", () => {
+        const stop = backgroundTools.find(t => t.function.name === "stop_background_task");
+        assert.ok(stop, "stop_background_task 应在注册表");
+        assert.equal(stop!.function.safetyLevel, ToolSafetyLevel.SAFE,
+            "SAFE 是有意的降噪声明（重放实证 4 次无信息量点击），改动须 conscious 更新此处与 background.ts 注释");
     });
 });
 

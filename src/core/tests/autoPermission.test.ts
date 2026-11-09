@@ -210,6 +210,33 @@ describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
         assert.deepEqual(splitShellSegments("x && y || z"), ["x ", " y ", " z"]);
         assert.deepEqual(splitShellSegments("a & b"), ["a ", " b"]);   // 单 &（后台符）按段边界
     });
+
+    // ---- ★ A1 补口（2026-11-09 离线重放实测的 5 条漏网形态）----
+
+    it("补口：sort/uniq 管道尾段放行（trace #8 形态：find | sort; echo; find | sort）", () => {
+        assert.equal(isReadOnlyCommand("find src/core/src/batch -type f | sort"), true);
+        assert.equal(isReadOnlyCommand("find src/a -type f | sort; echo '--- tests ---'; find src -path '*test*' | sort"), true);
+        assert.equal(isReadOnlyCommand("sort src/list.txt | uniq -d | head -5"), true);
+    });
+
+    it("补口：git 全局旗形态归一化（trace #93/#116：git -c k=v diff / git -C <path> diff / --no-pager）", () => {
+        assert.equal(isReadOnlyCommand("git -c core.quotepath=false diff --name-status HEAD~2 HEAD | head -5"), true);
+        assert.equal(isReadOnlyCommand("cd /tmp/ns-probe && git -C /tmp/ns-probe diff --name-status HEAD~2 HEAD"), true);
+        assert.equal(isReadOnlyCommand("git -C /tmp/x -c core.quotepath=false diff --numstat HEAD~1"), true);
+        assert.equal(isReadOnlyCommand("git --no-pager log --oneline | head -10"), true);
+        assert.equal(isReadOnlyCommand("git --no-optional-locks status --porcelain"), true);
+        assert.equal(isReadOnlyCommand("git --git-dir=.git log --oneline"), true);
+    });
+
+    it("补口边界：写形态 / 未知旗 / 带引号值 / 写子命令带全局旗 → 仍不免审", () => {
+        assert.equal(isReadOnlyCommand("sort -o /tmp/evil src/a.txt"), false);            // sort 写文件（绕过 > 闸的形态）
+        assert.equal(isReadOnlyCommand("sort --output=/tmp/evil src/a.txt"), false);
+        assert.equal(isReadOnlyCommand("git --unknown-flag status"), false);              // 未知全局旗不归一化
+        assert.equal(isReadOnlyCommand('git -C "my dir" status'), false);                  // 带引号值 token 切分不可靠 → 不豁免
+        assert.equal(isReadOnlyCommand("git -c core.quotepath=false add -A"), false);      // 全局旗不放大写子命令
+        assert.equal(isReadOnlyCommand("git -C /tmp/x commit -m x"), false);
+        assert.equal(isReadOnlyCommand("find / -name x -delete | sort"), false);           // 管道尾只读不救写段
+    });
 });
 
 // ============ ★ A2（2026-11-09 审批降噪）：runner 族「入口前缀」归一化（单元） ============

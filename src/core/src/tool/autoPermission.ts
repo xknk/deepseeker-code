@@ -155,6 +155,8 @@ const READONLY_HEADS: RegExp[] = [
     /^find\b/,                                   // 列路径（-delete/-exec/-ok 由 hasWriteModifier 拦）
     /^grep\b/, /^egrep\b/, /^fgrep\b/, /^rg\b/,  // 内容检索（敏感文件由 hasSensitiveFileArg 拦）
     /^sed\b/,                                    // 默认/-n 打印到 stdout 即只读（-i 由 hasWriteModifier 拦）
+    /^sort\b/, /^uniq\b/,                        // 纯 stdout 过滤（-o/--output 写文件由 hasWriteModifier 拦）——
+                                                 // 2026-11-09 重放实测补口：`find … | sort` 链因管道尾段不在清单被漏问
     // —— 版本号 ——
     /^(node|npm|pnpm|npx|git|tsc|python|python3)\s+(-v|-V|--version)\b/,
     // —— 验证类（跑项目代码但不改源码）——
@@ -246,6 +248,7 @@ export const isInterpreterRepoScript = (cmd: string): boolean => {
 export const hasWriteModifier = (cmd: string): boolean => {
     if (!cmd) return false;
     if (/^sed\b/.test(cmd) && /(^|\s)-i\b/.test(cmd)) return true;   // sed -i（原地写）
+    if (/^sort\b/.test(cmd) && /(^|\s)(-o\b|--output(=|\b))/.test(cmd)) return true;   // sort -o/--output（写文件，绕过 > 重定向闸）
     return /(^|\s)--?(delete|exec|ok)\b/.test(cmd);                  // find -delete / -exec / -ok
 };
 
@@ -334,12 +337,43 @@ const hasForbiddenRedirect = (cmd: string): boolean => /[<>]/.test(stripAllowedR
 /** A1：`cd <路径>` 段视为只读头——cd 只改工作目录、无副作用（目标仅是路径 token，不读写内容）。 */
 const CD_SEGMENT_HEAD = /^cd(\s|$)/;
 
-/** A1 单段只读判定：只读头（含 cd 段）+ 无写选项 + 无敏感文件参数，三道闸缺一不可；空段保守拒。 */
+/**
+ * ★ A1 补口（2026-11-09 重放实测）：git 全局旗归一化——`git -c k=v diff` / `git -C <path> diff` /
+ * `git --no-pager log` 与 `git diff`/`git log` 同为只读，但 READONLY_HEADS 按 `^git <子命令>` 锚定、
+ * 全局旗夹在中间即漏问（trace 实证 92 条中 3 条此形态）。
+ * 归一化规则（宁窄勿宽）：仅剥已知全局旗白名单——无值布尔旗 + 「旗 + 单 token 值」对 + `--flag=<v>` 形态；
+ * 值缺失/以 - 开头/含引号（空格路径的 token 切分不可靠）→ 原样返回不豁免（转人工）。未知旗 → 同样不剥。
+ * 只影响只读头的锚定；写选项/敏感文件参数复检仍用原串（超集语义，不受影响）。
+ */
+const GIT_GLOBAL_BOOL_FLAGS = new Set(["--no-pager", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs"]);
+const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"]);
+const normalizeGitGlobalFlags = (s: string): string => {
+    const tokens = s.split(/\s+/).filter(Boolean);
+    if (tokens[0] !== "git") return s;
+    const badValue = (v?: string): boolean => !v || v.startsWith("-") || v.includes('"') || v.includes("'");
+    let i = 1;
+    while (i < tokens.length) {
+        const t = tokens[i];
+        if (GIT_GLOBAL_BOOL_FLAGS.has(t)) { i++; continue; }
+        if (/^--(git-dir|work-tree|namespace|super-prefix)=/.test(t)) { i++; continue; }
+        if (GIT_GLOBAL_VALUE_FLAGS.has(t) || t === "-c") {
+            if (badValue(tokens[i + 1])) return s;   // 值缺失/嵌套旗/带引号 → 不归一化
+            i += 2;
+            continue;
+        }
+        break;   // 首个非全局旗 token = 子命令起点
+    }
+    if (i === 1) return s;   // 无全局旗，原样
+    return ["git", ...tokens.slice(i)].join(" ");
+};
+
+/** A1 单段只读判定：只读头（含 cd 段、git 全局旗归一化）+ 无写选项 + 无敏感文件参数，三道闸缺一不可；空段保守拒。 */
 const isReadOnlySegment = (seg: string): boolean => {
     const s = seg.trim();
     if (!s) return false;
-    if (!CD_SEGMENT_HEAD.test(s) && !READONLY_HEADS.some(re => re.test(s))) return false;
-    if (hasWriteModifier(s)) return false;      // sed -i / find -delete/-exec/-ok（逐段复检）
+    const headCandidate = normalizeGitGlobalFlags(s);
+    if (!CD_SEGMENT_HEAD.test(headCandidate) && !READONLY_HEADS.some(re => re.test(headCandidate))) return false;
+    if (hasWriteModifier(s)) return false;      // sed -i / sort -o / find -delete/-exec/-ok（逐段复检）
     if (hasSensitiveFileArg(s)) return false;   // grep .env / cat id_rsa（逐段复检）
     return true;
 };
