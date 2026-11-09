@@ -8,7 +8,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { matchCommandDeny, runAutoCheck, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
+import { matchCommandDeny, runAutoCheck, isReadOnlyCommand, isScriptRunnerCommand, splitShellSegments, scriptRunnerEntryPrefix } from "@/tool/autoPermission.ts";
 
 describe("matchCommandDeny（灾难命令硬拒清单 / P0-2 独立闸门）", () => {
     it("命中：递归删根 / 家 / 通配", () => {
@@ -158,5 +158,81 @@ describe("isReadOnlyCommand / isScriptRunnerCommand（供应链面分轨治理 /
     it("空串：两判定均 false", () => {
         assert.equal(isScriptRunnerCommand(""), false);
         assert.equal(isReadOnlyCommand(""), false);
+    });
+});
+
+// ============ ★ A1（2026-11-09 审批降噪）：链式只读免审——引号感知拆段 + 分段判定 ============
+
+describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
+    it("引号内的分隔符不拆段：grep 模式 \\| 字面保留（方案固化的坑位契约）", () => {
+        assert.equal(isReadOnlyCommand('grep "a\\|b" src/x.ts'), true);
+        assert.equal(isReadOnlyCommand("grep a\\|b src/x.ts"), true);   // 引号外反斜杠转义同样不拆
+        assert.equal(isReadOnlyCommand(`git log --grep="fix; WIP" --oneline`), true);
+    });
+
+    it("真实链式全只读管道放行（2026-11-05 trace 形状，~60/92 条的点击来源）", () => {
+        assert.equal(isReadOnlyCommand("ls -la .ai-docs 2>/dev/null | head -50; echo '---'; ls -la | head -50"), true);
+        assert.equal(isReadOnlyCommand(`git show --stat 0489589 | head -30; echo '=== versions ==='; grep -m1 '"version"' src/cli/package.json`), true);
+        assert.equal(isReadOnlyCommand("git log --oneline | head; echo '---'; git diff --stat | tail -3"), true);
+        assert.equal(isReadOnlyCommand("cd src && git diff"), true);                 // cd 段视为只读
+        assert.equal(isReadOnlyCommand("cd /tmp && ls -la && pwd"), true);
+        assert.equal(isReadOnlyCommand("git show HEAD --stat 2>&1 | head -5"), true); // 白名单重定向 + 管道
+    });
+
+    it("命令替换（整串任何位置）一律不免审", () => {
+        assert.equal(isReadOnlyCommand("echo $(rm -rf /)"), false);
+        assert.equal(isReadOnlyCommand("git status; echo $(date)"), false);
+        assert.equal(isReadOnlyCommand("git log `cat .git/HEAD`"), false);
+    });
+
+    it("重定向白名单：白名单内放行，白名单外（写文件/追加/输入/here-doc）一律不免审", () => {
+        assert.equal(isReadOnlyCommand("git diff > /tmp/x.patch"), false);
+        assert.equal(isReadOnlyCommand("git diff >> /tmp/x.patch"), false);
+        assert.equal(isReadOnlyCommand("wc -l < src/a.ts"), false);
+        assert.equal(isReadOnlyCommand("cat > /tmp/probe.mjs <<'EOF'"), false);
+        assert.equal(isReadOnlyCommand("git show HEAD --stat 2>&1"), true);
+        assert.equal(isReadOnlyCommand("ls -la 2>/dev/null | head -5"), true);
+        assert.equal(isReadOnlyCommand("git diff >/dev/null"), true);
+        assert.equal(isReadOnlyCommand("cat a.txt 1>/dev/null"), true);
+    });
+
+    it("链中任一段非只读 → 整串不免审（写选项段 / 非只读头段 / runner 段 / 尾随空段）", () => {
+        assert.equal(isReadOnlyCommand("ls | rm -rf x"), false);
+        assert.equal(isReadOnlyCommand("git status && sed -i 's/a/b/' f.txt"), false);
+        assert.equal(isReadOnlyCommand("cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch help 2>&1 | head -40"), false);
+        assert.equal(isReadOnlyCommand("git status;"), false);
+        assert.equal(isReadOnlyCommand("ls;;rm x"), false);
+    });
+
+    it("splitShellSegments：引号感知拆段契约（单双引号 / 反斜杠转义 / && || 合并消费）", () => {
+        assert.deepEqual(splitShellSegments('a | b "c; d" ; e'), ["a ", " b \"c; d\" ", " e"]);
+        assert.deepEqual(splitShellSegments('grep "a\\|b" f'), ['grep "a\\|b" f']);
+        assert.deepEqual(splitShellSegments("x && y || z"), ["x ", " y ", " z"]);
+        assert.deepEqual(splitShellSegments("a & b"), ["a ", " b"]);   // 单 &（后台符）按段边界
+    });
+});
+
+// ============ ★ A2（2026-11-09 审批降噪）：runner 族「入口前缀」归一化（单元） ============
+
+describe("scriptRunnerEntryPrefix（A2 入口前缀归一化）", () => {
+    it("runner 裸命令 / cd 前缀链 / 链尾管道 → 同一「解释器+入口脚本」前缀", () => {
+        assert.equal(scriptRunnerEntryPrefix("npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status"),
+            "npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx");
+        assert.equal(scriptRunnerEntryPrefix("cd src/cli && npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status"),
+            "npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx");
+        assert.equal(scriptRunnerEntryPrefix('cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check 2>&1 | head -30; echo done'),
+            "npx tsx --tsconfig ./tsconfig.json ./src/main.tsx");
+        assert.equal(scriptRunnerEntryPrefix("cd src && npx tsx src/main.tsx x && echo done"),
+            "npx tsx src/main.tsx");
+    });
+
+    it("保守边界：非 runner / runner 无入口 token / 命令替换 / timeout 包装 → null（回退精确串）", () => {
+        assert.equal(scriptRunnerEntryPrefix("git status"), null);
+        assert.equal(scriptRunnerEntryPrefix("npm test"), null);              // 无脚本路径 token → 精确串兜底
+        assert.equal(scriptRunnerEntryPrefix("npm install left-pad"), null);  // 刻意不落 npm install*（M5 教训）
+        assert.equal(scriptRunnerEntryPrefix("pnpm dlx create-vite"), null);
+        assert.equal(scriptRunnerEntryPrefix("echo $(x)"), null);             // 命令替换不进规则
+        assert.equal(scriptRunnerEntryPrefix("timeout 60 npx tsx src/main.tsx x"), null);  // 首段非 runner
+        assert.equal(scriptRunnerEntryPrefix("git status && npx tsx src/main.tsx x"), null); // 链中后段 runner 不认
     });
 });

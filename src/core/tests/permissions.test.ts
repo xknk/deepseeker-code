@@ -16,7 +16,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildScopedAllowRule, checkPermission, compileRule } from "@/tool/permissions.ts";
+import { buildScopedAllowRule, checkPermission, compileRule, addSessionPermissionRule } from "@/tool/permissions.ts";
+import { matchCommandDeny } from "@/tool/autoPermission.ts";
 
 describe("buildScopedAllowRule（allow-always 安全保守作用域）", () => {
     it("命令类 → 精确命令串（杜绝跨子命令 / 链式注入的静默放行）", () => {
@@ -96,5 +97,56 @@ describe("compileRule：DANGER 命令工具裸名 allow 拒绝（P0-2 供应链�
 
     it("末尾 * 通配的 DANGER 工具 allow → 拒绝（run_command* 同样过宽）", () => {
         assert.equal(compileRule("run_command*", "test", "allow"), null);
+    });
+});
+
+// ============ ★ A2（2026-11-09 审批降噪）：runner 族落「入口前缀」规则 ============
+
+describe("buildScopedAllowRule A2：runner 族入口前缀规则（2026-11-09）", () => {
+    it("runner 裸命令与 cd 前缀链生成同一入口前缀；run_in_background 同享", () => {
+        const bare = buildScopedAllowRule("run_command", { command: "npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status" }, "command");
+        assert.equal(bare, "run_command(npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx*)");
+        const cdForm = buildScopedAllowRule("run_command", { command: "cd src/cli && npx tsx --tsconfig src/cli/tsconfig.json src/cli/src/main.tsx batch status" }, "command");
+        assert.equal(cdForm, bare, "剥 cd 前缀后同一入口前缀（trace：92 条中 22 条带 cd 前缀）");
+        // trace 真实形状：2>&1 | head 尾巴 + echo 收尾
+        const chained = buildScopedAllowRule("run_command", { command: 'cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check 2>&1 | head -30; echo "EXIT=${PIPESTATUS[0]}"' }, "command");
+        assert.equal(chained, "run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx*)");
+        assert.equal(buildScopedAllowRule("run_in_background", { command: "cd src/core && npx tsx src/main.tsx x" }, "command"),
+            "run_in_background(npx tsx src/main.tsx*)");
+    });
+
+    it("非 runner / runner 无入口 token → 精确串（M5 现状不变；绝不落 npm install* 包名通配）", () => {
+        assert.equal(buildScopedAllowRule("run_command", { command: "npm test" }, "command"), "run_command(npm test)");
+        assert.equal(buildScopedAllowRule("run_command", { command: "npm install left-pad" }, "command"), "run_command(npm install left-pad)");
+        assert.equal(buildScopedAllowRule("run_command", { command: "pnpm dlx create-vite" }, "command"), "run_command(pnpm dlx create-vite)");
+        assert.equal(buildScopedAllowRule("run_command", { command: "git status" }, "command"), "run_command(git status)");
+        assert.equal(buildScopedAllowRule("run_command", { command: "timeout 60 npx tsx src/main.tsx x" }, "command"), "run_command(timeout 60 npx tsx src/main.tsx x)");
+    });
+
+    it("匹配侧：cd 前缀变体命中同一前缀规则；不同入口脚本不命中（重新审批）", () => {
+        const sess = "sess-a2-match";
+        const rule = buildScopedAllowRule("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch status" }, "command")!;
+        assert.ok(addSessionPermissionRule(rule, "allow", sess));
+        assert.equal(checkPermission("run_command", { command: "npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check" }, "command", sess),
+            "allow", "裸形态变体命中");
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check 2>&1 | head -30" }, "command", sess),
+            "allow", "cd 前缀 + 管道尾巴变体命中（匹配侧对称剥 cd）");
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/evil.ts batch status" }, "command", sess),
+            null, "不同入口脚本不命中");
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch status 2>&1 | head -40" }, "command", sess),
+            "allow", "trace 实弹形状（尾随管道）命中");
+    });
+
+    it("优先级回归：deny 规则先于前缀 allow；COMMAND_DENY 硬闸不依赖 allow 独立生效", () => {
+        const sess = "sess-a2-priority";
+        const allowRule = buildScopedAllowRule("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync" }, "command")!;
+        assert.ok(addSessionPermissionRule(allowRule, "allow", sess));
+        assert.ok(addSessionPermissionRule("run_command(*batch sync*)", "deny", sess));
+        assert.equal(checkPermission("run_command", { command: "cd src/cli && npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch sync --check" }, "command", sess),
+            "deny", "deny 优先于前缀 allow（既有契约，前缀规则不得越过）");
+        assert.equal(checkPermission("run_command", { command: "npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch help" }, "command", sess),
+            "allow", "deny 未命中的变体仍走前缀 allow");
+        // COMMAND_DENY 独立硬闸：规则层 allow 的灾难段在执行层仍拒（不依赖 allow、不可绕过）
+        assert.equal(matchCommandDeny("npx tsx --tsconfig ./tsconfig.json ./src/main.tsx batch status; rm -rf /"), true);
     });
 });

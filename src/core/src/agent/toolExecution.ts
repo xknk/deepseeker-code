@@ -322,7 +322,9 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
     const isCommandTool = matchedTool.function.argKind === 'command';
     const isForegroundCommand = isCommandTool && matchedTool.function.isSync !== false;
     // ★ 默认模式只读命令免审（P1-8）：仅前台命令工具、且用户未设显式权限规则（perm===null）时，
-    //   对只读命令（git 只读子命令 / ls / tsc --noEmit 等无 shell 元字符的纯查看+验证类）直接免审，消除审批疲劳。
+    //   对只读命令直接免审，消除审批疲劳。★ A1（2026-11-09）isReadOnlyCommand 升级为引号感知分段判定：
+    //   链式全只读（grep … | head; echo '---'; git show … | head——trace 实证 ~60/92 条）同样免审；
+    //   命令替换 / 白名单外重定向 / 任一非只读段仍转人工（判定细节见 autoPermission.isReadOnlyCommand）。
     //   安全：COMMAND_DENY 硬闸门（下方紧接判定）+ hasShellMetachars（isReadOnlyCommand 内）双闸兜底；
     //         收紧：permissions.ask/deny 优先级始终更高（perm!==null 时本判定不生效，用户可 opt-out）；
     //         不含后台命令工具（isSync:false，任务持续运行，免审风险更高）；
