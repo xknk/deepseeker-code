@@ -452,8 +452,17 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                 setupDoneByProbe = true; // 环境已备好，agent 阶段首轮不重跑 setup
             }
             emit(T.baselineProbeLine(t.accept));
-            const probe = await runAcceptCommand(t.accept, wt.path);
-            const verdict = classifyProbe({ code: probe.code ?? 1, timedOut: probe.timedOut });
+            let probe = await runAcceptCommand(t.accept, wt.path);
+            let verdict = classifyProbe({ code: probe.code ?? 1, timedOut: probe.timedOut });
+            if (verdict !== "ok") {
+                // 迟滞复测：单轮红可能是测试负载 flake（白天用机实锤，间歇性 ~40%，红用例每次还不同）；
+                // 一红就写「今日已验不通过」缓存会把全天票全部堵死（真机踩过：08:36 一轮 flake 毒化一整天）。
+                // 隔 30s 复测一次，二次红才定罪——真红仓库两连红只是晚 30s，flake 误伤被吸收。
+                emit(T.baselineProbeRetrying);
+                await new Promise((r) => setTimeout(r, 30_000));
+                probe = await runAcceptCommand(t.accept, wt.path);
+                verdict = classifyProbe({ code: probe.code ?? 1, timedOut: probe.timedOut });
+            }
             await writeBaselineCache(key, verdict, new Date());
             if (verdict !== "ok") {
                 // 超时 → watch-suspect（疑似 watch/常驻，修法与普通验收失败不同），与 baseline-broken 分开报

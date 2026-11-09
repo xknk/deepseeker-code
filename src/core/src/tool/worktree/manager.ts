@@ -77,9 +77,13 @@ export const createWorktree = async (sessionId: string, stepId: string, baseRef 
     try {
         await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
     } catch (e: any) {
-        // 残留目录兜底：若上次崩溃留了空目录，清后重试一次
+        // 残留兜底：上次失败尝试可能留下旧目录、陈旧 worktree 元数据或同名残分支——
+        // 只清目录不够（分支还在时 -b 撞 "branch already exists"，该票永远跑不起来，重跑场景必须自愈）。
+        // 同名分支（dsc-wt-<session>-<step>）只可能是本槽位上一次尝试的尸体，删之安全。
         if (e?.code === "ENOENT" || /already exists|not a working tree/i.test(`${e?.stderr || ""} ${e?.message || ""}`)) {
             await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
+            await runMainGit(["worktree", "prune"]).catch(() => { });
+            await runMainGit(["branch", "-D", branch]).catch(() => { });
             await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
         } else {
             throw e;

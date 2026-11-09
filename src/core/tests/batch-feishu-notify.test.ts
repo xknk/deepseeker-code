@@ -143,13 +143,22 @@ test("finishTicket 咽喉：feishu 票（带 feishu-chat）落完成通知；普
         };
         const feishuId = await mkTicket("飞书票", "feishu-chat: oc_target\nfeishu-msg: om_orig\nfeishu-sender: ou_alice\n");
         const plainId = await mkTicket("普通票", "");
-        const taken1 = await queue.takeNextTicket();
-        const taken2 = await queue.takeNextTicket();
-        assert.ok(taken1 && taken2, "两张票都进入 running");
-        await queue.finishTicket(feishuId, SAMPLE_REPORT);
-        await queue.finishTicket(plainId, SAMPLE_REPORT);
+        // 串行取跑（与生产 runner 同构）：take→finish→take→finish。不能连取两张再一起 finish——
+        // takeNextTicket 开头的崩溃残留回收会把 running 搬回 pending，第二 take 会把第一张退回去再取
+        // 同一张（随机 id 排序决定谁被退，「单跑绿全量红」实为 50% 硬币，2026-11-09 取证实锤）。
+        const t1 = await queue.takeNextTicket();
+        assert.ok(t1, "第一张进入 running");
+        await queue.finishTicket(t1.id, SAMPLE_REPORT);
+        const t2 = await queue.takeNextTicket();
+        assert.ok(t2, "第二张进入 running");
+        await queue.finishTicket(t2.id, SAMPLE_REPORT);
 
-        const pend = await listPendingNotifications();
+        // rename 后的目录可见性在 Windows 高负载下可能短暂滞后，短轮询兜底（不影响确定性）
+        let pend: Awaited<ReturnType<typeof listPendingNotifications>> = [];
+        for (let i = 0; i < 20 && pend.length === 0; i++) {
+            pend = await listPendingNotifications();
+            if (pend.length === 0) await new Promise((r) => setTimeout(r, 100));
+        }
         assert.equal(pend.length, 1, "只有 feishu 票落通知");
         assert.equal(pend[0].ticketId, feishuId);
         assert.equal(pend[0].chatId, "oc_target");

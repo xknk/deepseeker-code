@@ -89,8 +89,11 @@ const makeFakeSdk = () => {
 };
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 4));
-/** 轮询直到断言成立（常驻进程异步抵达用）；时间预算制（CI 慢机上 4ms tick 会被拖长，按次数算会假超时）；超时抛出。 */
-const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 8000): Promise<void> => {
+/**
+ * 轮询直到断言成立（常驻进程异步抵达用）；时间预算制（CI 慢机上 4ms tick 会被拖长，按次数算会假超时）；超时抛出。
+ * 缺省预算 20s：全量并行 + 真实监听器同机运行时 8s 曾两轮假超时（白天用机时段负载更高）。
+ */
+const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 20_000): Promise<void> => {
     const deadline = Date.now() + budgetMs;
     for (;;) {
         if (await probe()) return;

@@ -125,3 +125,18 @@ test("Batch-Trace agent 自 commit：补打尾注（amend 只改消息）；已�
         await cleanup(wt);
     }
 });
+
+test("worktree 自愈：同名残分支（上次失败尝试尸体）不再堵死重跑——分支被清后重建成功", async () => {
+    // 复刻 2026-11-09 真机三连撞名：工单残分支（worktree 目录已被清）在场，createWorktree 必须自愈
+    const branchName = `dsc-wt-sess-hea-stepH`; // sanitize("sess-heal").slice(0,8)="sess-hea"
+    await git(root, ["branch", branchName]);
+    const mainHead = (await git(root, ["rev-parse", "main"])).trim();
+    const wt = await mgr.createWorktree("sess-heal", "stepH");
+    try {
+        const headInWt = (await git(wt.path, ["rev-parse", "HEAD"])).trim();
+        assert.equal(headInWt, mainHead, "残分支被清，重建的 worktree 检出基座 HEAD");
+        assert.equal(wt.branch, branchName, "分支名复用同槽位");
+    } finally {
+        await cleanup(wt);
+    }
+});

@@ -130,8 +130,14 @@ export const finishTicket = async (id: string, reportMd: string): Promise<void> 
         await fs.mkdir(stateDir("done"), { recursive: true });
         await fs.writeFile(reportPath(id), reportMd, "utf-8");
         await fs.rename(path.join(stateDir("running"), `${id}.md`), path.join(stateDir("done"), `${id}.md`)).catch(() => { });
-        const ticketSrc = await fs.readFile(path.join(stateDir("done"), `${id}.md`), "utf-8").catch(() => null)
-            ?? await fs.readFile(path.join(stateDir("running"), `${id}.md`), "utf-8").catch(() => null);
+        // rename 在 Windows 高负载下对读者短暂不可见（源已去、目标未现的窗口）：两侧都读空时小退避重试。
+        // 咽喉错过这次读取，完成通知文件就不会落盘、推送永远丢失（它监听器发送的唯一凭据），值得一秒的耐心。
+        let ticketSrc: string | null = null;
+        for (let i = 0; i < 6 && ticketSrc === null; i++) {
+            ticketSrc = await fs.readFile(path.join(stateDir("done"), `${id}.md`), "utf-8").catch(() => null)
+                ?? await fs.readFile(path.join(stateDir("running"), `${id}.md`), "utf-8").catch(() => null);
+            if (ticketSrc === null) await new Promise((r) => setTimeout(r, 150));
+        }
         if (ticketSrc !== null) {
             const parsed = parseBatchTicket(ticketSrc);
             if (parsed.ok && parsed.ticket.feishuChat) {

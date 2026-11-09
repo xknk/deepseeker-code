@@ -45,6 +45,20 @@ test("装配：探测超时走 watch-suspect 分支（与普通验收失败分�
     assert.match(gateBody, /killBackgroundTasksUnder\(wt\.path\)/, "探测/终止路径必须清理遗留后台进程（watch 残留）");
 });
 
+test("装配：基线探测红有迟滞复测（flake 一红不定罪，二次红才写缓存——防毒化全天票）", () => {
+    const probeIdx = RUNNER_SRC.indexOf("baselineProbeLine(t.accept)");
+    assert.ok(probeIdx > 0, "探测起点存在");
+    const cacheIdx = RUNNER_SRC.indexOf("writeBaselineCache(key, verdict", probeIdx);
+    assert.ok(cacheIdx > probeIdx, "缓存写在探测/复测之后");
+    const between = RUNNER_SRC.slice(probeIdx, cacheIdx);
+    assert.match(between, /baselineProbeRetrying/, "一红先发复测提示（双语文案）");
+    assert.match(between, /setTimeout\(r, 30_000\)/, "复测间隔 30s");
+    assert.match(between, /runAcceptCommand\(t\.accept/, "复测真跑第二遍探测");
+    // 双语文案齐备
+    assert.match(batchT("zh").baselineProbeRetrying, /复测/);
+    assert.match(batchT("en").baselineProbeRetrying, /re-probing/i);
+});
+
 test("报告：触碰的测试文件段 + needs-review 头字段（双语词表齐备）", async () => {
     assert.match(batchT("zh").statusLabel("baseline-broken"), /基线未过/);
     assert.match(batchT("en").statusLabel("baseline-broken"), /baseline broken/i);
