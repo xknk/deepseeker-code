@@ -716,6 +716,19 @@ test("B3 isConfirmPhrase：整句命中才豁免；片段/沾边一概不豁免�
     for (const m of misses) assert.equal(isConfirmPhrase(m), false, `不应命中：${JSON.stringify(m)}`);
 });
 
+test("B3 对账重放确认语不回执：reconcile 路静默跳过（2026-11-09 排查「完成推送双发」顺带实锤「👍 收到」连发 2-3 次——对账游标按归一成功消息推进、bot 消息不占游标 + 毫秒游标 floor 成秒查询边界，旧确认语每轮重拉；本分支在内容去重上游且不登记 state，重放必复命。对齐 duplicate 不回话原则：对账重放不产生新外发）", async () => {
+    const src = await fs.readFile(new URL("../src/batch/feishu/listen.ts", import.meta.url), "utf-8");
+    const i = src.indexOf("isConfirmPhrase(candidate.text)");
+    assert.ok(i > 0, "确认语分支存在");
+    const block = src.slice(i, src.indexOf("const gate = feishuGateVerdict", i));
+    assert.match(block, /source === "reconcile"/, "确认语分支必须识别对账重放路");
+    assert.ok(
+        block.indexOf('source === "reconcile"') < block.indexOf("sendText"),
+        "静默判断必须先于回执发送（重放零外发）",
+    );
+    assert.match(block, /不重复回执/, "重放跳过留痕可对账");
+});
+
 test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映射、清单外照旧建票；B4：前票 running 中回复 → 建后续票且回执写明排队", async () => {
     await withTempBatchDir(async (dir) => {
         await writeFeishuConfig(dir, { users: ["ou_alice"] });

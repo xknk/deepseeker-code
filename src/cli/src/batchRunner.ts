@@ -277,7 +277,7 @@ export const buildReport = (args: {
 id: ${id}
 title: ${ticket.title}
 status: ${status}
-cost-yuan: ${cost.costYuan !== null ? cost.costYuan.toFixed(4) : "null"}
+cost-yuan: ${cost.costYuan !== null ? cost.costYuan.toFixed(4) : "?"}
 rounds: ${cost.rounds}
 budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}

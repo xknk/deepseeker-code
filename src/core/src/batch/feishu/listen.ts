@@ -556,7 +556,17 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         // ★ B3 确认语闸（先于回复路由——si6d 实证回复完成推送「知道了」被老实开成续修票）：
         //   整句确认语 → 回「👍 收到」不开票。只对白名单内发送者生效（白名单外维持既有静默语义）。
         //   回执不登记消息映射（「收到」不是票，回复它不该被路由成追加）。
+        //   ★ 对账重放不回执（2026-11-09 排查「完成推送双发」顺带实锤）：对账游标按【归一成功的
+        //   消息】推进，bot 消息（列表路 normalize 为 null）不占游标 → 窗口长期含旧确认语；叠加
+        //   游标毫秒值 floor 成秒查询边界（飞书 list API 秒粒度，1.0.72），边界秒内的消息每轮重拉。
+        //   本分支在一切内容去重上游且不登记 state → 实时路已回过的「知道了」被对账每轮重放、
+        //   「👍 收到」连发 2-3 次（真机 20261109 实证）。对齐 duplicate 的既有原则（同函数下方：
+        //   对账重拉不回话——用户没新动作，凭空冒提示反而困惑）：回执是实时交互的反馈，补拉路静默。
         if (fcfg.users.includes(candidate.senderOpenId) && isConfirmPhrase(candidate.text)) {
+            if (source === "reconcile") {
+                log(`⏭️ [feishu] 对账重放确认语，不重复回执（${candidate.messageId.slice(0, 12)}…）`);
+                return { ok: true, action: "skipped", reason: locale === "zh" ? "对账重放确认语，不重复回执" : "replayed confirmation phrase, no repeat reply" };
+            }
             const at = candidate.chatType === "group" ? `<at user_id="${candidate.senderOpenId}"></at> ` : "";
             await sendText(client, candidate.chatId, `${at}${notifyText.ackConfirm(locale)}`);
             log(`👍 [feishu] 确认语整句命中，不开票（${candidate.messageId.slice(0, 12)}…）`);

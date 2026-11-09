@@ -183,6 +183,20 @@ test("扫描循环留痕：推送成功记 notifySent、单次失败记 notifyRe
     assert.match(notifyText.notifyRetry("en", "t-1", 1), /retry/i);
 });
 
+// ============ cost 归一（2026-11-09 排查「完成推送双发」顺带实锤：czeg 推送「花费 ¥null」） ============
+
+test("cost 归一：报告 cost-yuan 字面 null（旧版 batchRunner 无价模型写法）→ 落盘 \"?\"；推送文案不出现 ¥null", async () => {
+    await withTempBatchDir(async () => {
+        const report = SAMPLE_REPORT.replace("cost-yuan: 0.42", "cost-yuan: null");
+        await writeFinishNotification({ ticketId: "t-cost-null", reportMd: report, chatId: "oc_c", title: "x" });
+        const n = (await listPendingNotifications())[0];
+        assert.equal(n.cost, "?", "字面 null 归一为 ?（与报告正文「无价模型，不计钱」口径一致）");
+        const text = notifyText.finish("zh", n as any);
+        assert.ok(!text.includes("¥null"), "推送文案零 ¥null 病灶形态");
+        assert.match(text, /花费 ¥\?/, "花费位显示 ?");
+    });
+});
+
 // ============ B2/B5（2026-11-09 飞书拆软闸门）：拒清单 + 改动文件名列表 ============
 
 test("B5 通知落盘：changed-file 真实条目解析出文件名列表（普通/二进制形态）；省略行（不含 (+N/-M)/(binary) 形态）自然滤除", async () => {

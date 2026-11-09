@@ -140,7 +140,8 @@ export const writeFinishNotification = async (args: { ticketId: string; reportMd
             senderOpenId: args.senderOpenId,
             title: args.title.slice(0, 60),
             status: reportFm(args.reportMd, "status") || "unknown",
-            cost: reportFm(args.reportMd, "cost-yuan") || "?",
+            // cost 归一：缺省/旧版报告字面 "null"（batchRunner 无价模型曾直写 "null"）→ "?"（推送 ¥null 实锤，2026-11-09）
+            cost: (v => !v || v === "null" ? "?" : v)(reportFm(args.reportMd, "cost-yuan")),
             branch: reportFm(args.reportMd, "branch") || "",
             changedFiles,
             changedFileNames,
