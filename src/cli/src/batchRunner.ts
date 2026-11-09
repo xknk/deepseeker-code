@@ -680,7 +680,14 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         const quiet = await waitSessionQuiescent(sessionId, undefined, timeoutMin * 60_000);
         if (!quiet) emit(`⏳ [${task.id}] 唤醒链未在时限内收敛，按现状验收`);
         wd?.setPaused(true); // accept 命令执行期豁免判定（§4；看门狗已 stop，防御性对齐）
-        const r = await runAcceptCommand(t.accept, wt.path);
+        let r = await runAcceptCommand(t.accept, wt.path);
+        // 迟滞复测：与基线探测同款。单轮红可能是测试负载 flake（真机实锤 2026-11-09：README 已修好，
+        // 却被 listen 家族 flake 的单轮红判「验收未通过」，假阴性推给了用户手机）——二次红才定罪。
+        if ((r.code ?? 1) !== 0 || r.timedOut) {
+            emit(T.acceptProbeRetrying);
+            await new Promise((resolve) => setTimeout(resolve, 30_000));
+            r = await runAcceptCommand(t.accept, wt.path);
+        }
         accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut };
         status = r.code === 0 && !r.timedOut ? "passed" : "accept-failed";
         emit(T.acceptLine(status === "passed", task.id, r.code) + (r.timedOut ? T.acceptKilledSuffix : ""));

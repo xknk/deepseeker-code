@@ -166,3 +166,19 @@ test("finishTicket 咽喉：feishu 票（带 feishu-chat）落完成通知；普
         assert.match(pend[0].title, /飞书票/);
     });
 });
+
+test("扫描循环留痕：推送成功记 notifySent、单次失败记 notifyRetry（2026-11-09 排查「重复推送」时成功路径零日志、无从对账的教训）", async () => {
+    const src = await fs.readFile(new URL("../src/batch/feishu/listen.ts", import.meta.url), "utf-8");
+    const loopIdx = src.indexOf("notifyText.finish(locale, n)");
+    assert.ok(loopIdx > 0, "scanLoop 推送段存在");
+    const block = src.slice(loopIdx, src.indexOf("await sleepInterruptible", loopIdx));
+    assert.match(block, /recordMsgMap\(sentId, n\.ticketId\)/, "成功分支先映射回复路由");
+    assert.match(block, /notifySent\(/, "成功推送必须留日志（含票号与消息 id，可对账）");
+    assert.match(block, /notifyRetry\(/, "单次失败必须留日志（重试可对账）");
+    assert.match(block, /notifyGiveUp\(/, "放弃分支留日志（原有）");
+    // 双语文案齐备
+    assert.match(notifyText.notifySent("zh", "t-1", "om_x"), /已推送/);
+    assert.match(notifyText.notifySent("en", "t-1", "om_x"), /pushed/i);
+    assert.match(notifyText.notifyRetry("zh", "t-1", 1), /重试/);
+    assert.match(notifyText.notifyRetry("en", "t-1", 1), /retry/i);
+});

@@ -221,4 +221,14 @@ export const notifyText = {
         locale === "zh"
             ? `⚠️ [feishu] 完成通知 ${ticketId} 连续 ${NOTIFY_MAX_RETRIES} 次发送失败，放弃（会话可能已不可达；报告仍在 ${`.deepseeker-code/batch/done/${ticketId}.report.md`}）`
             : `⚠️ [feishu] finish notification ${ticketId} failed ${NOTIFY_MAX_RETRIES} times, giving up (chat unreachable? report stays at ${`.deepseeker-code/batch/done/${ticketId}.report.md`})`,
+    /** 通知推送成功留痕（日志用，不外发）——成功也要可对账，否则手机收到 N 条时无线索可查。 */
+    notifySent: (locale: SyncLocale, ticketId: string, msgId: string): string =>
+        locale === "zh"
+            ? `📤 [feishu] 完成通知已推送：票 ${ticketId}（消息 ${msgId}，已映射回复路由并清除待发）`
+            : `📤 [feishu] finish notification pushed: ticket ${ticketId} (message ${msgId}, reply route mapped, pending cleared)`,
+    /** 通知推送单次失败（下轮扫描重试；日志用，不外发）。 */
+    notifyRetry: (locale: SyncLocale, ticketId: string, attempt: number): string =>
+        locale === "zh"
+            ? `⚠️ [feishu] 完成通知发送失败：票 ${ticketId} 第 ${attempt}/${NOTIFY_MAX_RETRIES} 次，下轮扫描重试`
+            : `⚠️ [feishu] finish notification send failed: ticket ${ticketId} attempt ${attempt}/${NOTIFY_MAX_RETRIES}, will retry next scan`,
 };

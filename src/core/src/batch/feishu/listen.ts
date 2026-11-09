@@ -652,9 +652,11 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                 if (sentId !== null) {
                     await recordMsgMap(sentId, n.ticketId); // 回复报告消息 = 续修该票
                     await clearNotification(n.ticketId);
+                    log(notifyText.notifySent(locale, n.ticketId, sentId)); // 成功也留痕（2026-11-09 排查「重复推送」时成功路径零日志、无从对账）
                 } else {
                     const giveUp = await bumpNotificationRetries(n);
                     if (giveUp) log(notifyText.notifyGiveUp(locale, n.ticketId));
+                    else log(notifyText.notifyRetry(locale, n.ticketId, n.retries));
                 }
             }
             await sleepInterruptible(scanMs); // 停机可打断

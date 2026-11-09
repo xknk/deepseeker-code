@@ -126,3 +126,16 @@ test("报告：changed-file 清单固化进 frontmatter（改动清单交接，2
     assert.equal((fm2.match(/^changed-file: f\d+\.ts/gm) ?? []).length, 30, "清单封顶 30 条");
     assert.match(fm2, /^changed-file: …（其余 3 个略）$/m, "省略行带余量");
 });
+
+test("装配：终局验收红有迟滞复测（与基线同款；防负载 flake 假阴性判「验收未通过」推给用户手机——2026-11-09 真机实锤）", () => {
+    const accIdx = RUNNER_SRC.indexOf("let r = await runAcceptCommand(t.accept, wt.path)");
+    assert.ok(accIdx > 0, "终局验收调用点存在（let r 区别于基线探测的 let probe）");
+    const nextIdx = RUNNER_SRC.indexOf("accept = { cmd: t.accept", accIdx);
+    assert.ok(nextIdx > accIdx, "复测在 accept 赋值之前完成（报告取复测结论）");
+    const between = RUNNER_SRC.slice(accIdx, nextIdx);
+    assert.match(between, /acceptProbeRetrying/, "一红先发复测提示（双语文案）");
+    assert.match(between, /setTimeout\(\w+, 30_000\)/, "复测间隔 30s");
+    assert.match(between, /runAcceptCommand\(t\.accept/, "复测真跑第二遍验收");
+    assert.match(batchT("zh").acceptProbeRetrying, /复测/);
+    assert.match(batchT("en").acceptProbeRetrying, /re-probing/i);
+});
