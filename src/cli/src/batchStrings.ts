@@ -121,6 +121,10 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     testFilesH: "## 触碰的测试文件（信息标注）",
     testFilesNote: (n: number) => `本次 diff 触碰 ${n} 个测试路径（P1 仅信息标注，不参与状态判定）：`,
     changedMore: (n: number) => `…（其余 ${n} 个略）`,
+    // B2（2026-11-09）：denied-tool frontmatter 省略行（超 DENIED_FM_CAP 时；解析侧按「 — 」分隔符滤除本行）
+    deniedMore: (n: number) => `…（另有 ${n} 条被拒未列出）`,
+    // B1（2026-11-09 飞书拆软闸门）：挂机窗口内高危不推卡，自动 deny + 留痕（日志/控制台行）
+    windowAutoDeny: (tool: string) => `🌙 挂机窗口内不推审批卡，已自动拒绝并留痕：${tool}（白天/人在场运行照常弹卡；要放行请改白天跑或回复推送续修）`,
     artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，已提交，保留待人工处置）`,
     inWindowNow: (hhmm: string) => `⏰ 当前 ${hhmm} 已在窗口内，立即开跑。`,
     waitWindowWait: (h: number, m: number) => `⏰ --wait-window：${h} 小时 ${m} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`,
@@ -307,6 +311,8 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     testFilesH: "## Touched test files (informational)",
     testFilesNote: (n) => `This diff touches ${n} test paths (P1: informational only, not part of status judgment):`,
     changedMore: (n) => `...(and ${n} more)`,
+    deniedMore: (n) => `...(and ${n} more denied, not listed)`,
+    windowAutoDeny: (tool) => `🌙 Wait-window active: card approval skipped for ${tool} — auto-denied and logged (cards return for attended/daytime runs; reply to the push for a follow-up if it should run in the day)`,
     artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, committed, kept for manual handling)`,
     inWindowNow: (hhmm) => `⏰ It's ${hhmm}, already inside the window — starting now.`,
     waitWindowWait: (h, m) => `⏰ --wait-window: starting in ${h}h ${m}m (at the window start). Waiting — Ctrl+C to cancel.`,

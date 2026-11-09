@@ -21,7 +21,7 @@ import fsSync from "fs";
 import os from "os";
 import path from "path";
 
-const { runFeishuListen } = await import("@/batch/feishu/listen.ts");
+const { runFeishuListen, isConfirmPhrase } = await import("@/batch/feishu/listen.ts");
 const { approvalsDir, writeListenerHeartbeat, listPendingApprovals } = await import("@/batch/feishu/approval.ts");
 
 const withTempBatchDir = async (fn: (dir: string) => Promise<void>): Promise<void> => {
@@ -687,6 +687,120 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
             // 本测试 create 共 3 次：建票回执/追加回执/完成推送 → 通知消息 id = om_out_3（回复它=续修该票）
             await until(async () => (await readMap().catch(() => ({}) as Record<string, string>))["om_out_3"] === ticketId, "通知消息 id 进映射表", LOOP_BUDGET);
             assert.equal(await lookupMsgMap("om_out_3"), ticketId, "通知消息 id 可被回复路由");
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
+    });
+});
+
+// ============ B3/B4（2026-11-09 飞书拆软闸门）：确认语闸 + 跑批中回复建后续票 ============
+
+test("B3 isConfirmPhrase：整句命中才豁免；片段/沾边一概不豁免（宁窄勿宽——清单外照旧建票，不做语义猜测）", () => {
+    const fe = String.fromCharCode(0xfe0f); // emoji 变体选择符（匹配侧老坑：👍 vs 👍️）
+    const hits = [
+        "知道了", "收到", "好的", "好的好的", "好", "好嘞", "嗯", "嗯嗯", "了解", "明白", "明白了",
+        "辛苦了", "谢谢", "多谢", "感谢", "不用了", "先这样",
+        "ok", "OK", "Ok", "okay", "roger", "got it", "noted", "thanks", "thank you", "thx",
+        "知道了。", "知道了，谢谢。", "好的，收到！", "多谢，辛苦了",
+        "👍", "👍" + fe, "🙏", "👌", "🆗", "✅", "👍 。",
+    ];
+    for (const h of hits) assert.equal(isConfirmPhrase(h), true, `应命中：${JSON.stringify(h)}`);
+    const misses = [
+        "", "   ", "！？。", // 空串/纯标点
+        "ok了", "oksir", "好的吗", "不知道", "收到消息了吗", // 沾边但语义不同
+        "收到请回复", "check ok", "ok thanks buddy", // 片段混入
+        "知道了，顺便把导出乱码也修一下", "谢谢，但是有个问题", // 分句含清单外内容
+        "可以", "行", // 刻意不入清单的歧义词（可答问）
+    ];
+    for (const m of misses) assert.equal(isConfirmPhrase(m), false, `不应命中：${JSON.stringify(m)}`);
+});
+
+test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映射、清单外照旧建票；B4：前票 running 中回复 → 建后续票且回执写明排队", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+        const { sdk, state } = makeFakeSdk();
+        // create 回带 message_id：回执消息 id 进映射表（回复路由键）
+        let msgSeq = 0;
+        const origClient = sdk.Client;
+        sdk.Client = function (this: any, cfg: any) {
+            origClient.call(this, cfg);
+            const inner = this.im.message.create;
+            this.im.message.create = async (args: any) => {
+                msgSeq += 1;
+                const r = await inner(args);
+                return { ...r, data: { ...r.data, message_id: `om_out_${msgSeq}` } };
+            };
+        } as any;
+        const lines: string[] = [];
+        let stop = false;
+        const LOOP_BUDGET = 30_000;
+        const deadline = Date.now() + 90_000;
+        const queue = await import("@/batch/queue.ts");
+        const { lookupMsgMap } = await import("@/batch/feishu/notify.ts");
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 5, reconcileMs: 1000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        const post = (messageId: string, text: string, parentId?: string): void => {
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: messageId, chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
+                    create_time: String(Date.now()), ...(parentId ? { parent_id: parentId } : {}),
+                    content: JSON.stringify({ text }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+        };
+        try {
+            await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
+
+            // 1. B3：整句确认语 → 「👍 收到」回执；不开票、不登记映射（回复它不该被路由成追加）
+            post("om_c1", "知道了");
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("👍 收到")), "确认语回执", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 0, "确认语不开票");
+            assert.equal(await lookupMsgMap("om_c1"), null, "确认语回执不登记消息映射");
+            assert.match(lines.join("\n"), /确认语整句命中/, "命中留痕可对账");
+
+            // 2. B3 不误伤：清单外「知道了，顺便…」分句含任务内容 → 照旧建票
+            post("om_t1", "修复导出乱码。知道了，顺便把 CSV 编码也改成 UTF-8");
+            await until(
+                () => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已建票")),
+                "清单外照旧建票 + 建票回执", LOOP_BUDGET,
+            );
+            assert.equal((await queue.snapshotQueue()).pending.length, 1, "票已落 pending");
+            const ackCard = state.cards.find((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已建票"));
+            const m = /已建票 (2026\d{4}-[\w-]+)「/.exec(JSON.parse(ackCard.data.content).text);
+            assert.ok(m, "票号可解析");
+            const ticketA = m![1];
+            // 票 A 的回执 om_out 序号不硬编码（B3 的「👍 收到」回执也占号）——扫映射表拿实际键
+            let ackMsgId = "";
+            await until(async () => {
+                const raw = await fs.readFile(path.join(dir, "feishu-msg-map.json"), "utf-8").catch(() => "{}");
+                const all = (JSON.parse(raw).map ?? {}) as Record<string, string>;
+                ackMsgId = Object.entries(all).find(([k, v]) => v === ticketA && k.startsWith("om_out"))?.[0] ?? "";
+                return !!ackMsgId;
+            }, "建票回执映射登记", LOOP_BUDGET);
+
+            // 3. B4：原票进 running（模拟 runner 执行中）→ 回复建票回执 → 后续票照建 + 回执写明排队
+            const taken = await queue.takeNextTicket();
+            assert.ok(taken && taken.id === ticketA, "原票进入 running");
+            post("om_c2", "再补一个：CSV 导出加 BOM", ackMsgId);
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("正在执行，本条已排其后")), "排队回执", LOOP_BUDGET);
+            const q3 = await queue.snapshotQueue();
+            assert.equal(q3.pending.length, 1, "后续票已建（pending）");
+            assert.equal(q3.running.length, 1, "原票仍在 running（不被打断）");
+            assert.notEqual(q3.pending[0], ticketA, "后续票是新票号");
+            const behind = state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text).find((t: string) => t.includes("正在执行"))!;
+            assert.match(behind, new RegExp(`原票 ${ticketA} 正在执行`), "回执点名原票");
+            // 排队回执的 om_out 序号动态取（B3 回执/建票回执都占号，msgSeq=最新发送序号）；
+            // pending 快照条目带 .md 后缀（snapshotQueue 只剥 done 侧）——比对前归一。
+            const behindId = q3.pending[0].replace(/\.md$/, "");
+            await until(async () => (await lookupMsgMap(`om_out_${msgSeq}`)) === behindId, "排队回执消息映射到后续票", LOOP_BUDGET);
+            assert.equal(await lookupMsgMap("om_c2"), behindId, "用户原消息也路由到后续票");
         } finally {
             stop = true;
             await running.catch(() => { });

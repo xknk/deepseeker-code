@@ -86,6 +86,13 @@ export interface FinishNotification {
     branch: string;
     /** changed-file 行数（含省略行——量级感知足够，不逐文件列）。 */
     changedFiles: number;
+    /** ★ B5（2026-11-09）：改动文件名列表——changed-file frontmatter 解析出【真实文件条目】
+     *  （`<path> (+N/-M)` / `<path> (binary)` 形态；省略行不含该形态自然滤除）。
+     *  仅文件名、不含 diff（外发红线）；解析/封顶在 writeFinishNotification，发送端只读不补算。 */
+    changedFileNames: string[];
+    /** ★ B2（2026-11-09）：被拒工具清单——denied-tool frontmatter 逐条原样（`<tool> — <detail>`），
+     *  省略行（不含分隔符）滤除。推送追加「⚠️ N 个操作未放行…｜回复本消息可续修补跑」的拒因数据源。 */
+    deniedTools: string[];
     /** 相对 <项目> 的报告路径（手机上点不开本机路径，但可对账查找）。 */
     reportPath: string;
     /** 发送失败计数（listen 侧累加；达到 NOTIFY_MAX_RETRIES 放弃删除）。 */
@@ -102,6 +109,15 @@ const reportFm = (report: string, key: string): string => {
     return m ? m[1].trim() : "";
 };
 
+/** 报告 frontmatter 多值提取（逐行；B2/B5 拒清单与改动清单共用）。 */
+const reportFmAll = (report: string, key: string): string[] =>
+    [...report.matchAll(new RegExp(`^${key}:\\s*(.+)$`, "gm"))].map((m) => m[1].trim());
+
+/** changed-file 条目形态（numstatToChangedFiles 产出）：`<path> (+N/-M)` 或 `<path> (binary)`；省略行不匹配 → 滤除。 */
+const CHANGED_FILE_ENTRY = /^(.+?)\s\((?:\+\d+\/-\d+|binary)\)$/;
+/** denied-tool 条目形态：`<tool> — <detail>`（buildReport 落盘口径）；省略行不含分隔符 → 滤除。 */
+const DENIED_TOOL_SEP = " — ";
+
 /**
  * 落一张完成通知（queue.finishTicket 单一咽喉调用；票带 feishu-chat 才有此文件）。
  * 报告字段解析失败不抛——通知是增益不是关键路径，最差少推一条、日志可见。
@@ -109,6 +125,15 @@ const reportFm = (report: string, key: string): string => {
 export const writeFinishNotification = async (args: { ticketId: string; reportMd: string; chatId: string; senderOpenId?: string; title: string }): Promise<void> => {
     try {
         const changedFiles = [...args.reportMd.matchAll(/^changed-file:\s*(.+)$/gm)].length;
+        // B5：文件名列表（仅真实条目；封顶 30 与报告侧 CHANGED_FILE_CAP 同量级——推送展示侧再封顶）。
+        const changedFileNames = reportFmAll(args.reportMd, "changed-file")
+            .map((v) => CHANGED_FILE_ENTRY.exec(v)?.[1])
+            .filter((x): x is string => !!x)
+            .slice(0, 30);
+        // B2：拒清单（含分隔符的真实条目；省略行滤除）。
+        const deniedTools = reportFmAll(args.reportMd, "denied-tool")
+            .filter((v) => v.includes(DENIED_TOOL_SEP))
+            .slice(0, 30);
         const n: FinishNotification = {
             ticketId: args.ticketId,
             chatId: args.chatId,
@@ -118,6 +143,8 @@ export const writeFinishNotification = async (args: { ticketId: string; reportMd
             cost: reportFm(args.reportMd, "cost-yuan") || "?",
             branch: reportFm(args.reportMd, "branch") || "",
             changedFiles,
+            changedFileNames,
+            deniedTools,
             reportPath: `.deepseeker-code/batch/done/${args.ticketId}.report.md`,
             retries: 0,
             createdAt: new Date().toISOString(),
@@ -206,15 +233,42 @@ export const notifyText = {
         locale === "zh"
             ? `🔁 已建续修票 ${ticketId}（接 ${prevId}）——验收/预算沿用前票，代码基座含前次改动，不重做；已排队`
             : `🔁 Continuation ticket ${ticketId} (after ${prevId}) created — same accept/budget, code base includes the previous fix; queued`,
-    /** 完成推送（手机可读摘要；不含 diff 与验收输出——外发红线）。 */
+    /** ★ B3 确认语闸回执（2026-11-09）：整句确认语不开票，回一句收到（si6d 实证误开票烧 ¥0.77）。 */
+    ackConfirm: (locale: SyncLocale): string =>
+        locale === "zh" ? "👍 收到" : "👍 Got it",
+    /** ★ B4 后续票回执（2026-11-09）：回复时原票正在执行 → 新票照建、排原票后，回执写明排队关系
+     *  （此前此分支只回通用建票回执，「我的追加去哪了」无着落——路由总表黑洞分支补齐）。 */
+    ackQueuedBehind: (locale: SyncLocale, ticketId: string, title: string, prevId: string): string =>
+        locale === "zh"
+            ? `🧵 已建票 ${ticketId}「${title}」｜原票 ${prevId} 正在执行，本条已排其后，依次跑完各推报告；要补充需求，继续回复本条消息`
+            : `🧵 Ticket ${ticketId} "${title}" created | previous ticket ${prevId} is still running — this one queues right after it; reports push as each finishes; reply to this message to add more`,
+    /** 完成推送（手机可读摘要；不含 diff 与验收输出——外发红线）。
+     *  ★ B5：改动清单带文件名列表（封顶 8 个，超出「等 N 个」）；★ B2：deniedTools 非空时追加
+     *  「⚠️ N 个操作未放行…｜回复本消息可续修补跑」拒清单 + 翻案引导（此时通用尾注让位给引导语）。 */
     finish: (locale: SyncLocale, n: FinishNotification): string => {
         const zh = locale === "zh";
         const status = zh ? (STATUS_ZH[n.status] ?? n.status) : n.status;
-        const files = zh ? `改动 ${n.changedFiles} 个文件` : `${n.changedFiles} file(s) changed`;
+        const names = n.changedFileNames ?? [];
+        const shown = names.slice(0, 8);
+        const files = names.length === 0
+            ? (zh ? `改动 ${n.changedFiles} 个文件` : `${n.changedFiles} file(s) changed`)
+            : (zh
+                ? `改动 ${n.changedFiles} 个文件：${shown.join("、")}${names.length > 8 ? ` 等 ${names.length} 个` : ""}`
+                : `${n.changedFiles} file(s) changed: ${shown.join(", ")}${names.length > 8 ? ` +${names.length - 8} more` : ""}`);
         const cost = zh ? `花费 ¥${n.cost}` : `cost ¥${n.cost}`;
         const branch = n.branch ? (zh ? `｜分支 ${n.branch}` : ` | branch ${n.branch}`) : "";
-        const tail = zh ? "｜要跟进，直接回复本条消息" : " | reply to this message to follow up";
-        return `📋 票 ${n.ticketId}「${n.title}」跑完｜${status}｜${files}｜${cost}${branch}${tail}\n报告：${n.reportPath}`;
+        const denied = n.deniedTools ?? [];
+        const deniedShown = denied.slice(0, 3).map((d) => {
+            const i = d.indexOf(DENIED_TOOL_SEP);
+            const tool = i >= 0 ? d.slice(0, i) : d;
+            const why = i >= 0 ? d.slice(i + DENIED_TOOL_SEP.length) : "";
+            return zh ? `${tool}（${why.slice(0, 60)}）` : `${tool} (${why.slice(0, 60)})`;
+        });
+        const deniedLine = denied.length === 0 ? "" : (zh
+            ? `\n⚠️ ${denied.length} 个操作未放行：${deniedShown.join("；")}${denied.length > 3 ? ` 等 ${denied.length} 项` : ""}｜回复本消息可续修补跑`
+            : `\n⚠️ ${denied.length} op(s) not permitted: ${deniedShown.join("; ")}${denied.length > 3 ? ` +${denied.length - 3} more` : ""} | reply to this message to follow up and re-run`);
+        const tail = denied.length === 0 ? (zh ? "｜要跟进，直接回复本条消息" : " | reply to this message to follow up") : "";
+        return `📋 票 ${n.ticketId}「${n.title}」跑完｜${status}｜${files}｜${cost}${branch}${tail}${deniedLine}\n报告：${n.reportPath}`;
     },
     /** 通知推送失败放弃（日志用，不外发）。 */
     notifyGiveUp: (locale: SyncLocale, ticketId: string): string =>

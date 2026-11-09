@@ -143,6 +143,11 @@ const touchedTestFiles = async (wtPath: string, baseSha: string): Promise<string
 /** 报告 frontmatter changed-file 清单封顶：超出部分不丢信息——末尾一条省略行带余量。 */
 const CHANGED_FILE_CAP = 30;
 
+/** 报告 frontmatter denied-tool 清单封顶（B2 完成推送拒清单的数据源）：同 changed-file 口径，末尾省略行带余量。
+ *  行形态 `denied-tool: <tool> — <detail>`（detail 已在留痕时拍平换行）；notify 侧解析按「 — 」分隔符识别，
+ *  省略行不含分隔符自然滤除。 */
+const DENIED_FM_CAP = 20;
+
 /**
  * `git diff --cached --numstat <baseSha>` 原始输出 → changed-file 行（改动清单交接，2026-11-05 打磨第一批）。
  * 行形态 `<+N>\t<-M>\t<path>`；二进制行是 `-	-	<path>` → 渲染 `(binary)`；改名 `{old => new}` 按 git 原样。
@@ -263,6 +268,11 @@ export const buildReport = (args: {
     const changed = args.changedFiles ?? [];
     const changedFm = changed.length === 0 ? "" : changed.slice(0, CHANGED_FILE_CAP).map((f) => `changed-file: ${f}\n`).join("")
         + (changed.length > CHANGED_FILE_CAP ? `changed-file: ${T.changedMore(changed.length - CHANGED_FILE_CAP)}\n` : "");
+    // 被拒清单 frontmatter 段（B2，2026-11-09）：deniedTools 此前只进报告正文——手机推送拿不到，
+    // 「票为什么没干完」在飞书上无着落。落 frontmatter 供 writeFinishNotification 解析进推送。
+    const denied = args.deniedTools ?? [];
+    const deniedFm = denied.length === 0 ? "" : denied.slice(0, DENIED_FM_CAP).map((d) => `denied-tool: ${d.tool} — ${d.detail}\n`).join("")
+        + (denied.length > DENIED_FM_CAP ? `denied-tool: ${T.deniedMore(denied.length - DENIED_FM_CAP)}\n` : "");
     return `---
 id: ${id}
 title: ${ticket.title}
@@ -273,7 +283,7 @@ budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
-${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${changedFm}---
+${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${deniedFm}${changedFm}---
 
 ${T.reportTitle(ticket.title)}
 
@@ -531,8 +541,17 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         //   canApprove）才落 pending 等点卡（30min 超时 = deny，fail-closed）；不存活 → 立即 deny +
         //   记录（现状路径，零输出零回归）。等待期挂看门狗 PAUSED（同 setup 语义：卡片等待最长
         //   30min 无事件，R3 断流判定会误杀）。批准 = allow-once 单次生效，不改 allowApproval 白名单。
+        // ★ B1（2026-11-09 飞书拆软闸门）：挂机窗口内不推卡——半夜无人点卡，30min 空等 = 注定拒绝；
+        //   直接走自动应答器（deny + deniedTools 留痕 + 会话继续、票不死，agent 绕路）。判定与
+        //   分叉收在 batchApprovalRoute 纯函数（守门测试钉窗口内外两形态）。
         const requestApprovalWithCard = async (detail: string, meta: { toolName: string }): Promise<"allow-once" | "deny"> => {
-            if (allowApproval.has(meta.toolName)) return "allow-once";
+            const route = batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
+            if (route === "auto-deny") {
+                deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) }); // 与卡片拒绝同一留痕口径，绝不静默吞
+                emit(`🌙 [${task.id}] ${T.windowAutoDeny(meta.toolName)}`);
+                return "deny";
+            }
+            if (route === "allow-once") return "allow-once";
             wd?.setPaused(true);
             let card: "allow-once" | "deny";
             try {
@@ -736,7 +755,33 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     return { status, cost, budgetTruncated };
 };
 
-// ============ 等待窗口（--wait-window HH:MM-HH:MM：仅延迟启动语义；峰谷价已核实——空闲档半价，窗口对准空闲时段即半价跑批） ============
+// ============ 等待窗口（--wait-window HH:MM-HH:MM：延迟启动语义 + B1 卡片压制；峰谷价已核实——空闲档半价，窗口对准空闲时段即半价跑批） ============
+
+/**
+ * 当前时刻是否在挂机窗口内（B1 卡片压制的判定核心）。窗口可跨午夜（23:00-07:00 → startMin > endMin）：
+ * waitUntilWindow 只管「等下一起点」不判窗内时刻，本判定必须判对——跨段窗的凌晨时刻要落在窗内。
+ * 边界：起点含、终点不含（与 waitUntilWindow 的 now >= startMin && now < endMin 同口径）。
+ */
+export const inWaitWindow = (w: { startMin: number; endMin: number } | null, nowMin: number): boolean => {
+    if (!w) return false;
+    return w.startMin < w.endMin
+        ? nowMin >= w.startMin && nowMin < w.endMin
+        : nowMin >= w.startMin || nowMin < w.endMin;
+};
+
+/**
+ * 审批路由三分叉（B1，2026-11-09 飞书拆软闸门）。纯函数——判定与 IO 分离，守门测试直接验证：
+ *  - unlocked（编辑类 ∪ 工单 tools 显式解锁）→ allow-once（既有自动应答器语义，一个字不改）；
+ *  - 窗口生效（--wait-window 已配且当前时刻在窗内）→ auto-deny：半夜无人点卡，卡片路径 30min 超时
+ *    等于「注定拒绝的空等」（5 张高危票/晚 ≈ 2.5h 吞吐损失，占 6h 窗口 40%）——直接 deny +
+ *    deniedTools 留痕（同卡片拒绝的记录口径，绝不静默吞），会话继续、票不死，agent 绕路；
+ *  - 其余 → card（既有卡片路径，白天/人在场的运行）。
+ */
+export const batchApprovalRoute = (args: { unlocked: boolean; windowActive: boolean }): "allow-once" | "auto-deny" | "card" =>
+    args.unlocked ? "allow-once" : args.windowActive ? "auto-deny" : "card";
+
+/** runBatchQueue 写入、runOneTask→requestApprovalWithCard 读取（模块级：与 extraTestPatterns 同款装配态）。 */
+let activeWaitWindow: { startMin: number; endMin: number } | null = null;
 
 export const parseWaitWindow = (s?: string): { startMin: number; endMin: number } | null => {
     if (!s) return null;
@@ -787,6 +832,7 @@ export const runBatchQueue = async (opts?: { waitWindow?: string; maxTotalYuan?:
         return;
     }
     if (window) await waitUntilWindow(window);
+    activeWaitWindow = window; // B1：窗口态供 requestApprovalWithCard 压卡（finally 复位防跨 run 残留）
 
     const lock = await acquireRunLock(getLocale());
     if (!lock.ok) {
@@ -834,6 +880,7 @@ export const runBatchQueue = async (opts?: { waitWindow?: string; maxTotalYuan?:
             }
         }
     } finally {
+        activeWaitWindow = null; // B1：run 结束即复位（同进程再 run 不带 --wait-window 时不得继承压卡态）
         await releaseRunLock();
         // P2 账本（§5.2.3 注）：每 run 一行（零任务也落——定时器节奏可见）；账本失败只提示不影响结果。
         try {

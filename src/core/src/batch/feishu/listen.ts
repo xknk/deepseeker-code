@@ -359,6 +359,37 @@ const extractCardAction = (data: any): { approvalId?: string; decision?: "allow"
     };
 };
 
+// ============ B3 确认语闸（2026-11-09，真机案例 si6d：回复「知道了」误开续修票烧 ¥0.77） ============
+
+/**
+ * 内置确认语清单（整句命中 → 回「👍 收到」不开票；清单外照旧建票，刻意不做语义猜测）。
+ * 判定口径（isConfirmPhrase）：剔 @ 标签残留、抹 emoji 变体选择符（👍 vs 👍️，U+FE0F——
+ * 匹配侧的老坑）、拉丁转小写后按标点分句，【每个分句】都是清单整句命中才算确认——
+ * 「知道了，谢谢」免票；「知道了，顺便把 X 修一下」照旧建票。
+ */
+const CONFIRM_PHRASES: ReadonlySet<string> = new Set([
+    // zh（整句；刻意保守——「可以」「行」这类可答问的词不入清单）
+    "知道了", "收到", "好的", "好的好的", "好", "好嘞", "嗯", "嗯嗯", "哦", "哦哦",
+    "了解", "明白", "明白了", "辛苦了", "辛苦啦", "谢谢", "多谢", "感谢", "谢啦", "谢谢啦",
+    "好的谢谢", "收到谢谢", "不用了", "没了", "先这样", "就这样",
+    // en（整句、小写）
+    "ok", "okay", "roger", "got it", "noted", "thanks", "thank you", "thx",
+    // emoji（变体选择符抹除后以裸码点参与比较）
+    "👍", "🙏", "👌", "🆗", "✅",
+]);
+
+/** 整句确认语判定（守门测试直接验证：整句命中 / 近似句不命中）。 */
+export const isConfirmPhrase = (text: string): boolean => {
+    const cleaned = (text || "")
+        .replace(/<at[^>]*><\/at>/g, " ")   // 群 @ 标签残留（normalizeMessageEvent 已剔 key 占位，标签形态兜底）
+        .replace(new RegExp(String.fromCharCode(0xfe0f), "g"), "")             // emoji 变体选择符
+        .toLowerCase()
+        .trim();
+    if (!cleaned) return false;
+    const segs = cleaned.split(/[.,;:!?,，。；：！？、]+/).map((s) => s.trim()).filter(Boolean);
+    return segs.length > 0 && segs.every((s) => CONFIRM_PHRASES.has(s));
+};
+
 // ============ 主编排 ============
 
 export interface FeishuListenResult { code: number }
@@ -485,14 +516,24 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     // —— 5.5 处理 + 回执 wrapper（实时/对账两路共用）：聊天入口必须有反馈——建票成败都回话，
     //        静默 = 黑洞（2026-11-06 真机联调实锤：配额拒收静默、建票成功也无回执，用户无从判断）。
     //        回执发送失败只留日志不重试——票已建/已拒，回执是增益不是关键路径。 ——
-    const replyAck = async (candidate: FeishuMessageCandidate, r: FeishuTicketResult, source: "live" | "reconcile"): Promise<void> => {
+    // ★ B4（2026-11-09）：票是否正在被 runner 执行（running/<id>.md 存在即是在跑——runner 移文件进
+    //    running 目录是状态机原子步）。回复路由的「前票执行中」分支据此给回执点名排队关系。
+    const isTicketRunning = async (ticketId: string): Promise<boolean> =>
+        fs.stat(path.join(batchQueueRoot(), "running", `${ticketId}.md`)).then(() => true).catch(() => false);
+
+    const replyAck = async (candidate: FeishuMessageCandidate, r: FeishuTicketResult, source: "live" | "reconcile", queuedBehindPrev?: string): Promise<void> => {
         let text: string | null = null;
         let ticketId: string | undefined;
         if (!r.ok) text = notifyText.ackSkipped(locale, r.error.slice(0, 160));
         else if (r.action === "created") {
             ticketId = r.ticketId;
-            const snap = await snapshotQueue().catch(() => ({ pending: [] as string[], running: [] as string[], done: [] as string[] }));
-            text = notifyText.ackCreated(locale, r.ticketId, feishuTitleOf(candidate.text), Math.max(0, snap.pending.length - 1));
+            if (queuedBehindPrev) {
+                // ★ B4：前票正在执行 → 回执写明排队关系（建票事实不变，口径从「前面还有 N 张」换成点名原票）
+                text = notifyText.ackQueuedBehind(locale, r.ticketId, feishuTitleOf(candidate.text), queuedBehindPrev);
+            } else {
+                const snap = await snapshotQueue().catch(() => ({ pending: [] as string[], running: [] as string[], done: [] as string[] }));
+                text = notifyText.ackCreated(locale, r.ticketId, feishuTitleOf(candidate.text), Math.max(0, snap.pending.length - 1));
+            }
         } else if (r.action === "appended") {
             ticketId = r.ticketId;
             text = notifyText.ackAppended(locale, r.ticketId, r.title);
@@ -512,9 +553,19 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     };
 
     const handleAndReply = async (candidate: FeishuMessageCandidate, source: "live" | "reconcile"): Promise<FeishuTicketResult> => {
+        // ★ B3 确认语闸（先于回复路由——si6d 实证回复完成推送「知道了」被老实开成续修票）：
+        //   整句确认语 → 回「👍 收到」不开票。只对白名单内发送者生效（白名单外维持既有静默语义）。
+        //   回执不登记消息映射（「收到」不是票，回复它不该被路由成追加）。
+        if (fcfg.users.includes(candidate.senderOpenId) && isConfirmPhrase(candidate.text)) {
+            const at = candidate.chatType === "group" ? `<at user_id="${candidate.senderOpenId}"></at> ` : "";
+            await sendText(client, candidate.chatId, `${at}${notifyText.ackConfirm(locale)}`);
+            log(`👍 [feishu] 确认语整句命中，不开票（${candidate.messageId.slice(0, 12)}…）`);
+            return { ok: true, action: "skipped", reason: locale === "zh" ? "确认语整句命中，不开票" : "whole-sentence confirmation ack, no ticket" };
+        }
         // 回复路由先行：parent_id 命中映射表且回复者在 users 白名单 → 追加/续修那张票。
         // 免 @（回复关系即触发——群里话题式跟进不该被 mentionOnly 拦住）；白名单外的回复不走路由，
         // 落到下面的闸 = 静默（不给陌生会话回话）。
+        let queuedBehindPrev: string | undefined;
         if (candidate.parentId && fcfg.users.includes(candidate.senderOpenId)) {
             const prevId = await lookupMsgMap(candidate.parentId).catch(() => null);
             if (prevId) {
@@ -523,13 +574,16 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                     await replyAck(candidate, r, source);
                     return r;
                 }
-                // null = 前票执行中/无踪迹：回落正常建票流（回执口径同新建票）
+                // null = 前票执行中/无踪迹：回落正常建票流（回执口径同新建票）。
+                // ★ B4：前票在 running → 新票照建（runner 串行消费 pending，自然排原票后），回执写明
+                //   排队关系。复核与建票之间前票恰好跑完 → 退化通用回执（幂等无害，票照建）。
+                else if (await isTicketRunning(prevId)) queuedBehindPrev = prevId;
             }
         }
         const gate = feishuGateVerdict(candidate, fcfg, handleDeps.botOpenId);
         if (!gate.ok) return { ok: true, action: "skipped", reason: gate.reason };
         const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
-        await replyAck(candidate, r, source);
+        await replyAck(candidate, r, source, queuedBehindPrev);
         return r;
     };
 
