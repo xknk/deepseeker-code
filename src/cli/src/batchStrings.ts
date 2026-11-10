@@ -33,7 +33,7 @@ const ZH = {
   budget-yuan: 0.5      # 可选：本任务花费上限（元）
   timeout-min: 30       # 可选：agent 阶段超时（分钟，缺省 30）
   retry: 1              # 可选：被看门狗终止后带证据重试次数（0-3，缺省 0=杀即终态）
-  tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path）
+  tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path；MCP 工具可通配，如 mcp__playwright__* 一条解锁整个服务的工具）
   ---
   任务描述正文（Markdown）…
 
@@ -130,6 +130,8 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     deniedMore: (n: number) => `…（另有 ${n} 条被拒未列出）`,
     // B1（2026-11-09 飞书拆软闸门）：挂机窗口内高危不推卡，自动 deny + 留痕（日志/控制台行）
     windowAutoDeny: (tool: string) => `🌙 挂机窗口内不推审批卡，已自动拒绝并留痕：${tool}（白天/人在场运行照常弹卡；要放行请改白天跑或回复推送续修）`,
+    cardRememberedAllow: (tool: string) => `♻️ 本工单已批过 ${tool}，后续调用直接放行（不再重复弹卡）`,
+    cardRememberedDeny: (tool: string) => `♻️ 本工单已拒过 ${tool}，后续调用直接拒绝（不再重复弹卡；要放行请在工单 tools: 解锁后重跑）`,
     artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，已提交，保留待人工处置）`,
     inWindowNow: (hhmm: string) => `⏰ 当前 ${hhmm} 已在窗口内，立即开跑。`,
     waitWindowWait: (h: number, m: number) => `⏰ --wait-window：${h} 小时 ${m} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`,
@@ -238,7 +240,7 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
   budget-yuan: 0.5      # optional: per-task cost cap (yuan)
   timeout-min: 30       # optional: agent-phase timeout (minutes, default 30)
   retry: 1              # optional: evidence-carrying retries after a watchdog kill (0-3, default 0 = kill is final)
-  tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default)
+  tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default; MCP tools accept wildcards, e.g. mcp__playwright__* unlocks the whole server)
 ---
 
   Task description body (Markdown)…
@@ -332,6 +334,8 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     changedMore: (n) => `...(and ${n} more)`,
     deniedMore: (n) => `...(and ${n} more denied, not listed)`,
     windowAutoDeny: (tool) => `🌙 Wait-window active: card approval skipped for ${tool} — auto-denied and logged (cards return for attended/daytime runs; reply to the push for a follow-up if it should run in the day)`,
+    cardRememberedAllow: (tool) => `♻️ ${tool} already approved on this ticket — subsequent calls auto-allowed (no repeat cards)`,
+    cardRememberedDeny: (tool) => `♻️ ${tool} already denied on this ticket — subsequent calls auto-denied (no repeat cards; unlock via ticket tools: and re-run to allow)`,
     artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, committed, kept for manual handling)`,
     inWindowNow: (hhmm) => `⏰ It's ${hhmm}, already inside the window — starting now.`,
     waitWindowWait: (h, m) => `⏰ --wait-window: starting in ${h}h ${m}m (at the window start). Waiting — Ctrl+C to cancel.`,

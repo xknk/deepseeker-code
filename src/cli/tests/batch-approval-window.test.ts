@@ -63,7 +63,7 @@ test("装配：requestApprovalWithCard 走 batchApprovalRoute；auto-deny 分支
     const callIdx = RUNNER_SRC.indexOf("batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName)");
     assert.ok(callIdx > 0, "路由判定调用点存在");
     assert.match(
-        RUNNER_SRC.slice(callIdx, callIdx + 160),
+        RUNNER_SRC.slice(callIdx, callIdx + 220),
         /inWaitWindow\(activeWaitWindow, nowMinutes\(\)\)/,
         "窗口态取模块级 activeWaitWindow（runBatchQueue 装配）",
     );

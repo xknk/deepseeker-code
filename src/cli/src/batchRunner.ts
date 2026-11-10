@@ -56,6 +56,18 @@ const BATCH_EDIT_TOOLS = new Set(["edit_file", "create_file", "write_file", "mov
 /** 缺省禁用清单（对模型不可见，同 SUBAGENT_DENYLIST）：工单 tools: 字段可显式解锁。
  *  run_in_background 同步收权（审查报告 P1-8′）：挂机是无人值守场景，后台孤儿任务产物无人验收。 */
 const BATCH_DEFAULT_DENYLIST = new Set(["run_command", "delete_path", "run_in_background"]);
+
+/** 工单 tools: 解锁匹配（2026-11-10）：条目带尾缀 `*` 按前缀匹配——`mcp__playwright__*` 一条覆盖
+ *  整个 MCP 服务的工具集（MCP 工具逐个点名=打地鼠，浏览器票实锤 8 卡）；无 `*` 条目精确匹配
+ *  （`interpreter` 伪槽位语义不变）。只有尾缀 `*` 触发通配，条目中间的 `*` 仍按字面处理。 */
+export const matchUnlockedTool = (name: string | undefined, entries: Iterable<string>): boolean => {
+    if (!name) return false;
+    for (const e of entries) {
+        if (e.endsWith("*")) { if (name.startsWith(e.slice(0, -1))) return true; }
+        else if (e === name) return true;
+    }
+    return false;
+};
 /** 验收命令自身超时（分钟）：验收挂死不能拖垮整队。 */
 const ACCEPT_TIMEOUT_MIN = 10;
 /** 验收输出进报告的尾部长度（行）。 */
@@ -402,14 +414,23 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
 
     // 工具表裁剪：缺省禁高危（对模型不可见），工单 tools: 显式解锁。
     // ★ P1-6 声明化：工具声明 batchAllowed:false 同样收权（与名单任一命中即拒），未声明者回退名单兜底。
+    // ★ 通配解锁（2026-11-10 b00s 实锤）：MCP 工具逐个点名=打地鼠——浏览器一张票实际调
+    //   navigate/snapshot/click/wait_for/resize… 多种，票面只解 4 个名字 → 手机 72 秒连弹 8 张
+    //   审批卡。tools: 条目带尾缀 * 按前缀匹配（`mcp__playwright__*` 一条解锁整个 playwright
+    //   服务），语义=「这张票允许用这个 MCP 服务」；无 * 条目保持精确匹配（含 interpreter 伪槽位）。
     const unlocked = new Set(t.tools ?? []);
     const toolSchemas = agentTools.filter((x: any) =>
-        unlocked.has(x?.function?.name)
+        matchUnlockedTool(x?.function?.name, unlocked)
         || ((x?.function?.batchAllowed !== false) && !BATCH_DEFAULT_DENYLIST.has(x?.function?.name)));
 
     // 审批自动应答器：编辑类 ∪ 工单解锁 → allow-once；其余 deny + 记录（fail-closed，绝不无限等）
     const allowApproval = new Set([...BATCH_EDIT_TOOLS, ...unlocked]);
     const deniedTools: { tool: string; detail: string }[] = [];
+    // ★ 同票同工具审批记忆（2026-11-10 b00s 实锤）：卡片路径每次调用一张卡——browser_click 连点 5 次
+    //   = 5 张卡，是磨损式轰炸。人在卡片上点过一次 allow/deny 即票内终身生效：allow → 后续同工具
+    //   直接放行；deny → 后续直接拒（同时堵死「反复弹卡把人磨到随手批准」）。只记卡片路径的人工
+    //   决定，窗口期 auto-deny 不入册；跨重试轮共享（与 deniedTools 同款任务级作用域）。
+    const cardDecisions = new Map<string, "allow-once" | "deny">();
 
     // ★ N5 供应链闸门（内核审查报告第三批，2026-10-20，维护者拍板：仅 batch 场景纳入）：解释器直跑
     //   仓库内脚本（node ./x.js / python x.py / 裸 tsc / make / cargo / go…）与 npm 族风险同源，历史上
@@ -677,13 +698,24 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         //   直接走自动应答器（deny + deniedTools 留痕 + 会话继续、票不死，agent 绕路）。判定与
         //   分叉收在 batchApprovalRoute 纯函数（守门测试钉窗口内外两形态）。
         const requestApprovalWithCard = async (detail: string, meta: { toolName: string }): Promise<"allow-once" | "deny"> => {
-            const route = batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
+            const route = batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName) || matchUnlockedTool(meta.toolName, unlocked), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
             if (route === "auto-deny") {
                 deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) }); // 与卡片拒绝同一留痕口径，绝不静默吞
                 emit(`🌙 [${task.id}] ${T.windowAutoDeny(meta.toolName)}`);
                 return "deny";
             }
             if (route === "allow-once") return "allow-once";
+            // ★ 同票同工具记忆命中：卡片批过/拒过一次的工具不再重复弹卡（b00s 8 卡教训的第二刀）。
+            const remembered = cardDecisions.get(meta.toolName);
+            if (remembered === "allow-once") {
+                emit(`♻️ [${task.id}] ${T.cardRememberedAllow(meta.toolName)}`);
+                return "allow-once";
+            }
+            if (remembered === "deny") {
+                deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
+                emit(`♻️ [${task.id}] ${T.cardRememberedDeny(meta.toolName)}`);
+                return "deny";
+            }
             wd?.setPaused(true);
             let card: "allow-once" | "deny";
             try {
@@ -698,6 +730,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
             } finally {
                 wd?.setPaused(false);
             }
+            cardDecisions.set(meta.toolName, card); // 人工决定入册：同票后续调用直接按此执行
             if (card === "allow-once") return "allow-once";
             deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
             return "deny";
