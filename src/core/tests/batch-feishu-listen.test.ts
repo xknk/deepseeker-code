@@ -976,6 +976,30 @@ test("C1 直答链路（假 SDK 全链）：问句→注入 runDa 回话+会话�
     });
 });
 
+test("C1 对账重放不重跑直答（源码结构守门）：问句/续问两分支 reconcile 路静默——直答不建票无去重态（票路 duplicate 靠已有票查重），游标 floor 成秒的边界重放每轮到这，不闸 = 每轮重跑 LLM + 重复回话（B3 确认语连发同构、贵三个数量级，2026-11-10 验证实锤）", async () => {
+    const src = await fs.readFile(new URL("../src/batch/feishu/listen.ts", import.meta.url), "utf-8");
+    // 分支一：新问句 → 直答
+    const q = src.indexOf('kind === "question"');
+    assert.ok(q > 0, "问句路由分支存在");
+    const qBlock = src.slice(q, src.indexOf("const intent = matchDelayIntent", q));
+    assert.match(qBlock, /source === "reconcile"/, "问句直答分支必须识别对账重放路");
+    assert.ok(
+        qBlock.indexOf('source === "reconcile"') < qBlock.indexOf("daSerial"),
+        "静默判断必须先于直答点火（重放零 LLM 调用零外发）",
+    );
+    assert.match(qBlock, /不重复直答/, "重放跳过留痕可对账");
+    // 分支二：回复链续问 → 粘会话直答
+    const f = src.indexOf("lookupDaSession(candidate.parentId)");
+    assert.ok(f > 0, "续问粘会话分支存在");
+    const fBlock = src.slice(f, src.indexOf("const gate = feishuGateVerdict", f));
+    assert.match(fBlock, /source === "reconcile"/, "续问直答分支必须识别对账重放路");
+    assert.ok(
+        fBlock.indexOf('source === "reconcile"') < fBlock.indexOf("daSerial"),
+        "续问静默判断必须先于直答点火",
+    );
+    assert.match(fBlock, /不重复直答/, "重放跳过留痕可对账");
+});
+
 test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导；整句外不命中照旧建票（宁窄勿宽）；stop 落协议文件、cancel 删票", async () => {
     await withTempBatchDir(async (dir) => {
         await writeFeishuConfig(dir, { users: ["ou_alice"] });

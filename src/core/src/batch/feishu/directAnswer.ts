@@ -207,6 +207,8 @@ export const runDirectAnswer = async (args: {
             },
         );
     } catch (e: any) {
+        // 升级 abort 被某层抛成异常（而非 runAgent 安静收尾）时，仍按升级归类——升级事实优先于异常形态
+        if (upgradeWhy) return { kind: "upgrade", upgradeWhy };
         return { kind: "error", error: String(e?.message ?? e).slice(0, 160) };
     } finally {
         clearTimeout(timer);

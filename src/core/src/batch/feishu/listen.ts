@@ -801,6 +801,13 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             if (!queuedBehindPrev) {
                 const daSid = await lookupDaSession(candidate.parentId).catch(() => null);
                 if (daSid) {
+                    // ★ 对账重放不重跑直答（同 B3 重放纪律，2026-11-10 验证实锤）：续问不建票、
+                    //   无去重态（票路 duplicate 靠已有票查重，问句从没登记过）——游标 floor 成秒的
+                    //   边界重放每轮都到这，不闸 = 每轮重跑一次 LLM + 重复回话（确认语连发同构，更贵）。
+                    if (source === "reconcile") {
+                        log(`⏭️ [feishu] 对账重放续问，不重复直答（${candidate.messageId.slice(0, 12)}…）`);
+                        return { ok: true, action: "skipped", reason: locale === "zh" ? "对账重放续问，不重复直答" : "replayed follow-up question, no repeat direct answer" };
+                    }
                     const fresh = isConfirmPhraseFreshReset(candidate.text);
                     void daSerial(() => runDaAndReply(candidate, fresh ? undefined : daSid))
                         .catch((e: any) => log(`❌ [feishu] 直答异常（不中断监听）：${e?.message ?? e}`));
@@ -814,6 +821,12 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         //   任务 → 票。★ C2 意图词（今晚跑/明早跑）：任务票带 not-before 延迟到点（攒批唯一合法来源①）。
         const kind = await classifyMessageKind(candidate.text, flashClassify ?? undefined);
         if (kind === "question") {
+            // ★ 对账重放不重跑直答（同 B3 重放纪律，2026-11-10 验证实锤）：问句不建票无去重态，
+            //   边界秒重放每轮到这——不闸 = 每轮重跑 LLM + 重复回话。实时路已答过，重放静默留痕即可。
+            if (source === "reconcile") {
+                log(`⏭️ [feishu] 对账重放问句，不重复直答（${candidate.messageId.slice(0, 12)}…）`);
+                return { ok: true, action: "skipped", reason: locale === "zh" ? "对账重放问句，不重复直答" : "replayed question, no repeat direct answer" };
+            }
             void daSerial(() => runDaAndReply(candidate, undefined))
                 .catch((e: any) => log(`❌ [feishu] 直答异常（不中断监听）：${e?.message ?? e}`));
             return { ok: true, action: "skipped", reason: locale === "zh" ? "直答后台进行中" : "direct answer running in background" };
