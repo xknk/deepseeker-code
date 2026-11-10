@@ -78,11 +78,11 @@ test("票面 tools: mcp__playwright__* 原样入册", () => {
 
 // ============ ③ 装配面锚点（源码扫描，CRLF 无关） ============
 
-test("装配：工具表裁剪与审批路由判定都走通配匹配", () => {
-    assert.match(RUNNER_SRC, /matchUnlockedTool\(x\?\.function\?\.name,\s*unlocked\)/);
-    assert.match(RUNNER_SRC, /allowApproval\.has\(meta\.toolName\)\s*\|\|\s*matchUnlockedTool\(meta\.toolName,\s*unlocked\)/);
+test("装配：工具表裁剪与审批路由判定都走通配匹配（buildBatchToolPolicy 单一真相源）", () => {
+    assert.match(RUNNER_SRC, /agentTools\.filter\(\(x: any\) => policy\.isVisible\(x\)\)/);
+    assert.match(RUNNER_SRC, /policy\.isApprovalAllowed\(meta\.toolName\)/);
     // interpreter 逃生门保持精确匹配（unlocked.has，不走通配）
-    assert.match(RUNNER_SRC, /!unlocked\.has\("interpreter"\)/);
+    assert.match(RUNNER_SRC, /!opts\.unlocked\.has\("interpreter"\)/);
 });
 
 test("装配：卡片路径先查记忆（allow/deny 两分支）再弹卡，人工决定入册", () => {

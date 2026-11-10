@@ -60,10 +60,10 @@ test("batchApprovalRoute：unlocked 最优先（白名单工具窗口内也放�
 // ============ B1 装配面：接线钉死 ============
 
 test("装配：requestApprovalWithCard 走 batchApprovalRoute；auto-deny 分支留痕与卡片拒绝同口径，绝不静默吞", () => {
-    const callIdx = RUNNER_SRC.indexOf("batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName)");
+    const callIdx = RUNNER_SRC.indexOf("batchApprovalRoute({ unlocked: policy.isApprovalAllowed(meta.toolName)");
     assert.ok(callIdx > 0, "路由判定调用点存在");
     assert.match(
-        RUNNER_SRC.slice(callIdx, callIdx + 220),
+        RUNNER_SRC.slice(callIdx, callIdx + 160),
         /inWaitWindow\(activeWaitWindow, nowMinutes\(\)\)/,
         "窗口态取模块级 activeWaitWindow（runBatchQueue 装配）",
     );

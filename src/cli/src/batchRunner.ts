@@ -68,6 +68,55 @@ export const matchUnlockedTool = (name: string | undefined, entries: Iterable<st
     }
     return false;
 };
+
+/** N5 供应链闸门包装工厂（runOneTask 内 wrapInterpreterGate 的实现体，独立导出配协议单测）：
+ *  拦截分支 yield 拒绝文案后 return；放行分支 yield* 委托原 execute。run_command/run_in_background
+ *  的 execute 是 async generator——包装若用普通 async 函数返回 generator 对象，执行器判非流式把
+ *  generator JSON.stringify（{}），命令明明执行成功模型只见空壳+假「缺少退出码哨兵」失败
+ *  （2026-11-10 w7ez 真机 3 连试全空壳实锤；同 9bda588 直答 wrapReadOnlyRunCommand 的教训）。 */
+export const makeInterpreterGateWrapper = (opts: {
+    unlocked: Set<string>;
+    onDeny: (tool: string, cmd: string, why: string) => void;
+}) => (x: any): any => {
+    const name = x?.function?.name;
+    if (name !== "run_command" && name !== "run_in_background") return x;
+    const innerExecute = x.function.execute.bind(x.function);
+    return {
+        ...x,
+        function: {
+            ...x.function,
+            execute: async function* (args: any, ctx: any) {
+                const cmd = typeof args?.command === "string" ? args.command : "";
+                if (cmd && isInterpreterRepoScript(cmd) && !opts.unlocked.has("interpreter")) {
+                    const why = `🚫 [batch 供应链闸门] 解释器直跑仓库内脚本已拦截：${cmd.slice(0, 120)}。执行仓库作者提交的代码与 npm 族风险同源，挂机场景默认拒绝；确需执行请在本工单 tools: 中加 "interpreter" 解锁。`;
+                    opts.onDeny(name, cmd, why);
+                    yield why;
+                    return;
+                }
+                yield* innerExecute(args, ctx);
+            },
+        },
+    };
+};
+
+/** batch 工具策略单一真相源（runOneTask 装配与全量矩阵测试共用，2026-11-10）：
+ *  可见性 = 精确/通配解锁 ∪（声明未收权 batchAllowed≠false 且 不在缺省禁用清单）；
+ *  审批自动放行 = 编辑类白名单 ∪ 精确/通配解锁（放行者不问，其余按 SAFETY 等级走卡片/夜间自动拒）。 */
+export const buildBatchToolPolicy = (unlockedEntries: Iterable<string>): {
+    unlocked: Set<string>;
+    isVisible: (schema: any) => boolean;
+    isApprovalAllowed: (name: string) => boolean;
+} => {
+    const unlocked = new Set(unlockedEntries);
+    return {
+        unlocked,
+        isVisible: (schema: any): boolean =>
+            matchUnlockedTool(schema?.function?.name, unlocked)
+            || ((schema?.function?.batchAllowed !== false) && !BATCH_DEFAULT_DENYLIST.has(schema?.function?.name)),
+        isApprovalAllowed: (name: string): boolean =>
+            BATCH_EDIT_TOOLS.has(name) || matchUnlockedTool(name, unlocked),
+    };
+};
 /** 验收命令自身超时（分钟）：验收挂死不能拖垮整队。 */
 const ACCEPT_TIMEOUT_MIN = 10;
 /** 验收输出进报告的尾部长度（行）。 */
@@ -419,12 +468,8 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     //   审批卡。tools: 条目带尾缀 * 按前缀匹配（`mcp__playwright__*` 一条解锁整个 playwright
     //   服务），语义=「这张票允许用这个 MCP 服务」；无 * 条目保持精确匹配（含 interpreter 伪槽位）。
     const unlocked = new Set(t.tools ?? []);
-    const toolSchemas = agentTools.filter((x: any) =>
-        matchUnlockedTool(x?.function?.name, unlocked)
-        || ((x?.function?.batchAllowed !== false) && !BATCH_DEFAULT_DENYLIST.has(x?.function?.name)));
-
-    // 审批自动应答器：编辑类 ∪ 工单解锁 → allow-once；其余 deny + 记录（fail-closed，绝不无限等）
-    const allowApproval = new Set([...BATCH_EDIT_TOOLS, ...unlocked]);
+    const policy = buildBatchToolPolicy(unlocked);
+    const toolSchemas = agentTools.filter((x: any) => policy.isVisible(x));
     const deniedTools: { tool: string; detail: string }[] = [];
     // ★ 同票同工具审批记忆（2026-11-10 b00s 实锤）：卡片路径每次调用一张卡——browser_click 连点 5 次
     //   = 5 张卡，是磨损式轰炸。人在卡片上点过一次 allow/deny 即票内终身生效：allow → 后续同工具
@@ -439,27 +484,18 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     //   分类器放行/审批放行最终都落 execute，全路径必经零漏。命中即拒并记 deniedTools；拒绝文案回模型
     //   （可改道，但闸门一直在）。逃生门：工单 tools: 加伪槽位 "interpreter"（非真实工具，仅作为
     //   授权标记被 unlocked 集合记住；混入 allowApproval 无害——解释器命令不走 requireApproval 文案）。
-    const wrapInterpreterGate = (x: any): any => {
-        const name = x?.function?.name;
-        if (name !== "run_command" && name !== "run_in_background") return x;
-        const innerExecute = x.function.execute.bind(x.function);
-        return {
-            ...x,
-            function: {
-                ...x.function,
-                execute: async (args: any, ctx: any) => {
-                    const cmd = typeof args?.command === "string" ? args.command : "";
-                    if (cmd && isInterpreterRepoScript(cmd) && !unlocked.has("interpreter")) {
-                        const why = `🚫 [batch 供应链闸门] 解释器直跑仓库内脚本已拦截：${cmd.slice(0, 120)}。执行仓库作者提交的代码与 npm 族同源风险，挂机场景默认拒绝；确需执行请在本工单 tools: 中加 "interpreter" 解锁。`;
-                        deniedTools.push({ tool: name, detail: why.replace(/\n+/g, " ").slice(0, 140) });
-                        emit(`🚫 [${task.id}] 拦截解释器脚本：${cmd.slice(0, 80)}`);
-                        return why;
-                    }
-                    return innerExecute(args, ctx);
-                },
-            },
-        };
-    };
+    // ★ 流式协议透传（2026-11-10 w7ez 实锤，同 9bda588 直答教训）：run_command/run_in_background 的
+    //   execute 是 async generator，包装必须同为 async generator + yield* 委托——此前普通 async 函数
+    //   返回 generator 对象，执行器判非流式把 generator JSON.stringify（{}），命令明明执行成功模型
+    //   只见空壳+假「缺少退出码哨兵」失败（真机 3 连试全空壳）。工厂独立导出配协议单测
+    //   （wrapReadOnlyRunCommand 同款形态）。
+    const wrapInterpreterGate = makeInterpreterGateWrapper({
+        unlocked,
+        onDeny: (tool, cmd, why) => {
+            deniedTools.push({ tool, detail: why.replace(/\n+/g, " ").slice(0, 140) });
+            emit(`🚫 [${task.id}] 拦截解释器脚本：${cmd.slice(0, 80)}`);
+        },
+    });
     const gatedSchemas = toolSchemas.map(wrapInterpreterGate);
 
     // ============ 跨仓路由（2026-11-10 真机实锤 ij9q 引发） ============
@@ -698,7 +734,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         //   直接走自动应答器（deny + deniedTools 留痕 + 会话继续、票不死，agent 绕路）。判定与
         //   分叉收在 batchApprovalRoute 纯函数（守门测试钉窗口内外两形态）。
         const requestApprovalWithCard = async (detail: string, meta: { toolName: string }): Promise<"allow-once" | "deny"> => {
-            const route = batchApprovalRoute({ unlocked: allowApproval.has(meta.toolName) || matchUnlockedTool(meta.toolName, unlocked), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
+            const route = batchApprovalRoute({ unlocked: policy.isApprovalAllowed(meta.toolName), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
             if (route === "auto-deny") {
                 deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) }); // 与卡片拒绝同一留痕口径，绝不静默吞
                 emit(`🌙 [${task.id}] ${T.windowAutoDeny(meta.toolName)}`);
