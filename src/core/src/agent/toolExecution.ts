@@ -401,7 +401,13 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
         if (autoGateAsked) detail += `\n（ℹ️ 说明：本调用未获自动放行——不在自动放行范围 / 安全分类器判 risky / 判定超时（分类器上限 10s）或异常，按 fail-closed 转人工审批。）`;
         if (!state.denied) {
             let approved = false;
-            try { approved = await requestApproval(calledName, toolCall.id, detail, toolCtx, level, state.calledArgs, matchedTool.function.primaryArg); }
+            // ★ 审批也用合成名（2026-11-10 y38a 实锤）：mcp_call 分发器模式下 hooks/权限规则/分类器
+            //   都按 resolveMcpPermissionName 收到 mcp__<server>__<tool>，唯独这里曾传裸 calledName
+            //   （"mcp_call"）——宿主审批的解锁名单（batch 工单 tools: 逐名/通配条目）永远匹配不上，
+            //   每次调用都落人工卡（浏览器票真机 15 卡实锤）。补齐后逐名解锁、mcp__server__* 通配、
+            //   审批记忆键粒度全部恢复语义；detail 文案与 UI 展示同步拿到具体工具名。
+            const approvalName = resolveMcpPermissionName(calledName, state.calledArgs);
+            try { approved = await requestApproval(approvalName, toolCall.id, detail, toolCtx, level, state.calledArgs, matchedTool.function.primaryArg); }
             catch (e: any) { state.denied = true; failResult(state, `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`, 'permission'); }
             if (!approved && !state.denied) { state.denied = true; failResult(state, `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`, 'permission'); }
         }

@@ -283,7 +283,8 @@ describe("内核审查报告第四批守门（I-4 / I-3 / I-6 / P2-10）", () =>
                 "matchCommandDeny(",                                                  // 灾难命令硬闸（不可被 allow 绕过）
                 "isLockHeld(state.lockKey)",                                          // 后台工具互斥锁
                 "runAutoCheck(resolveMcpPermissionName",                              // 分类器
-                "requestApproval(calledName,",                                        // 人工审批
+                "const approvalName = resolveMcpPermissionName(calledName, state.calledArgs);", // ★ 2026-11-10 审批合成名来源（mcp_call 分发器下宿主解锁名单/审批记忆需见 mcp__server__tool）
+                "requestApproval(approvalName,",                                      // 人工审批（与 hook/权限/分类器同源同粒度）
                 "runPreHooks(resolveMcpPermissionName(calledName, state.calledArgs)", // 旧位 pre-hook
                 "beforeMutationBackup(matchedTool.function.triggersUndo",             // undo 写前备份
             ];

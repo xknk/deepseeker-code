@@ -241,12 +241,18 @@ export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
  * 启动期孤儿清扫：进程重启意味着上次未清理的 worktree 全是孤儿。
  * 扫 <dataDir>/worktrees/<userWorkspaceDir>/ 下所有 worktree 目录，强制移除 + prune。
  * 在 initEngine 中调用。非 git 仓库静默跳过。
+ * ★ 年龄护栏（2026-11-10 y38a 实锤）：清扫前提「残留=孤儿」只在单进程世界成立——本机是多进程
+ *   并存（listen 点火的 runner 在跑，另一进程 boot 即触发本清扫），曾把活跃 runner 刚建好的
+ *   worktree 连根拔掉（agent 中途 git_status 报无仓库、收尾提交 not a git repository）。
+ *   近 SWEEP_MIN_AGE_MS 内有写入的目录一律跳过（正在跑的必新；刚完成的留到下次启动再扫，无害）。
  */
-export const sweepOrphanedWorktrees = async (): Promise<void> => {
-    const root = worktreeRootDir();
+const SWEEP_MIN_AGE_MS = 60 * 60 * 1000;
+export const sweepOrphanedWorktrees = async (rootOverride?: string): Promise<void> => {
+    const root = rootOverride ?? worktreeRootDir();
     let entries: string[];
     try { entries = await fs.promises.readdir(root); } catch { return; /* 目录不存在，无事可扫 */ }
     let swept = 0;
+    let skippedYoung = 0;
     for (const sessionIdDir of entries) {
         const sessionPath = path.join(root, sessionIdDir);
         let stepDirs: string[];
@@ -254,18 +260,22 @@ export const sweepOrphanedWorktrees = async (): Promise<void> => {
         for (const stepDir of stepDirs) {
             const wtPath = path.join(sessionPath, stepDir);
             try {
+                const st = await fs.promises.stat(wtPath);
+                if (Date.now() - st.mtimeMs < SWEEP_MIN_AGE_MS) { skippedYoung++; continue; }
+            } catch { /* stat 失败（已被移走等）走下方移除兜底 */ }
+            try {
                 await runMainGit(["worktree", "remove", "--force", wtPath]);
             } catch {
                 await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
             }
             swept++;
         }
-        // 该 session 的 worktree 目录已空，清掉壳
-        await fs.promises.rm(sessionPath, { recursive: true, force: true }).catch(() => { });
+        // 该 session 的 worktree 目录已空，清掉壳（仍有年轻 worktree 的壳保留）
+        if (skippedYoung === 0) await fs.promises.rm(sessionPath, { recursive: true, force: true }).catch(() => { });
     }
     if (swept > 0) {
         try { await runMainGit(["worktree", "prune"]); } catch { /* ignore */ }
-        console.log(`🧹 [worktree] 启动期清扫 ${swept} 个孤儿 worktree`);
+        console.log(`🧹 [worktree] 启动期清扫 ${swept} 个孤儿 worktree${skippedYoung > 0 ? `（跳过 ${skippedYoung} 个近期活跃，可能是并行进程在用）` : ""}`);
     }
 };
 
