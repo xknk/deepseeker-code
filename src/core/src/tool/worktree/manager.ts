@@ -60,11 +60,18 @@ const isNotARepoError = (e: any): boolean => {
 /**
  * 创建一个从主仓检出（缺省当前 HEAD）的独立 worktree（新临时分支）。
  * @param baseRef 检出基座（P2 续修链：传前票产物分支名，代码基座=前次修复成果；缺省 HEAD 不变）。
+ * @param repoRoot 跨仓路由（2026-11-10）：worktree admin 锚定的仓库根，缺省主仓（WORKSPACE_ROOT）。
+ *   跨仓票（如「在 lg-pms 项目…」）传目标仓库根——分支/worktree 元数据落目标仓；harvest/commit
+ *   本就按 wt.path（git -C）操作、不依赖锚定仓，天然跨仓。
  * @throws 非 git 仓库 / worktree add 失败时抛错（run_workflow 捕获后该步骤标失败）
  */
-export const createWorktree = async (sessionId: string, stepId: string, baseRef = "HEAD"): Promise<WorktreeHandle> => {
+export const createWorktree = async (sessionId: string, stepId: string, baseRef = "HEAD", repoRoot?: string): Promise<WorktreeHandle> => {
+    // admin git 锚定仓（跨仓路由时为目标仓库；缺省主仓）
+    const adminCwd = repoRoot ?? WORKSPACE_ROOT;
+    const runAdminGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
+        execFileSmart("git", args, { cwd: adminCwd, maxBuffer });
     // 检出基座作为 worktree 基座与 diff 基准（先解析成 SHA：baseRef 可能是分支名）
-    const { stdout: shaOut } = await runMainGit(["rev-parse", baseRef]);
+    const { stdout: shaOut } = await runAdminGit(["rev-parse", baseRef]);
     const baseSha = shaOut.trim();
 
     const wtPath = worktreeDir(sessionId, stepId);
@@ -75,21 +82,21 @@ export const createWorktree = async (sessionId: string, stepId: string, baseRef 
     await fs.promises.mkdir(path.dirname(wtPath), { recursive: true });
     // -b：新建分支；baseRef：从指定基座检出（缺省 HEAD）。worktree 路径须不存在（mkdir 只建到父级）。
     try {
-        await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
+        await runAdminGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
     } catch (e: any) {
         // 残留兜底：上次失败尝试可能留下旧目录、陈旧 worktree 元数据或同名残分支——
         // 只清目录不够（分支还在时 -b 撞 "branch already exists"，该票永远跑不起来，重跑场景必须自愈）。
         // 同名分支（dsc-wt-<session>-<step>）只可能是本槽位上一次尝试的尸体，删之安全。
         if (e?.code === "ENOENT" || /already exists|not a working tree/i.test(`${e?.stderr || ""} ${e?.message || ""}`)) {
             await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
-            await runMainGit(["worktree", "prune"]).catch(() => { });
-            await runMainGit(["branch", "-D", branch]).catch(() => { });
-            await runMainGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
+            await runAdminGit(["worktree", "prune"]).catch(() => { });
+            await runAdminGit(["branch", "-D", branch]).catch(() => { });
+            await runAdminGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
         } else {
             throw e;
         }
     }
-    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}${baseRef === "HEAD" ? "" : ` ← ${baseRef}`}）`);
+    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}${baseRef === "HEAD" ? "" : ` ← ${baseRef}`}@${path.basename(adminCwd)}）`);
     return { path: wtPath, branch, baseSha };
 };
 

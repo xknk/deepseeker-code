@@ -31,7 +31,9 @@ import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
 import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket, markTicketNeedsReview, readStopRequest, writeTicketProgress } from "@/batch/queue.ts";
-import { continuationBaseBranch, doneTicketPath } from "@/batch/continuation.ts";
+import { continuationBaseBranch, continuationRepoRoot, doneTicketPath } from "@/batch/continuation.ts";
+import { loadRepoIndex, routeRepoByRules } from "@/batch/repoRoute.ts";
+import { detectAccept } from "@/batch/sync/accept.ts";
 import { appendLedgerEntry } from "@/batch/ledger.ts";
 import { compileTestPatterns, isTestPath } from "@/batch/sync/testpaths.ts";
 import { loadSyncConfig } from "@/batch/sync/config.ts";
@@ -127,6 +129,39 @@ const gitSimple = (args: string[], cwd: string): Promise<string | null> =>
         child.on("error", () => resolve(null));
         child.on("close", (code) => resolve(code === 0 ? decodeProcessOutput(Buffer.concat(chunks)).trim() || null : null));
     });
+
+// ============ 跨仓路由 accept/setup 适配（纯函数，守门测试直接验证） ============
+
+/** npm 族命令形状（含 Windows 可执行后缀变体）：首 token 是 npm/pnpm/yarn/npx/node/bun 才算。 */
+const NPM_FAMILY_CMD = /^(?:npm|pnpm|yarn|npx|node|bun)(?:\.cmd|\.exe)?(?:\s|$)/;
+
+/**
+ * 跨仓票的 accept/setup 适配（2026-11-10）：只动「在目标仓结构性必失败」的命令——目标仓没有
+ * package.json 时 npm 族命令必失败（ij9q 实锤：npm run typecheck + pnpm install 落在 Java 仓）。
+ * accept 换成目标仓探测结果（探测不出则保留原样，基线三态校验会诚实报告）；setup 直接丢弃
+ * （白装依赖）。目标仓有 package.json（同为 node 仓）或命令本就不是 npm 族（mvn / test -f /
+ * make…外部或手写的显式命令）→ 一律原样保留，绝不擅自替换。
+ */
+export const adaptCommandsForTargetRepo = (args: {
+    accept: string; setup?: string; targetHasPackageJson: boolean; detectedAccept?: string;
+}): { accept: string; setup?: string; acceptAdaptedFrom?: string; setupDropped?: string } => {
+    const npmShaped = (cmd?: string): boolean => !!cmd && NPM_FAMILY_CMD.test(cmd.trim());
+    let accept = args.accept;
+    let setup = args.setup;
+    let acceptAdaptedFrom: string | undefined;
+    let setupDropped: string | undefined;
+    if (!args.targetHasPackageJson) {
+        if (npmShaped(args.accept) && args.detectedAccept && args.detectedAccept !== args.accept) {
+            acceptAdaptedFrom = args.accept;
+            accept = args.detectedAccept;
+        }
+        if (npmShaped(setup)) {
+            setupDropped = setup;
+            setup = undefined;
+        }
+    }
+    return { accept, setup, acceptAdaptedFrom, setupDropped };
+};
 
 /** 主仓库根（缓存键的「仓库」维度）：从 worktree 反查 common dir 的父目录。 */
 const mainRepoRootOf = async (wtPath: string): Promise<string> => {
@@ -258,6 +293,9 @@ export const buildReport = (args: {
     imagesRead?: number;
     /** 改动清单（numstatToChangedFiles 所得；写进报告 frontmatter changed-file:，续修票注入用。空/缺省不写行）。 */
     changedFiles?: string[];
+    /** 跨仓路由的目标仓库根（2026-11-10）：非空 → 落 frontmatter repo:（续修票经 continuationRepoRoot 继承——
+     *  前次产物分支只在该仓库存在，落回基座 = 成果丢失）。基座票缺省不写行（旧报告无此行 = 基座，兼容）。 */
+    repoRoot?: string | null;
 }): string => {
     const { id, ticket, status, budgetTruncated, cost, receipt, finalText, accept, deniedTools, diff, wt } = args;
     const T = batchT(getLocale());
@@ -289,7 +327,7 @@ budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
-${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${deniedFm}${changedFm}${summaryFm}---
+${args.repoRoot ? `repo: ${args.repoRoot.replace(/\\/g, "/")}\n` : ""}${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${deniedFm}${changedFm}${summaryFm}---
 
 ${T.reportTitle(ticket.title)}
 
@@ -403,6 +441,58 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     };
     const gatedSchemas = toolSchemas.map(wrapInterpreterGate);
 
+    // ============ 跨仓路由（2026-11-10 真机实锤 ij9q 引发） ============
+    // 工单指向基座之外的仓库（「在 lg-pms 项目生成 test 文件」）时，从目标仓库（而非基座）开
+    // worktree——agent 工作区围栏随 worktree 走，目标仓文件天然可写、验收也在目标仓跑。两层判定：
+    //  1) 续修票：继承前票报告 repo:（前次产物分支只存在于那仓库，落回基座 = 前次修复成果丢失）；
+    //  2) 规则路由（repoRoute.ts，零 LLM）：仓库索引 + 复合标识符 + 邻近词护栏，任一不过 → 基座
+    //     （现行为 fail-safe——ij9q 之前所有票都是这么跑的，路由失败不比现状差）。
+    // 路由命中外部仓时顺手适配 accept/setup（只动目标仓结构性必失败的 npm 族命令，见
+    // adaptCommandsForTargetRepo），并在 body 尾部补跨仓执行说明（agent 需知道工作区即目标仓）。
+    let repoRoot: string | null = null;
+    let routedRepoName = "";
+    let acceptAdapted = false;
+    if (t.continues) {
+        const prevRepo = await continuationRepoRoot(t.continues);
+        if (prevRepo && path.resolve(prevRepo) !== path.resolve(process.cwd())) {
+            repoRoot = prevRepo;
+            routedRepoName = path.basename(prevRepo);
+            emit(`🧭 [${task.id}] ${T.repoInherit(t.continues, prevRepo)}`);
+        }
+    } else {
+        try {
+            const index = await loadRepoIndex();
+            const r = routeRepoByRules(`${t.title}\n${t.body}`, index, process.cwd());
+            if (r.repo) {
+                repoRoot = r.repo.dir;
+                routedRepoName = r.repo.name;
+                emit(`🧭 [${task.id}] ${T.repoRouted(r.repo.name, r.matchedIdent ?? "?", r.repo.dir)}`);
+            }
+        } catch (e: any) {
+            emit(`⚠️ [${task.id}] 跨仓路由索引构建失败（回退基座仓执行）：${e?.message ?? e}`);
+        }
+    }
+    if (repoRoot) {
+        const targetHasPkg = fs.existsSync(path.join(repoRoot, "package.json"));
+        let detectedAccept: string | undefined;
+        if (!targetHasPkg) {
+            const d = await detectAccept(repoRoot, getLocale());
+            if (d.ok && d.accept) detectedAccept = d.accept;
+        }
+        const adapted = adaptCommandsForTargetRepo({ accept: t.accept, setup: t.setup, targetHasPackageJson: targetHasPkg, detectedAccept });
+        if (adapted.acceptAdaptedFrom) {
+            emit(`🧭 [${task.id}] ${T.repoAcceptAdapted(adapted.acceptAdaptedFrom, adapted.accept)}`);
+            t.accept = adapted.accept;
+            t.needsReview = true; // 验收命令被 runner 换过（本地探测来源）→ 与探测票同口径强制人工复核
+            acceptAdapted = true;
+        }
+        if (adapted.setupDropped) {
+            emit(`🧭 [${task.id}] ${T.repoSetupDropped(adapted.setupDropped)}`);
+            t.setup = undefined;
+        }
+        t.body = t.body + T.repoBodyNote(routedRepoName);
+    }
+
     // worktree：改动隔离 + 产物载体（非 git 项目在此失败 → error 报告，继续下一任务）。
     // ★ stepId 用任务全局唯一 id（不用 "batch" 常量）：worktree 保留策略下分支常驻，而 manager 的
     //   分支名 = dsc-wt-<sessionId 前 8>-<stepId>，batch-* 会话前 8 位全是 "batch-20"——常量 stepId
@@ -411,12 +501,12 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     try {
         // P2 续修链（§6.2）：代码基座 = 前票产物分支（前次修复已在树里，不从 main 重做）。
         // 分支解析不出（前票未跑完/报告丢失/分支已被删）→ 回退 HEAD 并在控制台注明——宁可基座退化，
-        // 不能让续修票卡死在建 worktree 这一步。
+        // 不能让续修票卡死在建 worktree 这一步。分支解析锚定仓 = 跨仓路由仓（前次分支在那仓库）。
         let baseRef = "HEAD";
         if (t.continues) {
             const prevBranch = await continuationBaseBranch(t.continues);
             if (prevBranch) {
-                const verify = await gitSimple(["rev-parse", "--verify", "--quiet", `refs/heads/${prevBranch}`], process.cwd());
+                const verify = await gitSimple(["rev-parse", "--verify", "--quiet", `refs/heads/${prevBranch}`], repoRoot ?? process.cwd());
                 if (verify !== null) {
                     baseRef = prevBranch;
                     emit(`🌿 [${task.id}] ${T.contBaseNote(prevBranch)}`);
@@ -427,13 +517,13 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                 emit(`⚠️ [${task.id}] ${T.contBaseFallback(t.continues, T.contBaseNoBranch)}`);
             }
         }
-        wt = await createWorktree(sessionId, task.id, baseRef);
+        wt = await createWorktree(sessionId, task.id, baseRef, repoRoot ?? undefined);
     } catch (e: any) {
         const msg = T.wtCreateFail(e?.message ?? e);
         const cost = await collectSessionCost(sessionId);
         await finishTicket(task.id, buildReport({
             id: task.id, ticket: t, status: "error", budgetTruncated: false, cost, receipt: undefined,
-            finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt: null, errorMessage: msg,
+            finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt: null, errorMessage: msg, repoRoot,
         }));
         emit(`💥 [${task.id}] ${msg}`);
         return { status: "error", cost, budgetTruncated: false };
@@ -445,15 +535,15 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     let setupDoneByProbe = false;
     if (t.source !== "manual") {
         emit(`🧪 [${task.id}] ${T.baselineGateNote}`);
-        const repoRoot = await mainRepoRootOf(wt.path);
-        const key = baselineKey(repoRoot, wt.baseSha, t.accept);
+        const baselineRepoRoot = await mainRepoRootOf(wt.path); // worktree 顶层（跨仓票=目标仓检出，键随仓隔离）
+        const key = baselineKey(baselineRepoRoot, wt.baseSha, t.accept);
         const finishBaselineBroken = async (verdict: "baseline-broken" | "watch-suspect", probe: { code: number | null; output: string; timedOut: boolean } | null) => {
             await killBackgroundTasksUnder(wt.path).catch(() => { });
             const cost = await collectSessionCost(sessionId);
             await finishTicket(task.id, buildReport({
                 id: task.id, ticket: t, status: "baseline-broken", budgetTruncated: false, cost, receipt: undefined,
                 finalText: "", accept: probe ? { cmd: t.accept, code: probe.code, output: probe.output, timedOut: probe.timedOut } : null,
-                deniedTools: [], diff: T.diffNone, wt, errorMessage: baselineVerdictLabel(verdict, getLocale()),
+                deniedTools: [], diff: T.diffNone, wt, errorMessage: baselineVerdictLabel(verdict, getLocale()), repoRoot,
             }));
             emit(`🧪 [${task.id}] ${T.statusLabel("baseline-broken")}`);
             return { status: "baseline-broken" as const, cost, budgetTruncated: false };
@@ -475,7 +565,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                     const cost = await collectSessionCost(sessionId);
                     await finishTicket(task.id, buildReport({
                         id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
-                        finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
+                        finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg, repoRoot,
                     }));
                     emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
                     return { status: "setup-failed", cost, budgetTruncated: false };
@@ -628,7 +718,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                 const cost = await collectSessionCost(sessionId);
                 await finishTicket(task.id, buildReport({
                     id: task.id, ticket: t, status: "setup-failed", budgetTruncated: false, cost, receipt: undefined,
-                    finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg,
+                    finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt, errorMessage: msg, repoRoot,
                 }));
                 emit(`🛠️ [${task.id}] ${T.setupFail(t.setup, s.code)}`);
                 return { status: "setup-failed", cost, budgetTruncated: false };
@@ -815,9 +905,14 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         touchedTestFiles: touched.length > 0 ? touched : undefined,
         imagesRead,
         changedFiles,
+        repoRoot,
     }));
-    if (downgraded) {
+    if (downgraded || acceptAdapted) {
+        // 票档同步补标 needs-review（报告 fm 由 t.needsReview 渲染；此处把搬入 done/ 的票档也对齐，
+        // 供 batch pr 拒绝与人工复核看到同一体征——与测试触碰降级同款补标路径）。
         await markTicketNeedsReview(doneTicketPath(task.id)).catch(() => { });
+    }
+    if (downgraded) {
         emit(`⚠️ [${task.id}] ${T.downgradedNote(touched.length)}`);
     }
     emit(`   ${T.statusLabel(status)} · ${T.costSummary(cost)}`);

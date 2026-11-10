@@ -55,6 +55,22 @@ export const continuationBaseBranch = async (prevId: string): Promise<string | n
     return branch && /^[\w][\w./-]*$/.test(branch) ? branch : null;
 };
 
+/**
+ * 前票跨仓路由结果（runner 侧续修继承，2026-11-10）：读 done 报告 frontmatter `repo:`。
+ * 前票被路由到外部仓（如 lg-pms）时，续修票必须仍在该仓检出——分支只存在于那个仓库，
+ * 落回基座仓 rev-parse 必失败、基座退化为 HEAD，前次修复成果就丢了。无报告/无 repo/目录已不存在 → null
+ * （null = 基座仓，即不路由，现行为）。目录存在性校验：报告可能比磁盘活得久（外部删仓）。
+ */
+export const continuationRepoRoot = async (prevId: string): Promise<string | null> => {
+    const report = await fs.readFile(reportPath(prevId), "utf-8").catch(() => null);
+    if (!report) return null;
+    const m = /^repo:\s*(\S+)\s*$/m.exec(report);
+    const dir = m?.[1];
+    if (!dir || !path.isAbsolute(dir)) return null;
+    const stat = await fs.stat(dir).catch(() => null);
+    return stat?.isDirectory() ? dir : null;
+};
+
 /** 前次改动文件清单封顶（与 batchRunner 生成端同口径；超出末尾补省略行带余量）。 */
 const CHANGED_FILE_CAP = 30;
 const CHANGED_MORE_NOTE = (n: number): string => `…（其余 ${n} 个略）`;

@@ -4,7 +4,7 @@
  *
  *  解析序（安全优先）：本地 defaultAccept（配置）→ 外部 accept 块（默认完全忽略；
  *  allowExternalAccept 显式开启才采信，且只收单命令形态，强制 needs-review）→
- *  自动探测（package.json → Makefile → go test，强制 needs-review）→ 拒绝建票（missing-accept）。
+ *  自动探测（package.json → Makefile → 根 pom.xml → go.mod，强制 needs-review）→ 拒绝建票（missing-accept）。
  *
  *  ★ 红线（§9.7）：issue 里写的验收命令 = 陌生人在你机器上执行命令，且 batch 的 accept 走
  *  spawn(cmd, {shell}) 直接执行、完全绕过工具白名单——默认完全忽略，绝不因「issue 写了」而采信。
@@ -74,7 +74,7 @@ const PM_BY_LOCK: { lock: string; pm: string }[] = [
 /** npm test 空壳脚本（探测到等于没有：跑了也不验任何东西，还给人「有测试」错觉）。 */
 const EMPTY_TEST_SCRIPT = /^\s*(echo\s+["']?no test specified["']?\s*&&\s*exit\s+\d*\s*|:)\s*;?\s*$/;
 
-/** 在项目根探测可用的验收命令。序：package.json scripts.test（按 lockfile 选包管理器）→ Makefile test 目标 → go.mod。 */
+/** 在项目根探测可用的验收命令。序：package.json scripts.test（按 lockfile 选包管理器）→ Makefile test 目标 → 根 pom.xml（mvn 编译检查）→ go.mod。 */
 export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh"): Promise<DetectResult> => {
     // 1) package.json scripts.test（空壳脚本视为没有）
     try {
@@ -95,7 +95,13 @@ export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh
             return { ok: true, accept: "make test", source: locale === "zh" ? "Makefile test 目标（CI=1 由 runner 环境变量注入）" : "Makefile test target (CI=1 injected via runner env)" };
         }
     } catch { /* 无 Makefile → 下一步 */ }
-    // 3) go.mod → go test ./...
+    // 3) 根 pom.xml → mvn 编译检查（2026-11-10 跨仓路由配套）：Java 仓探测验收选编译而非 test——
+    //    maven 测试套可能缺失/巨慢/依赖外网，挂机场景编译通过已是「改动不破坏构建」的诚实下界。
+    try {
+        await fs.access(path.join(projectRoot, "pom.xml"));
+        return { ok: true, accept: "mvn -q -DskipTests compile", source: locale === "zh" ? "根 pom.xml（mvn 编译检查，跳测试；依赖本机 .m2 缓存）" : "root pom.xml (mvn compile check, tests skipped; relies on the local .m2 cache)" };
+    } catch { /* 无 pom.xml → 下一步 */ }
+    // 4) go.mod → go test ./...
     try {
         await fs.access(path.join(projectRoot, "go.mod"));
         return { ok: true, accept: "go test ./...", source: locale === "zh" ? "go.mod（go test ./...；CI=1 由 runner 环境变量注入）" : "go.mod (go test ./...; CI=1 injected via runner env)" };
