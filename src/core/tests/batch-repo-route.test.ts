@@ -119,9 +119,17 @@ test("routeRepoByRules：无复合标识符 → null（零误报面）", () => {
 
 // ============ 索引扫描与缓存 ============
 
-test("buildRepoIndex：.git 命中即停（嵌套仓不当独立目标）；node_modules/隐藏目录剪枝；深度上限", async () => {
+test("buildRepoIndex：.git 命中即停（嵌套仓不当独立目标）；node_modules/隐藏目录剪枝；深度上限；pom 坐标取 parent 块+自身（全文首匹配会抓成 <parent> 的坐标——pms-parent 真机实锤）", async () => {
     await withScanRoot(async (root) => {
-        await mkRepo(path.join(root, "pms-parent"), [{ name: "pom.xml", content: "<project><groupId>com.zlgx.lg.pms</groupId><artifactId>pms-parent</artifactId></project>" }]);
+        await mkRepo(path.join(root, "pms-parent"), [{
+            name: "pom.xml",
+            // 真实 pms-parent 形态：<modules> 在最前、<parent> 坐标其后、自身坐标再后、
+            // dependencyManagement 里大量外来坐标（两个历史 bug：首匹配抓成 parent 坐标；头部切片被 modules 截断）
+            content: `<project><modules><module>pms-api</module><module>pms-settlement</module></modules>` +
+                `<parent><groupId>com.zlgx.base</groupId><artifactId>zlgx-bom</artifactId></parent>` +
+                `<groupId>com.zlgx.lg.pms</groupId><artifactId>pms-parent</artifactId>` +
+                `<dependencyManagement><dependencies><dependency><groupId>com.zlgx.bid.cooperative</groupId><artifactId>zhaocai-api</artifactId></dependency></dependencies></dependencyManagement></project>`,
+        }]);
         await mkRepo(path.join(root, "webapp"), [{ name: "package.json", content: JSON.stringify({ name: "@org/lg-webapp" }) }]);
         // webapp 内嵌套仓：不独立收录（webapp 已是仓库，扫描到它即 return）
         await mkRepo(path.join(root, "webapp", "nested-inner-repo"));
@@ -133,7 +141,9 @@ test("buildRepoIndex：.git 命中即停（嵌套仓不当独立目标）；node
         const dirs = idx.repos.map((x) => x.name).sort();
         assert.deepEqual(dirs, ["pms-parent", "webapp"], "只收根下两层仓库；嵌套/黑名单/超深不收");
         const pms = idx.repos.find((x) => x.name === "pms-parent")!;
-        assert.ok(pms.tokens.includes("comzlgxlgpms"), "pom groupId 归一进 token");
+        assert.ok(pms.tokens.includes("comzlgxlgpms"), "自身坐标 groupId（在 parent 块之后）也进 token——lg-pms 匹配的就是它");
+        assert.ok(pms.tokens.includes("comzlgxlgpmspmsparent"), "坐标按出现序配对进 token（不做笛卡尔积）");
+        assert.ok(!pms.tokens.includes("comzlgxbidcooperative"), "依赖管理里的外来坐标不当身份 token（防歧义误伤）");
         assert.ok(pms.tokens.includes("pmsparent"), "目录名进 token");
         const web = idx.repos.find((x) => x.name === "webapp")!;
         assert.ok(web.tokens.includes("orglgwebapp"), "package.json name 归一进 token");

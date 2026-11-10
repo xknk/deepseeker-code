@@ -79,11 +79,19 @@ const collectRepoTokens = async (repoDir: string): Promise<string[]> => {
     }
     const pomRaw = await fs.readFile(path.join(repoDir, "pom.xml"), "utf-8").catch(() => null);
     if (pomRaw) {
-        const g = /<groupId>\s*([^<]+?)\s*<\/groupId>/.exec(pomRaw)?.[1];
-        const a = /<artifactId>\s*([^<]+?)\s*<\/artifactId>/.exec(pomRaw)?.[1];
-        if (g) raw.add(g);
-        if (a) raw.add(a);
-        if (g && a) raw.add(`${g}.${a}`);
+        // 剥掉依赖/构建/插件/仓库/profile 子树后再抓坐标：只留 parent 块 + 项目自身坐标——
+        // ①全文首匹配会抓到 <parent> 的坐标（pms-parent 真机实锤：真坐标 com.zlgx.lg.pms 在 parent 之后）；
+        // ②头部切片也不行（同 pom 的 <modules> 排在 parent 之前，真机实锤二连）；③全文全抓会把
+        // 依赖管理的几十个外来坐标当噪声 token。非贪婪 + 反向引用配对闭合标签，嵌套同族块安全。
+        const noise = /<(dependencyManagement|dependencies|build|pluginManagement|plugins|repositories|profiles|reporting)\b[^>]*>[\s\S]*?<\/\1>/g;
+        const body = pomRaw.replace(noise, " ");
+        const gs = [...body.matchAll(/<groupId>\s*([^<]+?)\s*<\/groupId>/g)].map((m) => m[1]);
+        const as = [...body.matchAll(/<artifactId>\s*([^<]+?)\s*<\/artifactId>/g)].map((m) => m[1]);
+        for (const g of gs) raw.add(g);
+        for (const a of as) raw.add(a);
+        // 坐标按出现序配对（parent 对、自身对）——只加真实存在的组合，不做笛卡尔积
+        const n = Math.min(gs.length, as.length);
+        for (let i = 0; i < n; i++) raw.add(`${gs[i]}.${as[i]}`);
     }
     const cfgRaw = await fs.readFile(path.join(repoDir, ".git", "config"), "utf-8").catch(() => null);
     if (cfgRaw) {
