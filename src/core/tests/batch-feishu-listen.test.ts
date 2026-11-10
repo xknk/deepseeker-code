@@ -872,7 +872,9 @@ test("C1 直答只读硬闸（源码结构守门）：工具表白名单零写�
     const gateIdx = src.indexOf("!isReadOnlyCommand(cmd)");
     assert.ok(gateIdx > 0, "run_command 只读判定闸存在");
     const gateBlock = src.slice(gateIdx, gateIdx + 400);
-    assert.match(gateBlock, /requestUpgrade/, "只读闸触碰 → 升级建票（不是默默拒绝）");
+    assert.match(gateBlock, /onViolation\(/, "只读闸触碰 → onViolation 升级回调（不是默默拒绝）");
+    assert.match(src, /wrapReadOnlyRunCommand\(x, requestUpgrade\)/, "调用侧 onViolation=requestUpgrade（触碰即升级建票）");
+    assert.match(src, /yield\* innerExecute/, "闸包装 yield* 委托内部流式 execute（协议保持，2026-11-10 真机实锤）");
     assert.match(src, /isInterpreterRepoScript\(cmd\)/, "解释器直跑仓库脚本同闸（N5 同源风险）");
     // 审批钩子全拒：任何走到审批的工具 = 超出只读信封
     const apIdx = src.indexOf("requestApproval:");
@@ -885,6 +887,39 @@ test("C1 直答只读硬闸（源码结构守门）：工具表白名单零写�
     assert.match(src, /batch-da-/, "会话 id 前缀（--continue 剔除 + 外部数据边界段语义）");
     assert.match(src, /DA_BUDGET_YUAN/, "直答预算硬帽（E2 120% 截断兜底）");
     assert.match(src, /DA_TIMEOUT_MS/, "直答超时（绝不挂长）");
+});
+
+test("C1 run_command 只读闸包装保持流式协议（2026-11-10 真机实锤回归钉）：async generator + yield* 委托——旧包装是普通 async 函数，返回 Promise<generator> 被 collectToolResult 当非流式值 JSON.stringify，命令明明跑成功模型只见 {} + 「缺少退出码哨兵」假失败", async () => {
+    const { wrapReadOnlyRunCommand } = await import("@/batch/feishu/directAnswer.ts");
+    // 假 run_command：真品是 async *execute 流式（尾部追加退出码哨兵），这里最小复刻协议形态
+    const fakeTool = {
+        type: "function",
+        function: {
+            name: "run_command",
+            async *execute(args: { command: string }) {
+                yield `OUT: ${args.command}`;
+                yield "\n⟦DSC_EXIT:0⟧";
+            },
+        },
+    };
+    const violations: string[] = [];
+    const wrapped = wrapReadOnlyRunCommand(fakeTool as any, (why: string) => violations.push(why));
+
+    // 1. 协议保持（回归主钉）：调用结果必须本身就是 async generator（不是 Promise<generator>）
+    const ret = (wrapped.function as any).execute({ command: "git log -1" }, {});
+    assert.equal(typeof (ret as any)?.[Symbol.asyncIterator], "function",
+        "包装后 execute 仍须是流式 generator——否则 collectToolResult 走非流式分支丢输出（真机实锤形态）");
+    const chunks: string[] = [];
+    for await (const c of ret as AsyncGenerator<string>) chunks.push(c);
+    assert.equal(chunks.join(""), "OUT: git log -1\n⟦DSC_EXIT:0⟧", "内部 generator 输出经 yield* 原样透传（含哨兵）");
+    assert.deepEqual(violations, [], "只读命令零升级");
+
+    // 2. 非只读闸：yield 拦截文案、不透传内部执行、登记升级原因
+    const ret2 = (wrapped.function as any).execute({ command: "npm install left-pad" }, {});
+    let out2 = "";
+    for await (const c of ret2 as AsyncGenerator<string>) out2 += c;
+    assert.match(out2, /直答只读闸/, "非只读命令吃闸门文案");
+    assert.equal(violations.length, 1, "升级原因登记一次");
 });
 
 test("C1 直答链路（假 SDK 全链）：问句→注入 runDa 回话+会话映射双登记；回复链续问粘会话；「新任务」重开；升级→建票+🛠️回执；失败→⚠️不静默", async () => {

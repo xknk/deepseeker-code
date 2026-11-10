@@ -71,6 +71,38 @@ export const classifyMessageKind = async (text: string, flash?: (t: string) => P
     }
 };
 
+/**
+ * run_command 只读闸包装（★ 2026-11-10 真机三连修之三，独立导出以便单测）：
+ * 包装必须是 async generator 并 `yield*` 委托内部 execute——run_command 是流式工具
+ * （async *execute，collectToolCollect 按 Symbol.asyncIterator 识别）。普通 async 函数包装
+ * 会把返回值变成 Promise<generator>：收集器 isAsyncGenerator 判否 → 走非流式分支把
+ * generator 对象 JSON.stringify（模型只见 {}）→ 命令明明执行成功却报「缺少退出码哨兵=执行失败」
+ * （真机实锤：模型被迫读 .git/logs/HEAD 兜底答对了，但全程认为 git 跑不动）。
+ */
+export const wrapReadOnlyRunCommand = (tool: any, onViolation: (why: string) => void): any => {
+    const innerExecute = tool.function.execute.bind(tool.function);
+    return {
+        ...tool,
+        function: {
+            ...tool.function,
+            async *execute(toolArgs: any, ctx: any) {
+                const cmd = typeof toolArgs?.command === "string" ? toolArgs.command : "";
+                if (!cmd || !isReadOnlyCommand(cmd)) {
+                    onViolation("问答只做只读查询，这一步要写文件或跑非只读命令");
+                    yield "🚫 直答只读闸：本命令不是只读，不执行——已转建票流程（写代码的活走票，验收和分支都有保障）。";
+                    return;
+                }
+                if (isInterpreterRepoScript(cmd)) {
+                    onViolation("解释器直跑仓库脚本超出问答只读边界（供应链风险，同 N5）");
+                    yield "🚫 直答只读闸：解释器直跑仓库脚本不执行——已转建票流程。";
+                    return;
+                }
+                yield* innerExecute(toolArgs, ctx);   // 协议保持：流式委托，输出与退出码哨兵原样透传
+            },
+        },
+    };
+};
+
 // ============ 直答轻会话（只读硬闸 + flash 档 + 小预算 + 超时） ============
 
 /** 直答产物（listen 据此回话或升级建票）。 */
@@ -154,28 +186,7 @@ export const runDirectAnswer = async (args: {
     const source = args.toolSchemas ?? agentTools;
     const daTools = source
         .filter((x: any) => DA_TOOLS.has(x?.function?.name))
-        .map((x: any) => {
-            if (x?.function?.name !== "run_command") return x;
-            const innerExecute = x.function.execute.bind(x.function);
-            return {
-                ...x,
-                function: {
-                    ...x.function,
-                    execute: async (toolArgs: any, ctx: any) => {
-                        const cmd = typeof toolArgs?.command === "string" ? toolArgs.command : "";
-                        if (!cmd || !isReadOnlyCommand(cmd)) {
-                            requestUpgrade("问答只做只读查询，这一步要写文件或跑非只读命令");
-                            return "🚫 直答只读闸：本命令不是只读，不执行——已转建票流程（写代码的活走票，验收和分支都有保障）。";
-                        }
-                        if (isInterpreterRepoScript(cmd)) {
-                            requestUpgrade("解释器直跑仓库脚本超出问答只读边界（供应链风险，同 N5）");
-                            return "🚫 直答只读闸：解释器直跑仓库脚本不执行——已转建票流程。";
-                        }
-                        return await innerExecute(toolArgs, ctx);
-                    },
-                },
-            };
-        });
+        .map((x: any) => (x?.function?.name === "run_command" ? wrapReadOnlyRunCommand(x, requestUpgrade) : x));
 
     const sessionId = args.sessionId ?? args.newSessionId?.() ?? `batch-da-${generateBatchId(args.now?.() ?? new Date())}`;
     // 新会话首轮带一行模式声明（进 transcript 即前缀稳定，跨轮/跨 run 缓存无损）；追问轮只发问题本身。
