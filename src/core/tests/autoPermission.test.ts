@@ -235,6 +235,15 @@ describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
         assert.equal(isReadOnlyCommand('git --no-pager -C "D:/x" diff HEAD~1'), true);          // 布尔旗 + 引号值混排
     });
 
+    it("补口：git 提交图遍历/计算型只读子命令（2026-11-10 真机实锤：rev-list --count 数条数被误判写→问句误升级建票）", () => {
+        assert.equal(isReadOnlyCommand("git rev-list --count 8749ee8..bddec57"), true);
+        assert.equal(isReadOnlyCommand('cd "D:/code/x"; echo "提交数:"; git rev-list --count HEAD~5..HEAD'), true);  // 真机原命令形态（cd 引号头+链）
+        assert.equal(isReadOnlyCommand("git shortlog -sn HEAD"), true);
+        assert.equal(isReadOnlyCommand("git merge-base main dev"), true);
+        assert.equal(isReadOnlyCommand("git reflog expire --expire=now --all"), false);         // reflog 刻意不放（expire/delete 是写）
+        assert.equal(isReadOnlyCommand("git cat-file -p HEAD:.env"), false);                    // cat-file 刻意不放（绕开敏感文件参数闸）
+    });
+
     it("补口边界：写形态 / 未知旗 / 带引号值 / 写子命令带全局旗 → 仍不免审", () => {
         assert.equal(isReadOnlyCommand("sort -o /tmp/evil src/a.txt"), false);            // sort 写文件（绕过 > 闸的形态）
         assert.equal(isReadOnlyCommand("sort --output=/tmp/evil src/a.txt"), false);

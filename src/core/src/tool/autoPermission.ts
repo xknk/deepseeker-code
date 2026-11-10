@@ -145,6 +145,10 @@ const READONLY_HEADS: RegExp[] = [
     // —— git 只读子命令（写子命令 add/commit/push/checkout/reset/mv/rm 一律不在内）——
     /^git status\b/, /^git log\b/, /^git diff\b/, /^git show\b/, /^git blame\b/,
     /^git rev-parse\b/, /^git ls-files\b/, /^git describe\b/,
+    // ★ 提交图遍历/计算型只读（2026-11-10 直答真机实锤：rev-list --count 数提交条数被误判写 → 问句误升级建票）：
+    //   rev-list 遍历计数、shortlog 汇总作者、merge-base 算祖先——纯读纯算，无任何工作区/引用副作用。
+    //   刻意仍不放：reflog（expire/delete 是写）/ cat-file（-p HEAD:.env 绕开敏感文件参数闸）/ ls-remote（外联网络）。
+    /^git rev-list\b/, /^git shortlog\b/, /^git merge-base\b/,
     /^git remote(?:\s+-v)?\s*$/,            // 仅 `git remote` / `git remote -v`（add/remove 是写，不匹配）
     /^git stash list\b/,
     /^git config --get\b/,                  // 仅 --get（读取）；`git config k v` 是写，不匹配
