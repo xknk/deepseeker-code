@@ -21,6 +21,9 @@
  *  feishu-chat: oc_xxx         ← 可选（P4 反馈闭环）：回执/报告推送目标会话 chat_id
  *  feishu-msg: om_xxx          ← 可选：触发本票的飞书消息 id（审计/回复路由）
  *  feishu-sender: ou_xxx       ← 可选：触发者 open_id（群聊回执 @ 用）
+ *  not-before: <时间>          ← 可选（C2 意图词延迟执行）：此时刻之前取票跳过（留在 pending，
+ *                                FIFO 只在可跑票上生效）——「今晚跑/明早跑」的唯一载体；票档入队时
+ *                                必须已带（事后补改会跟点火器竞态）。
  *  ---
  *  ★ 红线（§4.1 评审修订）：以上新字段全部不进模型上下文——batchRunner 只把 body 作为 user 消息；
  *    字段是给人、给 batch pr、给续修与基线策略用的。非法值 fail-closed 拒收。
@@ -65,6 +68,9 @@ export interface BatchTicket {
     feishuMsg?: string;
     /** 触发者 open_id（群聊回执 @ 前缀用；不进模型上下文）。 */
     feishuSender?: string;
+    /** 最早可跑时刻（C2 意图词延迟执行，ISO 8601）：此时刻之前 takeNextTicket 跳过（票留 pending）。
+     *  入队时即定（事后补改与点火器竞态）；不进模型上下文。 */
+    notBefore?: string;
     /** 任务正文（Markdown，喂给 agent 的 user 消息）。 */
     body: string;
 }
@@ -93,6 +99,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         badContinues: (v: string) => `continues 非法（"${v}"）：须为前次工单 id（单行、无空白）。`,
         badAttachments: (v: string) => `attachments 非法（"${v}"）：须为相对 .deepseeker-code 的目录路径（禁绝对路径与 .. 上跳）。`,
         badFeishuField: (k: string, v: string) => `${k} 非法（"${v}"）：须为单行无空白的飞书 id（feishu-chat=oc_ 会话 / feishu-msg=om_ 消息 / feishu-sender=ou_ 用户）。`,
+        badNotBefore: (v: string) => `not-before 非法（"${v}"）：须为可解析的时间（ISO 8601，如 2026-11-11T01:00:00+08:00）。`,
         emptyBody: "任务正文为空：frontmatter 之后应写任务描述。",
         untitled: "(未命名任务)",
         readFail: (e: string) => `读工单失败：${e}`,
@@ -111,6 +118,7 @@ const TICKET_MSG: Record<BatchLocale, Record<string, any>> = {
         badContinues: (v: string) => `Invalid continues ("${v}"): must be the previous ticket id (single line, no whitespace).`,
         badAttachments: (v: string) => `Invalid attachments ("${v}"): must be a directory path relative to .deepseeker-code (no absolute paths, no ".." segments).`,
         badFeishuField: (k: string, v: string) => `Invalid ${k} ("${v}"): must be a single-line Feishu id with no whitespace (feishu-chat=oc_ chat / feishu-msg=om_ message / feishu-sender=ou_ user).`,
+        badNotBefore: (v: string) => `Invalid not-before ("${v}"): must be a parseable time (ISO 8601, e.g. 2026-11-11T01:00:00+08:00).`,
         emptyBody: "Empty task body: write the task description after the frontmatter.",
         untitled: "(untitled task)",
         readFail: (e: string) => `Failed to read ticket: ${e}`,
@@ -241,6 +249,17 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
     const fsn = parseFeishuId("feishu-sender");
     if (fsn.err) return { ok: false, error: fsn.err };
 
+    // ============ C2 意图词延迟执行字段：not-before（可选；须为可解析时间，归一 ISO） ============
+    let notBefore: string | undefined;
+    if (fm["not-before"] !== undefined) {
+        const v = fm["not-before"].trim();
+        if (v) {
+            const t = new Date(v).getTime();
+            if (!Number.isFinite(t)) return { ok: false, error: ticketMsg(locale, "badNotBefore")(fm["not-before"]) };
+            notBefore = new Date(t).toISOString();
+        }
+    }
+
     const body = bodyRaw.trim();
     if (!body) return { ok: false, error: ticketMsg(locale, "emptyBody") };
 
@@ -251,7 +270,7 @@ export const parseBatchTicket = (source: string, locale: BatchLocale = "zh"): Pa
             title, accept, setup, budgetYuan, timeoutMin, retry,
             tools: tools && tools.length > 0 ? tools : undefined,
             source: ticketSource, sourceUrl, sourceId, needsReview, continues, attachments,
-            feishuChat: fc.v, feishuMsg: fmId.v, feishuSender: fsn.v,
+            feishuChat: fc.v, feishuMsg: fmId.v, feishuSender: fsn.v, notBefore,
             body,
         },
     };

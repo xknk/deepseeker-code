@@ -21,7 +21,11 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { batchQueueRoot, snapshotQueue } from "../queue.ts";
+import {
+    batchQueueRoot, snapshotQueue,
+    listPendingTickets, listRunningTickets, runnerLockHolderAlive, cancelPendingTicket,
+    writeStopRequest, readTicketProgress,
+} from "../queue.ts";
 import { loadFeishuConfig, type FeishuConfig } from "./config.ts";
 import { handleFeishuMessage, handleFeishuFollowup, feishuGateVerdict, feishuTitleOf, normalizeMessageEvent, type FeishuMessageCandidate, type FeishuTicketResult } from "./message.ts";
 import {
@@ -29,8 +33,10 @@ import {
     writeApprovalDecision, acquireListenLock, releaseListenLock, APPROVAL_POLL_MS, HEARTBEAT_WRITE_INTERVAL_MS,
 } from "./approval.ts";
 import {
-    lookupMsgMap, recordMsgMap, listPendingNotifications, clearNotification, bumpNotificationRetries, notifyText,
+    lookupMsgMap, recordMsgMap, lookupDaSession, recordDaSession,
+    listPendingNotifications, clearNotification, bumpNotificationRetries, notifyText,
 } from "./notify.ts";
+import { classifyMessageKind, runDirectAnswer, type MessageKind } from "./directAnswer.ts";
 import { runReconcile, loadKnownChats, recordKnownChat, type FeishuPull } from "./reconcile.ts";
 import type { DownloadFile } from "../sync/attachments.ts";
 import type { SyncLocale } from "../sync/config.ts";
@@ -119,6 +125,14 @@ export interface FeishuListenDeps {
     /** 建票 deps 覆盖（queueRoot/projectRoot 透传 handleFeishuMessage；测试重定向用）。 */
     queueRoot?: string;
     projectRoot?: string;
+    /** ★ C1 flash 问句/任务二分兜底（缺省动态 import LLM 链；测试注入确定性分类器零网络）。 */
+    flashClassify?: (t: string) => Promise<MessageKind>;
+    /** ★ C1 直答执行器（缺省 runDirectAnswer；测试注入假 runner 零 LLM 零工具）。 */
+    runDa?: typeof runDirectAnswer;
+    /** ★ C2 runner 点火器（缺省不点火——CLI 装配真实 spawner；测试注入可控假件零进程）。 */
+    spawnRunner?: () => void;
+    /** ★ C2 点火冷却（毫秒，缺省 90s）：防重复点火。 */
+    igniteCooldownMs?: number;
 }
 
 /** 变量 specifier 动态 import：esbuild 无法静态解析 → 产物保留运行时 import，缺包走提示路径。 */
@@ -378,16 +392,58 @@ const CONFIRM_PHRASES: ReadonlySet<string> = new Set([
     "👍", "🙏", "👌", "🆗", "✅",
 ]);
 
+/** 短语归一（确认语/控制词/意图词共用）：剔 @ 标签残留、抹 emoji 变体选择符（U+FE0F）、小写、去首尾空白。 */
+const normalizePhrase = (text: string): string => (text || "")
+    .replace(/<at[^>]*><\/at>/g, " ")   // 群 @ 标签残留（normalizeMessageEvent 已剔 key 占位，标签形态兜底）
+    .replace(new RegExp(String.fromCharCode(0xfe0f), "g"), "")             // emoji 变体选择符
+    .toLowerCase()
+    .trim();
+
 /** 整句确认语判定（守门测试直接验证：整句命中 / 近似句不命中）。 */
 export const isConfirmPhrase = (text: string): boolean => {
-    const cleaned = (text || "")
-        .replace(/<at[^>]*><\/at>/g, " ")   // 群 @ 标签残留（normalizeMessageEvent 已剔 key 占位，标签形态兜底）
-        .replace(new RegExp(String.fromCharCode(0xfe0f), "g"), "")             // emoji 变体选择符
-        .toLowerCase()
-        .trim();
+    const cleaned = normalizePhrase(text);
     if (!cleaned) return false;
     const segs = cleaned.split(/[.,;:!?,，。；：！？、]+/).map((s) => s.trim()).filter(Boolean);
     return segs.length > 0 && segs.every((s) => CONFIRM_PHRASES.has(s));
+};
+
+// ============ C4 控制面 + 剧本 E 闲聊 + C2 意图词（整句/短语精确匹配，不做语义猜测，对齐 B3 哲学） ============
+
+/** 控制词解析产物（「取消」带票 id；id 形态校验在 cancelPendingTicket 侧）。 */
+export type ControlWord = { kind: "queue" } | { kind: "progress" } | { kind: "stop" } | { kind: "cancel"; id: string };
+
+/** 整句控制词判定：队列 / 进度 / 停 / 取消 <id>（含可选尾标点；清单外一律不命中）。 */
+export const matchControlWord = (text: string): ControlWord | null => {
+    const t = normalizePhrase(text);
+    if (!t) return null;
+    if (/^(队列|queue)[。.!！]?$/.test(t)) return { kind: "queue" };
+    if (/^(进度|progress)[。.!！]?$/.test(t)) return { kind: "progress" };
+    if (/^(停|停下|停止|stop)[。.!！]?$/.test(t)) return { kind: "stop" };
+    const m = /^(?:取消|cancel)\s+([\w.-]+)[。.!！]?$/.exec(t);
+    if (m) return { kind: "cancel", id: m[1] };
+    return null;
+};
+
+/** 剧本 E 整句闲聊（「在吗」族）：回一句引导，不建票不直答。 */
+export const isHelloPhrase = (text: string): boolean =>
+    /^(在吗|在么|在不在|你还在吗|hello|hi|hey)[?？。.!！]?$/.test(normalizePhrase(text));
+
+/** 延迟意图（短语包含即命中——「这三件事今晚跑」正文+意图词一体；不做语义猜测）。 */
+export type DelayIntent = "tonight" | "morning";
+export const matchDelayIntent = (text: string): DelayIntent | null => {
+    const t = normalizePhrase(text);
+    if (/今晚跑|今晚跑批|晚上跑|今晚处理|run tonight|tonight/.test(t)) return "tonight";
+    if (/明早跑|明早跑批|明天早上跑|明早处理|run tomorrow morning|tomorrow morning/.test(t)) return "morning";
+    return null;
+};
+
+/** 意图 → 最早可跑时刻（ISO）：今晚=下个 01:00、明早=下个 07:00（本地时区；cron 定时批 01:00 清 pending，
+ *  早于 01:00 的「今晚」票由 cron 清、晚于的与「明早」票由点火器到点起跑——即跑不分昼夜，攒只攒到点）。 */
+export const nextRunAtISO = (intent: DelayIntent, from = new Date()): string => {
+    const d = new Date(from);
+    d.setHours(intent === "tonight" ? 1 : 7, 0, 0, 0);
+    if (d.getTime() <= from.getTime()) d.setDate(d.getDate() + 1);
+    return d.toISOString();
 };
 
 // ============ 主编排 ============
@@ -521,13 +577,150 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     const isTicketRunning = async (ticketId: string): Promise<boolean> =>
         fs.stat(path.join(batchQueueRoot(), "running", `${ticketId}.md`)).then(() => true).catch(() => false);
 
-    const replyAck = async (candidate: FeishuMessageCandidate, r: FeishuTicketResult, source: "live" | "reconcile", queuedBehindPrev?: string): Promise<void> => {
+    // —— C3 发送留痕 wrapper（进程内统一出口：成功记消息 id、失败记业务码+原因，凭据永不进日志）——
+    const sendAndLog = async (chatId: string, text: string): Promise<string | null> => {
+        const r = await sendText(client, chatId, text);
+        if (r.ok) {
+            log(notifyText.sendOk(locale, r.msgId, text.length));
+            return r.msgId;
+        }
+        log(notifyText.sendFail(locale, r.why));
+        return null;
+    };
+    const atPrefix = (c: FeishuMessageCandidate): string =>
+        c.chatType === "group" ? `<at user_id="${c.senderOpenId}"></at> ` : "";
+
+    // —— C2 点火器（有活才起、干完就走：pending 有可跑票 + 无 runner 存活 → spawn batch run）——
+    // 缺省不点火（deps.spawnRunner 未传 = 测试/纯监听形态零进程副作用）；CLI 装配真实 spawner。
+    const igniteCooldownMs = deps?.igniteCooldownMs ?? 90_000;
+    let lastIgniteMs = 0;
+    const igniteIfNeeded = async (why: string): Promise<void> => {
+        if (!deps?.spawnRunner) return;
+        const t = Date.now();
+        if (t - lastIgniteMs < igniteCooldownMs) return;
+        if (await runnerLockHolderAlive()) return; // runner 活着 = 队列自然被消费，不点火
+        const pending = await listPendingTickets(now());
+        const eligible = pending.filter((p) => p.eligible);
+        if (eligible.length === 0) return; // 空/全是未到点的延迟票 = 无活可点
+        lastIgniteMs = t;
+        log(`🔥 [feishu] 点火 batch run（${why}）：可跑 ${eligible.length} 张、无 runner 存活`);
+        try {
+            deps.spawnRunner();
+        } catch (e: any) {
+            log(`⚠️ [feishu] 点火失败（下轮扫描再试）：${e?.message ?? e}`);
+            lastIgniteMs = 0;
+        }
+    };
+
+    // —— C1 直答（后台执行：回复链即时回执不等 LLM——单条问句最长 120s，不能堵住控制词与建票）——
+    // daSerial 串行化直答（成本护栏：一次只跑一个轻会话；后续问题排队，控制词/建票不受影响）。
+    let daChain: Promise<void> = Promise.resolve();
+    const daSerial = <T,>(fn: () => Promise<T>): Promise<T> => {
+        const p = daChain.then(fn, fn);
+        daChain = p.then(() => undefined, () => undefined);
+        return p;
+    };
+    const runDa = deps?.runDa ?? runDirectAnswer;
+    const flashClassify = deps?.flashClassify ?? null;
+
+    const runDaAndReply = async (candidate: FeishuMessageCandidate, continueSessionId: string | undefined): Promise<FeishuTicketResult> => {
+        log(`💬 [feishu] 直答进行中（${candidate.messageId.slice(0, 12)}…）`);
+        const da = await runDa({ question: candidate.text, sessionId: continueSessionId, locale, now });
+        if (da.kind === "answered") {
+            const sentId = await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.daAnswer(locale, da.answer ?? "", da.cost ?? "?")}`);
+            if (sentId && da.sessionId) {
+                // 会话粘住：回答回复消息与提问消息都映射到会话——回复任一个都能续问（前缀缓存热）
+                await recordDaSession(sentId, da.sessionId);
+                await recordDaSession(candidate.messageId, da.sessionId);
+            }
+            return { ok: true, action: "skipped", reason: locale === "zh" ? `直答完成（未建票，¥${da.cost ?? "?"}）` : `direct answer sent (no ticket, ¥${da.cost ?? "?"})` };
+        }
+        if (da.kind === "upgrade") {
+            // 只读硬闸触碰：升级建票（写操作零容忍——不做「手机上批代码」）
+            log(`🛠️ [feishu] 直答升级建票：${da.upgradeWhy}`);
+            const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+            if (r.ok && r.action === "created") {
+                const sentId = await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.ackUpgraded(locale, r.ticketId, feishuTitleOf(candidate.text))}`);
+                if (sentId) await recordMsgMap(sentId, r.ticketId);
+                void igniteIfNeeded(`升级票 ${r.ticketId}`).catch(() => { });
+            } else {
+                // 建票被拒（缺验收/日上限等）：如实回话（静默=黑洞）
+                const reason = r.ok ? (r.action === "skipped" ? r.reason : locale === "zh" ? "未能建票" : "could not create ticket") : r.error;
+                await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.ackSkipped(locale, String(reason).slice(0, 160))}`);
+            }
+            return r;
+        }
+        await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.daError(locale, da.error ?? "?")}`);
+        return { ok: true, action: "skipped", reason: locale === "zh" ? `直答失败：${da.error}` : `direct answer failed: ${da.error}` };
+    };
+
+    // —— C4 控制词处理（队列/进度/停/取消；数据查队列与进度心跳文件，文案全走 notifyText 闸）——
+    const handleControlWord = async (ctl: ControlWord, candidate: FeishuMessageCandidate): Promise<string> => {
+        const zh = locale === "zh";
+        const humanTime = (iso?: string): string => {
+            if (!iso) return "";
+            const d = new Date(iso);
+            const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+            const base = now();
+            const dayDiff = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime()) / 86_400_000);
+            const dayTxt = dayDiff <= 0 ? (zh ? "今天" : "today") : dayDiff === 1 ? (zh ? "明" : "tomorrow") : `${d.getMonth() + 1}/${d.getDate()}`;
+            return `${dayTxt} ${hm}`;
+        };
+        if (ctl.kind === "queue") {
+            const running = await listRunningTickets();
+            const pending = await listPendingTickets(now());
+            const runningLine = running.length === 0
+                ? (zh ? "在跑：无" : "running: none")
+                : (zh ? `在跑：${running.map((t) => `${t.id}「${t.title}」`).join("、")}` : `running: ${running.map((t) => `${t.id} "${t.title}"`).join(", ")}`);
+            const pendingLine = pending.length === 0
+                ? (zh ? "待跑：无（推任务即跑）" : "pending: none (send a task and it runs)")
+                : (zh
+                    ? `待跑 ${pending.length} 张：${pending.map((t) => `${t.id}「${t.title}」${t.eligible ? "" : `（${humanTime(t.notBefore)} 开跑）`}`).join("、")}`
+                    : `pending ${pending.length}: ${pending.map((t) => `${t.id} "${t.title}"${t.eligible ? "" : ` (starts ${humanTime(t.notBefore)})`}`).join(", ")}`);
+            return notifyText.ctlQueue(locale, runningLine, pendingLine);
+        }
+        if (ctl.kind === "progress") {
+            const running = await listRunningTickets();
+            if (running.length === 0) return notifyText.ctlNothingRunningProgress(locale);
+            const t = running[0];
+            const p = await readTicketProgress(t.id);
+            if (!p) {
+                return zh
+                    ? `⏳ ${t.id}「${t.title}」正在准备（建 worktree/备环境）…`
+                    : `⏳ ${t.id} "${t.title}" is preparing (worktree/setup)…`;
+            }
+            const mins = Math.max(1, Math.round((now().getTime() - new Date(p.startedAt).getTime()) / 60_000));
+            return zh
+                ? `⏳ 第 ${p.round} 轮 · ${p.activity}（已 ${mins} 分钟）· ${t.id}「${t.title}」`
+                : `⏳ Round ${p.round} · ${p.activity} (${mins} min in) · ${t.id} "${t.title}"`;
+        }
+        if (ctl.kind === "stop") {
+            const running = await listRunningTickets();
+            if (running.length === 0) return notifyText.ctlNothingRunning(locale);
+            const t = running[0];
+            await writeStopRequest(t.id, candidate.senderOpenId, now());
+            log(`🛑 [feishu] 停止请求已落盘：${t.id}（runner 工具边界软停，不杀进程）`);
+            return notifyText.ctlStopAccepted(locale, t.id);
+        }
+        // cancel
+        const pending = await listPendingTickets(now());
+        const t = pending.find((x) => x.id === ctl.id);
+        if (!t) return notifyText.ctlCancelGone(locale, ctl.id);
+        await cancelPendingTicket(t.id);
+        log(`🗑️ [feishu] 已撤销待跑票：${t.id}`);
+        return notifyText.ctlCancelled(locale, t.id, t.title);
+    };
+
+    const replyAck = async (candidate: FeishuMessageCandidate, r: FeishuTicketResult, source: "live" | "reconcile", queuedBehindPrev?: string, deferredWhenHuman?: string): Promise<void> => {
         let text: string | null = null;
         let ticketId: string | undefined;
         if (!r.ok) text = notifyText.ackSkipped(locale, r.error.slice(0, 160));
         else if (r.action === "created") {
             ticketId = r.ticketId;
-            if (queuedBehindPrev) {
+            if (deferredWhenHuman) {
+                // ★ C2 意图词延迟票：回执换 🌙 排期口径（建票事实不变，不与 ackCreated 双发）
+                text = notifyText.ackDeferred(locale, r.ticketId, feishuTitleOf(candidate.text), deferredWhenHuman);
+            } else if (queuedBehindPrev) {
                 // ★ B4：前票正在执行 → 回执写明排队关系（建票事实不变，口径从「前面还有 N 张」换成点名原票）
                 text = notifyText.ackQueuedBehind(locale, r.ticketId, feishuTitleOf(candidate.text), queuedBehindPrev);
             } else {
@@ -547,8 +740,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             text = notifyText.ackSkipped(locale, r.reason.slice(0, 200));
         }
         if (!text) return;
-        const at = candidate.chatType === "group" ? `<at user_id="${candidate.senderOpenId}"></at> ` : "";
-        const sentId = await sendText(client, candidate.chatId, `${at}${text}`);
+        const sentId = await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${text}`);
         if (sentId && ticketId) await recordMsgMap(sentId, ticketId); // 回复回执消息 = 同票追加/续修
     };
 
@@ -567,10 +759,25 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                 log(`⏭️ [feishu] 对账重放确认语，不重复回执（${candidate.messageId.slice(0, 12)}…）`);
                 return { ok: true, action: "skipped", reason: locale === "zh" ? "对账重放确认语，不重复回执" : "replayed confirmation phrase, no repeat reply" };
             }
-            const at = candidate.chatType === "group" ? `<at user_id="${candidate.senderOpenId}"></at> ` : "";
-            await sendText(client, candidate.chatId, `${at}${notifyText.ackConfirm(locale)}`);
+            await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.ackConfirm(locale)}`);
             log(`👍 [feishu] 确认语整句命中，不开票（${candidate.messageId.slice(0, 12)}…）`);
             return { ok: true, action: "skipped", reason: locale === "zh" ? "确认语整句命中，不开票" : "whole-sentence confirmation ack, no ticket" };
+        }
+        // ★ C4 控制词 + 剧本 E 闲聊引导（整句命中；白名单内；对账重放静默留痕——对齐 B3 重放纪律）。
+        //   先于回复路由：回复「进度」到任何消息都是控制语义，整句无歧义。
+        if (fcfg.users.includes(candidate.senderOpenId)) {
+            const ctl = matchControlWord(candidate.text);
+            const hello = ctl === null && isHelloPhrase(candidate.text);
+            if (ctl || hello) {
+                if (source === "reconcile") {
+                    log(`⏭️ [feishu] 对账重放控制词/闲聊，不重复回执（${candidate.messageId.slice(0, 12)}…）`);
+                    return { ok: true, action: "skipped", reason: locale === "zh" ? "对账重放控制词/闲聊，不重复回执" : "replayed control word/small talk, no repeat reply" };
+                }
+                const text = ctl ? await handleControlWord(ctl, candidate) : notifyText.ctlHello(locale);
+                await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${text}`);
+                log(`🎛️ [feishu] ${ctl ? `控制词命中（${ctl.kind}）` : "闲聊引导"}（${candidate.messageId.slice(0, 12)}…）`);
+                return { ok: true, action: "skipped", reason: locale === "zh" ? (ctl ? `控制词 ${ctl.kind} 已处理` : "闲聊引导") : (ctl ? `control word ${ctl.kind} handled` : "small-talk guidance") };
+            }
         }
         // 回复路由先行：parent_id 命中映射表且回复者在 users 白名单 → 追加/续修那张票。
         // 免 @（回复关系即触发——群里话题式跟进不该被 mentionOnly 拦住）；白名单外的回复不走路由，
@@ -589,12 +796,49 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                 //   排队关系。复核与建票之间前票恰好跑完 → 退化通用回执（幂等无害，票照建）。
                 else if (await isTicketRunning(prevId)) queuedBehindPrev = prevId;
             }
+            // ★ C1 会话粘住：回复直答回复消息（或提问消息本身）→ 续问同一轻会话（前缀缓存热）。
+            //   「新任务」整句 = 显式重开（换新会话）。票映射已在上面先查——升级成票后回复原消息走票路。
+            if (!queuedBehindPrev) {
+                const daSid = await lookupDaSession(candidate.parentId).catch(() => null);
+                if (daSid) {
+                    const fresh = isConfirmPhraseFreshReset(candidate.text);
+                    void daSerial(() => runDaAndReply(candidate, fresh ? undefined : daSid))
+                        .catch((e: any) => log(`❌ [feishu] 直答异常（不中断监听）：${e?.message ?? e}`));
+                    return { ok: true, action: "skipped", reason: locale === "zh" ? "直答后台进行中" : "direct answer running in background" };
+                }
+            }
         }
         const gate = feishuGateVerdict(candidate, fcfg, handleDeps.botOpenId);
         if (!gate.ok) return { ok: true, action: "skipped", reason: gate.reason };
-        const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
-        await replyAck(candidate, r, source, queuedBehindPrev);
+        // ★ C1 路由二分（规则先行 + flash 兜底）：问句 → 直答（后台，不建票不开 worktree）；
+        //   任务 → 票。★ C2 意图词（今晚跑/明早跑）：任务票带 not-before 延迟到点（攒批唯一合法来源①）。
+        const kind = await classifyMessageKind(candidate.text, flashClassify ?? undefined);
+        if (kind === "question") {
+            void daSerial(() => runDaAndReply(candidate, undefined))
+                .catch((e: any) => log(`❌ [feishu] 直答异常（不中断监听）：${e?.message ?? e}`));
+            return { ok: true, action: "skipped", reason: locale === "zh" ? "直答后台进行中" : "direct answer running in background" };
+        }
+        const intent = matchDelayIntent(candidate.text);
+        const intentWhen = intent ? nextRunAtISO(intent, now()) : undefined;
+        const r = await handleFeishuMessage(candidate, fcfg, intentWhen ? { ...handleDeps, notBefore: intentWhen } : handleDeps);
+        await replyAck(candidate, r, source, queuedBehindPrev, intentWhen ? humanizeRunAt(intentWhen) : undefined);
+        if (r.ok && r.action === "created" && !intentWhen) void igniteIfNeeded(`新票 ${r.ticketId}`).catch(() => { });
         return r;
+    };
+
+    /** 延迟票回执的时刻人话（「明 01:00」；listen 侧小助手，locale 已定）。 */
+    const humanizeRunAt = (iso: string): string => {
+        const d = new Date(iso);
+        const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+        if (locale !== "zh") return `tomorrow ${hm}`;
+        const base = now();
+        const dayDiff = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime()) / 86_400_000);
+        return `${dayDiff <= 0 ? "今" : "明"} ${hm}`;
+    };
+    /** 「新任务」整句重开直答会话（与确认语同款归一；清单外不重开——不做语义猜测）。 */
+    const isConfirmPhraseFreshReset = (text: string): boolean => {
+        const t = normalizePhrase(text);
+        return /^(新任务|new task)[。.!！]?$/.test(t);
     };
 
     // —— 6. 消息事件（im.message.receive_v1）：归一 → 建票管线；异常只留日志不击垮监听 ——
@@ -685,9 +929,10 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         }
     };
 
-    // —— 11. 扫描循环：心跳 + 残留清理 + pending 推卡 ——
+    // —— 11. 扫描循环：心跳 + 残留清理 + pending 推卡 + 完成通知推送 + C2 点火巡检 ——
     let lastHeartbeat = 0;
     let lastSweep = 0;
+    let lastIgniteCheck = 0;
     const pushed = new Set<string>();
     const scanLoop = async (): Promise<void> => {
         for (; ; ) {
@@ -701,6 +946,11 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                 lastSweep = t;
                 await sweepStaleApprovals(now()).catch(() => 0);
             }
+            // —— 11.4 C2 点火巡检（10s 节奏，内部另有 90s 冷却 + runner 存活 + 可跑票三重闸）——
+            if (t - lastIgniteCheck >= 10_000) {
+                lastIgniteCheck = t;
+                await igniteIfNeeded("巡检").catch(() => { });
+            }
             try {
                 const pendings = await listPendingApprovals(now());
                 for (const p of pendings) {
@@ -712,7 +962,7 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             // —— 11.5 完成通知推送（runner 经 finishTicket 落盘 → 此处发送）：监听不在 = 文件留存
             //        等回来补推（断线不丢通知）；连败 NOTIFY_MAX_RETRIES 次放弃（会话不可达）——
             for (const n of await listPendingNotifications().catch(() => [] as Awaited<ReturnType<typeof listPendingNotifications>>)) {
-                const sentId = await sendText(client, n.chatId, notifyText.finish(locale, n));
+                const sentId = await sendAndLog(n.chatId, notifyText.finish(locale, n));
                 if (sentId !== null) {
                     await recordMsgMap(sentId, n.ticketId); // 回复报告消息 = 续修该票
                     await clearNotification(n.ticketId);
@@ -736,17 +986,23 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
     return { code: stopReason === "ws error" ? 1 : 0 };
 };
 
-/** 发一条文本消息到会话（回执/完成推送共用；成功返回消息 id 供回复路由登记，失败 null 不抛）。 */
-const sendText = async (client: any, chatId: string, text: string): Promise<string | null> => {
+/** 发送结果（C3 可对账：成功带消息 id；失败带业务码+原因——5x46 实锤吞错返回 null 无从排查）。 */
+export type SendResult = { ok: true; msgId: string } | { ok: false; why: string };
+
+/** 发一条文本消息到会话（回执/完成推送共用；失败不抛，原因结构化带回；凭据/鉴权头永不进日志）。 */
+const sendText = async (client: any, chatId: string, text: string): Promise<SendResult> => {
     try {
         const r = await client.im.message.create({
             params: { receive_id_type: "chat_id" },
             data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text }) },
         });
-        if ((r?.code ?? 0) !== 0) return null;
-        return typeof r?.data?.message_id === "string" ? r.data.message_id : null;
-    } catch {
-        return null;
+        const code = r?.code ?? 0;
+        if (code !== 0) return { ok: false, why: `${code} ${r?.msg ?? ""}`.trim() };
+        return typeof r?.data?.message_id === "string"
+            ? { ok: true, msgId: r.data.message_id }
+            : { ok: false, why: "响应缺 message_id" };
+    } catch (e: any) {
+        return { ok: false, why: sdkErrWhy(e) };
     }
 };
 

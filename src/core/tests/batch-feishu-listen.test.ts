@@ -21,7 +21,7 @@ import fsSync from "fs";
 import os from "os";
 import path from "path";
 
-const { runFeishuListen, isConfirmPhrase } = await import("@/batch/feishu/listen.ts");
+const { runFeishuListen, isConfirmPhrase, matchControlWord, matchDelayIntent, nextRunAtISO, isHelloPhrase } = await import("@/batch/feishu/listen.ts");
 const { approvalsDir, writeListenerHeartbeat, listPendingApprovals } = await import("@/batch/feishu/approval.ts");
 
 const withTempBatchDir = async (fn: (dir: string) => Promise<void>): Promise<void> => {
@@ -723,8 +723,8 @@ test("B3 对账重放确认语不回执：reconcile 路静默跳过（2026-11-09
     const block = src.slice(i, src.indexOf("const gate = feishuGateVerdict", i));
     assert.match(block, /source === "reconcile"/, "确认语分支必须识别对账重放路");
     assert.ok(
-        block.indexOf('source === "reconcile"') < block.indexOf("sendText"),
-        "静默判断必须先于回执发送（重放零外发）",
+        block.indexOf('source === "reconcile"') < block.indexOf("sendAndLog"),
+        "静默判断必须先于回执发送（重放零外发；出口已统一为 sendAndLog——C3 发送留痕）",
     );
     assert.match(block, /不重复回执/, "重放跳过留痕可对账");
 });
@@ -819,4 +819,354 @@ test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映�
             await running.catch(() => { });
         }
     });
+});
+
+// ============ C1/C2/C4（2026-11-10「指挥台」）：路由二分 / 直答链路 / 意图词延迟 / 控制词 / 点火器 / sendText 留痕 ============
+
+test("C1 路由二分：规则先行（问号/疑问词/查询动词→问句；写改祈使/代码块→任务），灰区 flash 兜底；flash 不可用→任务（fail-safe=既有建票行为）", async () => {
+    const { classifyByRules, classifyMessageKind } = await import("@/batch/feishu/directAnswer.ts");
+    // —— 问句侧
+    assert.equal(classifyByRules("这个报错是什么意思？"), "question");
+    assert.equal(classifyByRules("队列里有哪些票？"), "question");
+    assert.equal(classifyByRules("看看 git log 最近三条"), "question");
+    assert.equal(classifyByRules("这个函数还有人用吗"), "question");
+    // —— 任务侧
+    assert.equal(classifyByRules("修复日期解析 bug"), "task");
+    assert.equal(classifyByRules("能不能把登录页的报错修了"), "task", "写改祈使在句中也是任务");
+    assert.equal(classifyByRules("```js\nconsole.log(1)\n```\n跑一下这个"), "task", "代码块=最强任务信号");
+    assert.equal(classifyByRules("加上一个导出按钮"), "task");
+    assert.equal(classifyByRules("处理下这个 TODO"), "task");
+    assert.equal(await classifyMessageKind("帮我处理下这个 TODO"), "task", "「帮我」开头规则层不硬猜 → unsure → 无 flash 回退 task（既有建票行为）");
+    // —— 意图词先过分类：问句形态去直答（「今晚跑的票有哪些？」不是延迟票）
+    assert.equal(classifyByRules("今晚跑的票有哪些？"), "question");
+    // —— 灰区：flash 兜底 / 失败回退 task
+    assert.equal(classifyByRules("这个项目结构挺有意思的"), "unsure");
+    assert.equal(await classifyMessageKind("这个项目结构挺有意思的", async () => "question"), "question");
+    assert.equal(await classifyMessageKind("这个项目结构挺有意思的", async () => "task"), "task");
+    assert.equal(await classifyMessageKind("这个项目结构挺有意思的", async () => { throw new Error("boom"); }), "task", "flash 抛错 → task（fail-safe）");
+    assert.equal(await classifyMessageKind("这个项目结构挺有意思的"), "task", "无 flash → task");
+});
+
+test("C2 意图词：今晚跑→下个 01:00、明早跑→下个 07:00（本地时区「下个 occurrence」语义）；无意图词不命中（不做语义猜测）", () => {
+    assert.equal(matchDelayIntent("这三件事今晚跑"), "tonight");
+    assert.equal(matchDelayIntent("修复登录页，明早跑"), "morning");
+    assert.equal(matchDelayIntent("run tonight please"), "tonight");
+    assert.equal(matchDelayIntent("修复日期解析 bug"), null, "无意图词不猜");
+    assert.equal(matchDelayIntent("今晚跑的票有哪些？"), "tonight", "意图词命中，但路由分类先把它判问句去直答");
+    // 本地时区断言：ISO 比对会撞 UTC 偏移，按本地字段断言
+    const hm = (d: Date): string => `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const at = (s: string) => new Date(nextRunAtISO(matchDelayIntent(s) ?? "tonight", new Date("2026-11-10T22:00:00")));
+    const tonight = at("今晚跑");
+    assert.equal(`${tonight.getFullYear()}-${tonight.getMonth() + 1}-${tonight.getDate()} ${hm(tonight)}`, "2026-11-11 1:00", "22 点说今晚跑 → 已过当日 01:00，排次日");
+    const morning = at("明早跑");
+    assert.equal(`${morning.getFullYear()}-${morning.getMonth() + 1}-${morning.getDate()} ${hm(morning)}`, "2026-11-11 7:00");
+    const tonightEarly = new Date(nextRunAtISO("tonight", new Date("2026-11-10T00:30:00")));
+    assert.equal(`${tonightEarly.getDate()} ${hm(tonightEarly)}`, "10 1:00", "00:30 说今晚跑 → 当天 01:00（还没过点）");
+});
+
+test("C1 直答只读硬闸（源码结构守门）：工具表白名单零写类；run_command 只读闸+解释器闸；审批全拒+升级；答案过外发摘要闸", async () => {
+    const src = await fs.readFile(new URL("../src/batch/feishu/directAnswer.ts", import.meta.url), "utf-8");
+    // 白名单零写类工具（模型不可见 = 结构性不可能，不靠纪律）
+    assert.ok(!/"(edit_file|create_file|write_file|move_file|notebook_edit|delete_path|move_path|run_in_background|execute_code)"/.test(src), "写类工具绝不入直答白名单");
+    // run_command 只读硬闸（写操作零容忍：不审批不放行，直接升级）
+    const gateIdx = src.indexOf("!isReadOnlyCommand(cmd)");
+    assert.ok(gateIdx > 0, "run_command 只读判定闸存在");
+    const gateBlock = src.slice(gateIdx, gateIdx + 400);
+    assert.match(gateBlock, /requestUpgrade/, "只读闸触碰 → 升级建票（不是默默拒绝）");
+    assert.match(src, /isInterpreterRepoScript\(cmd\)/, "解释器直跑仓库脚本同闸（N5 同源风险）");
+    // 审批钩子全拒：任何走到审批的工具 = 超出只读信封
+    const apIdx = src.indexOf("requestApproval:");
+    assert.ok(apIdx > 0, "审批钩子被接管");
+    const apBlock = src.slice(apIdx, apIdx + 600);
+    assert.match(apBlock, /return "deny"/, "审批全拒");
+    assert.match(apBlock, /requestUpgrade/, "走到审批 → 升级");
+    // 答案出站过摘要闸 + 会话前缀 + 成本护栏
+    assert.match(src, /reportSummary\(answer/, "答案过外发摘要闸（剥代码块/封顶）");
+    assert.match(src, /batch-da-/, "会话 id 前缀（--continue 剔除 + 外部数据边界段语义）");
+    assert.match(src, /DA_BUDGET_YUAN/, "直答预算硬帽（E2 120% 截断兜底）");
+    assert.match(src, /DA_TIMEOUT_MS/, "直答超时（绝不挂长）");
+});
+
+test("C1 直答链路（假 SDK 全链）：问句→注入 runDa 回话+会话映射双登记；回复链续问粘会话；「新任务」重开；升级→建票+🛠️回执；失败→⚠️不静默", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+        const { sdk, state } = makeFakeSdk();
+        // create 回带 message_id（回执映射键，同 B3/B4 测试形态）
+        let msgSeq = 0;
+        const origClient = sdk.Client;
+        sdk.Client = function (this: any, cfg: any) {
+            origClient.call(this, cfg);
+            const inner = this.im.message.create;
+            this.im.message.create = async (args: any) => {
+                msgSeq += 1;
+                const r = await inner(args);
+                return { ...r, data: { ...r.data, message_id: `om_out_${msgSeq}` } };
+            };
+        } as any;
+        const lines: string[] = [];
+        let stop = false;
+        const LOOP_BUDGET = 30_000;
+        const deadline = Date.now() + 90_000;
+        const queue = await import("@/batch/queue.ts");
+        const { lookupDaSession } = await import("@/batch/feishu/notify.ts");
+        const daCalls: { question: string; sessionId?: string }[] = [];
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 5, reconcileMs: 1000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+            runDa: async (args: any) => {
+                daCalls.push({ question: args.question, sessionId: args.sessionId });
+                if (args.question.includes("要改文件")) return { kind: "upgrade" as const, upgradeWhy: "写操作（测试注入）" };
+                if (args.question.includes("给我报个错")) return { kind: "error" as const, error: "模型炸了（测试注入）" };
+                return { kind: "answered" as const, answer: `答：${args.question.slice(0, 10)}`, cost: "0.0012", sessionId: args.sessionId ?? "batch-da-first" };
+            },
+        });
+        const post = (messageId: string, text: string, parentId?: string): void => {
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: messageId, chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
+                    create_time: String(Date.now()), ...(parentId ? { parent_id: parentId } : {}),
+                    content: JSON.stringify({ text }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+        };
+        try {
+            await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
+            const texts = (): string[] => state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text as string);
+
+            // 1. 问句 → 直答回话（📖 + 花费），不建票
+            post("om_q1", "主入口文件是哪个？");
+            await until(() => texts().some((t) => t.includes("📖") && t.includes("¥0.0012")), "直答回话", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 0, "问句不建票（不开 worktree 不烧票）");
+            await until(async () => (await lookupDaSession("om_q1")) === "batch-da-first", "提问消息映射会话（recordDaSession 异步落表，回执可见≠映射已落）", LOOP_BUDGET);
+            let ansId = "";
+            await until(async () => {
+                const raw = await fs.readFile(path.join(dir, "feishu-da-sessions.json"), "utf-8").catch(() => "{}");
+                const all = (JSON.parse(raw).map ?? {}) as Record<string, string>;
+                ansId = Object.entries(all).find(([k, v]) => v === "batch-da-first" && k.startsWith("om_out"))?.[0] ?? "";
+                return !!ansId;
+            }, "回答回执也映射会话", LOOP_BUDGET);
+
+            // 2. 回复链续问 → 同会话粘住（前缀缓存热的测试面）
+            post("om_q2", "那第二个问题呢", ansId);
+            await until(() => daCalls.length >= 2, "续问抵达", LOOP_BUDGET);
+            assert.equal(daCalls[1].sessionId, "batch-da-first", "回复链续问粘同一会话");
+
+            // 3. 「新任务」整句 = 显式重开（新会话）
+            post("om_q3", "新任务", ansId);
+            await until(() => daCalls.length >= 3, "重开抵达", LOOP_BUDGET);
+            assert.equal(daCalls[2].sessionId, undefined, "「新任务」重开，不带旧会话");
+
+            // 4. 升级：只读闸触碰 → 建票 + 🛠️ 回执（写操作零容忍 → 走票路）
+            post("om_q4", "看看这个要改文件的地方");
+            await until(() => texts().some((t) => t.includes("这活要改文件") && t.includes("已开票")), "升级建票回执", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 1, "升级照建票");
+
+            // 5. 失败 → ⚠️ 回执不静默（静默=黑洞）
+            post("om_q5", "刚才为什么给我报个错");
+            await until(() => texts().some((t) => t.includes("没答上来")), "失败回执", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 1, "直答失败也不补建票（引导重发/改任务）");
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
+    });
+});
+
+test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导；整句外不命中照旧建票（宁窄勿宽）；stop 落协议文件、cancel 删票", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+        // 预置两张票：一张会被 takeNextTicket 取走进 running（模拟 runner 在跑），另一张留 pending
+        const queue = await import("@/batch/queue.ts");
+        const mkTicketFile = async (title: string): Promise<string> => {
+            const tmp = path.join(dir, `${encodeURIComponent(title)}.md`);
+            await fs.writeFile(tmp, `---\ntitle: ${title}\naccept: npm test\n---\n\n正文\n`, "utf-8");
+            const enq = await queue.enqueueTicketFile(tmp);
+            if (!enq.ok) throw new Error(enq.error);
+            await fs.rm(tmp, { force: true });
+            return enq.id;
+        };
+        const id1 = await mkTicketFile("第一张");
+        const id2 = await mkTicketFile("第二张");
+        const taken = await queue.takeNextTicket();
+        assert.ok(taken, "一张进入 running");
+        const runningId = taken.id;
+        const pendingId = [id1, id2].find((x) => x !== runningId)!;
+        assert.equal((await queue.snapshotQueue()).running.length, 1);
+
+        const { sdk, state } = makeFakeSdk();
+        const lines: string[] = [];
+        let stop = false;
+        const LOOP_BUDGET = 30_000;
+        const deadline = Date.now() + 90_000;
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 5, reconcileMs: 1000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+        });
+        const post = (messageId: string, text: string): void => {
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: messageId, chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
+                    create_time: String(Date.now()), content: JSON.stringify({ text }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+        };
+        try {
+            await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
+            const texts = (): string[] => state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text as string);
+
+            // 「队列」：在跑 + 待跑都点名（延迟票带开跑时刻）
+            post("om_k1", "队列");
+            await until(() => texts().some((t) => t.includes("📋")), "队列回执", LOOP_BUDGET);
+            const qText = texts().find((t) => t.includes("📋"))!;
+            assert.match(qText, new RegExp(runningId), "在跑票点名");
+            assert.match(qText, new RegExp(pendingId), "待跑票点名");
+
+            // 「进度」：runner 未写心跳 → 准备中口径（不瞎编活动）
+            post("om_k2", "进度");
+            await until(() => texts().some((t) => t.includes("⏳")), "进度回执", LOOP_BUDGET);
+            assert.match(texts().find((t) => t.includes("⏳"))!, /正在准备/);
+
+            // 写进度心跳再问 → 轮次 + 当前活动（真实 activity 来自 runner 写的心跳文件）
+            await queue.writeTicketProgress({
+                ticketId: runningId, pid: 1, round: 2, activity: "run_command",
+                since: new Date().toISOString(), startedAt: new Date(Date.now() - 120_000).toISOString(), updatedAt: new Date().toISOString(),
+            });
+            post("om_k3", "进度");
+            await until(() => texts().some((t) => t.includes("第 2 轮")), "进度轮次", LOOP_BUDGET);
+            assert.match(texts().find((t) => t.includes("第 2 轮"))!, /run_command/);
+
+            // 「停」→ 协议文件落盘（软停约定：runner 工具边界查获，不杀进程），回执点名票号
+            post("om_k4", "停");
+            await until(() => texts().some((t) => t.includes("正在停")), "停回执", LOOP_BUDGET);
+            const req = await queue.readStopRequest(runningId);
+            assert.ok(req, "stop 协议文件已落盘");
+            assert.equal(req!.by, "ou_alice", "留痕停指令发起人");
+
+            // 「取消 <id>」→ pending 票移除；取消不存在的票 → 点名找不到（引导改发「停」）
+            post("om_k5", `取消 ${pendingId}`);
+            await until(() => texts().some((t) => t.includes("已撤销")), "取消回执", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 0, "待跑票已删");
+            post("om_k6", "取消 t-nonexist-1");
+            await until(() => texts().some((t) => t.includes("没找到待跑的票")), "取消找不到回执", LOOP_BUDGET);
+
+            // 闲聊引导（剧本 E）+ 整句外不命中：沾边句照旧建票（宁窄勿宽，不做语义猜测）。
+            // ★ 测试文本纪律：句中不得出现问号/疑问词（如何/怎么/吗…）——那是问句路由的合法命中，
+            //   会把本消息分去直答路（真 runDa 无注入会走真实调用），建票断言必超时。
+            post("om_k7", "在吗");
+            await until(() => texts().some((t) => t.includes("在的")), "闲聊引导", LOOP_BUDGET);
+            const before = (await queue.snapshotQueue()).pending.length;
+            post("om_k8", "队列里再看下进度，顺便确认下停不停得下来");
+            await until(async () => (await queue.snapshotQueue()).pending.length === before + 1, "整句外照旧建票", LOOP_BUDGET);
+            assert.ok(matchControlWord("队列里再看下进度如何") === null, "非整句不命中控制词（纯函数面）");
+            assert.deepEqual(matchControlWord("停止"), { kind: "stop" }, "整句命中");
+            assert.deepEqual(matchControlWord("队列。"), { kind: "queue" }, "尾标点容忍");
+            assert.ok(isHelloPhrase("在不在？") && !isHelloPhrase("你在不在搞什么"), "闲聊词整句边界");
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
+    });
+});
+
+test("C2 点火器（假 SDK 全链）：即时票建票即点（spawnRunner 注入）；延迟票不点火且 not-before 落票面；巡检只点可跑票", async () => {
+    await withTempBatchDir(async (dir) => {
+        await writeFeishuConfig(dir, { users: ["ou_alice"] });
+        await writeSyncConfig(dir, { defaultAccept: "npm test", maxTicketsPerDay: 100 });
+        const { sdk, state } = makeFakeSdk();
+        const ignites: number[] = [];
+        const lines: string[] = [];
+        let stop = false;
+        const LOOP_BUDGET = 30_000;
+        const deadline = Date.now() + 90_000;
+        const queue = await import("@/batch/queue.ts");
+        const running = runFeishuListen({
+            env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
+            registerSignals: false, shouldStop: () => stop || Date.now() > deadline,
+            scanMs: 5, heartbeatMs: 5, reconcileMs: 1000,
+            sleep: async () => { await new Promise((res) => setTimeout(res, 3)); },
+            spawnRunner: () => { ignites.push(Date.now()); },
+            igniteCooldownMs: 50, // 测试提速（生产 90s）
+        });
+        const post = (messageId: string, text: string): void => {
+            state.registered["im.message.receive_v1"]({
+                message: {
+                    message_id: messageId, chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
+                    create_time: String(Date.now()), content: JSON.stringify({ text }),
+                },
+                sender: { sender_id: { open_id: "ou_alice" } },
+            });
+        };
+        try {
+            await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
+            const texts = (): string[] => state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text as string);
+
+            // 1. 延迟票：🌙 排期回执、不点火（可跑票为空，巡检也不点）
+            post("om_d1", "修复日期解析 bug，今晚跑");
+            await until(() => texts().some((t) => t.includes("🌙")), "延迟票排期回执", LOOP_BUDGET);
+            assert.equal(ignites.length, 0, "延迟票不点火（到点由点火器拾取）");
+            await until(async () => {
+                const pendings = await queue.listPendingTickets(new Date());
+                const deferred = pendings.find((p: any) => p.notBefore);
+                return !!deferred?.notBefore && new Date(deferred.notBefore).getTime() > Date.now();
+            }, "延迟票 not-before 落队列且在未来", LOOP_BUDGET);
+
+            // 2. 即时票：建票即点（无 runner 存活 + 可跑票非空 → spawn）
+            post("om_d2", "修复导出乱码");
+            await until(() => texts().some((t) => t.includes("马上开跑") || t.includes("前面还有")), "即时票回执", LOOP_BUDGET);
+            await until(() => ignites.length >= 1, "点火发生", LOOP_BUDGET);
+            // 3. 可跑性分野：延迟票 eligible=false、即时票 eligible=true（点火器只点可跑的）
+            const pendings = await queue.listPendingTickets(new Date());
+            assert.equal(pendings.filter((p: any) => p.eligible).length, 1, "只有即时票可跑");
+            // 4. 无 spawner 零副作用（缺省形态：测试/纯监听不点火）——上面的 listener 已验证有 spawner 路，
+            //    缺省路由全链路冒烟等既有测试覆盖（未传 spawnRunner 从不点）
+        } finally {
+            stop = true;
+            await running.catch(() => { });
+        }
+    });
+});
+
+test("C3 sendText 留痕：SendResult 结构化返回（ok+msgId / ok:false+why）；sendAndLog 成功失败都留日志；凭据零进日志", async () => {
+    const src = await fs.readFile(new URL("../src/batch/feishu/listen.ts", import.meta.url), "utf-8");
+    assert.match(src, /const sendText = async \(client: any, chatId: string, text: string\): Promise<SendResult>/, "sendText 结构化返回（不吞错误——5x46 排查教训）");
+    assert.match(src, /ok: false, why: `\$\{code\} \$\{r\?\.msg/, "业务失败带 code+msg（可对账）");
+    const i = src.indexOf("const sendAndLog = async");
+    assert.ok(i > 0, "sendAndLog 统一出口存在");
+    const block = src.slice(i, src.indexOf("};", i));
+    assert.match(block, /notifyText\.sendOk\(/, "成功留日志（消息 id 可对账）");
+    assert.match(block, /notifyText\.sendFail\(/, "失败留日志（原因可对账）");
+    const sendBlock = src.slice(src.indexOf("const sendText = async"));
+    assert.ok(!sendBlock.slice(0, 900).includes("secret") && !sendBlock.slice(0, 900).includes("appSecret"), "凭据/鉴权字段不进留痕");
+    // 双语留痕文案
+    const { notifyText } = await import("@/batch/feishu/notify.ts");
+    assert.match(notifyText.sendOk("zh", "om_x", 42), /已发送/);
+    assert.match(notifyText.sendFail("zh", "230027 x"), /失败/);
+    assert.match(notifyText.sendOk("en", "om_x", 42), /sent/i);
+    assert.match(notifyText.sendFail("en", "boom"), /failed/i);
+});
+
+test("C4 runner 软停（源码结构守门）：stop 协议文件查获 → 软停标志 + roundAc 干净收尾（不杀进程）；状态判定先于看门狗重试；stopped 不跑验收", async () => {
+    const src = await fs.readFile(new URL("../../cli/src/batchRunner.ts", import.meta.url), "utf-8");
+    assert.match(src, /readStopRequest\(task\.id\)/, "runner 读 stop 协议文件（跨进程协议）");
+    const csIdx = src.indexOf("const checkStop = (): void =>");
+    assert.ok(csIdx > 0, "边界巡检存在");
+    const csBlock = src.slice(csIdx, csIdx + 600);
+    assert.match(csBlock, /userStop = true/, "查获置软停标志");
+    assert.match(csBlock, /roundAc\.abort/, "走 abort 干净收尾（runAgent 轮边界，不杀进程）");
+    assert.match(src, /writeTicketProgress\(/, "进度心跳写入（「进度」控制词的数据源）");
+    // 状态判定次序：userStop 分支先于 wdKill（人喊停优先于带证据重试——停了就不再续跑烧钱）
+    const uIdx = src.indexOf("if (userStop) {");
+    const wIdx = src.indexOf("if (wdKill) {");
+    assert.ok(uIdx > 0 && wIdx > uIdx, "软停判定先于看门狗重试");
+    const uBlock = src.slice(uIdx, uIdx + 300);
+    assert.match(uBlock, /status = "stopped"/, "终态 stopped");
+    assert.match(uBlock, /break;/, "跳出重试环（不跑验收——改动不完整族）");
 });

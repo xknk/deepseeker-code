@@ -217,6 +217,8 @@ export const buildFeishuTicketSource = (args: {
     locale: SyncLocale;
     /** 反馈闭环（P4）：回执/报告推送目标会话与回复路由键（票跑完 finishTicket 按此落通知）。 */
     feishu?: { chatId: string; messageId: string; senderOpenId: string };
+    /** ★ C2 意图词延迟执行：「今晚跑/明早跑」解析出的最早可跑时刻（ISO）。缺省不写行=立即可跑。 */
+    notBefore?: string;
 }): string => {
     const c = args.config;
     const lines = [
@@ -226,6 +228,7 @@ export const buildFeishuTicketSource = (args: {
         c.defaultSetup ? `setup: ${c.defaultSetup}` : null,
         "source: feishu",
         `source-id: ${args.sourceId}`,
+        args.notBefore ? `not-before: ${args.notBefore}` : null,
         args.feishu ? `feishu-chat: ${args.feishu.chatId}` : null,
         args.feishu ? `feishu-msg: ${args.feishu.messageId}` : null,
         args.feishu ? `feishu-sender: ${args.feishu.senderOpenId}` : null,
@@ -313,6 +316,8 @@ export interface FeishuDeps {
     /** 本地自动探测的项目根（缺省 process.cwd()）。 */
     projectRoot?: string;
     locale?: SyncLocale;
+    /** ★ C2 意图词延迟执行：listen 解析「今晚跑/明早跑」后传入的最早可跑时刻（ISO）；缺省=立即可跑。 */
+    notBefore?: string;
 }
 
 export type FeishuTicketResult =
@@ -468,6 +473,7 @@ export const handleFeishuMessage = async (candidate: FeishuMessageCandidate, fcf
         const source = buildFeishuTicketSource({
             title, body: candidate.text, acc, sourceId, needsReview, config, budgetYuan, att, preId, locale,
             feishu: { chatId: candidate.chatId, messageId: candidate.messageId, senderOpenId: candidate.senderOpenId },
+            notBefore: deps?.notBefore,
         });
         const tmp = path.join(os.tmpdir(), `dsc-feishu-ticket-${process.pid}-${Math.random().toString(36).slice(2, 8)}.md`);
         let enq: { ok: true; id: string; title: string } | { ok: false; error: string };

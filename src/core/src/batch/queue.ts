@@ -82,31 +82,146 @@ export const enqueueTicketFile = async (srcPath: string, locale: BatchLocale = "
 };
 
 /**
- * 取下一个待跑任务：先收割上次崩溃残留（running/ → pending/ 重排队），再取 pending/ 队首。
- * @returns 任务（id + 工单路径）或 null（队列空）。
+ * 取下一个待跑任务：先收割上次崩溃残留（running/ → pending/ 重排队），再取 pending/ 中
+ * 【第一个已到可跑时刻】的票（not-before 未到的跳过、原位保留——C2 意图词延迟执行，
+ * FIFO 只在可跑票上生效；延后票不堵后面的即时票）。
+ * @returns 任务（id + 工单路径）或 null（队列空 / 无可跑票）。
  */
 export const takeNextTicket = async (): Promise<{ id: string; path: string } | null> => {
     await requeueStaleRunning();
-    const pending = await listState("pending");
-    if (pending.length === 0) return null;
-    const file = pending[0];
-    const from = path.join(stateDir("pending"), file);
-    const to = path.join(stateDir("running"), file);
+    const first = await firstEligiblePending();
+    if (!first) return null;
+    const from = path.join(stateDir("pending"), first.file);
+    const to = path.join(stateDir("running"), first.file);
     await fs.mkdir(stateDir("running"), { recursive: true });
     await fs.rename(from, to); // 原子搬家：崩溃后 either 端可见，幂等
-    return { id: file.replace(/\.md$/, ""), path: to };
+    return { id: first.file.replace(/\.md$/, ""), path: to };
 };
 
 /**
  * 窥视队首但不取走（M6 总量硬闸）：超限停票信息需要知道「停在谁之前」，工单必须原样留在
  * pending/（下一批继续，不留半成品也不丢票）。run 持单飞锁，窥视与取走之间无并发竞争。
+ * 与 takeNextTicket 同一可跑判定（not-before 跳过）——窥到的那张就是即将取走的那张。
  */
 export const peekNextTicket = async (): Promise<{ id: string; path: string } | null> => {
     await requeueStaleRunning();
+    const first = await firstEligiblePending();
+    if (!first) return null;
+    return { id: first.file.replace(/\.md$/, ""), path: path.join(stateDir("pending"), first.file) };
+};
+
+/** pending/ 中第一个已到可跑时刻的票（文件名升序 FIFO 之上的 not-before 过滤；无 → null）。 */
+const firstEligiblePending = async (now = new Date()): Promise<{ file: string } | null> => {
     const pending = await listState("pending");
-    if (pending.length === 0) return null;
-    const file = pending[0];
-    return { id: file.replace(/\.md$/, ""), path: path.join(stateDir("pending"), file) };
+    for (const file of pending) {
+        const t = await readBatchTicket(path.join(stateDir("pending"), file));
+        if (t.ok && t.ticket.notBefore && new Date(t.ticket.notBefore).getTime() > now.getTime()) continue; // 未到点：跳过原位保留
+        return { file };
+    }
+    return null;
+};
+
+// ============ C2 点火器 / C4 控制面的队列读侧（listen 专用，纯文件零 SDK） ============
+
+/** pending 票元数据（「队列」一览与点火判定的数据源）。 */
+export interface PendingTicketMeta {
+    id: string;
+    title: string;
+    /** 最早可跑时刻（ISO；缺省=立即可跑）。 */
+    notBefore?: string;
+    /** 此刻是否已到可跑时刻。 */
+    eligible: boolean;
+}
+
+/** 列 pending 票（文件名升序=FIFO；带标题与可跑判定；损坏票标 title 占位不炸）。 */
+export const listPendingTickets = async (now = new Date()): Promise<PendingTicketMeta[]> => {
+    const out: PendingTicketMeta[] = [];
+    for (const file of await listState("pending")) {
+        const id = file.replace(/\.md$/, "");
+        const t = await readBatchTicket(path.join(stateDir("pending"), file));
+        out.push(t.ok
+            ? { id, title: t.ticket.title, notBefore: t.ticket.notBefore, eligible: !t.ticket.notBefore || new Date(t.ticket.notBefore).getTime() <= now.getTime() }
+            : { id, title: id, eligible: true });
+    }
+    return out;
+};
+
+/** 列 running 票（串行队列至多一张；带标题）。 */
+export const listRunningTickets = async (): Promise<{ id: string; title: string }[]> => {
+    const out: { id: string; title: string }[] = [];
+    for (const file of await listState("running")) {
+        const id = file.replace(/\.md$/, "");
+        const t = await readBatchTicket(path.join(stateDir("running"), file));
+        out.push({ id, title: t.ok ? t.ticket.title : id });
+    }
+    return out;
+};
+
+/** runner 是否存活（.lock 持有者 pid 存活探测）：点火器的「无 runner 存活」判据；无锁/死 pid = 无 runner。 */
+export const runnerLockHolderAlive = async (): Promise<boolean> => {
+    const raw = await fs.readFile(lockPath(), "utf-8").catch(() => "");
+    const ownerPid = parseInt(raw.split(" ")[0], 10);
+    return Number.isFinite(ownerPid) && pidAlive(ownerPid);
+};
+
+/** 撤销 pending 票（C4「取消 <id>」）：删 pending/<id>.md；票不存在/已在跑 = false（取消只对没开跑的票有效）。 */
+export const cancelPendingTicket = async (id: string): Promise<boolean> => {
+    if (!/^[\w.-]+$/.test(id)) return false; // id 形态闸：防路径拼接
+    return await fs.rm(path.join(stateDir("pending"), `${id}.md`), { force: false }).then(() => true, () => false);
+};
+
+// ============ C2/C4 跨进程协议文件（runner 写/读，listen 写/读；路径约定单点收拢） ============
+
+/** 停止约定文件路径（「停」：listen 落 running/<id>.stop.json，runner 每轮工具边界检查，软停不杀进程）。 */
+export const stopRequestPath = (id: string): string => path.join(stateDir("running"), `${id}.stop.json`);
+
+/** 落停止请求（幂等覆盖写；payload 记谁在何时喊停，报告可溯源）。 */
+export const writeStopRequest = async (id: string, by = "feishu", at = new Date()): Promise<void> => {
+    await fs.mkdir(stateDir("running"), { recursive: true });
+    await fs.writeFile(stopRequestPath(id), JSON.stringify({ ticketId: id, by, at: at.toISOString() }, null, 2), "utf-8").catch(() => { });
+};
+
+/** 读停止请求（runner 轮询用；无文件/损坏 = null）。 */
+export const readStopRequest = async (id: string): Promise<{ ticketId: string; by: string; at: string } | null> => {
+    try {
+        const raw = JSON.parse(await fs.readFile(stopRequestPath(id), "utf-8"));
+        return raw && typeof raw === "object" ? raw : null;
+    } catch {
+        return null;
+    }
+};
+
+/** 进度心跳文件路径（「进度」：runner 在轮边界/工具启动时更新 running/<id>.progress.json）。 */
+export const progressPath = (id: string): string => path.join(stateDir("running"), `${id}.progress.json`);
+
+/** 进度心跳载荷（runner 写、listen 读；activity 不含命令全文——外发红线在展示侧另有闸）。 */
+export interface TicketProgress {
+    ticketId: string;
+    pid: number;
+    /** agent 轮次（从 1 起）。 */
+    round: number;
+    /** 正在干什么（人话短语，如「正在跑 npm test」）。 */
+    activity: string;
+    /** 本活动开始时刻（ISO）。 */
+    since: string;
+    startedAt: string;
+    updatedAt: string;
+}
+
+/** 写进度心跳（runner 侧；失败吞——进度是增益不是关键路径）。 */
+export const writeTicketProgress = async (p: TicketProgress): Promise<void> => {
+    await fs.mkdir(stateDir("running"), { recursive: true });
+    await fs.writeFile(progressPath(p.ticketId), JSON.stringify(p, null, 2), "utf-8").catch(() => { });
+};
+
+/** 读进度心跳（listen 侧；无文件/损坏 = null）。 */
+export const readTicketProgress = async (id: string): Promise<TicketProgress | null> => {
+    try {
+        const raw = JSON.parse(await fs.readFile(progressPath(id), "utf-8"));
+        return raw && typeof raw === "object" ? raw : null;
+    } catch {
+        return null;
+    }
 };
 
 /** 崩溃残留重排队：running/ 全部搬回 pending/（工单内容没跑完即重跑；worktree 孤儿由启动期 sweep 清）。 */
@@ -130,6 +245,9 @@ export const finishTicket = async (id: string, reportMd: string): Promise<void> 
         await fs.mkdir(stateDir("done"), { recursive: true });
         await fs.writeFile(reportPath(id), reportMd, "utf-8");
         await fs.rename(path.join(stateDir("running"), `${id}.md`), path.join(stateDir("done"), `${id}.md`)).catch(() => { });
+        // C2/C4 协议文件随票收尾清走（stop 残留会误导同 id 复跑判定；progress 残留会被「进度」读到死票）
+        await fs.rm(stopRequestPath(id), { force: true }).catch(() => { });
+        await fs.rm(progressPath(id), { force: true }).catch(() => { });
         // rename 在 Windows 高负载下对读者短暂不可见（源已去、目标未现的窗口）：两侧都读空时小退避重试。
         // 咽喉错过这次读取，完成通知文件就不会落盘、推送永远丢失（它监听器发送的唯一凭据），值得一秒的耐心。
         let ticketSrc: string | null = null;

@@ -8,8 +8,8 @@
  */
 import type { Locale } from "@/common/index.ts";
 
-/** 任务终态（batchRunner 与词表共用；setup-failed/baseline-broken/timeout/error/watchdog-killed 不跑验收，其余必跑验收定 passed/accept-failed）。 */
-export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed" | "baseline-broken";
+/** 任务终态（batchRunner 与词表共用；setup-failed/baseline-broken/timeout/error/watchdog-killed/stopped 不跑验收，其余必跑验收定 passed/accept-failed）。 */
+export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed" | "baseline-broken" | "stopped";
 
 const ZH = {
     // —— batchAdmin（add / list / clean / help） ——
@@ -146,6 +146,7 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
         rejected: "🚫 工单被拒",
         "watchdog-killed": "🐕 看门狗终止",
         "baseline-broken": "🧪 基线未过（本票未执行）",
+        stopped: "🛑 已按指令停下",
     })[s],
 
     // —— 验收命令执行（输出嵌入报告） ——
@@ -201,6 +202,14 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     wdKillRec: (verdict: string, evidence: string) => `⛔ 终止：${verdict} — ${evidence}`,
     wdAtKillRec: (round: number, costYuan: string) => `终止时刻：轮 ${round} · ¥${costYuan}`,
     wdRetryRec: (n: number) => `带证据重试：共 ${n + 1} 轮（同 worktree 续跑，证据见各轮记录）`,
+
+    // —— C4 软停（2026-11-10「指挥台」）：listen 的「停」→ stop 协议文件 → runner 边界查获干净收尾 ——
+    stopRequestNote: "收到停止指令，正在收尾（跑完当前这步就停，改动照常提交到分支）",
+    stopAbortReason: "收到停止指令（软停：当前步跑完即收尾）",
+    stoppedEarlyNote: "开跑前已收到停止指令（点火竞态：起跑前人喊了停）——未执行，零花费",
+    stopAcceptedLine: (id: string) => `🛑 [${id}] 已按指令停下（改动保留在分支上，报告照推）`,
+    // C4 进度心跳（「进度」控制词读）活动短语
+    progressThinking: "思考中",
 };
 
 const EN: typeof ZH = {
@@ -333,6 +342,7 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
         rejected: "🚫 ticket rejected",
         "watchdog-killed": "🐕 watchdog killed",
         "baseline-broken": "🧪 baseline broken (ticket not executed)",
+        stopped: "🛑 stopped by you",
     })[s],
 
     spawnFail: (e) => `Spawn failed: ${e}`,
@@ -384,6 +394,14 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     wdKillRec: (verdict, evidence) => `⛔ Killed: ${verdict} — ${evidence}`,
     wdAtKillRec: (round, costYuan) => `At kill time: round ${round} · ¥${costYuan}`,
     wdRetryRec: (n) => `Evidence-carrying retries: ${n + 1} rounds total (same worktree; per-round evidence above)`,
+
+    // —— C4 soft stop (2026-11-10 "command center"): listen's "stop" → stop protocol file → runner checks at event boundaries, wraps up cleanly ——
+    stopRequestNote: "Stop received; wrapping up (finishes the current step, changes are committed to the branch as usual)",
+    stopAbortReason: "Stop received (soft stop: finish the current step, then wrap up)",
+    stoppedEarlyNote: "Stop arrived before the run started (ignition race: you called stop while it was starting) — not executed, zero spend",
+    stopAcceptedLine: (id: string) => `🛑 [${id}] Stopped as instructed (changes kept on the branch, report still pushed)`,
+    // C4 progress heartbeat ("progress" control word) activity phrase
+    progressThinking: "thinking",
 };
 
 const DICT: Record<Locale, typeof ZH> = { zh: ZH, en: EN };

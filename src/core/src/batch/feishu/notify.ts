@@ -65,6 +65,64 @@ export const lookupMsgMap = async (msgId: string): Promise<string | null> => {
     return (await loadMsgMap())[msgId] ?? null;
 };
 
+// ============ 直答会话映射表（C1 会话粘住：与票映射刻意分表，互不污染路由） ============
+
+/**
+ * feishu-da-sessions.json：机器人直答回复消息 id → 直答 sessionId。
+ * ★ 刻意独立于 feishu-msg-map.json：回复一张票的回执必须路由成「追加/续修」（票语义），
+ *   回复一条直答必须续问（问答语义）——两表混用会让路由口径互相踩。同一把封顶/损坏自愈纪律。
+ */
+const daMapPath = (): string => path.join(batchRoot(), "feishu-da-sessions.json");
+
+interface DaMapFile { map: Record<string, string>; updatedAt: string }
+
+const loadDaMap = async (): Promise<Record<string, string>> => {
+    try {
+        const raw = JSON.parse(await fs.readFile(daMapPath(), "utf-8")) as DaMapFile;
+        return raw?.map && typeof raw.map === "object" ? raw.map : {};
+    } catch {
+        return {};
+    }
+};
+
+/** 登记一条 直答回复消息 id → 直答 sessionId（追问复用会话=前缀缓存热；幂等覆盖）。 */
+export const recordDaSession = async (msgId: string, sessionId: string): Promise<void> => {
+    if (!msgId || !sessionId) return;
+    try {
+        const map = await loadDaMap();
+        map[msgId] = sessionId;
+        const keys = Object.keys(map);
+        for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k];
+        const tmp = `${daMapPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+        await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+        await fs.rename(tmp, daMapPath());
+    } catch { /* 映射失败只影响追问粘住（降级为新会话），不阻塞直答主流程 */ }
+};
+
+/** 查消息 id 对应的直答 sessionId（无/损坏 = null）。 */
+export const lookupDaSession = async (msgId: string): Promise<string | null> => {
+    if (!msgId) return null;
+    return (await loadDaMap())[msgId] ?? null;
+};
+
+// ============ 外发摘要闸（C3 结论回传：剥代码块 + 封顶；完成推送与直答回答同闸） ============
+
+/**
+ * 结论文字摘要构造器（外发红线的唯一放行形态）：剥 fenced 代码块（含未闭合退化到串尾）、
+ * 剥行内反引号记号（保内容）、压空白为单空格、封顶 cap 字符加省略号。
+ * 仍禁的东西（diff 体/凭据/验收原文）不经过本函数——上游就不放进来；这里只负责
+ * 「允许结论文字」的形态约束。纯函数，守门测试直接验证。
+ */
+export const reportSummary = (text: string, cap = 200): string => {
+    const stripped = (text || "")
+        .replace(/```[\s\S]*?(```|$)/g, " ") // fenced 块整段剥（未闭合剥到串尾）
+        .replace(/`([^`]*)`/g, "$1")        // 行内代码剥记号保内容
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!stripped) return "";
+    return stripped.length > cap ? `${stripped.slice(0, cap)}…` : stripped;
+};
+
 // ============ 完成通知文件（runner → listen 跨进程协议） ============
 
 /** 通知重试上限：超限放弃（防 bot 被移出会话等不可达场景无限打 API）。 */
@@ -93,6 +151,9 @@ export interface FinishNotification {
     /** ★ B2（2026-11-09）：被拒工具清单——denied-tool frontmatter 逐条原样（`<tool> — <detail>`），
      *  省略行（不含分隔符）滤除。推送追加「⚠️ N 个操作未放行…｜回复本消息可续修补跑」的拒因数据源。 */
     deniedTools: string[];
+    /** ★ C3（2026-11-10）：结论摘要——报告 summary frontmatter 原样（runner 侧经 reportSummary
+     *  剥代码块后落盘；单行 ≤200 字符）。旧版报告无此字段 = undefined，推送自然缺省该行。 */
+    summary?: string;
     /** 相对 <项目> 的报告路径（手机上点不开本机路径，但可对账查找）。 */
     reportPath: string;
     /** 发送失败计数（listen 侧累加；达到 NOTIFY_MAX_RETRIES 放弃删除）。 */
@@ -134,6 +195,8 @@ export const writeFinishNotification = async (args: { ticketId: string; reportMd
         const deniedTools = reportFmAll(args.reportMd, "denied-tool")
             .filter((v) => v.includes(DENIED_TOOL_SEP))
             .slice(0, 30);
+        // C3：结论摘要（runner 已剥代码块并压成单行；缺省 = 旧版报告，推送自然缺省该行）。
+        const summary = reportFm(args.reportMd, "summary") || undefined;
         const n: FinishNotification = {
             ticketId: args.ticketId,
             chatId: args.chatId,
@@ -146,6 +209,7 @@ export const writeFinishNotification = async (args: { ticketId: string; reportMd
             changedFiles,
             changedFileNames,
             deniedTools,
+            summary,
             reportPath: `.deepseeker-code/batch/done/${args.ticketId}.report.md`,
             retries: 0,
             createdAt: new Date().toISOString(),
@@ -206,14 +270,34 @@ const STATUS_ZH: Record<string, string> = {
     rejected: "🚫 工单被拒（未执行）",
     "watchdog-killed": "⏹ 看门狗终止（疑似卡死）",
     "baseline-broken": "⚠️ 基线测试本身是坏的",
+    stopped: "🛑 已按你的指令停下",
 };
 
 export const notifyText = {
-    /** 建票回执（ahead=前面还有几张）。 */
+    /** 建票回执（ahead=前面还有几张）。★ C2 即跑世界：默认点火即跑（不再是「随下次挂机跑批执行」）；
+     *  排队时如实说排队。C5 人话化：无术语。 */
     ackCreated: (locale: SyncLocale, ticketId: string, title: string, ahead: number): string =>
         locale === "zh"
-            ? `✅ 已建票 ${ticketId}「${title}」｜前面还有 ${ahead} 张，随下次挂机跑批执行｜跑完在这里推报告；要补充需求，直接回复本条消息`
-            : `✅ Ticket ${ticketId} "${title}" created | ${ahead} ahead of it; runs at the next batch window | report will be pushed here; reply to this message to add requirements`,
+            ? `🏃 已建票 ${ticketId}「${title}」${ahead > 0 ? `｜前面还有 ${ahead} 张，依次跑` : "｜马上开跑"}｜跑完在这里推报告；要补充需求，直接回复本条消息`
+            : `🏃 Ticket ${ticketId} "${title}" created${ahead > 0 ? ` | ${ahead} ahead of it, runs in order` : " | starting now"} | report will be pushed here; reply to this message to add requirements`,
+    /** ★ C2 意图词延迟回执（「今晚跑/明早跑」）：whenHuman=开跑时刻的人话（如「明 01:00」）。 */
+    ackDeferred: (locale: SyncLocale, ticketId: string, title: string, whenHuman: string): string =>
+        locale === "zh"
+            ? `🌙 已按你说的排到 ${whenHuman}：票 ${ticketId}「${title}」｜到点自动开跑，跑完在这里推报告`
+            : `🌙 Scheduled for ${whenHuman} as you asked: ticket ${ticketId} "${title}" | starts automatically then; report will be pushed here`,
+    /** ★ C1 直答升级建票回执（写操作零容忍 → 升级建票，不引入「手机上批代码」）。 */
+    ackUpgraded: (locale: SyncLocale, ticketId: string, title: string): string =>
+        locale === "zh"
+            ? `🛠️ 这活要改文件——已开票 ${ticketId}「${title}」，马上跑（问答模式只查不改，改代码走票）；跑完在这里推报告`
+            : `🛠️ This one needs file changes — ticket ${ticketId} "${title}" created and starting (Q&A mode is read-only; code changes go through tickets); report will be pushed here`,
+    /** ★ C1 直答回执（答案已过外发摘要闸：剥代码块、封顶；costText=本次花费，带 ¥ 前缀或 "?"）。 */
+    daAnswer: (locale: SyncLocale, answer: string, costText: string): string =>
+        locale === "zh" ? `📖 ${answer}｜¥${costText}` : `📖 ${answer} | ¥${costText}`,
+    /** ★ C1 直答失败回执（失败不静默——静默=黑洞；引导改走任务路）。 */
+    daError: (locale: SyncLocale, why: string): string =>
+        locale === "zh"
+            ? `⚠️ 没答上来：${why}｜稍后重发可再试；要改代码的话直接说任务，我开票去跑`
+            : `⚠️ Couldn't answer: ${why} | resend to retry; for code changes just state the task and I'll open a ticket`,
     /** 拒收回执（过了白名单但没建成——拒因必须回给人，静默=黑洞）。 */
     ackSkipped: (locale: SyncLocale, reason: string): string =>
         locale === "zh"
@@ -269,8 +353,54 @@ export const notifyText = {
             ? `\n⚠️ ${denied.length} 个操作未放行：${deniedShown.join("；")}${denied.length > 3 ? ` 等 ${denied.length} 项` : ""}｜回复本消息可续修补跑`
             : `\n⚠️ ${denied.length} op(s) not permitted: ${deniedShown.join("; ")}${denied.length > 3 ? ` +${denied.length - 3} more` : ""} | reply to this message to follow up and re-run`);
         const tail = denied.length === 0 ? (zh ? "｜要跟进，直接回复本条消息" : " | reply to this message to follow up") : "";
-        return `📋 票 ${n.ticketId}「${n.title}」跑完｜${status}｜${files}｜${cost}${branch}${tail}${deniedLine}\n报告：${n.reportPath}`;
+        // ★ C3 结论摘要（外发红线唯一放行形态：runner 侧已剥代码块封顶 200 字；旧报告无此行自然缺省）
+        const summaryLine = n.summary ? `\n📄 ${n.summary}` : "";
+        return `📋 票 ${n.ticketId}「${n.title}」跑完｜${status}｜${files}｜${cost}${branch}${tail}${deniedLine}${summaryLine}\n报告：${n.reportPath}`;
     },
+    // ============ C4 控制面回执（整句控制词的答复；数据在 listen 侧查队列/进度文件后传入） ============
+    /** 「队列」：在跑 + 待跑一览（runningLine/pendingLines 由 listen 拼好——文案与数据同闸在此定型）。 */
+    ctlQueue: (locale: SyncLocale, runningLine: string, pendingLine: string): string =>
+        locale === "zh"
+            ? `📋 ${runningLine}${pendingLine ? `\n${pendingLine}` : ""}`
+            : `📋 ${runningLine}${pendingLine ? `\n${pendingLine}` : ""}`,
+    /** 「进度」：当前票轮次+正在干什么（progressLine 由 listen 从进度心跳文件拼好）。 */
+    ctlProgress: (locale: SyncLocale, progressLine: string): string => progressLine,
+    /** 「停」已受理（软停：跑完当前这步就收尾，改动保留、报告照推）。 */
+    ctlStopAccepted: (locale: SyncLocale, ticketId: string): string =>
+        locale === "zh"
+            ? `🛑 收到，正在停：票 ${ticketId} 跑完当前这步就收尾（改动保留在分支上，报告照推）`
+            : `🛑 Stopping: ticket ${ticketId} will wrap up after the current step (changes kept on the branch; report still pushed)`,
+    /** 「停」但没有在跑的票。 */
+    ctlNothingRunning: (locale: SyncLocale): string =>
+        locale === "zh" ? "ℹ️ 现在没有在跑的票" : "ℹ️ Nothing is running right now",
+    /** 「进度」但没有在跑的票。 */
+    ctlNothingRunningProgress: (locale: SyncLocale): string =>
+        locale === "zh" ? "ℹ️ 现在没有在跑的票；发「队列」看待跑清单" : "ℹ️ Nothing is running; send \"queue\" for the pending list",
+    /** 「取消 <id>」成功。 */
+    ctlCancelled: (locale: SyncLocale, ticketId: string, title: string): string =>
+        locale === "zh"
+            ? `🗑️ 已撤销 ${ticketId}「${title}」（还没开跑）`
+            : `🗑️ Cancelled ${ticketId} "${title}" (it hadn't started)`,
+    /** 「取消 <id>」找不到（已开跑/已跑完/无此票）。 */
+    ctlCancelGone: (locale: SyncLocale, ticketId: string): string =>
+        locale === "zh"
+            ? `⚠️ 没找到待跑的票 ${ticketId}（可能已开跑或已撤；开跑中的票发「停」）`
+            : `⚠️ No pending ticket ${ticketId} (already started or cancelled; to stop a running one, send "stop")`,
+    /** 剧本 E 闲聊引导（「在吗」整句）：一句话说清两种用法。 */
+    ctlHello: (locale: SyncLocale): string =>
+        locale === "zh"
+            ? "在的。想查什么直接问（我查了就答，不建票）；要改代码的活描述清楚（我开票去跑，跑完推报告）。"
+            : "Here. Ask anything you want looked up (I'll answer inline, no ticket); describe code changes as tasks (I'll open a ticket and push the report when done).",
+    /** sendText 成功留痕（日志用，不外发；C3：5x46 实锤发送结果零日志无从对账）。 */
+    sendOk: (locale: SyncLocale, msgId: string, len: number): string =>
+        locale === "zh"
+            ? `📤 [feishu] 消息已发送（msg ${msgId}，${len} 字符）`
+            : `📤 [feishu] message sent (msg ${msgId}, ${len} chars)`,
+    /** sendText 失败留痕（日志用，不外发；只记业务码与原因，凭据/鉴权头永不进日志）。 */
+    sendFail: (locale: SyncLocale, why: string): string =>
+        locale === "zh"
+            ? `⚠️ [feishu] 消息发送失败：${why}`
+            : `⚠️ [feishu] message send failed: ${why}`,
     /** 通知推送失败放弃（日志用，不外发）。 */
     notifyGiveUp: (locale: SyncLocale, ticketId: string): string =>
         locale === "zh"

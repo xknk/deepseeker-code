@@ -30,12 +30,13 @@ import { readUsageRecords } from "@/observability/usageLog.ts";
 import type { UIEvent } from "@/observability/type.ts";
 import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
-import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket, markTicketNeedsReview } from "@/batch/queue.ts";
+import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket, markTicketNeedsReview, readStopRequest, writeTicketProgress } from "@/batch/queue.ts";
 import { continuationBaseBranch, doneTicketPath } from "@/batch/continuation.ts";
 import { appendLedgerEntry } from "@/batch/ledger.ts";
 import { compileTestPatterns, isTestPath } from "@/batch/sync/testpaths.ts";
 import { loadSyncConfig } from "@/batch/sync/config.ts";
 import { requestCardApproval } from "@/batch/feishu/approval.ts"; // P4 卡片审批（轻模块：纯 fs 协议零 SDK/LLM）
+import { reportSummary } from "@/batch/feishu/notify.ts"; // C3 结论回传闸（剥代码块/封顶——推送唯一出站形态，轻模块同 approval.ts）
 import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
@@ -273,6 +274,11 @@ export const buildReport = (args: {
     const denied = args.deniedTools ?? [];
     const deniedFm = denied.length === 0 ? "" : denied.slice(0, DENIED_FM_CAP).map((d) => `denied-tool: ${d.tool} — ${d.detail}\n`).join("")
         + (denied.length > DENIED_FM_CAP ? `denied-tool: ${T.deniedMore(denied.length - DENIED_FM_CAP)}\n` : "");
+    // C3 结论回传（2026-11-10「指挥台」）：finalText 经外发摘要闸（剥代码块/内联反引号、折叠空白、
+    // 200 封顶）落 frontmatter summary: —— writeFinishNotification 解析进完成推送，手机直接看结论；
+    // 红线不动：diff/代码体/凭证/验收原始输出照旧只留报告里（reportSummary 是结论唯一出站形态）。
+    const summaryText = reportSummary(finalText ?? "", 200);
+    const summaryFm = summaryText ? `summary: ${summaryText}\n` : "";
     return `---
 id: ${id}
 title: ${ticket.title}
@@ -283,7 +289,7 @@ budget-truncated: ${budgetTruncated}
 ${ticket.needsReview ? "needs-review: true\n" : ""}session: batch-${id}
 worktree: ${wt?.path ?? T.notCreated}
 branch: ${wt?.branch ?? T.notCreated}
-${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${deniedFm}${changedFm}---
+${ticket.continues ? `continues: ${ticket.continues}\n` : ""}${deniedFm}${changedFm}${summaryFm}---
 
 ${T.reportTitle(ticket.title)}
 
@@ -340,6 +346,21 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     const timeoutMin = t.timeoutMin ?? 30;
     emit(`▶ [${task.id}] ${t.title}`);
     emit(T.taskMeta(t.budgetYuan, timeoutMin, t.accept));
+
+    // C4 早停检查（2026-11-10「指挥台」）：点火竞态——listen 的「停」可能在 runner 起跑前已落盘
+    //（票刚被取走转 running，人看到「跑批中」就喊停）。此处命中 → 不建 worktree 不进 agent，
+    // 零花费 stopped 收尾（finishTicket 会顺手清走 stop/progress 协议文件）。
+    if (await readStopRequest(task.id)) {
+        emit(`🛑 [${task.id}] ${T.stopRequestNote}`);
+        const cost: SessionCost = { rounds: 0, mainRounds: 0, subRuns: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costYuan: 0, toolCostYuan: 0, auxCostYuan: 0, partialPrice: false, durationMs: 0 };
+        await finishTicket(task.id, buildReport({
+            id: task.id, ticket: t, status: "stopped", budgetTruncated: false, cost, receipt: undefined,
+            finalText: "", accept: null, deniedTools: [], diff: T.diffNone, wt: null,
+            errorMessage: T.stoppedEarlyNote,
+        }));
+        emit(`   ${T.statusLabel("stopped")}`);
+        return { status: "stopped", cost, budgetTruncated: false };
+    }
 
     // 工具表裁剪：缺省禁高危（对模型不可见），工单 tools: 显式解锁。
     // ★ P1-6 声明化：工具声明 batchAllowed:false 同样收权（与名单任一命中即拒），未声明者回退名单兜底。
@@ -502,9 +523,11 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     let agentError: string | undefined;
     let budgetTruncated = false;
     let wdKill: WatchdogKillInfo | null = null;
+    let userStop = false; // C4 软停标志：listen「停」→ stop 文件 → 工具/轮边界查获 → abort 干净收尾（不杀进程）
     let status: TaskStatus;
     let accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null = null;
     let imagesRead = 0; // §5.2.2 落地要求 6：read_image 调用统计进报告（人要能判断该翻案还是换模型）
+    const agentStartedAt = new Date().toISOString(); // C4 进度心跳 startedAt（「进度」算已跑时长用）
 
     for (let round = 1; ; round++) {
         wdKill = null;
@@ -514,6 +537,25 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         let nudgeCount = 0;
 
         const roundAc = new AbortController();
+        // C4 软停巡检 + 进度心跳（2026-11-10「指挥台」）：stop 文件 = 跨进程协议文件（listen 的「停」
+        //  写、runner 读），在 round.start/tool 边界查获——软停不杀进程：roundAc.abort 走 runAgent
+        //  轮边界干净收尾（结算照走、改动照提交，分支保全）。重试轮不摘 stop 文件：停就是停，重试也停。
+        const checkStop = (): void => {
+            if (userStop) return;
+            void readStopRequest(task.id).then((req) => {
+                if (!req || userStop) return;
+                userStop = true;
+                emit(`🛑 [${task.id}] ${T.stopRequestNote}`);
+                roundAc.abort(new Error(T.stopAbortReason));
+            }).catch(() => { });
+        };
+        const writeProgress = (roundNo: number, activity: string): void => {
+            const nowIso = new Date().toISOString();
+            void writeTicketProgress({
+                ticketId: task.id, pid: process.pid, round: roundNo, activity,
+                since: nowIso, startedAt: agentStartedAt, updatedAt: nowIso,
+            }).catch(() => { });
+        };
         // 看门狗与 ac/timer 并排初始化（方案 §3）：nudge 复用 pushSessionInbox（inbox steering 既有
         // 通道，轮边界 claim）；kill 走 ac.abort 复用 timeout 路径，finally 清理全部照走。
         const wd = watchdogEnabled ? new BatchWatchdog({
@@ -615,6 +657,18 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                         else if (evt?.type === "text.reset") finalText = "";
                         else if (evt?.type === "final") finalText = evt.text || finalText;
                         else if (evt?.type === "tool.start" && evt?.toolName === "read_image") imagesRead++;
+                        else if (evt?.type === "round.start" || evt?.type === "tool.end") {
+                            // C4 唤醒 run 同受软停管束（stop 文件查获 → 置标志 + 断唤醒 ac；
+                            // 主 roundAc 已停，状态判定统一走 userStop 分支）
+                            if (!userStop) {
+                                void readStopRequest(task.id).then((req) => {
+                                    if (!req || userStop) return;
+                                    userStop = true;
+                                    emit(`🛑 [${task.id}] ${T.stopRequestNote}`);
+                                    wakeAc.abort(new Error(T.stopAbortReason));
+                                }).catch(() => { });
+                            }
+                        }
                     },
                     wakeAc.signal,
                     {
@@ -640,8 +694,17 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
                     if (evt?.type === "text.delta") finalText += evt.text;
                     else if (evt?.type === "text.reset") finalText = ""; // 流式 stall 重试：同轮从零重生成，丢弃已累积
                     else if (evt?.type === "final") finalText = evt.text || finalText;
-                    else if (evt?.type === "round.start") emit(T.roundLine(ts(), evt.round));
-                    else if (evt?.type === "tool.start" && evt?.toolName === "read_image") imagesRead++;
+                    else if (evt?.type === "round.start") {
+                        emit(T.roundLine(ts(), evt.round));
+                        writeProgress(evt.round, T.progressThinking); // C4 进度心跳（「进度」控制词读）
+                        checkStop();
+                    } else if (evt?.type === "tool.start") {
+                        if (evt?.toolName === "read_image") imagesRead++;
+                        writeProgress(typeof evt?.round === "number" ? evt.round : round, String(evt?.toolName ?? ""));
+                        checkStop();
+                    } else if (evt?.type === "tool.end") {
+                        checkStop(); // 工具边界查停：工具执行完再断（不打断半截工具，软停约定）
+                    }
                 },
                 roundAc.signal,
                 {
@@ -670,6 +733,13 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         if (agentError) {
             status = "error";
             emit(T.agentErrorLine(task.id, agentError));
+            break;
+        }
+        // C4 软停判定（置于 wdKill 之前：人喊停优先于看门狗带证据重试——停了就不再续跑烧钱；
+        // 与 timeout 同族不跑验收，改动不完整，分支照提交保全，报告照出）。
+        if (userStop) {
+            status = "stopped";
+            emit(T.stopAcceptedLine(task.id));
             break;
         }
         if (wdKill) {

@@ -15,6 +15,7 @@ import path from "path";
 const {
     recordMsgMap, lookupMsgMap, MSG_MAP_CAP,
     writeFinishNotification, listPendingNotifications, clearNotification, bumpNotificationRetries, notifyText, NOTIFY_MAX_RETRIES,
+    reportSummary, recordDaSession, lookupDaSession,
 } = await import("@/batch/feishu/notify.ts");
 const queue = await import("@/batch/queue.ts");
 
@@ -294,4 +295,91 @@ test("B3/B4 回执文案：确认语「👍 收到」；后续票回执点名原
     assert.match(zh, /依次跑完各推报告/);
     const en = notifyText.ackQueuedBehind("en", "t-2", "more", "t-1");
     assert.match(en, /previous ticket t-1 is still running/i);
+});
+
+// ============ C3（2026-11-10「指挥台」）：结论回传——外发摘要闸 + summary frontmatter 全链 ============
+
+test("C3 reportSummary 外发摘要闸：剥围栏代码块/内联反引号、折叠空白单行、封顶加省略号；纯代码块=空结论", () => {
+    const inp = "结论已经修好。\n\n```diff\n+secret line\n-另一段\n```\n细节见 `src/a.ts` 的   改动。";
+    const out = reportSummary(inp, 200);
+    assert.ok(!out.includes("secret line") && !out.includes("diff"), "围栏代码块整体剥除（含未闭合退化）");
+    assert.ok(!out.includes("`"), "内联反引号记号剥除");
+    assert.ok(!/\s{2,}/.test(out), "空白折叠为单行");
+    assert.match(out, /^结论已经修好。 细节见 src\/a\.ts 的 改动。$/, "结论文字保留");
+    const long = reportSummary("啊".repeat(500), 200);
+    assert.equal(long.length, 201, "200 封顶 + 省略号");
+    assert.ok(long.endsWith("…"));
+    assert.equal(reportSummary("```js\nonly code\n```", 200), "", "纯代码块 = 空结论（不出站）");
+    assert.equal(reportSummary("", 200), "", "空文本 = 空");
+    assert.equal(reportSummary("```js\n未闭合也剥到尾\n", 200), "", "未闭合围栏剥到串尾");
+});
+
+test("C3 summary frontmatter 全链：报告 summary 行 → 通知字段 → 推送 📄 结论行；无 summary 零新增行", async () => {
+    await withTempBatchDir(async () => {
+        const withSummary = SAMPLE_REPORT.replace("---\n\n## 模型收尾汇报", "summary: 修好了，测试全绿\n---\n\n## 模型收尾汇报");
+        await writeFinishNotification({ ticketId: "t-sum", reportMd: withSummary, chatId: "oc_c", title: "x" });
+        const n = (await listPendingNotifications())[0];
+        assert.equal(n.summary, "修好了，测试全绿", "summary frontmatter 提取");
+        const text = notifyText.finish("zh", n as any);
+        assert.match(text, /📄 修好了，测试全绿/, "结论行进推送（手机直接看结论）");
+
+        await writeFinishNotification({ ticketId: "t-nosum", reportMd: SAMPLE_REPORT, chatId: "oc_c", title: "x" });
+        const n2 = (await listPendingNotifications())[0];
+        assert.equal(n2.ticketId, "t-nosum");
+        assert.equal(n2.summary, undefined, "无 summary 行 → 字段缺省");
+        assert.ok(!notifyText.finish("zh", n2 as any).includes("📄"), "无结论零新增行（不占推送预算）");
+    });
+});
+
+test("C3 runner 侧源码守门：buildReport 的 summary 由 reportSummary(finalText) 产出（结论唯一出站形态，diff/代码体/验收原文照旧只留报告）", async () => {
+    const src = await fs.readFile(new URL("../../cli/src/batchRunner.ts", import.meta.url), "utf-8");
+    const i = src.indexOf("const summaryText = reportSummary(finalText");
+    assert.ok(i > 0, "summary 由外发摘要闸产出（与直答回答同闸同源）");
+    const block = src.slice(i, i + 250);
+    assert.match(block, /summary: \$\{summaryText\}/, "落 frontmatter summary:（writeFinishNotification 解析进推送）");
+    assert.match(block, /200/, "封顶 200 与完成推送口径一致");
+});
+
+// ============ C1（2026-11-10「指挥台」）：直答会话映射表（与票映射分表互不污染） ============
+
+test("C1 直答会话映射：登记/查询往返、与票映射分表互不污染、封顶丢最旧", async () => {
+    await withTempBatchDir(async (dir) => {
+        assert.equal(await lookupDaSession("om_x"), null, "空表查无");
+        await recordDaSession("om_a", "batch-da-1");
+        await recordDaSession("om_b", "batch-da-2");
+        assert.equal(await lookupDaSession("om_a"), "batch-da-1");
+        assert.equal(await lookupDaSession("om_b"), "batch-da-2");
+        await recordMsgMap("om_a", "t-1"); // 同键写票映射表
+        assert.equal(await lookupDaSession("om_a"), "batch-da-1", "分表：票映射不挤掉直答映射");
+        assert.equal(await lookupMsgMap("om_a"), "t-1", "票映射侧照常");
+        for (let i = 0; i < MSG_MAP_CAP + 10; i++) await recordDaSession(`om_bulk_${i}`, "batch-da-x");
+        assert.equal(await lookupDaSession("om_bulk_0"), null, "封顶丢最旧");
+        assert.equal(await lookupDaSession(`om_bulk_${MSG_MAP_CAP + 9}`), "batch-da-x", "最新保留");
+        // 损坏 → 空表可重建
+        await fs.writeFile(path.join(dir, "feishu-da-sessions.json"), "{broken", "utf-8");
+        assert.equal(await lookupDaSession("om_bulk_0"), null, "损坏=空表");
+        await recordDaSession("om_new", "batch-da-new");
+        assert.equal(await lookupDaSession("om_new"), "batch-da-new");
+    });
+});
+
+// ============ C4（2026-11-10「指挥台」）：控制面文案（人话口径，黑话清零） ============
+
+test("C4/C1 控制面与直答/排期文案：人话口径双语齐备；黑话（挂机）不外发", () => {
+    assert.match(notifyText.ctlStopAccepted("zh", "t-1"), /正在停.*跑完当前这步就收尾/);
+    assert.match(notifyText.ctlStopAccepted("zh", "t-1"), /改动保留在分支上/);
+    assert.match(notifyText.ctlStopAccepted("en", "t-1"), /wrap up after the current step/i);
+    assert.match(notifyText.ctlNothingRunning("zh"), /没有在跑的票/);
+    assert.match(notifyText.ctlNothingRunningProgress("zh"), /发「队列」看待跑清单/);
+    assert.match(notifyText.ctlCancelled("zh", "t-1", "标题"), /已撤销 t-1「标题」/);
+    assert.match(notifyText.ctlCancelGone("zh", "t-1"), /没找到待跑的票 t-1/);
+    assert.match(notifyText.ctlHello("zh"), /想查什么直接问/);
+    assert.match(notifyText.daAnswer("zh", "答案是 42", "0.0012"), /📖 答案是 42｜¥0\.0012/);
+    assert.match(notifyText.daError("zh", "超时"), /没答上来：超时/);
+    assert.match(notifyText.ackUpgraded("zh", "t-2", "改文件的活"), /这活要改文件.*已开票 t-2「改文件的活」/);
+    assert.match(notifyText.ackUpgraded("en", "t-2", "x"), /needs file changes.*ticket t-2/i);
+    assert.match(notifyText.ackDeferred("zh", "t-3", "今晚的活", "明 01:00"), /排到 明 01:00.*票 t-3「今晚的活」/);
+    assert.match(notifyText.ackDeferred("en", "t-3", "x", "01:00"), /Scheduled for 01:00.*ticket t-3/i);
+    assert.ok(!notifyText.ctlStopAccepted("zh", "t-1").includes("挂机"), "黑话清零：停机文案不出现「挂机」");
+    assert.ok(!notifyText.ackDeferred("zh", "t-3", "x", "01:00").includes("挂机"), "黑话清零：排期文案不出现「挂机」");
 });

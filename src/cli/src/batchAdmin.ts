@@ -8,6 +8,8 @@
  */
 import fs from "fs/promises";
 import path from "path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { snapshotQueue, enqueueTicketFile, cleanDone, reportPath } from "@/batch/queue.ts";
 import { batchT } from "./batchStrings.ts";
 import { getLocale, setLocale } from "./strings.ts";
@@ -159,7 +161,22 @@ export const handleBatchAdmin = async (b: BatchArgv): Promise<void> => {
             return;
         }
         const { runFeishuListen } = await import("@/batch/feishu/listen.ts");
-        const r = await runFeishuListen({ locale: getLocale() });
+        // C2 点火器（2026-11-10「指挥台」）：listen 检测「pending 有可跑票 + 无 runner 存活」时自起
+        //   batch run（detached：不随 listen 退出；stdio ignore：日志各有各的 trace）。入口自举——
+        //   打包态 argv[1] = dist/cli.mjs（node 直跑）；tsx 开发态 execArgv 带 tsx loader 同样成立。
+        const spawnRunner = (): void => {
+            const entry = process.argv[1] || fileURLToPath(import.meta.url);
+            // execArgv 前置传位（本机 @types/node 的 SpawnOptions 无该字段）：tsx 开发态带 loader 起
+            // 子进程、打包态为空数组原样成立——子进程的 node 参数逐字复刻父进程。
+            const child = spawn(process.execPath, [...process.execArgv, entry, "batch", "run"], {
+                cwd: process.cwd(),
+                detached: true,
+                stdio: "ignore",
+                windowsHide: true,
+            });
+            child.unref();
+        };
+        const r = await runFeishuListen({ locale: getLocale(), spawnRunner });
         if (r.code !== 0) process.exitCode = r.code;
         return;
     }
