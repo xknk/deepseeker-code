@@ -228,6 +228,13 @@ describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
         assert.equal(isReadOnlyCommand("git --git-dir=.git log --oneline"), true);
     });
 
+    it("补口：单 token 闭合引号值豁免（2026-11-10 直答真机实锤：教学示范的 git -C \"路径\" log 反被误杀→误升级建票）", () => {
+        assert.equal(isReadOnlyCommand('git -C "D:/code/中联/五服一管/lg-wms-admin" log -1'), true);
+        assert.equal(isReadOnlyCommand('git -C "D:/code/x" log -1 --stat --date=iso'), true);   // 旗表本就放行，此前死在引号
+        assert.equal(isReadOnlyCommand("git -C 'D:/code/x' show abc --stat"), true);            // 单引号同构
+        assert.equal(isReadOnlyCommand('git --no-pager -C "D:/x" diff HEAD~1'), true);          // 布尔旗 + 引号值混排
+    });
+
     it("补口边界：写形态 / 未知旗 / 带引号值 / 写子命令带全局旗 → 仍不免审", () => {
         assert.equal(isReadOnlyCommand("sort -o /tmp/evil src/a.txt"), false);            // sort 写文件（绕过 > 闸的形态）
         assert.equal(isReadOnlyCommand("sort --output=/tmp/evil src/a.txt"), false);

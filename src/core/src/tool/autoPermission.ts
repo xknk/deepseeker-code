@@ -353,14 +353,29 @@ const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--nam
 const normalizeGitGlobalFlags = (s: string): string => {
     const tokens = s.split(/\s+/).filter(Boolean);
     if (tokens[0] !== "git") return s;
-    const badValue = (v?: string): boolean => !v || v.startsWith("-") || v.includes('"') || v.includes("'");
+    // ★ 引号值修正（2026-11-10 直答真机实锤）：模型习惯给 -C 的路径加引号（`git -C "D:/code/…" log`），
+    //   旧判定对含引号 token 一票否决 → 教学里示范的命令形态反被误杀、直答误升级建票。
+    //   安全边界：仅豁免「单 token 完整闭合引号、内部无引号无空白」的值（split(/\s+/) 保证无空白）；
+    //   开引号未闭合（= 路径含空格被切成多 token）仍不豁免。剥引号只影响只读头锚定——
+    //   写选项/敏感参数/重定向复检均跑在原始整串上，不受影响。
+    const closedQuoteValue = (v: string): string | null => {
+        if (/^"[^"]*"$/.test(v)) return v.slice(1, -1);
+        if (/^'[^']*'$/.test(v)) return v.slice(1, -1);
+        return v.startsWith('"') || v.startsWith("'") ? null : v;
+    };
+    const badValue = (v?: string): boolean => {
+        if (!v) return true;
+        const unquoted = closedQuoteValue(v);
+        if (unquoted === null || !unquoted) return true;   // 未闭合引号 / 空
+        return unquoted.startsWith("-") || unquoted.includes('"') || unquoted.includes("'");
+    };
     let i = 1;
     while (i < tokens.length) {
         const t = tokens[i];
         if (GIT_GLOBAL_BOOL_FLAGS.has(t)) { i++; continue; }
         if (/^--(git-dir|work-tree|namespace|super-prefix)=/.test(t)) { i++; continue; }
         if (GIT_GLOBAL_VALUE_FLAGS.has(t) || t === "-c") {
-            if (badValue(tokens[i + 1])) return s;   // 值缺失/嵌套旗/带引号 → 不归一化
+            if (badValue(tokens[i + 1])) return s;   // 值缺失/嵌套旗/未闭合引号 → 不归一化
             i += 2;
             continue;
         }
