@@ -179,14 +179,18 @@ export const runDirectAnswer = async (args: {
 
     const sessionId = args.sessionId ?? args.newSessionId?.() ?? `batch-da-${generateBatchId(args.now?.() ?? new Date())}`;
     // 新会话首轮带一行模式声明（进 transcript 即前缀稳定，跨轮/跨 run 缓存无损）；追问轮只发问题本身。
-    // ★ 跨仓查证教学（2026-11-10 真机实锤补）：flash 首轮盲找仓库——`ls ..` 在 Windows ENOENT、
-    //   `cmd /c dir` 过不了只读闸（cmd 不在白名单）→ 白白升级。教它只用白名单内的探路原语。
+    // ★ 跨仓查证教学（2026-11-10 真机两轮实锤）：v1 flash 盲找仓库——`ls ..` ENOENT、`cmd /c dir`
+    //   过不了只读闸；v2 教探路原语后它拿到 list_dir 结果却不认、转头全盘递归 glob 撞回收站 EPERM
+    //   + 1 万节点上限，答「本机没有该仓库」（实际在 D:/code/中联/五服一管/）。v3 把路线钉死：
+    //   先 list_dir 浅层 → 在结果里点名目录 → git -C 绝对路径。
     const content = args.sessionId
         ? args.question
         : `[直答模式] 这是飞书来的只读问答：用只读工具查证后用简短人话回答（一两句到一小段），不要改任何文件，回答里不要贴代码块。
-查证提示（Windows 环境）：
-- 列目录/找文件用 list_dir、glob 工具，别用 ls/dir 命令（会失败或过不了只读闸），也别用 cmd/powershell 包装任何命令。
-- 问题提到的仓库往往不是当前目录：先用 list_dir 按绝对路径逐层找（如 D:/code、D:/code 下的公司目录），找到目标仓库目录后，用 git -C <该目录绝对路径> log / show / diff / status 查它的状态——这些都是只读命令，直接可用。
+查证提示（Windows 环境，找仓库的标准路线）：
+- 列目录用 list_dir 工具（别用 ls/dir 命令，也别用 cmd/powershell 包装——会失败或过不了只读闸）。
+- 问题提到的仓库通常不在当前目录：先 list_dir "D:/code" max_depth=2，在返回的目录清单里按名字找目标仓库（可能在公司/产品子目录下，如 中联/五服一管/xxx）。清单里看得到就直接用那个绝对路径，不要再递归。
+- 浅层清单没有就逐层 list_dir 往下钻（每次指定上一层绝对路径），不要用 glob ** 全盘扫（会撞节点上限和回收站权限，扫不出来）。
+- 拿到仓库绝对路径后用 git -C <绝对路径> log / show / diff / status 查——都是只读命令，直接可用。
 
 ${args.question}`;
 
