@@ -38,6 +38,7 @@ import {
 } from "./notify.ts";
 import { classifyMessageKind, runDirectAnswer, type MessageKind } from "./directAnswer.ts";
 import { runReconcile, loadKnownChats, recordKnownChat, type FeishuPull } from "./reconcile.ts";
+import { voidSyncEntryByTicket } from "../sync/state.ts";
 import type { DownloadFile } from "../sync/attachments.ts";
 import type { SyncLocale } from "../sync/config.ts";
 
@@ -638,7 +639,24 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         if (da.kind === "upgrade") {
             // 只读硬闸触碰：升级建票（写操作零容忍——不做「手机上批代码」）
             log(`🛠️ [feishu] 直答升级建票：${da.upgradeWhy}`);
-            const r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+            let r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+            // 陈旧 duplicate 自愈（2026-11-10 真机实锤）：状态指向的票已不在任何队列目录
+            //（手工删票/早期撤票残留）→ 撤去重态重建一次，别拿「未能建票」糊弄人。
+            if (r.ok && r.action === "duplicate" && r.ticketId) {
+                const snap = await snapshotQueue().catch(() => null);
+                const known = snap ? [...snap.pending, ...snap.running, ...snap.done] : [];
+                if (!known.includes(r.ticketId)) {
+                    const voided = await voidSyncEntryByTicket(r.ticketId, now()).catch(() => false);
+                    log(`♻️ [feishu] 升级建票撞陈旧去重（票 ${r.ticketId} 已不存在${voided ? "，去重态已撤" : ""}），重建`);
+                    r = await handleFeishuMessage(candidate, fcfg, handleDeps);
+                }
+            }
+            if (r.ok && r.action === "duplicate") {
+                // 活票 duplicate：如实说已有同款票（同问题早先已开过票），不笼统报「未能建票」
+                log(`⏭️ [feishu] 升级建票判 duplicate：已有同款票 ${r.ticketId ?? "?"}`);
+                await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.ackDuplicate(locale, r.ticketId ?? "?")}`);
+                return r;
+            }
             if (r.ok && r.action === "created") {
                 const sentId = await sendAndLog(candidate.chatId, `${atPrefix(candidate)}${notifyText.ackUpgraded(locale, r.ticketId, feishuTitleOf(candidate.text))}`);
                 if (sentId) await recordMsgMap(sentId, r.ticketId);
@@ -707,7 +725,10 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         const t = pending.find((x) => x.id === ctl.id);
         if (!t) return notifyText.ctlCancelGone(locale, ctl.id);
         await cancelPendingTicket(t.id);
-        log(`🗑️ [feishu] 已撤销待跑票：${t.id}`);
+        // 撤票必须同时撤去重态（append-only state last-wins 覆盖为 cancelled）——否则同内容重发
+        // 永远判 duplicate（2026-11-10 真机实锤：撤过的票像幽灵挡住重建）。
+        const voided = await voidSyncEntryByTicket(t.id, now()).catch(() => false);
+        log(`🗑️ [feishu] 已撤销待跑票：${t.id}${voided ? "（去重态已撤）" : ""}`);
         return notifyText.ctlCancelled(locale, t.id, t.title);
     };
 

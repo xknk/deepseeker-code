@@ -21,7 +21,7 @@ import { createHash } from "crypto";
 import { batchQueueRoot } from "../queue.ts";
 
 /** 规则闸/Gatekeeper 结论 + 建票结果（state 的 verdict 段）。 */
-export type SyncVerdict = "work" | "skip" | "changed" | "reject" | "missing-accept";
+export type SyncVerdict = "work" | "skip" | "changed" | "reject" | "missing-accept" | "cancelled";
 
 /** 纳入指纹的评论轨迹条数（§6.2「最近 N 条」；N=5：翻页成本与触发灵敏度折中）。 */
 export const COMMENTS_IN_FINGERPRINT = 5;
@@ -98,8 +98,24 @@ export const appendSyncState = async (entry: SyncStateEntry): Promise<void> => {
 /** 三态判定：new（未见）/ skip（已见未变）/ changed（已见且变——P1 只日志不续修）。 */
 export type DeduceVerdict = "new" | "skip" | "changed";
 export const deduceVerdict = (existing: SyncStateEntry | undefined, fingerprint: string): DeduceVerdict => {
-    if (!existing) return "new";
+    if (!existing || existing.verdict === "cancelled") return "new"; // 已撤票 = 未见过（同内容重发可再建票）
     return existing.fingerprint === fingerprint ? "skip" : "changed";
+};
+
+/**
+ * 按票撤状态（C4「取消」收尾 + 陈旧 duplicate 自愈）：把 verdict=work 且 ticketId 匹配的条目
+ * 追加为 cancelled（append-only last-wins 覆盖）。撤票不清状态 = 同内容重发永远被判 duplicate
+ * （2026-11-10 真机实锤：升级建票撞手工删票的残留态，回「未能建票」）。返回是否撤到。
+ */
+export const voidSyncEntryByTicket = async (ticketId: string, now: Date = new Date()): Promise<boolean> => {
+    if (!ticketId) return false;
+    for (const e of (await loadSyncState()).values()) {
+        if (e.verdict === "work" && e.ticketId === ticketId) {
+            await appendSyncState({ ...e, verdict: "cancelled", updatedAt: now.toISOString() });
+            return true;
+        }
+    }
+    return false;
 };
 
 /** 本地时区当日（YYYY-MM-DD）——maxTicketsPerDay 的「天」以本机日历日计。 */

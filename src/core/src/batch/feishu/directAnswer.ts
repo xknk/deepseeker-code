@@ -179,9 +179,16 @@ export const runDirectAnswer = async (args: {
 
     const sessionId = args.sessionId ?? args.newSessionId?.() ?? `batch-da-${generateBatchId(args.now?.() ?? new Date())}`;
     // 新会话首轮带一行模式声明（进 transcript 即前缀稳定，跨轮/跨 run 缓存无损）；追问轮只发问题本身。
+    // ★ 跨仓查证教学（2026-11-10 真机实锤补）：flash 首轮盲找仓库——`ls ..` 在 Windows ENOENT、
+    //   `cmd /c dir` 过不了只读闸（cmd 不在白名单）→ 白白升级。教它只用白名单内的探路原语。
     const content = args.sessionId
         ? args.question
-        : `[直答模式] 这是飞书来的只读问答：用只读工具查证后用简短人话回答（一两句到一小段），不要改任何文件，回答里不要贴代码块。\n\n${args.question}`;
+        : `[直答模式] 这是飞书来的只读问答：用只读工具查证后用简短人话回答（一两句到一小段），不要改任何文件，回答里不要贴代码块。
+查证提示（Windows 环境）：
+- 列目录/找文件用 list_dir、glob 工具，别用 ls/dir 命令（会失败或过不了只读闸），也别用 cmd/powershell 包装任何命令。
+- 问题提到的仓库往往不是当前目录：先用 list_dir 按绝对路径逐层找（如 D:/code、D:/code 下的公司目录），找到目标仓库目录后，用 git -C <该目录绝对路径> log / show / diff / status 查它的状态——这些都是只读命令，直接可用。
+
+${args.question}`;
 
     let answer = "";
     try {

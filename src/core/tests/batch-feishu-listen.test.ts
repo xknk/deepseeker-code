@@ -1000,6 +1000,26 @@ test("C1 对账重放不重跑直答（源码结构守门）：问句/续问两�
     assert.match(fBlock, /不重复直答/, "重放跳过留痕可对账");
 });
 
+test("撤票清去重态 + 升级陈旧 duplicate 自愈（源码结构守门，2026-11-10 真机实锤）：cancel 控制词撤 state；升级建票撞「票已不在队列」的 duplicate → 撤态重建一次、不拿「未能建票」糊弄；直答模式声明教跨仓查证（git -C 只读链）", async () => {
+    const lsrc = await fs.readFile(new URL("../src/batch/feishu/listen.ts", import.meta.url), "utf-8");
+    // cancel 分支：删票文件之外必须同时撤去重态
+    const ci = lsrc.indexOf("await cancelPendingTicket(t.id)");
+    assert.ok(ci > 0, "取消分支存在");
+    const cBlock = lsrc.slice(ci, lsrc.indexOf("return notifyText.ctlCancelled", ci));
+    assert.match(cBlock, /voidSyncEntryByTicket/, "取消必须同步撤去重态（否则同内容重发永远 duplicate）");
+    // 升级分支：duplicate 先验票是否真在队列，不在 → 撤态重建
+    const ui = lsrc.indexOf("直答升级建票");
+    assert.ok(ui > 0, "升级分支存在");
+    const uBlock = lsrc.slice(ui, lsrc.indexOf("return r;", ui));
+    assert.match(uBlock, /voidSyncEntryByTicket/, "陈旧 duplicate 自愈：撤态");
+    assert.match(uBlock, /snapshotQueue/, "验票在不在队列（snapshotQueue）");
+    assert.match(uBlock, /重建/, "撤态后重建留痕");
+    // 直答模式声明：跨仓查证教学（真机实锤：flash 盲找仓库——ls ENOENT / cmd dir 过不了只读闸 → 白白升级）
+    const dsrc = await fs.readFile(new URL("../src/batch/feishu/directAnswer.ts", import.meta.url), "utf-8");
+    assert.match(dsrc, /git -C/, "模式声明教 git -C 跨仓只读查证");
+    assert.match(dsrc, /list_dir/, "模式声明教用 list_dir 探路（Windows 别用 ls/dir 命令）");
+});
+
 test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导；整句外不命中照旧建票（宁窄勿宽）；stop 落协议文件、cancel 删票", async () => {
     await withTempBatchDir(async (dir) => {
         await writeFeishuConfig(dir, { users: ["ou_alice"] });

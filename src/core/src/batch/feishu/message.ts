@@ -371,7 +371,7 @@ export const handleFeishuMessage = async (candidate: FeishuMessageCandidate, fcf
     // —— 3. 状态预读（去重 + 规则闸已知标题；正式去重在锁内复核）——
     const state = await loadSyncState();
     const existing = state.get(sourceId) as SyncStateEntry | undefined;
-    if (existing && existing.fingerprint === fingerprint) {
+    if (existing && existing.fingerprint === fingerprint && existing.verdict !== "cancelled") { // cancelled=已撤票，同内容可再建
         if (existing.verdict === "work") {
             out(msg(locale, "duplicate", sourceId));
             return { ok: true, action: "duplicate", ticketId: existing.ticketId };
@@ -420,7 +420,7 @@ export const handleFeishuMessage = async (candidate: FeishuMessageCandidate, fcf
         // 锁内复核去重（对账与实时事件可能并发到达）
         const state2 = await loadSyncState();
         const existing2 = state2.get(sourceId) as SyncStateEntry | undefined;
-        if (existing2 && existing2.fingerprint === fingerprint) {
+        if (existing2 && existing2.fingerprint === fingerprint && existing2.verdict !== "cancelled") { // cancelled=已撤票，同内容可再建
             if (existing2.verdict === "work") return { ok: true, action: "duplicate", ticketId: existing2.ticketId };
             return { ok: true, action: "skipped", reason: existing2.reason ? `已见过（曾拒绝：${existing2.reason}）` : "已见过（曾拒绝）" };
         }
@@ -579,7 +579,7 @@ export const handleFeishuFollowup = async (candidate: FeishuMessageCandidate, pr
     // —— 1. 去重先行（对账重拉同一条回复不重复追加/续修）——
     const state = await loadSyncState();
     const existing = state.get(sourceId) as SyncStateEntry | undefined;
-    if (existing && existing.fingerprint === fingerprint) {
+    if (existing && existing.fingerprint === fingerprint && existing.verdict !== "cancelled") { // cancelled=已撤票，同内容可再建
         if (existing.verdict === "work") return { ok: true, action: "duplicate", ticketId: existing.ticketId };
         return { ok: true, action: "skipped", reason: existing.reason ? `已见过（曾拒绝：${existing.reason}）` : "已见过（曾拒绝）" };
     }

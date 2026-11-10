@@ -24,6 +24,7 @@ const {
 } = await import("@/batch/feishu/message.ts");
 const { loadFeishuConfig } = await import("@/batch/feishu/config.ts");
 const { lookupMsgMap } = await import("@/batch/feishu/notify.ts");
+const { voidSyncEntryByTicket, deduceVerdict } = await import("@/batch/sync/state.ts");
 const queue = await import("@/batch/queue.ts");
 
 const CORE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -257,8 +258,17 @@ test("去重：同内容再发 duplicate；内容变化（编辑重发）建新�
         const edited = normalizeMessageEvent(evP2p({ message: { ...evP2p().message, message_id: "om_10", content: JSON.stringify({ text: "修复日期解析 bug：补充单测\n编辑后重发" }) } }))!;
         const r3 = await handleFeishuMessage(edited, fcfg, baseDeps(dir, root));
         assert.equal(r3.ok && r3.action, "created", "内容变化 = 新指纹 = 新票（标题也要变——同标题会先撞规则闸）");
+        // 撤票清去重态（C4「取消」收尾语义；2026-11-10 真机实锤：撤票不清态 = 同内容重发永远 duplicate，
+        // 升级建票撞陈旧态回「未能建票」）。cancelled 态不挡路、重建后新 work 态照常去重。
+        assert.equal(deduceVerdict({ sourceId: "x", seenAt: "", fingerprint: "f", verdict: "cancelled" }, "f"), "new", "cancelled 态三态判定 = new");
+        const voided = await voidSyncEntryByTicket((r1 as any).ticketId);
+        assert.equal(voided, true, "按票撤到 work 态条目");
+        const r4 = await handleFeishuMessage(c1, fcfg, baseDeps(dir, root));
+        assert.equal(r4.ok && r4.action, "created", "撤票后同内容重发 = 新票（cancelled 不挡路）");
+        const r5 = await handleFeishuMessage(c1, fcfg, baseDeps(dir, root));
+        assert.equal(r5.ok && r5.action, "duplicate", "重建后新 work 态生效，照常去重");
         const snap = await queue.snapshotQueue();
-        assert.equal(snap.pending.length, 2);
+        assert.equal(snap.pending.length, 3);
         await fs.rm(root, { recursive: true, force: true });
     });
 });
