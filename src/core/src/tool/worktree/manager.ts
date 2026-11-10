@@ -34,9 +34,18 @@ export interface WorktreeHandle {
     baseSha: string;
 }
 
+/**
+ * 在【主仓】执行 git（worktree admin 操作锚定主仓，不受 ALS 影响）。
+ * ★ core.longpaths（2026-11-10 跨仓路由实锤）：worktree 落系统临时目录，路径前缀长（tmpdir +
+ *   项目桶 + batch-<50位id> + 任务id ≈150 字符），叠上目标仓深层 Java 路径即破 Windows MAX_PATH 260
+ *   （pms-parent checkout 全线 Filename too long）。逐调用 -c 注入：不改仓级配置、三平台无害。
+ */
+const gitWithLongpaths = (args: string[], options: { cwd?: string; maxBuffer?: number }) =>
+    execFileSmart("git", ["-c", "core.longpaths=true", ...args], { maxBuffer: 1024 * 1024 * 5, ...options });
+
 /** 在【主仓】执行 git（worktree admin 操作锚定主仓，不受 ALS 影响）。 */
 const runMainGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileSmart("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
+    gitWithLongpaths(args, { cwd: WORKSPACE_ROOT, maxBuffer });
 
 /**
  * worktree 根目录：<os.tmpdir()/deepseeker-code-worktrees>/<userWorkspaceDir>/（按项目隔离，sweep 按此扫）。
@@ -66,10 +75,10 @@ const isNotARepoError = (e: any): boolean => {
  * @throws 非 git 仓库 / worktree add 失败时抛错（run_workflow 捕获后该步骤标失败）
  */
 export const createWorktree = async (sessionId: string, stepId: string, baseRef = "HEAD", repoRoot?: string): Promise<WorktreeHandle> => {
-    // admin git 锚定仓（跨仓路由时为目标仓库；缺省主仓）
+    // admin git 锚定仓（跨仓路由时为目标仓库；缺省主仓）；core.longpaths 见 gitWithLongpaths 注
     const adminCwd = repoRoot ?? WORKSPACE_ROOT;
     const runAdminGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
-        execFileSmart("git", args, { cwd: adminCwd, maxBuffer });
+        gitWithLongpaths(args, { cwd: adminCwd, maxBuffer });
     // 检出基座作为 worktree 基座与 diff 基准（先解析成 SHA：baseRef 可能是分支名）
     const { stdout: shaOut } = await runAdminGit(["rev-parse", baseRef]);
     const baseSha = shaOut.trim();
@@ -133,9 +142,9 @@ export const harvestDiff = async (wt: WorktreeHandle): Promise<string> => {
     }
 };
 
-/** 在 worktree 内执行 git（git -C <wt>）。 */
+/** 在 worktree 内执行 git（git -C <wt>；longpaths 同注入——add/diff/commit 都要走深层文件）。 */
 const runInWorktree = (wtPath: string, args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileSmart("git", ["-C", wtPath, ...args], { maxBuffer });
+    gitWithLongpaths(["-C", wtPath, ...args], { maxBuffer });
 
 /** 收尾快照提交的结果（供 batch 报告落字）。 */
 export interface WorktreeCommit {
