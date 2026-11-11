@@ -33,6 +33,23 @@ export const MSG_MAP_CAP = 500;
 
 const msgMapPath = (): string => path.join(batchRoot(), "feishu-msg-map.json");
 
+// ============ 写串行化（丢更新防线） ============
+
+/**
+ * 同一映射文件的读改写必须串行：两笔并发各自读到同一快照、先后 rename = 后写覆盖前写
+ *（丢更新——2026-11-11 全量并行测试下回执 om_out_1 登记静默丢失、keys 恒缺一条实锤）。
+ * 按文件绝对路径各排一条 Promise 链：每笔仍重读磁盘最新（无内存缓存），串行只保证
+ *「读到的快照永远是上一笔落盘后的」。链内前笔失败不断链（登记本就不阻塞主流程）。
+ */
+const mapWriteChains = new Map<string, Promise<unknown>>();
+
+export const serializedMapWrite = <T>(file: string, write: () => Promise<T>): Promise<T> => {
+    const prev = mapWriteChains.get(file) ?? Promise.resolve();
+    const next = prev.then(write, write); // 前笔成败都跑本笔
+    mapWriteChains.set(file, next.catch(() => { })); // 链上存永不 reject 的尾巴
+    return next;
+};
+
 interface MsgMapFile { map: Record<string, string>; updatedAt: string }
 
 const loadMsgMap = async (): Promise<Record<string, string>> => {
@@ -47,16 +64,23 @@ const loadMsgMap = async (): Promise<Record<string, string>> => {
 /** 登记一条 消息 id → 票 id（幂等：重复登记同 id 覆盖同值不写盘）。 */
 export const recordMsgMap = async (msgId: string, ticketId: string): Promise<void> => {
     if (!msgId || !ticketId) return;
+    const target = msgMapPath(); // ★ 调用内钉死一次解析：tmp 与 rename 同目录（batchRoot 实时读 env/cwd，await 间隙翻转曾致跨目录 ENOENT）
     try {
-        const map = await loadMsgMap();
-        if (map[msgId] === ticketId) return;
-        map[msgId] = ticketId;
-        const keys = Object.keys(map);
-        for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k]; // 丢最旧
-        const tmp = `${msgMapPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-        await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
-        await fs.rename(tmp, msgMapPath());
-    } catch { /* 映射失败只影响回复路由（降级为当新票），不阻塞建票主流程 */ }
+        await serializedMapWrite(target, async () => {
+            const map = await loadMsgMap();
+            if (map[msgId] === ticketId) return;
+            map[msgId] = ticketId;
+            const keys = Object.keys(map);
+            for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k]; // 丢最旧
+            const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+            await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+            await fs.rename(tmp, target);
+        });
+    } catch (e) {
+        // 映射失败只影响回复路由（降级为当新票），不阻塞建票主流程——但必须留痕：
+        // 全静默曾让丢更新/写盘失败无从发现（2026-11-11 测试全量并行下 om_out 登记静默丢失实锤）。
+        console.error(`[feishu] msg-map 登记失败（${msgId}）：`, e);
+    }
 };
 
 /** 查消息 id 对应的票 id（无/损坏 = null）。 */
@@ -88,15 +112,21 @@ const loadDaMap = async (): Promise<Record<string, string>> => {
 /** 登记一条 直答回复消息 id → 直答 sessionId（追问复用会话=前缀缓存热；幂等覆盖）。 */
 export const recordDaSession = async (msgId: string, sessionId: string): Promise<void> => {
     if (!msgId || !sessionId) return;
+    const target = daMapPath(); // ★ 同 recordMsgMap：调用内钉死路径 + 写串行
     try {
-        const map = await loadDaMap();
-        map[msgId] = sessionId;
-        const keys = Object.keys(map);
-        for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k];
-        const tmp = `${daMapPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-        await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
-        await fs.rename(tmp, daMapPath());
-    } catch { /* 映射失败只影响追问粘住（降级为新会话），不阻塞直答主流程 */ }
+        await serializedMapWrite(target, async () => {
+            const map = await loadDaMap();
+            map[msgId] = sessionId;
+            const keys = Object.keys(map);
+            for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k];
+            const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+            await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+            await fs.rename(tmp, target);
+        });
+    } catch (e) {
+        // 映射失败只影响追问粘住（降级为新会话），不阻塞直答主流程——留痕同理（静默曾无从发现）。
+        console.error(`[feishu] da-session 登记失败（${msgId}）：`, e);
+    }
 };
 
 /** 查消息 id 对应的直答 sessionId（无/损坏 = null）。 */

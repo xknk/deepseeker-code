@@ -63,6 +63,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         msgSkip: (why: string) => `⏭️ [feishu] 跳过消息：${why}`,
         msgFail: (e: string) => `❌ [feishu] 消息处理异常（不中断监听）：${e}`,
         chatLearned: (chatId: string) => `💬 会话已纳入断线对账（${chatId.slice(0, 12)}…）：此后断线窗口内该会话漏票可回补`,
+        chatLearnFail: (detail: string) => `⚠️ 会话登记失败（${detail}）：该会话断线窗口内漏票将无法自动回补`,
         legSkip: (chatId: string, why: string, permission: boolean) => `⚠️ [feishu] 对账跳过会话 ${chatId.slice(0, 12)}…：${why}${permission ? "（缺「获取与发送单聊、群组消息」权限）" : ""}——该会话断线窗口内漏票无法自动回补，重要内容请重新 @机器人`,
         cardDenied: (who: string) => `🚫 点卡人不在 users 白名单，拒绝审批：${who}`,
         cardOk: (id: string, d: string) => `🎴 审批决定已落盘 [${id.slice(0, 8)}…] ${d}`,
@@ -83,6 +84,7 @@ const LISTEN_MSG: Record<SyncLocale, Record<string, any>> = {
         msgSkip: (why: string) => `⏭️ [feishu] message skipped: ${why}`,
         msgFail: (e: string) => `❌ [feishu] message handling error (listener keeps running): ${e}`,
         chatLearned: (chatId: string) => `💬 chat registered for reconcile backfill (${chatId.slice(0, 12)}…): missed tickets in this chat are now recoverable after reconnects`,
+        chatLearnFail: (detail: string) => `⚠️ chat registration failed (${detail}): tickets missed in this chat during disconnects cannot be backfilled`,
         legSkip: (chatId: string, why: string, permission: boolean) => `⚠️ [feishu] reconcile skipped chat ${chatId.slice(0, 12)}…: ${why}${permission ? " (missing the read & send messages scope)" : ""} — tickets missed in this chat during disconnects cannot be backfilled; re-@ the bot for important ones`,
         cardDenied: (who: string) => `🚫 clicker not in the users whitelist, approval refused: ${who}`,
         cardOk: (id: string, d: string) => `🎴 approval decision recorded [${id.slice(0, 8)}…] ${d}`,
@@ -896,7 +898,11 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
                 // 过白名单发送者的会话（私聊/群聊）：登记 chat_id 纳入断线对账（先于建票闸——
                 // 会话注册与单条消息的票结果无关；对账拉回的消息仍走完整闸门，无白名单绕行）
                 if (candidate.chatId && fcfg.users.includes(candidate.senderOpenId)) {
-                    const learned = await recordKnownChat(candidate.chatId).catch(() => false);
+                    // 失败留痕不吞：登记失败=该会话断线窗口漏票（fail-visible 纪律同 chatLearned 日志）
+                    const learned = await recordKnownChat(candidate.chatId).catch((e) => {
+                        log(msg(locale, "chatLearnFail", `${candidate.chatId.slice(0, 12)}… ${String(e?.message ?? e)}`));
+                        return false as false;
+                    });
                     if (learned) {
                         learnedChats.add(candidate.chatId);
                         log(msg(locale, "chatLearned", candidate.chatId));

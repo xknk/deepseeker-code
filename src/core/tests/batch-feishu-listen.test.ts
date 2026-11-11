@@ -94,11 +94,11 @@ const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 4));
  * 缺省预算 45s：8s 曾假超时→20s（全量并行+真实监听器同机）→45s（2026-11-11 CI 2 核机全量并行下 20s 默认档再爆
  * 「会话对账」；单跑恒秒级绿 → 预算只是耐心上限，绿路径零成本，加大不拖慢）。长链路 LOOP_BUDGET 同理 30s→60s。
  */
-const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 45_000): Promise<void> => {
+const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 45_000, diag?: () => string): Promise<void> => {
     const deadline = Date.now() + budgetMs;
     for (;;) {
         if (await probe()) return;
-        if (Date.now() > deadline) throw new Error(`等待超时：${what}`);
+        if (Date.now() > deadline) throw new Error(`等待超时：${what}${diag ? `\n【现场】${diag()}` : ""}`);
         await tick();
     }
 };
@@ -458,7 +458,8 @@ test("会话对账：白名单首条消息（私聊+群聊）登记 chat_id → 
         await until(async () => {
             const raw = await fs.readFile(path.join(dir, "feishu-known-chats.json"), "utf-8").catch(() => "");
             return raw.includes("oc_grp_learn");
-        }, "群聊登记落盘（chats 未配置也学习）");
+        }, "群聊登记落盘（chats 未配置也学习）", 45_000, () =>
+            `文件=[${(() => { try { return fsSync.readFileSync(path.join(dir, "feishu-known-chats.json"), "utf-8"); } catch { return "无"; } })()}] 学习日志=${lines.filter((l) => /纳入断线对账|会话登记失败|msgSkip|msgFail/.test(l)).join(" ¦ ") || "无"} 全日志尾=[${lines.slice(-5).join(" ¦ ")}]`);
 
         // 陌生发送者：私聊/群聊都不登记
         state.registered["im.message.receive_v1"]({
@@ -646,10 +647,12 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
                 sender: { sender_id: { open_id: "ou_alice" } },
             });
             const readMap = async (): Promise<Record<string, string>> => JSON.parse(await fs.readFile(path.join(dir, "feishu-msg-map.json"), "utf-8")).map;
+            let lastMap: Record<string, string> = {};
             await until(async () => {
-                const mp = await readMap().catch(() => ({}) as Record<string, string>);
-                return Object.keys(mp).length >= 2;
-            }, "建票回执 + 映射登记（原消息与回执消息都路由）", LOOP_BUDGET);
+                lastMap = await readMap().catch(() => ({}) as Record<string, string>);
+                return Object.keys(lastMap).length >= 2;
+            }, "建票回执 + 映射登记（原消息与回执消息都路由）", LOOP_BUDGET, () =>
+                `keys=${JSON.stringify(Object.keys(lastMap))} cards=${state.cards.length}（${state.cards.map((c: any) => c.data?.msg_type).join(",")}） logs尾部=[${lines.slice(-6).map((l) => l.slice(0, 80)).join(" | ")}]`);
             const ack = state.cards.find((c: any) => c.data?.msg_type === "text");
             const ackText = JSON.parse(ack.data.content).text;
             assert.match(ackText, /收到，这就去办/, "回执带受理语义（拟人口径，不露完整票号）");

@@ -18,6 +18,7 @@ import path from "path";
 import { batchQueueRoot } from "../queue.ts";
 import type { SyncLocale } from "../sync/config.ts";
 import type { FeishuMessageCandidate, FeishuTicketResult } from "./message.ts";
+import { serializedMapWrite } from "./notify.ts";
 
 /** 对账拉取注入面：按 [startMs, endMs) 时间窗拉候选（升序）。 */
 export type FeishuPull = (startMs: string, endMs: string) => Promise<
@@ -87,23 +88,28 @@ export const loadKnownChats = async (): Promise<string[]> => {
 
 /**
  * 登记一个会话 chat_id（已登记 = false 零写入；新登记 = true）。
- * 读-并-写整文件原子替换：与游标写各自独立文件，最坏并发丢一次登记（下条消息重学，幂等），
- * 游标语义不受任何影响。
+ * 读-并-写整文件原子替换 + 写串行（serializedMapWrite，与 notify 两张映射表同一纪律）：
+ * 曾注释「最坏并发丢一次登记（下条消息重学，幂等）」——生产成立，但测试探测窗里丢失 =
+ * 永远死等（2026-11-11 全量并行「群聊登记落盘」45s 超时实锤），且登记本就该不丢。串行后每笔
+ * 读到的都是上一笔落盘后的快照。路径同样调用内钉死一次解析。
  */
 export const recordKnownChat = async (chatId: string): Promise<boolean> => {
-    const chats = await loadKnownChats();
-    if (chats.includes(chatId)) return false;
-    const next = { chats: [...chats, chatId], updatedAt: new Date().toISOString() };
-    await fs.mkdir(path.dirname(knownChatsPath()), { recursive: true });
-    const tmp = `${knownChatsPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-    try {
-        await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
-        await fs.rename(tmp, knownChatsPath());
-    } catch (e) {
-        await fs.unlink(tmp).catch(() => { }); // tmp 自净（与 saveCursor 同一泄漏教训）
-        throw e;
-    }
-    return true;
+    const target = knownChatsPath();
+    return serializedMapWrite(target, async () => {
+        const chats = await loadKnownChats();
+        if (chats.includes(chatId)) return false;
+        const next = { chats: [...chats, chatId], updatedAt: new Date().toISOString() };
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
+            await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
+            await fs.rename(tmp, target);
+        } catch (e) {
+            await fs.unlink(tmp).catch(() => { }); // tmp 自净（与 saveCursor 同一泄漏教训）
+            throw e;
+        }
+        return true;
+    });
 };
 
 const RECONCILE_MSG: Record<SyncLocale, Record<string, any>> = {
