@@ -311,12 +311,12 @@ test("全链路：消息事件建票 / 点卡决定落盘+toast / 白名单外�
         assert.ok(state.resources.length >= 1, "附件走 SDK 资源下载（feishu:// 合成 url → im.message resource）");
         assert.ok(judgeCalls.length >= 1, "gatekeeper judge 被透传调用");
 
-        // 3.5 建票回执（P4 反馈闭环）：text 消息回来源会话，带票号与排队位——静默建票=黑洞，已真机实锤拒收
+        // 3.5 建票回执（P4 反馈闭环）：text 消息回来源会话，拟人口径受理语——静默建票=黑洞，已真机实锤拒收
         await until(() => state.cards.some((c: any) => c.data?.msg_type === "text"), "建票回执发送");
         const ackRaw = state.cards.find((c: any) => c.data?.msg_type === "text");
         assert.equal(ackRaw.params.receive_id_type, "chat_id", "回执发来源会话（私聊/群聊同一 receive 面）");
         assert.equal(ackRaw.data.receive_id, "ou_alice");
-        assert.match(JSON.parse(ackRaw.data.content).text, /已建票/, "回执带票号语义");
+        assert.match(JSON.parse(ackRaw.data.content).text, /收到，这就去办/, "回执带受理语义（拟人口径）");
 
         // 4. 点卡：白名单内点卡人 → 决定落盘 + success toast
         const pendings = await listPendingApprovals(new Date());
@@ -636,7 +636,7 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
         try {
             await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
 
-            // 1. 私聊消息 → 建票 + 文本回执（带票号与排队位）
+            // 1. 私聊消息 → 建票 + 文本回执（拟人受理语；票号只进路由映射表不进回执）
             state.registered["im.message.receive_v1"]({
                 message: {
                     message_id: "om_in1", chat_id: "ou_alice", chat_type: "p2p", message_type: "text",
@@ -651,12 +651,10 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
             }, "建票回执 + 映射登记（原消息与回执消息都路由）", LOOP_BUDGET);
             const ack = state.cards.find((c: any) => c.data?.msg_type === "text");
             const ackText = JSON.parse(ack.data.content).text;
-            assert.match(ackText, /已建票/, "回执带票号语义");
-            const m = /已建票 (2026\d{4}-[\w-]+)「/.exec(ackText);
-            assert.ok(m, "票号可从回执解析");
-            const ticketId = m![1];
+            assert.match(ackText, /收到，这就去办/, "回执带受理语义（拟人口径，不露完整票号）");
             const map = await readMap();
-            assert.equal(map["om_in1"], ticketId, "原消息 id 路由到票");
+            const ticketId = map["om_in1"]!;
+            assert.ok(/^2026\d{4}-[\w-]+$/.test(ticketId), "票号从路由映射表取（回执不再带完整票号）");
             assert.equal(map["om_out_1"], ticketId, "回执消息 id 也路由到票");
 
             // 2. 用户回复那条回执（parent_id=回执消息 id，免 @）→ 并入原票 + 追加回执
@@ -667,7 +665,7 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
                 },
                 sender: { sender_id: { open_id: "ou_alice" } },
             });
-            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已并入")), "追加回执", LOOP_BUDGET);
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("并进了")), "追加回执", LOOP_BUDGET);
             const ticketSrc = await fs.readFile(path.join(dir, "pending", `${ticketId}.md`), "utf-8");
             assert.match(ticketSrc, /CSV 编码用 UTF-8/, "回复内容并入原票正文");
             assert.equal((await (await import("@/batch/queue.ts")).snapshotQueue()).pending.length, 1, "未另开新票");
@@ -680,9 +678,9 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
             });
             await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("验收通过")), "完成通知推送", LOOP_BUDGET);
             const finAck = state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text).find((t: string) => t.includes("验收通过"))!;
-            assert.match(finAck, new RegExp(ticketId.slice(0, 8)), "推送带票号");
+            assert.match(finAck, new RegExp(ticketId.slice(0, 8)), "推送带报告路径（路径含票号）");
             assert.match(finAck, /¥0\.35/, "推送带花费");
-            assert.match(finAck, /回复本条消息/, "续修指引");
+            assert.match(finAck, /要跟进直接回这条/, "续修指引");
             await until(async () => !(await fs.readFile(path.join(dir, "notifications", `${ticketId}.json`), "utf-8").then(() => true, () => false)), "通知文件发送后清除", LOOP_BUDGET);
             // 本测试 create 共 3 次：建票回执/追加回执/完成推送 → 通知消息 id = om_out_3（回复它=续修该票）
             await until(async () => (await readMap().catch(() => ({}) as Record<string, string>))["om_out_3"] === ticketId, "通知消息 id 进映射表", LOOP_BUDGET);
@@ -781,14 +779,13 @@ test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映�
             // 2. B3 不误伤：清单外「知道了，顺便…」分句含任务内容 → 照旧建票
             post("om_t1", "修复导出乱码。知道了，顺便把 CSV 编码也改成 UTF-8");
             await until(
-                () => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已建票")),
+                () => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("收到，这就去办")),
                 "清单外照旧建票 + 建票回执", LOOP_BUDGET,
             );
             assert.equal((await queue.snapshotQueue()).pending.length, 1, "票已落 pending");
-            const ackCard = state.cards.find((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("已建票"));
-            const m = /已建票 (2026\d{4}-[\w-]+)「/.exec(JSON.parse(ackCard.data.content).text);
-            assert.ok(m, "票号可解析");
-            const ticketA = m![1];
+            const mapA = (JSON.parse(await fs.readFile(path.join(dir, "feishu-msg-map.json"), "utf-8").catch(() => "{}")).map ?? {}) as Record<string, string>;
+            const ticketA = mapA["om_t1"]!;
+            assert.ok(/^2026\d{4}-[\w-]+$/.test(ticketA), "票号从路由映射表取（回执不再带完整票号）");
             // 票 A 的回执 om_out 序号不硬编码（B3 的「👍 收到」回执也占号）——扫映射表拿实际键
             let ackMsgId = "";
             await until(async () => {
@@ -802,13 +799,13 @@ test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映�
             const taken = await queue.takeNextTicket();
             assert.ok(taken && taken.id === ticketA, "原票进入 running");
             post("om_c2", "再补一个：CSV 导出加 BOM", ackMsgId);
-            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("正在执行，本条已排其后")), "排队回执", LOOP_BUDGET);
+            await until(() => state.cards.some((c: any) => c.data?.msg_type === "text" && JSON.parse(c.data.content).text.includes("这件排它后面")), "排队回执", LOOP_BUDGET);
             const q3 = await queue.snapshotQueue();
             assert.equal(q3.pending.length, 1, "后续票已建（pending）");
             assert.equal(q3.running.length, 1, "原票仍在 running（不被打断）");
             assert.notEqual(q3.pending[0], ticketA, "后续票是新票号");
-            const behind = state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text).find((t: string) => t.includes("正在执行"))!;
-            assert.match(behind, new RegExp(`原票 ${ticketA} 正在执行`), "回执点名原票");
+            const behind = state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text).find((t: string) => t.includes("排它后面"))!;
+            assert.match(behind, /上一件还在跑/, "回执写明排队关系（拟人口径，不露完整票号）");
             // 排队回执的 om_out 序号动态取（B3 回执/建票回执都占号，msgSeq=最新发送序号）；
             // pending 快照条目带 .md 后缀（snapshotQueue 只剥 done 侧）——比对前归一。
             const behindId = q3.pending[0].replace(/\.md$/, "");
@@ -1003,7 +1000,7 @@ test("C1 直答链路（假 SDK 全链）：问句→注入 runDa 回话+会话�
 
             // 4. 升级：只读闸触碰 → 建票 + 🛠️ 回执（写操作零容忍 → 走票路）
             post("om_q4", "看看这个要改文件的地方");
-            await until(() => texts().some((t) => t.includes("这活要改文件") && t.includes("已开票")), "升级建票回执", LOOP_BUDGET);
+            await until(() => texts().some((t) => t.includes("要动文件") && t.includes("当任务去办")), "升级建票回执", LOOP_BUDGET);
             assert.equal((await queue.snapshotQueue()).pending.length, 1, "升级照建票");
 
             // 5. 失败 → ⚠️ 回执不静默（静默=黑洞）
@@ -1107,12 +1104,13 @@ test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导
             await until(() => !!state.dispatcher, "dispatcher 注册", LOOP_BUDGET);
             const texts = (): string[] => state.cards.filter((c: any) => c.data?.msg_type === "text").map((c: any) => JSON.parse(c.data.content).text as string);
 
-            // 「队列」：在跑 + 待跑都点名（延迟票带开跑时刻）
+            // 「队列」：在跑 + 待跑都点名（拟人口径：标题 + 短代号，不露完整票号；延迟件带开跑时刻）
             post("om_k1", "队列");
             await until(() => texts().some((t) => t.includes("📋")), "队列回执", LOOP_BUDGET);
             const qText = texts().find((t) => t.includes("📋"))!;
-            assert.match(qText, new RegExp(runningId), "在跑票点名");
-            assert.match(qText, new RegExp(pendingId), "待跑票点名");
+            assert.match(qText, /在跑：「第[一二]张」/, "在跑件点名（标题）");
+            assert.match(qText, /排着 1 件：「第[一二]张」（代号 /, "待跑件点名（标题+短代号）");
+            assert.match(qText, new RegExp(pendingId.split("-").pop()!), "待跑件短代号露出");
 
             // 「进度」：runner 未写心跳 → 准备中口径（不瞎编活动）
             post("om_k2", "进度");
@@ -1135,12 +1133,18 @@ test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导
             assert.ok(req, "stop 协议文件已落盘");
             assert.equal(req!.by, "ou_alice", "留痕停指令发起人");
 
-            // 「取消 <id>」→ pending 票移除；取消不存在的票 → 点名找不到（引导改发「停」）
+            // 「取消 <完整票号>」→ pending 票移除
             post("om_k5", `取消 ${pendingId}`);
-            await until(() => texts().some((t) => t.includes("已撤销")), "取消回执", LOOP_BUDGET);
+            await until(() => texts().some((t) => t.includes("撤掉了")), "取消回执", LOOP_BUDGET);
             assert.equal((await queue.snapshotQueue()).pending.length, 0, "待跑票已删");
+            // 「取消 <短代号>」→ 短代号末段唯一命中同样可撤（回执只露短代号，撤销口令按代号走）
+            const id3 = await mkTicketFile("第三张");
+            post("om_k5b", `取消 ${id3.split("-").pop()}`);
+            await until(() => texts().filter((t) => t.includes("撤掉了")).length >= 2, "短代号取消回执", LOOP_BUDGET);
+            assert.equal((await queue.snapshotQueue()).pending.length, 0, "短代号取消同样删票");
+            // 取消不存在的票 → 点名找不到（引导改发「停」）
             post("om_k6", "取消 t-nonexist-1");
-            await until(() => texts().some((t) => t.includes("没找到待跑的票")), "取消找不到回执", LOOP_BUDGET);
+            await until(() => texts().some((t) => t.includes("没找到排着的")), "取消找不到回执", LOOP_BUDGET);
 
             // 闲聊引导（剧本 E）+ 整句外不命中：沾边句照旧建票（宁窄勿宽，不做语义猜测）。
             // ★ 测试文本纪律：句中不得出现问号/疑问词（如何/怎么/吗…）——那是问句路由的合法命中，
@@ -1205,7 +1209,7 @@ test("C2 点火器（假 SDK 全链）：即时票建票即点（spawnRunner 注
 
             // 2. 即时票：建票即点（无 runner 存活 + 可跑票非空 → spawn）
             post("om_d2", "修复导出乱码");
-            await until(() => texts().some((t) => t.includes("马上开跑") || t.includes("前面还有")), "即时票回执", LOOP_BUDGET);
+            await until(() => texts().some((t) => t.includes("这就去办") || t.includes("排上了")), "即时票回执", LOOP_BUDGET);
             await until(() => ignites.length >= 1, "点火发生", LOOP_BUDGET);
             // 3. 可跑性分野：延迟票 eligible=false、即时票 eligible=true（点火器只点可跑的）
             const pendings = await queue.listPendingTickets(new Date());

@@ -149,7 +149,7 @@ export interface FinishNotification {
      *  仅文件名、不含 diff（外发红线）；解析/封顶在 writeFinishNotification，发送端只读不补算。 */
     changedFileNames: string[];
     /** ★ B2（2026-11-09）：被拒工具清单——denied-tool frontmatter 逐条原样（`<tool> — <detail>`），
-     *  省略行（不含分隔符）滤除。推送追加「⚠️ N 个操作未放行…｜回复本消息可续修补跑」的拒因数据源。 */
+     *  省略行（不含分隔符）滤除。推送追加「⚠️ N 个操作没放行…回复本消息可续修补跑」的拒因数据源。 */
     deniedTools: string[];
     /** ★ C3（2026-11-10）：结论摘要——报告 summary frontmatter 原样（runner 侧经 reportSummary
      *  剥代码块后落盘；单行 ≤200 字符）。旧版报告无此字段 = undefined，推送自然缺省该行。 */
@@ -259,7 +259,7 @@ export const bumpNotificationRetries = async (n: FinishNotification): Promise<bo
     return giveUp;
 };
 
-// ============ 回执文案（纯函数；中英双语，单行紧凑风） ============
+// ============ 回执文案（纯函数；中英双语，拟人口径——不露票号黑话，对人只称「这件事/代号」） ============
 
 const STATUS_ZH: Record<string, string> = {
     passed: "✅ 验收通过",
@@ -273,75 +273,84 @@ const STATUS_ZH: Record<string, string> = {
     stopped: "🛑 已按你的指令停下",
 };
 
+/** 票号短代号（末段，如 20261111-112350-pyta → pyta）：对人可见处一律用短代号，完整票号只留在报告路径。
+ *  非标准形态（段数 < 3，如测试桩 t-3）原样返回——代号唯一可撤销的语义在 listen 侧兜住。 */
+const shortCode = (ticketId: string): string => {
+    const parts = ticketId.split("-");
+    return parts.length >= 3 ? (parts[parts.length - 1] ?? ticketId) : ticketId;
+};
+
 export const notifyText = {
-    /** 建票回执（ahead=前面还有几张）。★ C2 即跑世界：默认点火即跑（不再是「随下次挂机跑批执行」）；
-     *  排队时如实说排队。C5 人话化：无术语。 */
+    /** 建票回执（ahead=前面还有几件）。★ C2 即跑世界：默认点火即跑；排队时如实说排队。 */
     ackCreated: (locale: SyncLocale, ticketId: string, title: string, ahead: number): string =>
         locale === "zh"
-            ? `🏃 已建票 ${ticketId}「${title}」${ahead > 0 ? `｜前面还有 ${ahead} 张，依次跑` : "｜马上开跑"}｜跑完在这里推报告；要补充需求，直接回复本条消息`
-            : `🏃 Ticket ${ticketId} "${title}" created${ahead > 0 ? ` | ${ahead} ahead of it, runs in order` : " | starting now"} | report will be pushed here; reply to this message to add requirements`,
-    /** ★ C2 意图词延迟回执（「今晚跑/明早跑」）：whenHuman=开跑时刻的人话（如「明 01:00」）。 */
+            ? `🏃 收到，${ahead > 0 ? `排上了（前面还有 ${ahead} 件，依次跑）：「` : "这就去办：「"}${title}」。跑完回来汇报；想补充细节直接回这条`
+            : `🏃 On it: "${title}"${ahead > 0 ? ` (queued, ${ahead} ahead)` : ""}. I'll report back here when it's done; reply to this message to add details`,
+    /** ★ C2 意图词延迟回执（「今晚跑/明早跑/中午跑」）：whenHuman=开跑时刻的人话（如「明 01:00」）。
+     *  代号随回执露出——撤销（取消 <代号>）靠它，不露完整票号。 */
     ackDeferred: (locale: SyncLocale, ticketId: string, title: string, whenHuman: string): string =>
         locale === "zh"
-            ? `🌙 已按你说的排到 ${whenHuman}：票 ${ticketId}「${title}」｜到点自动开跑，跑完在这里推报告`
-            : `🌙 Scheduled for ${whenHuman} as you asked: ticket ${ticketId} "${title}" | starts automatically then; report will be pushed here`,
+            ? `🌙 好的，排在 ${whenHuman}：「${title}」。到点自动开工；想撤掉就发「取消 ${shortCode(ticketId)}」`
+            : `🌙 Scheduled for ${whenHuman} as you asked: "${title}". It starts automatically then; to cancel, send "cancel ${shortCode(ticketId)}"`,
     /** ★ C1 直答升级建票回执（写操作零容忍 → 升级建票，不引入「手机上批代码」）。 */
     ackUpgraded: (locale: SyncLocale, ticketId: string, title: string): string =>
         locale === "zh"
-            ? `🛠️ 这活要改文件——已开票 ${ticketId}「${title}」，马上跑（问答模式只查不改，改代码走票）；跑完在这里推报告`
-            : `🛠️ This one needs file changes — ticket ${ticketId} "${title}" created and starting (Q&A mode is read-only; code changes go through tickets); report will be pushed here`,
+            ? `🛠️ 这件要动文件（问答模式只查不改），我当任务去办了：「${title}」。跑完回来汇报`
+            : `🛠️ This one needs file changes (Q&A mode is read-only), so I'm running it as a task: "${title}". I'll report back when done`,
     /** ★ C1 直答回执（答案已过外发摘要闸：剥代码块、封顶；costText=本次花费，带 ¥ 前缀或 "?"）。 */
     daAnswer: (locale: SyncLocale, answer: string, costText: string): string =>
-        locale === "zh" ? `📖 ${answer}｜¥${costText}` : `📖 ${answer} | ¥${costText}`,
+        locale === "zh" ? `📖 ${answer}${costText !== "?" ? `\n（花了 ¥${costText}）` : ""}` : `📖 ${answer}${costText !== "?" ? `\n(cost ¥${costText})` : ""}`,
     /** ★ C1 直答失败回执（失败不静默——静默=黑洞；引导改走任务路）。 */
     daError: (locale: SyncLocale, why: string): string =>
         locale === "zh"
-            ? `⚠️ 没答上来：${why}｜稍后重发可再试；要改代码的话直接说任务，我开票去跑`
-            : `⚠️ Couldn't answer: ${why} | resend to retry; for code changes just state the task and I'll open a ticket`,
+            ? `⚠️ 这题没答上来：${why}。稍后可以再问一次；要改代码就直接说事，我去办`
+            : `⚠️ Couldn't answer: ${why}. Feel free to ask again later; for code changes just describe the task and I'll run it`,
     /** 拒收回执（过了白名单但没建成——拒因必须回给人，静默=黑洞）。 */
     ackSkipped: (locale: SyncLocale, reason: string): string =>
         locale === "zh"
-            ? `⚠️ 未建票：${reason}`
-            : `⚠️ No ticket created: ${reason}`,
-    /** 重复回执（同内容已有票——回答"到底收没收到"）。 */
+            ? `⚠️ 这条没接：${reason}`
+            : `⚠️ Not picked up: ${reason}`,
+    /** 重复回执（同内容已在办——回答"到底收没收到"）。 */
     ackDuplicate: (locale: SyncLocale, ticketId: string | undefined): string =>
         locale === "zh"
-            ? `ℹ️ 这个任务已有票${ticketId ? ` ${ticketId}` : ""}，未重复建票；要跟进，回复该票的回执消息`
-            : `ℹ️ This task already has a ticket${ticketId ? ` ${ticketId}` : ""}; reply to that ticket's ack to follow up`,
-    /** 追加回执（原票在排队：内容已并入原票）。 */
+            ? `ℹ️ 这件事之前已经排过了，没有重复开${ticketId ? `（代号 ${shortCode(ticketId)}）` : ""}；有进展会汇报`
+            : `ℹ️ This one was already queued${ticketId ? ` (code ${shortCode(ticketId)})` : ""}; no duplicate created. You'll hear back when it's done`,
+    /** 追加回执（原件事在排队：内容已并入）。 */
     ackAppended: (locale: SyncLocale, ticketId: string, title: string): string =>
         locale === "zh"
-            ? `➕ 已并入排队中的票 ${ticketId}「${title}」——半夜随它一起跑，不另开新票`
-            : `➕ Appended to queued ticket ${ticketId} "${title}" — runs together with it, no new ticket`,
-    /** 续修回执（原票已跑完：续修票已建，基座=前票产物分支）。 */
+            ? `➕ 收到——并进了排着的「${title}」，一起跑，不另开一件`
+            : `➕ Appended to the queued "${title}" — they'll run together, no separate task`,
+    /** 续办回执（上一件已跑完：续办件已排，基座=上件产物分支）。 */
     ackFollowupCreated: (locale: SyncLocale, ticketId: string, prevId: string): string =>
         locale === "zh"
-            ? `🔁 已建续修票 ${ticketId}（接 ${prevId}）——验收/预算沿用前票，代码基座含前次改动，不重做；已排队`
-            : `🔁 Continuation ticket ${ticketId} (after ${prevId}) created — same accept/budget, code base includes the previous fix; queued`,
+            ? `🔁 收到，接着上一件继续办（${shortCode(prevId)} 那件的后续）——之前的改动都在基础上，不重做。跑完汇报`
+            : `🔁 Continuing from ${shortCode(prevId)} — builds on the previous changes, no redo. Queued; report when done`,
     /** ★ B3 确认语闸回执（2026-11-09）：整句确认语不开票，回一句收到（si6d 实证误开票烧 ¥0.77）。 */
     ackConfirm: (locale: SyncLocale): string =>
         locale === "zh" ? "👍 收到" : "👍 Got it",
-    /** ★ B4 后续票回执（2026-11-09）：回复时原票正在执行 → 新票照建、排原票后，回执写明排队关系
-     *  （此前此分支只回通用建票回执，「我的追加去哪了」无着落——路由总表黑洞分支补齐）。 */
+    /** ★ B4 后续回执（2026-11-09）：回复时上一件正在执行 → 新件照排、排其后，回执写明排队关系
+     *  （此前此分支只回通用回执，「我的追加去哪了」无着落——路由总表黑洞分支补齐）。 */
     ackQueuedBehind: (locale: SyncLocale, ticketId: string, title: string, prevId: string): string =>
         locale === "zh"
-            ? `🧵 已建票 ${ticketId}「${title}」｜原票 ${prevId} 正在执行，本条已排其后，依次跑完各推报告；要补充需求，继续回复本条消息`
-            : `🧵 Ticket ${ticketId} "${title}" created | previous ticket ${prevId} is still running — this one queues right after it; reports push as each finishes; reply to this message to add more`,
+            ? `🧵 收到——上一件还在跑，这件排它后面（各跑完各汇报）；想补充继续回这条`
+            : `🧵 Got it — the previous task is still running; this one queues right after it (each reports when done). Reply here to add more`,
     /** 完成推送（手机可读摘要；不含 diff 与验收输出——外发红线）。
      *  ★ B5：改动清单带文件名列表（封顶 8 个，超出「等 N 个」）；★ B2：deniedTools 非空时追加
-     *  「⚠️ N 个操作未放行…｜回复本消息可续修补跑」拒清单 + 翻案引导（此时通用尾注让位给引导语）。 */
+     *  「⚠️ N 个操作没放行…回复本消息可续修补跑」拒清单 + 翻案引导（此时通用尾注让位给引导语）。 */
     finish: (locale: SyncLocale, n: FinishNotification): string => {
         const zh = locale === "zh";
         const status = zh ? (STATUS_ZH[n.status] ?? n.status) : n.status;
         const names = n.changedFileNames ?? [];
         const shown = names.slice(0, 8);
-        const files = names.length === 0
-            ? (zh ? `改动 ${n.changedFiles} 个文件` : `${n.changedFiles} file(s) changed`)
-            : (zh
-                ? `改动 ${n.changedFiles} 个文件：${shown.join("、")}${names.length > 8 ? ` 等 ${names.length} 个` : ""}`
-                : `${n.changedFiles} file(s) changed: ${shown.join(", ")}${names.length > 8 ? ` +${names.length - 8} more` : ""}`);
-        const cost = zh ? `花费 ¥${n.cost}` : `cost ¥${n.cost}`;
-        const branch = n.branch ? (zh ? `｜分支 ${n.branch}` : ` | branch ${n.branch}`) : "";
+        const files = n.changedFiles === 0
+            ? (zh ? "没动文件" : "no files changed")
+            : names.length === 0
+                ? (zh ? `动了 ${n.changedFiles} 个文件` : `${n.changedFiles} file(s) changed`)
+                : (zh
+                    ? `动了 ${n.changedFiles} 个文件（${shown.join("、")}${names.length > 8 ? ` 等 ${names.length} 个` : ""}）`
+                    : `${n.changedFiles} file(s) changed (${shown.join(", ")}${names.length > 8 ? ` +${names.length - 8} more` : ""})`);
+        const costPart = zh ? `花了 ¥${n.cost}` : `cost ¥${n.cost}`;
+        const branchPart = n.branch ? (zh ? `，改动在分支 ${n.branch}` : `, changes on branch ${n.branch}`) : "";
         const denied = n.deniedTools ?? [];
         const deniedShown = denied.slice(0, 3).map((d) => {
             const i = d.indexOf(DENIED_TOOL_SEP);
@@ -350,12 +359,12 @@ export const notifyText = {
             return zh ? `${tool}（${why.slice(0, 60)}）` : `${tool} (${why.slice(0, 60)})`;
         });
         const deniedLine = denied.length === 0 ? "" : (zh
-            ? `\n⚠️ ${denied.length} 个操作未放行：${deniedShown.join("；")}${denied.length > 3 ? ` 等 ${denied.length} 项` : ""}｜回复本消息可续修补跑`
+            ? `\n⚠️ ${denied.length} 个操作没放行：${deniedShown.join("；")}${denied.length > 3 ? ` 等 ${denied.length} 项` : ""}，回复本消息可续修补跑`
             : `\n⚠️ ${denied.length} op(s) not permitted: ${deniedShown.join("; ")}${denied.length > 3 ? ` +${denied.length - 3} more` : ""} | reply to this message to follow up and re-run`);
-        const tail = denied.length === 0 ? (zh ? "｜要跟进，直接回复本条消息" : " | reply to this message to follow up") : "";
+        const tail = denied.length === 0 ? (zh ? "\n要跟进直接回这条" : "\nReply here to follow up") : "";
         // ★ C3 结论摘要（外发红线唯一放行形态：runner 侧已剥代码块封顶 200 字；旧报告无此行自然缺省）
         const summaryLine = n.summary ? `\n📄 ${n.summary}` : "";
-        return `📋 票 ${n.ticketId}「${n.title}」跑完｜${status}｜${files}｜${cost}${branch}${tail}${deniedLine}${summaryLine}\n报告：${n.reportPath}`;
+        return `📋 「${n.title}」\n${status}，${files}，${costPart}${branchPart}${summaryLine}${deniedLine}\n报告：${n.reportPath}${tail}`;
     },
     // ============ C4 控制面回执（整句控制词的答复；数据在 listen 侧查队列/进度文件后传入） ============
     /** 「队列」：在跑 + 待跑一览（runningLine/pendingLines 由 listen 拼好——文案与数据同闸在此定型）。 */
@@ -363,34 +372,34 @@ export const notifyText = {
         locale === "zh"
             ? `📋 ${runningLine}${pendingLine ? `\n${pendingLine}` : ""}`
             : `📋 ${runningLine}${pendingLine ? `\n${pendingLine}` : ""}`,
-    /** 「进度」：当前票轮次+正在干什么（progressLine 由 listen 从进度心跳文件拼好）。 */
+    /** 「进度」：当前件轮次+正在干什么（progressLine 由 listen 从进度心跳文件拼好）。 */
     ctlProgress: (locale: SyncLocale, progressLine: string): string => progressLine,
     /** 「停」已受理（软停：跑完当前这步就收尾，改动保留、报告照推）。 */
     ctlStopAccepted: (locale: SyncLocale, ticketId: string): string =>
         locale === "zh"
-            ? `🛑 收到，正在停：票 ${ticketId} 跑完当前这步就收尾（改动保留在分支上，报告照推）`
-            : `🛑 Stopping: ticket ${ticketId} will wrap up after the current step (changes kept on the branch; report still pushed)`,
-    /** 「停」但没有在跑的票。 */
+            ? "🛑 好，正在停——等手上这步做完就收尾，改动留在分支上，结果照常发你"
+            : "🛑 Stopping — I'll wrap up after the current step. Changes stay on the branch; you'll still get the report",
+    /** 「停」但没有在跑的件。 */
     ctlNothingRunning: (locale: SyncLocale): string =>
-        locale === "zh" ? "ℹ️ 现在没有在跑的票" : "ℹ️ Nothing is running right now",
-    /** 「进度」但没有在跑的票。 */
+        locale === "zh" ? "ℹ️ 现在手上没有在跑的活儿" : "ℹ️ Nothing is running right now",
+    /** 「进度」但没有在跑的件。 */
     ctlNothingRunningProgress: (locale: SyncLocale): string =>
-        locale === "zh" ? "ℹ️ 现在没有在跑的票；发「队列」看待跑清单" : "ℹ️ Nothing is running; send \"queue\" for the pending list",
-    /** 「取消 <id>」成功。 */
+        locale === "zh" ? "ℹ️ 现在手上没有在跑的活儿；想看排了哪些，发「队列」" : "ℹ️ Nothing running; send \"queue\" to see what's lined up",
+    /** 「取消 <代号>」成功。 */
     ctlCancelled: (locale: SyncLocale, ticketId: string, title: string): string =>
         locale === "zh"
-            ? `🗑️ 已撤销 ${ticketId}「${title}」（还没开跑）`
-            : `🗑️ Cancelled ${ticketId} "${title}" (it hadn't started)`,
-    /** 「取消 <id>」找不到（已开跑/已跑完/无此票）。 */
+            ? `🗑️ 撤掉了：「${title}」（还没开跑）`
+            : `🗑️ Cancelled "${title}" (it hadn't started)`,
+    /** 「取消 <代号>」找不到（已开跑/已撤过/无此件）。 */
     ctlCancelGone: (locale: SyncLocale, ticketId: string): string =>
         locale === "zh"
-            ? `⚠️ 没找到待跑的票 ${ticketId}（可能已开跑或已撤；开跑中的票发「停」）`
-            : `⚠️ No pending ticket ${ticketId} (already started or cancelled; to stop a running one, send "stop")`,
+            ? `⚠️ 没找到排着的「${ticketId}」——可能已经开跑或撤过；在跑的要停就发「停」`
+            : `⚠️ Nothing queued matches "${ticketId}" (already started or cancelled; to stop a running one, send "stop")`,
     /** 剧本 E 闲聊引导（「在吗」整句）：一句话说清两种用法。 */
     ctlHello: (locale: SyncLocale): string =>
         locale === "zh"
-            ? "在的。想查什么直接问（我查了就答，不建票）；要改代码的活描述清楚（我开票去跑，跑完推报告）。"
-            : "Here. Ask anything you want looked up (I'll answer inline, no ticket); describe code changes as tasks (I'll open a ticket and push the report when done).",
+            ? "在的。想查什么直接问（我查了就答）；要改代码的活描述清楚，我去办，跑完汇报。"
+            : "Here. Ask anything you want looked up (I'll answer inline); describe code changes as tasks and I'll run them, reporting back when done.",
     /** sendText 成功留痕（日志用，不外发；C3：5x46 实锤发送结果零日志无从对账）。 */
     sendOk: (locale: SyncLocale, msgId: string, len: number): string =>
         locale === "zh"

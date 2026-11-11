@@ -689,14 +689,18 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
         if (ctl.kind === "queue") {
             const running = await listRunningTickets();
             const pending = await listPendingTickets(now());
+            const codeOf = (id: string): string => {
+                const parts = id.split("-");
+                return parts.length >= 3 ? (parts[parts.length - 1] ?? id) : id;
+            };
             const runningLine = running.length === 0
                 ? (zh ? "在跑：无" : "running: none")
-                : (zh ? `在跑：${running.map((t) => `${t.id}「${t.title}」`).join("、")}` : `running: ${running.map((t) => `${t.id} "${t.title}"`).join(", ")}`);
+                : (zh ? `在跑：${running.map((t) => `「${t.title}」`).join("")}` : `running: ${running.map((t) => `"${t.title}"`).join(", ")}`);
             const pendingLine = pending.length === 0
-                ? (zh ? "待跑：无（推任务即跑）" : "pending: none (send a task and it runs)")
+                ? (zh ? "排着：无（推任务就办）" : "queued: none (send a task and it runs)")
                 : (zh
-                    ? `待跑 ${pending.length} 张：${pending.map((t) => `${t.id}「${t.title}」${t.eligible ? "" : `（${humanTime(t.notBefore)} 开跑）`}`).join("、")}`
-                    : `pending ${pending.length}: ${pending.map((t) => `${t.id} "${t.title}"${t.eligible ? "" : ` (starts ${humanTime(t.notBefore)})`}`).join(", ")}`);
+                    ? `排着 ${pending.length} 件：${pending.map((t) => `「${t.title}」${t.eligible ? `（代号 ${codeOf(t.id)}）` : `（代号 ${codeOf(t.id)}，${humanTime(t.notBefore)} 开跑）`}`).join("、")}`
+                    : `queued ${pending.length}: ${pending.map((t) => `"${t.title}"${t.eligible ? ` (code ${codeOf(t.id)})` : ` (code ${codeOf(t.id)}, starts ${humanTime(t.notBefore)})`}`).join(", ")}`);
             return notifyText.ctlQueue(locale, runningLine, pendingLine);
         }
         if (ctl.kind === "progress") {
@@ -706,13 +710,13 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             const p = await readTicketProgress(t.id);
             if (!p) {
                 return zh
-                    ? `⏳ ${t.id}「${t.title}」正在准备（建 worktree/备环境）…`
-                    : `⏳ ${t.id} "${t.title}" is preparing (worktree/setup)…`;
+                    ? `⏳ 「${t.title}」正在准备（搭工作区、备环境）…`
+                    : `⏳ "${t.title}" is getting ready (workspace/setup)…`;
             }
             const mins = Math.max(1, Math.round((now().getTime() - new Date(p.startedAt).getTime()) / 60_000));
             return zh
-                ? `⏳ 第 ${p.round} 轮 · ${p.activity}（已 ${mins} 分钟）· ${t.id}「${t.title}」`
-                : `⏳ Round ${p.round} · ${p.activity} (${mins} min in) · ${t.id} "${t.title}"`;
+                ? `⏳ 「${t.title}」：第 ${p.round} 轮，${p.activity}（跑了 ${mins} 分钟）`
+                : `⏳ "${t.title}": round ${p.round}, ${p.activity} (${mins} min in)`;
         }
         if (ctl.kind === "stop") {
             const running = await listRunningTickets();
@@ -722,9 +726,11 @@ export const runFeishuListen = async (deps?: FeishuListenDeps): Promise<FeishuLi
             log(`🛑 [feishu] 停止请求已落盘：${t.id}（runner 工具边界软停，不杀进程）`);
             return notifyText.ctlStopAccepted(locale, t.id);
         }
-        // cancel
+        // cancel：支持完整票号或短代号（末段；须恰好唯一命中，防歧义误撤）
         const pending = await listPendingTickets(now());
-        const t = pending.find((x) => x.id === ctl.id);
+        const byId = pending.find((x) => x.id === ctl.id);
+        const byCode = byId ? [] : pending.filter((x) => x.id.endsWith(`-${ctl.id}`));
+        const t = byId ?? (byCode.length === 1 ? byCode[0] : undefined);
         if (!t) return notifyText.ctlCancelGone(locale, ctl.id);
         await cancelPendingTicket(t.id);
         // 撤票必须同时撤去重态（append-only state last-wins 覆盖为 cancelled）——否则同内容重发
