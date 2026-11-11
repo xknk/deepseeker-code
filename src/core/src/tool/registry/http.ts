@@ -60,6 +60,13 @@ export const httpTools: CustomTool[] = [
                 required: ["url"]
             },
             safetyLevel: ToolSafetyLevel.DANGER, // 对外/对内网络请求 + 可能带凭证，强制审批
+            // ★ A3（2026-11-09 审批降噪）：主参数 = url——权限规则 ToolName(argGlob) 按 URL 取值匹配
+            //   （此前未声明，scoped 规则退化为按裸名匹配任意调用）；allow-always 亦落精确 URL。
+            primaryArg: "url",
+            // ★ A3：字面回环目标（127.0.0.1 / localhost / [::1]，可带端口）default 档免审——本地前后端联调
+            //   的高频调用不再逐次转人工（2026-11-05 trace：16 次点击全为 localhost）。外网目标照旧转人工；
+            //   工具内 SSRF 闸（safeFetchFollow 钉 IP + 云元数据端点硬拦）不动，与本声明无关。
+            autoApproval: "loopback",
             isSync: true,
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: any) => {

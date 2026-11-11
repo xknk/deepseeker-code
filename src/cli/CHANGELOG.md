@@ -1,5 +1,98 @@
 # Changelog
 
+## 1.0.73
+
+飞书远程指挥台全线 + 跨仓工单路由 + 审批降噪 + 轻量验收 + 拟人文案（手机五剧本、中午延迟槽、拟人文案三条真机验收腿全过后发版）：
+
+- **C1–C5「指挥台」**（远程入口从「信箱」变「即时指挥」）：① 直答通道——问句走 flash 只读轻会话（¥0.001 级，不建票；写操作零容忍，触碰即升级建票）；同一回复链续问粘热会话吃前缀缓存；② listen 点火 runner——推任务即跑（有活才起 runner，缺省不点火），延迟意图词「今晚跑/明早跑/中午跑」排 01:00/07:00/12:00（过了当日点排次日，机器关着票不丢，巡检补跑）；③ 完成推送带结论摘要（≤200 字、剥代码块——外发红线唯一放行形态，diff/代码体仍禁）；④ 控制词四件：队列/进度/停/取消（停=协议文件软停，跑完当前这步收尾，不杀进程）。
+- **文案拟人化 + 票号黑话清零**（用户反馈「太机器话、票啊啥的去掉」）：建票「🏃 收到，这就去办：「标题」」、延迟「🌙 好的，排在 明 01:00：…想撤掉就发 取消 短代号」、完成推送改多行结论式（状态/动了哪些文件/花了多少/报告路径/要跟进直接回这条）；手机上只见标题与 4 位短代号（如 `pyta`），完整票号只留在报告路径；取消口令支持短代号（末段唯一命中才动手，宁可不动不误撤）。
+- **跨仓工单路由**：手机发票可指定别的仓库（「在 lg-pms 建…」）——repoRoute 规则路由（零 LLM：扫 D:/code 仓库索引，唯一外部命中+基座不命中+邻近词三护栏）+ 跨仓 worktree + accept 按目标仓 CI 构建面收敛适配（Java 走 `mvn -pl <CI模块> -am`）+ 报告 `repo:` frontmatter 供续修继承；长路径仓 git 全链 `-c core.longpaths=true`。
+- **审批降噪三连修**（浏览器票 15 张审批卡逐张点实锤）：MCP 审批合成名补齐（`mcp__server__tool` 进解锁名单/分类器/审批记忆，此前人工审批拿裸 `mcp_call` 永远匹配不上）；工单 `tools:` 支持尾缀通配（`mcp__playwright__*` 一条解锁整个服务）；同票同工具人工决定终身记忆（cardDecisions，跨重试轮防磨损式逼批）。
+- **run_command 流式协议修复**：供应链闸门包装误用普通 async 函数包 async generator，执行器判非流式把 generator stringify 成 `{}`——命令执行成功但模型只见空壳+假失败；改 async generator + `yield*` 委托透传（generator 包装三犯定则：包 async generator 必须本身是 async function* + yield* 委托）。
+- **轻量验收**：不碰代码的票（txt/md/图片等白名单；未知扩展名按代码处理——漏放行只是多跑编译，误放行是漏验）跳过整仓编译，报告诚实标注「未执行（轻量验收）」不伪装 exit 0；修复门时序——验收前先 `git add -A` 再 `--cached` numstat，untracked 新文件不再漏计（「建个 txt 也等 20 分钟编译」根治）。
+- **49 工具全矩阵守门**：batch 工单工具分类（hidden/edit/card/safe）逐个双向对账测试——注册表新增工具未分类必红，「忘了测某个工具」结构性不可能。
+- **B 组软闸门**：窗口内高危操作自动拒并留痕；完成推送带改动文件名列表（封顶 8）与拒清单（「回复本消息可续修补跑」翻案引导）；整句确认语（知道了/收到…）不开票只回「👍 收到」；跑批中回复自动建后续票并排在前票之后。
+- **「完成推送双发」排查定案（代码无罪）+ 两真缺陷**：飞书服务端硬对账实证每票仅一条推送（消息 id 逐一吻合），手机端第二条为客户端渲染现象；顺带修确认语对账重放连回「👍 收到」（重放路静默+留痕）与完成推送花费 ¥null 归一（无价模型写 `"?"`，文案不再露 ¥ 位）。
+- **即时回执**——过白名单闸的消息必回：建票/排队/重复/拒收（配额上限等拒因留痕）/异常各有回执；白名单外保持静默（防探测），群聊回执 @ 发送者。
+- **完成推送**——`finishTicket` 单一咽喉：飞书票跑完（成功失败都）落通知文件，监听器扫描发送；监听器不在线文件原地等（重试上限 5 次），不再依赖人盯控制台。
+- **回复即续修**——回复原消息/回执/完成推送 → 消息映射表路由：原票排队中 = 追加段并入正文（引用块边界 + 运行锁）；已完成 = 自动建续修票（`continues:` 继承 accept/setup/budget，base 分支取前次报告）；跑着/查无 = 回落普通建票。回复免 @ 但发送者必须 ∈ 白名单。
+- **外发红线不变**：回执/推送只含状态、元信息与结论摘要，无 diff、无代码体、无验收输出。
+- 守门：飞书 listen/notify/message/reconcile 全 family、batch-tool-matrix、worktree-sweep、轻量验收与门时序、跨仓路由与 CI 构建面四形态。
+
+真机验收当日连带修出的三个生产缺陷（全部实锤复现后修复）：
+
+- **基线探测迟滞复测**——测试套件在白天用机负载下偶发单用例红（间歇 ~40%，红用例每次不同），一红就写「今日已验不通过」当天缓存会把**全天票堵死**（实锤：08:36 一轮 flake 毒化一整天，票零花费全拒）。现探测红隔 30s 复测一次，二次红才定罪缓存；真红仓库两连红只晚 30 秒。
+- **worktree 同名残分支堵死重跑**——上次失败尝试留下的残分支（worktree 目录已被清）会让 `worktree add -b` 撞 "branch already exists"，该票**永远跑不起来**（实锤一早连咬三次）；现自愈：清目录 → `worktree prune` → 删同名残分支（只可能是本槽位上一次尝试的尸体）→ 重建，守门测试钉死。
+- **finishTicket 读空窗口**——`rename(running→done)` 在 Windows 高负载下存在「源已去、目标未现」的可见窗口，双侧读空时完成通知文件不落盘、推送静默丢失；现读空退避重试（900ms）。
+- 测试加固：listen 系等待预算 8s→20s（满载假超时实锤）、notify 咽喉测试改串行取跑与生产同构（连取两张会被残留回收语义退回一张——随机 id 排序决定谁被退，50% 硬币，取证实锤）。
+
+## 1.0.72
+
+飞书断线补票真打通（断线三连验收腿暴露的三连修，全部真机探针实锤）：
+
+- **对账拉取时间单位是秒，不是毫秒**——`im/v1/messages` 的 `start_time/end_time` 传毫秒 = 公元 3 万年的未来窗、查询恒空：游标照常推进、补票功能此前**从未工作过**（实时建票正常掩盖了它）。现查询边界换算秒（内部游标仍统一毫秒），守门测试钉死 10 位秒形态。
+- **list item 类型字段是 `msg_type`**——归一只认事件路 `message_type` 与想当然的 `type`，真实列表 item 的 `msg_type` 两头不匹配 → 恒判「形态异常」跳过；补 `deleted` 消息拒收，守门测试逐字段复刻真机 item。
+- **补票拒因必须留痕**——非建票结果（日上限/闸门拒绝/锁忙）原先静默计入跳过计数（真机实锤：日上限拒补票零日志，只能靠探针定位）；现 `补票跳过：<原因>` 一行见原因。
+
+## 1.0.71
+
+飞书对账逐腿隔离 + 原子写 tmp 自净（1.0.70 真机联调实锤）：
+
+- **对账单腿失败不再连坐整轮**——群腿缺 `im:message.group_msg` 权限时拉取报 400（飞书错码 230027），旧代码任一会话腿失败即整轮 return 失败：私聊腿被连坐，每轮对账死在第一条腿、游标冻结。现单腿失败降级明示（legSkip 日志点名会话 + 权限归因）并跳过，其余腿照常拉取；只有**全部腿失败**才整轮失败（游标不动下轮重试，语义不变）。
+- **SDK 吞错误体修复**——larksuite SDK 把 HTTP 4xx 抛成 Error 且 message 只有状态码，飞书 code/msg 藏在 `response.data`；现提取错误体并把 99991672/230027 归一为权限缺失（原正则永远探测不到 230027）。
+- **原子写 tmp 自净**——`saveCursor`/`recordKnownChat` 的 temp+rename 在 rename 失败时残留 tmp 文件（开发期曾累积 1 万+个垃圾文件）；现失败即 unlink，tmp 不再过夜。
+
+## 1.0.70
+
+飞书断线对账盲区修复（1.0.69 真机联调实锤）：**群聊自动学习**。
+
+- **缺口**：群 @ 建票走实时通道（WS 全量事件 + 闸门过滤），不依赖 `feishu.json chats` 配置；但断线对账翻页只认 `chats` + 已登记会话——只 @ 过一次的群两边都不在，**该群断线窗口内的消息永远补不回来**（与「断网重连不丢票」验收项冲突）。
+- **修法**：群聊与私聊对称——首个过白名单发送者的实时消息登记 chat_id 纳入对账（登记文件改名 `feishu-known-chats.json`，≤1.0.69 的 `feishu-p2p-chats.json` 自动迁移继承，首次登记即搬入新文件）；对账拉回的消息仍走完整闸门，无白名单绕行。从未给机器人发过消息的会话依然无法覆盖（无从得知 chat_id，降级文案明示）。
+
+## 1.0.69
+
+飞书监听停机语义补刀（1.0.68 真机冒烟暴露的潜伏缺陷——旧版被 start() 首轮自杀 bug 掩盖）：
+
+- **停机必须打断长睡**：`requestStop` 原先只设标志位，对账循环睡满 `reconcileMs`（缺省 **10 分钟**）才收尾——真机后果：Ctrl+C / 长连接终态失败后进程最长滞留 10 分钟才退出（心跳停写、锁仍占、WS 还活着）。现 `requestStop` 同时唤醒所有可打断睡眠，信号/终态失败即刻收尾。守门测试以缺省真实 sleep 钉死：终态失败必须 5 秒内退出。
+- **多路唤醒**：扫描/对账两循环并发睡眠，单槽唤醒回调会互相覆盖（唤醒丢失）；改集合制——每个睡眠者注册自己的回调、在自己的 finally 里摘除（race 双边结算都清，防悬挂回调漏进下一轮）。
+- **睡眠定时器 unref**：打断后 race 输家的定时器不许拖住进程退出。
+
+## 1.0.68
+
+飞书入口真机联调修复线（SDK 1.76 实锤三连修，全部经真机 API/监听复现定位）：
+
+- **致命：长连接生命周期语义修正**——SDK 的 `wsClient.start()` 校验完凭证后**立即 resolve**（连接由内部重连循环持有），返回值不是连接生命周期；1.0.67 把它当「关闭信号」用（`.then(stop)`）导致扫描/对账循环首轮即退、进程在 `start + 对账间隔` 准时自杀（心跳只写一次 → runner 判死 → 卡片审批静默回退 deny）。改为生命周期信号走 WSClient **构造器回调**：`onReady` = 连接建立（🟢 started 日志恢复，1.0.67 该日志从未出现即同根因）；`onError` = 终态失败（重试耗尽/不可重试）才停机；运行期断线由 SDK 自动重连，进程不因断线自杀（runner 侧心跳过期判定仍是外部看门狗）。守门测试复刻立即 resolve 语义钉死。
+- **审批卡在真机 API 上整卡被拒（230099）**——卡片 JSON 2.0 下 `tag:"action"` 容器与 `tag:"note"` 组件均不再支持（ErrCode 200861），`config.update_multi` 也被拒（300302）；按真机实测定型重写：**按钮直接作为 `body.elements` 元素**（实测 code 0），提示语并入 markdown。behaviors callback 回调值与点卡白名单闸不变。
+- **机器人 open_id 获取修复**——SDK 未暴露 `client.bot` 命名空间（`bot.info is not a function`），改走通用 `request` 直打 `/open-apis/bot/v3/info`（v4 路径 404 是旧文档误导）；`mentionOnlyInGroup=true` 下群 @建票恢复正常。
+
+## 1.0.67
+
+多入口工单流水线 P4——飞书入口（`batch listen feishu` 长连接 + 卡片审批），遥控入口延伸到手机：
+
+- **飞书长连接监听**：企业自建应用经官方 SDK WSClient 建立出站长连接（免公网 IP/域名/内网穿透，不开任何监听端口）；群里 @机器人一句话 / 白名单私聊直接建挂机票，与 sync/webhook 完全同一条建票管线（引用块边界、accept 四档同闸、附件三态经 `im.message.resource` 下载、`.sync.lock` 互斥、内容哈希去重、`maxTicketsPerDay` 共享配额）。text/post/图片/文件四类消息支持，@提及占位符剔除不污染标题。
+- **卡片审批**：`batch run` 撞高危操作 → 交互卡推到私聊（新版卡片 JSON，behaviors callback）→ **手机点批准 = allow-once 单次生效**（不改工具白名单），30 分钟没点 = 自动拒绝（fail-closed）；点卡人必须在 `users` 白名单；回调 3 秒内 toast 应答；卡片不含 diff 与验收输出。跨进程文件协议（pending→decision 原子写 + approvalId 比对 + 一个 pending 只决定一次），runner 按心跳判活——listen 不存活时行为与旧版完全一致（deny + 记录，零回归），卡片等待期看门狗挂 PAUSED 防断流误杀。
+- **断线对账**：时间游标（`feishu-cursor.json`）+ 周期增量拉取补漏票（验收硬项「断网重连不丢票」）；私聊 chat_id 从首条消息学习登记（`feishu-p2p-chats.json`）；缺历史权限时明示降级文案，不静默。**单实例约束**：飞书同应用多客户端不广播（消息随机送达一条连接），全系统只允许一个 listen 进程（`.listen.lock` 原子锁 + 心跳双重防护）。
+- **配置面零 sync.json 触碰**：飞书配置走独立 `feishu.json`（白名单 chats/users、`mentionOnlyInGroup` 缺省 true、`budgetYuan` 缺省 0.5 元 IM 强制小额、`gatekeeper` LLM 准入缺省关），凭证只走 `FEISHU_APP_ID`/`FEISHU_APP_SECRET` 环境变量；SDK 为可选依赖**不随主包装**（首次使用按提示 `npm install -g @larksuiteoapi/node-sdk`）。README 双语「飞书入口」跟着点。真机联调进行中，问题走后续小版本。
+- **顺手修一个 P1 起潜伏真 bug**：sync.json 未知键校验原为字符串子串匹配——`defaultBudget`/`maxTickets` 等合法键前缀错字能静默漏过（预算帽/日上限静默失效），改数组精确匹配并守门测试钉死前缀错字形态；`batch pr` 补边界口径（只认 github/gitlab 来源票，feishu/webhook 票验收后人工交付）。
+
+## 1.0.66
+
+挂机流水线打磨第一批 + 多入口工单流水线 P3（webhook 入口）——定时形态上线后暴露的缺口全收（与 VSCode 端 1.0.76 同批 core，流水线代码由 CLI 包承载）：
+
+- **P3 webhook 入口（`POST /hooks/:channel`）**：内网 CI 失败钩子 / 测试流程 POST 即建票，与 `batch sync` 走完全同一条管线（引用块边界、accept 四档同闸、附件三态、`.sync.lock` 互斥、sync-state 去重、每日上限）。鉴权复用 `DEEPSEEKER_CODE_TOKEN`；去重键=内容哈希（CI 同内容重推幂等 duplicate）；每 channel 固定窗口限流缺省 5 票/分钟（环境变量 `DEEPSEEKER_CODE_WEBHOOK_RATE` 可调）+ `maxTicketsPerDay` 共享配额；被忽略的外部 accept 字段票内注记不静默。配置面**零新键**（sync.json 被旧版 CLI 定时器共读，未知键=拒载停摆——webhook 经 `loadSyncConfig {allowNoSource}` 复用既有键，webhook-only 用户可不配拉模式源）。守门 batch-webhook.test.ts 21 例（含路由级 401→建票→重推 duplicate 冒烟与 import 白名单源码扫描）。
+- **sync 建票 `defaultSetup`**：sync.json 新键——定时自动建票没人补 `setup: pnpm install` 的票，每晚必因装不上依赖被缓存成 baseline-broken 空转，现建票自动附带；`defaultAccept` 同口径 fail-closed 校验，`--check` doctor 加「未配置」⚠ 非阻断提示。★时序：本地 sync.json 补此键必须晚于本版 CLI 装机（旧版读到未知键会拒载整份配置）。
+- **改动清单交接**：任务收尾把 `git diff --cached --numstat` 固化进报告 frontmatter（`changed-file: <path> (+N/-M)`，封顶 30 条带余量省略行，二进制标 (binary)、改名按 git 原样），续修票摘要自动注入【前次改动文件】段——续修不用重新探索上票改了什么；「每票新会话 / 预算隔离 / 不续接旧对话」红线不动。
+- **PR 正文小修**：外发文件清单剥掉 name-status 状态前缀（试点 PR #4 实证 `M⇥README.md` 漏进正文），控制台预览保留状态列；numstat/name-status 两处 diff 加 `core.quotepath=false`——中文路径不再被 git 转成八进制串进报告与 PR 正文（守门测试以中文文件名端到端钉死）。
+
+## 1.0.65
+
+多入口工单流水线全量上车（issue → 修复 → 验收 → PR；与 VSCode 端 1.0.75 同批 core，流水线代码由 CLI 包承载）：
+
+- **P1 `batch sync`（拉单）**：打了准入 label 的 GitHub/GitLab issue 自动拉成本地挂机工单。零 LLM 轻模块（不配 API key 也能同步/体检）：三态去重 sync-state.jsonl + 规则闸（作者白名单/屏蔽关键词/正文超长/同标题重复）+ accept 四档（本地配置 > issue 的 accept 块默认完全忽略、显式开启也只收单命令+强制人工复核 > 自动探测 package.json/Makefile/go.mod > 拒建票）+ **基线三态**（agent 开跑前干净树先跑验收：环境装不上=setup-failed 不缓存、基线红=baseline-broken 当日缓存、超时=疑似 watch 单列——**基线红的仓库零 agent 花费**）+ GitHub 附件链三态（内联/落盘+绝对路径/标未读取，含图强制 needs-review）+ 总量硬闸（`batch run --max-total-yuan` 停在票前；sync.json `maxTicketsPerDay`）+ `.sync.lock` 单飞 + `--check` 逐项体检 + `--dry-run` 预演 + 注入边界双层（issue 正文引用块 + batch 会话 system「数据非指令」段）+ 仓库一致性标注（fork 工作流任一 remote 匹配不误报）。README 双语三平台（cron/launchd/任务计划）双时钟定时示例 + sync.json.example。
+- **P2 `batch pr`（交付）与续修链**：验收通过的票经显式命令交付为**草稿 PR**——预检（报告+passed → needs-review 闸无豁免 → 幂等标记 `done/<id>.pr.json`）→ 产物分支重建审查 worktree → 强制 fetch 主干 + 落后/merge-tree 冲突预检（首版**不自动 rebase**：拒付+手工命令+打标）→ diff 预览 → push `agent/<票id>` → GitHub `gh pr create --draft`（fixes #N）/ GitLab Draft MR（Closes #iid）；**PR 正文四要素脱敏**（标题/状态与成本/改动文件清单/花费——diff 与验收输出永不外发）。**改测试即降级**：测试路径启发式（`tests?/`、`__tests__/`、`*.test.*`、`*.spec.*`）+ sync.json `testPathPatterns` 可扩展 → needs-review → 拒交付。**续修链**：指纹 v2=标题+正文+近 5 条评论 (id,updatedAt)，issue 变化 → 续修票（continues 前票、继承 accept/setup/budget、以前次产物分支为代码基座；旧状态首见迁移 v2 无升级洪水）。**账本**：`batch/ledger.jsonl` 每 run 追加，`batch status` 汇总近 7 天 + 队列实况。**GitLab 补齐**：附件链与仓库一致性标注。`batch clean` 同步回收附件目录（孤儿 10 分钟宽限防误删在途 sync）。
+- **随带**：batch worktree 收尾 commit 快照（改动固化为 dsc-wt-* 分支 commit，跨重启不丢——原「保留待处置」只活到下次进程启动）；sync 票 id 统一按注入时钟预生成（修双源排序随 CI 时区漂移翻车）。
+- **真仓实证**：issue #2（¥0.38，26 轮，修复经人工 cherry-pick 采纳关单）与 issue #3 → 草稿 PR #4（¥0.028，4 轮，batch pr 全流程含四要素脱敏/幂等标记）两单全链路闭环。
+
 ## 1.0.60
 
 随 core 重打包（2026-10-22）：携带 Agent 内核打磨 A/B 两批（与 VSCode 端 1.0.70 同源）——runLedger 成本账本收拢（runAgent 六个跨轮账目状态 + 子 run 成本中继收拢为每 run 一实例的闭包模块，纯结构收拢零控制流变化，runAgent 净瘦身 62 行；预算硬线 1.2× 单点化为 BUDGET_HARD_LIMIT_RATIO；结算单金额/usage.jsonl 行/预算截断文案经回放驱动对照与改前逐字节同形）+ 成功路径 [DSC-DIAG] 日志治理（streamInference 每轮统计行与 trace 事件全量重复，长会话纯刷屏，删除；错误路径保留并改写为「❌ 推理失败（round N）」风格，run 死因 stdout 可观测性不丢）。**CLI 自身代码无改动**，行为与文案均无变化；本版仅重打 dist 以携带更新后的 core（用户可见效果：长会话不再每轮刷诊断统计行，失败时 stdout 直显死因）。

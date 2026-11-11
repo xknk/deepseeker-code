@@ -1,8 +1,10 @@
 /**
  * @file tool/worktree/manager.ts
  * @description P2-13 git worktree 生命周期管理：为 run_workflow 的 worktree 隔离模式提供
- *  create / harvestDiff / remove / sweep 四件套。每个并行子 agent 派生前 create 一个独立 worktree，
+ *  create / harvestDiff / commit / remove / sweep 五件套。每个并行子 agent 派生前 create 一个独立 worktree，
  *  子 agent 在其中运行（经 ALS 隔离，改动不污染主工作区），结束 harvestDiff 收割改动，最后 remove 回收。
+ *  ★ commitWorktreeChanges 只为 batch 服务（worktree 目录被保留、跨重启交付）：run_workflow 的 worktree
+ *    由 removeWorktree 连分支一起删，提交无意义。
  *
  *  设计要点：
  *  - worktree 工作树落在仓外 <os.tmpdir()>/deepseeker-code-worktrees/<userWorkspaceDir>/<sessionId>/<stepId>/，
@@ -32,9 +34,18 @@ export interface WorktreeHandle {
     baseSha: string;
 }
 
+/**
+ * 在【主仓】执行 git（worktree admin 操作锚定主仓，不受 ALS 影响）。
+ * ★ core.longpaths（2026-11-10 跨仓路由实锤）：worktree 落系统临时目录，路径前缀长（tmpdir +
+ *   项目桶 + batch-<50位id> + 任务id ≈150 字符），叠上目标仓深层 Java 路径即破 Windows MAX_PATH 260
+ *   （pms-parent checkout 全线 Filename too long）。逐调用 -c 注入：不改仓级配置、三平台无害。
+ */
+const gitWithLongpaths = (args: string[], options: { cwd?: string; maxBuffer?: number }) =>
+    execFileSmart("git", ["-c", "core.longpaths=true", ...args], { maxBuffer: 1024 * 1024 * 5, ...options });
+
 /** 在【主仓】执行 git（worktree admin 操作锚定主仓，不受 ALS 影响）。 */
 const runMainGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileSmart("git", args, { cwd: WORKSPACE_ROOT, maxBuffer });
+    gitWithLongpaths(args, { cwd: WORKSPACE_ROOT, maxBuffer });
 
 /**
  * worktree 根目录：<os.tmpdir()/deepseeker-code-worktrees>/<userWorkspaceDir>/（按项目隔离，sweep 按此扫）。
@@ -56,12 +67,20 @@ const isNotARepoError = (e: any): boolean => {
 };
 
 /**
- * 创建一个从主仓当前 HEAD 检出的独立 worktree（新临时分支）。
+ * 创建一个从主仓检出（缺省当前 HEAD）的独立 worktree（新临时分支）。
+ * @param baseRef 检出基座（P2 续修链：传前票产物分支名，代码基座=前次修复成果；缺省 HEAD 不变）。
+ * @param repoRoot 跨仓路由（2026-11-10）：worktree admin 锚定的仓库根，缺省主仓（WORKSPACE_ROOT）。
+ *   跨仓票（如「在 lg-pms 项目…」）传目标仓库根——分支/worktree 元数据落目标仓；harvest/commit
+ *   本就按 wt.path（git -C）操作、不依赖锚定仓，天然跨仓。
  * @throws 非 git 仓库 / worktree add 失败时抛错（run_workflow 捕获后该步骤标失败）
  */
-export const createWorktree = async (sessionId: string, stepId: string): Promise<WorktreeHandle> => {
-    // 主仓 HEAD 作为 worktree 基座与 diff 基准
-    const { stdout: shaOut } = await runMainGit(["rev-parse", "HEAD"]);
+export const createWorktree = async (sessionId: string, stepId: string, baseRef = "HEAD", repoRoot?: string): Promise<WorktreeHandle> => {
+    // admin git 锚定仓（跨仓路由时为目标仓库；缺省主仓）；core.longpaths 见 gitWithLongpaths 注
+    const adminCwd = repoRoot ?? WORKSPACE_ROOT;
+    const runAdminGit = (args: string[], maxBuffer = 1024 * 1024 * 5) =>
+        gitWithLongpaths(args, { cwd: adminCwd, maxBuffer });
+    // 检出基座作为 worktree 基座与 diff 基准（先解析成 SHA：baseRef 可能是分支名）
+    const { stdout: shaOut } = await runAdminGit(["rev-parse", baseRef]);
     const baseSha = shaOut.trim();
 
     const wtPath = worktreeDir(sessionId, stepId);
@@ -70,19 +89,23 @@ export const createWorktree = async (sessionId: string, stepId: string): Promise
     const branch = `dsc-wt-${shortId}-${stepId}`;
 
     await fs.promises.mkdir(path.dirname(wtPath), { recursive: true });
-    // -b：新建分支；HEAD：从主仓当前 HEAD 检出。worktree 路径须不存在（mkdir 只建到父级）。
+    // -b：新建分支；baseRef：从指定基座检出（缺省 HEAD）。worktree 路径须不存在（mkdir 只建到父级）。
     try {
-        await runMainGit(["worktree", "add", "-b", branch, wtPath, "HEAD"]);
+        await runAdminGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
     } catch (e: any) {
-        // 残留目录兜底：若上次崩溃留了空目录，清后重试一次
+        // 残留兜底：上次失败尝试可能留下旧目录、陈旧 worktree 元数据或同名残分支——
+        // 只清目录不够（分支还在时 -b 撞 "branch already exists"，该票永远跑不起来，重跑场景必须自愈）。
+        // 同名分支（dsc-wt-<session>-<step>）只可能是本槽位上一次尝试的尸体，删之安全。
         if (e?.code === "ENOENT" || /already exists|not a working tree/i.test(`${e?.stderr || ""} ${e?.message || ""}`)) {
             await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
-            await runMainGit(["worktree", "add", "-b", branch, wtPath, "HEAD"]);
+            await runAdminGit(["worktree", "prune"]).catch(() => { });
+            await runAdminGit(["branch", "-D", branch]).catch(() => { });
+            await runAdminGit(["worktree", "add", "-b", branch, wtPath, baseSha]);
         } else {
             throw e;
         }
     }
-    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}）`);
+    console.log(`🌿 [worktree] 创建 ${branch} → ${wtPath}（base=${baseSha.slice(0, 8)}${baseRef === "HEAD" ? "" : ` ← ${baseRef}`}@${path.basename(adminCwd)}）`);
     return { path: wtPath, branch, baseSha };
 };
 
@@ -119,9 +142,83 @@ export const harvestDiff = async (wt: WorktreeHandle): Promise<string> => {
     }
 };
 
-/** 在 worktree 内执行 git（git -C <wt>）。 */
+/** 在 worktree 内执行 git（git -C <wt>；longpaths 同注入——add/diff/commit 都要走深层文件）。 */
 const runInWorktree = (wtPath: string, args: string[], maxBuffer = 1024 * 1024 * 5) =>
-    execFileSmart("git", ["-C", wtPath, ...args], { maxBuffer });
+    gitWithLongpaths(["-C", wtPath, ...args], { maxBuffer });
+
+/** 收尾快照提交的结果（供 batch 报告落字）。 */
+export interface WorktreeCommit {
+    /** true=本次调用产生了新 commit（worktree 内未提交改动已固化）。 */
+    committed: boolean;
+    /** 分支当前 HEAD SHA（成功时；失败为空串）。 */
+    sha: string;
+    /** true=相对基座 baseSha 完全没有改动（无未提交改动、也没有 agent 自己 commit）。 */
+    noChanges: boolean;
+    /** 提交失败原因（git 报错原文截断，单行）；成功或无改动时缺省。 */
+    error?: string;
+    /** true=agent 自 commit 被补打了 Batch-Trace 尾注（amend 改写）；快照自提的 commit 尾注随消息自带，不置位。 */
+    trailerAdded?: boolean;
+}
+
+/**
+ * 收尾快照提交（**仅 batch 调用**）：把 worktree 内全部改动固化成一个 commit。
+ *
+ * ★ 为什么必须提交：worktree 工作树落在 os.tmpdir()，进程重启时 sweepOrphanedWorktrees 会
+ *   `worktree remove --force` 清掉目录——未提交的改动随之消失。只有 commit 到分支
+ *   （dsc-wt-* ref 留在主仓）才能跨重启存活，次日 `batch pr` 才有东西可交付。
+ * ★ 三处刻意关闭项（无人值守场景）:
+ *   - `--no-verify`：跳过 pre-commit/commit-msg 钩子——仓库钩子可能交互、联网或挂死；
+ *   - `-c commit.gpgsign=false`：开着签名会在无 tty 时等口令直至超时；
+ *   - 显式 `user.name/email`：干净机器 / CI 常无 git 身份，缺省直接 commit 失败。
+ * ★ 失败不抛错：改动还在 worktree 里（当下能看），只是重启会丢——由调用方写进报告。
+ *
+ * @param trailer 溯源尾注（P2：`Batch-Trace: <票id>`）——快照自提时直接拼进提交消息；agent 已
+ *   自己 commit 过时（committed=false 且有改动）对 HEAD 补打尾注（amend，同样关闭钩子/签名，
+ *   只动消息不动内容）。补打失败不影响交付（分支与内容都在），只是溯源降级为票报告。
+ */
+export const commitWorktreeChanges = async (wt: WorktreeHandle, message: string, trailer?: string): Promise<WorktreeCommit> => {
+    const readHead = async (): Promise<string> => {
+        const { stdout } = await runInWorktree(wt.path, ["rev-parse", "HEAD"]);
+        return stdout.trim();
+    };
+    const identityFlags = [
+        "-c", "commit.gpgsign=false",
+        "-c", "user.name=deepseeker-code",
+        "-c", "user.email=deepseeker-code@localhost",
+    ];
+    try {
+        await runInWorktree(wt.path, ["add", "-A"]);
+        const { stdout: status } = await runInWorktree(wt.path, ["status", "--porcelain"]);
+        if (!status.trim()) {
+            // 无未提交改动：agent 可能自己 commit 过（HEAD 已前移），也可能全程没动文件
+            let head = await readHead();
+            const noChanges = head === wt.baseSha;
+            let trailerAdded = false;
+            if (!noChanges && trailer) {
+                // agent 自 commit：补打溯源尾注（amend 只改消息；失败不致命，降级为票报告溯源）
+                try {
+                    const { stdout: logMsg } = await runInWorktree(wt.path, ["log", "-1", "--format=%B"]);
+                    if (!logMsg.includes(trailer)) {
+                        const merged = `${logMsg.replace(/\s+$/, "")}\n\n${trailer}\n`;
+                        await runInWorktree(wt.path, [...identityFlags, "commit", "--no-verify", "--amend", "-m", merged]);
+                        trailerAdded = true;
+                        head = await readHead();
+                    }
+                } catch (e: any) {
+                    console.warn(`⚠️ [worktree] Batch-Trace 尾注补打失败（不影响交付）: ${`${e?.stderr || e?.message || e}`.trim().slice(0, 160)}`);
+                }
+            }
+            return { committed: false, sha: head, noChanges, trailerAdded: trailerAdded || undefined };
+        }
+        const finalMessage = trailer ? `${message.replace(/\s+$/, "")}\n\n${trailer}\n` : message;
+        await runInWorktree(wt.path, [...identityFlags, "commit", "--no-verify", "-m", finalMessage]);
+        return { committed: true, sha: await readHead(), noChanges: false };
+    } catch (e: any) {
+        const text = `${e?.stderr || ""} ${e?.message || e}`.trim().replace(/\s+/g, " ");
+        console.warn(`⚠️ [worktree] 收尾提交失败（改动仍在该 worktree 内，重启即丢）: ${text}`);
+        return { committed: false, sha: "", noChanges: false, error: text.slice(0, 300) };
+    }
+};
 
 /**
  * 移除 worktree：先杀其下常驻后台进程，再 git worktree remove + prune + 删临时分支。
@@ -144,12 +241,18 @@ export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
  * 启动期孤儿清扫：进程重启意味着上次未清理的 worktree 全是孤儿。
  * 扫 <dataDir>/worktrees/<userWorkspaceDir>/ 下所有 worktree 目录，强制移除 + prune。
  * 在 initEngine 中调用。非 git 仓库静默跳过。
+ * ★ 年龄护栏（2026-11-10 y38a 实锤）：清扫前提「残留=孤儿」只在单进程世界成立——本机是多进程
+ *   并存（listen 点火的 runner 在跑，另一进程 boot 即触发本清扫），曾把活跃 runner 刚建好的
+ *   worktree 连根拔掉（agent 中途 git_status 报无仓库、收尾提交 not a git repository）。
+ *   近 SWEEP_MIN_AGE_MS 内有写入的目录一律跳过（正在跑的必新；刚完成的留到下次启动再扫，无害）。
  */
-export const sweepOrphanedWorktrees = async (): Promise<void> => {
-    const root = worktreeRootDir();
+const SWEEP_MIN_AGE_MS = 60 * 60 * 1000;
+export const sweepOrphanedWorktrees = async (rootOverride?: string): Promise<void> => {
+    const root = rootOverride ?? worktreeRootDir();
     let entries: string[];
     try { entries = await fs.promises.readdir(root); } catch { return; /* 目录不存在，无事可扫 */ }
     let swept = 0;
+    let skippedYoung = 0;
     for (const sessionIdDir of entries) {
         const sessionPath = path.join(root, sessionIdDir);
         let stepDirs: string[];
@@ -157,18 +260,22 @@ export const sweepOrphanedWorktrees = async (): Promise<void> => {
         for (const stepDir of stepDirs) {
             const wtPath = path.join(sessionPath, stepDir);
             try {
+                const st = await fs.promises.stat(wtPath);
+                if (Date.now() - st.mtimeMs < SWEEP_MIN_AGE_MS) { skippedYoung++; continue; }
+            } catch { /* stat 失败（已被移走等）走下方移除兜底 */ }
+            try {
                 await runMainGit(["worktree", "remove", "--force", wtPath]);
             } catch {
                 await fs.promises.rm(wtPath, { recursive: true, force: true }).catch(() => { });
             }
             swept++;
         }
-        // 该 session 的 worktree 目录已空，清掉壳
-        await fs.promises.rm(sessionPath, { recursive: true, force: true }).catch(() => { });
+        // 该 session 的 worktree 目录已空，清掉壳（仍有年轻 worktree 的壳保留）
+        if (skippedYoung === 0) await fs.promises.rm(sessionPath, { recursive: true, force: true }).catch(() => { });
     }
     if (swept > 0) {
         try { await runMainGit(["worktree", "prune"]); } catch { /* ignore */ }
-        console.log(`🧹 [worktree] 启动期清扫 ${swept} 个孤儿 worktree`);
+        console.log(`🧹 [worktree] 启动期清扫 ${swept} 个孤儿 worktree${skippedYoung > 0 ? `（跳过 ${skippedYoung} 个近期活跃，可能是并行进程在用）` : ""}`);
     }
 };
 

@@ -41,7 +41,10 @@ export type AutoVerdict = 'allow' | 'deny' | 'ask';
  *  调用方（toolExecution）从匹配到的工具对象读出声明后经 decl 参数传入；未传/未声明 = 恒 ask（fail-closed）。
  */
 export type AutoApprovalDecl = {
-    autoApproval?: 'file' | 'command' | 'aggressive';
+    /** ★ 'loopback'（A3，2026-11-09）：http_request 字面回环免审——与 CustomTool.function.autoApproval
+     *  （tool/type.ts:222）同一联合；漏扩会让 runAutoCheck 的 loopback 分支比较被 TS2367 判死、
+     *  守门测试的显式 decl 报 TS2345（真机验收会话实锤 14 条）。 */
+    autoApproval?: 'file' | 'command' | 'aggressive' | 'loopback';
     pathArgs?: string[];
     primaryArg?: string;
     /** ★ P0-3（裁定 B 方案）：文件类二元分类读工具声明的安全等级与 undo 策略——
@@ -119,10 +122,10 @@ export const matchCommandDeny = (cmd: string): boolean => {
 
 /**
  * shell 元字符/链式/重定向/命令替换检测：命令串含 `;` `&` `|` `<` `>` 反引号 `$(` 换行任一即 true。
- * ★ 只读命令免审的安全基石——杜绝 `git status; rm -rf /`、`ls | evil`、`cat x > y`、`$(evil)`、`` `evil` ``
- *   式注入/链式/管道/重定向/命令替换。只读免审仅在「无元字符」时生效：此时命令是单条简单命令，
- *   其余 token 都是该命令的参数，无法拼接第二条命令。
- * 刻意不区分引号内外（保守）：`echo "a && b"` 也判为含元字符 → 不免审、交人工。宁可多问，绝不静默放行。
+ * ★ A1（2026-11-09 审批降噪）后定位变化：不再是只读免审的唯一基石（isReadOnlyCommand 已升级为
+ *   引号感知分段判定，见 splitShellSegments），仍是【整串一票否决】的两条判定线的基石——
+ *   isScriptRunnerCommand / isInterpreterRepoScript 在含元字符时一律 false（交下游既有闸门）。
+ * 刻意不区分引号内外（保守）：`echo "a && b"` 也判为含元字符。宁可多问，绝不静默放行。
  */
 export const hasShellMetachars = (cmd: string): boolean => {
     if (!cmd) return false;
@@ -131,8 +134,9 @@ export const hasShellMetachars = (cmd: string): boolean => {
 
 /**
  * 只读命令头清单（平衡档）：命中即视为只读、默认模式下免审批。
- * ★ 前提——hasShellMetachars 已先过滤掉一切链式/管道/重定向/替换，故本清单只需锚定「命令头 + 已知只读
- *   子命令」，其后 token 一律按该命令的参数对待（无第二条命令的拼接空间）。
+ * ★ A1（2026-11-09）后本清单的消费语境——isReadOnlyCommand 已引号感知拆段，本清单按【段】锚定
+ *   「命令头 + 已知只读子命令」，其后 token 一律按该命令的参数对待；每段独立过清单 + 写选项 + 敏感文件
+ *   三道闸，任一段不过则整串不免审（链中混入非只读段即转人工）。
  * ★ 刻意不放行：可读密钥的 cat/head/tail/type（应走 read_file 的敏感防护）、npm install/publish、
  *   curl/wget、git 写子命令（add/commit/push/checkout/reset/mv/rm 等）、rm/mv/cp/mkdir/touch 等任何写/外传操作。
  *   收紧/放宽：在 settings.json 配 permissions.ask/allow（checkPermission 优先级始终高于本判定）。
@@ -141,6 +145,10 @@ const READONLY_HEADS: RegExp[] = [
     // —— git 只读子命令（写子命令 add/commit/push/checkout/reset/mv/rm 一律不在内）——
     /^git status\b/, /^git log\b/, /^git diff\b/, /^git show\b/, /^git blame\b/,
     /^git rev-parse\b/, /^git ls-files\b/, /^git describe\b/,
+    // ★ 提交图遍历/计算型只读（2026-11-10 直答真机实锤：rev-list --count 数提交条数被误判写 → 问句误升级建票）：
+    //   rev-list 遍历计数、shortlog 汇总作者、merge-base 算祖先——纯读纯算，无任何工作区/引用副作用。
+    //   刻意仍不放：reflog（expire/delete 是写）/ cat-file（-p HEAD:.env 绕开敏感文件参数闸）/ ls-remote（外联网络）。
+    /^git rev-list\b/, /^git shortlog\b/, /^git merge-base\b/,
     /^git remote(?:\s+-v)?\s*$/,            // 仅 `git remote` / `git remote -v`（add/remove 是写，不匹配）
     /^git stash list\b/,
     /^git config --get\b/,                  // 仅 --get（读取）；`git config k v` 是写，不匹配
@@ -154,6 +162,8 @@ const READONLY_HEADS: RegExp[] = [
     /^find\b/,                                   // 列路径（-delete/-exec/-ok 由 hasWriteModifier 拦）
     /^grep\b/, /^egrep\b/, /^fgrep\b/, /^rg\b/,  // 内容检索（敏感文件由 hasSensitiveFileArg 拦）
     /^sed\b/,                                    // 默认/-n 打印到 stdout 即只读（-i 由 hasWriteModifier 拦）
+    /^sort\b/, /^uniq\b/,                        // 纯 stdout 过滤（-o/--output 写文件由 hasWriteModifier 拦）——
+                                                 // 2026-11-09 重放实测补口：`find … | sort` 链因管道尾段不在清单被漏问
     // —— 版本号 ——
     /^(node|npm|pnpm|npx|git|tsc|python|python3)\s+(-v|-V|--version)\b/,
     // —— 验证类（跑项目代码但不改源码）——
@@ -238,12 +248,14 @@ export const isInterpreterRepoScript = (cmd: string): boolean => {
 
 /**
  * 只读命令的写选项检测：sed 的 -i（原地写）、find 的 -delete/-exec/-ok（销毁/执行子句）是写操作，命中即不免审。
- * ★ hasShellMetachars 已挡住 `;`/`|`/`$(` 等，故此处只做 token 级匹配（find -exec cmd \; 的 \; 本就含 `;`，已被前置挡）。
+ * ★ A1 分段判定后按【段】调用：段内已无 `;`/`|` 分隔符（拆段时已切走），`$(`/反引号在整串前置已拒，
+ *   故此处仍只做 token 级匹配（find -exec cmd \; 的 \; 在引号外拆段时被切、引号内作为字面参数无害）。
  *   -i 检测仅对 sed 头限定，避免误杀 ls -i（显示 inode）等无关 -i flag。
  */
 export const hasWriteModifier = (cmd: string): boolean => {
     if (!cmd) return false;
     if (/^sed\b/.test(cmd) && /(^|\s)-i\b/.test(cmd)) return true;   // sed -i（原地写）
+    if (/^sort\b/.test(cmd) && /(^|\s)(-o\b|--output(=|\b))/.test(cmd)) return true;   // sort -o/--output（写文件，绕过 > 重定向闸）
     return /(^|\s)--?(delete|exec|ok)\b/.test(cmd);                  // find -delete / -exec / -ok
 };
 
@@ -258,17 +270,227 @@ export const hasSensitiveFileArg = (cmd: string): boolean => {
     return SENSITIVE_FILE_ARG_RE.test(cmd);
 };
 
+// ============ ★ A1（2026-11-09 审批降噪）：链式只读免审——引号感知拆段 + 分段判定 ============
+
 /**
- * 只读命令判定（默认模式 run_command 免审用）：无 shell 元字符 + 命令头命中只读清单 + 无写选项 + 不读敏感文件 → true。
- * 任意一项不满足（含元字符 / 不在清单 / 含写选项 / 读敏感文件）→ false，落入常规审批流。
+ * 引号感知的 shell 链拆段：按【未被引号包裹且未被反斜杠转义】的 `;` `&&` `||` `|`（含单 `&` 后台符、
+ * 换行）把命令串拆成段列表。
+ * ★ 坑位契约（方案固化的决策，2026-11-09）：grep 模式里的引号内 `\|`（如 `grep "a\|b"`）不得拆段——
+ *   引号内一切字符字面化；引号外的反斜杠转义（`grep a\|b`）同样字面化不拆。拆出的段交
+ *   isReadOnlyCommand 逐段过只读判定，任一段不过则整串不免审。
+ * 空段（如 `ls ;; rm`、尾随分隔符的尾段）原样保留为空串，由 isReadOnlySegment 保守拒（宁窄勿宽）。
+ */
+export const splitShellSegments = (cmd: string): string[] => {
+    const segs: string[] = [];
+    let cur = "";
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < cmd.length; i++) {
+        const ch = cmd[i];
+        if (inSingle) {
+            if (ch === "'") inSingle = false;
+            cur += ch;
+            continue;
+        }
+        if (inDouble) {
+            if (ch === "\\" && i + 1 < cmd.length) { cur += ch + cmd[i + 1]; i++; continue; } // 双引号内 \ 转义下一字符
+            if (ch === '"') inDouble = false;
+            cur += ch;
+            continue;
+        }
+        if (ch === "\\") { cur += ch + (cmd[i + 1] ?? ""); i++; continue; }   // 引号外转义：\; \| 等字面化不拆
+        if (ch === "'") { inSingle = true; cur += ch; continue; }
+        if (ch === '"') { inDouble = true; cur += ch; continue; }
+        if (ch === ";" || ch === "\n") { segs.push(cur); cur = ""; continue; }
+        if (ch === ">" && cmd[i + 1] === "&" && /\d/.test(cmd[i + 2] ?? "")) {
+            // fd 复制重定向（2>&1 / >&2 等）是原子 token：其 & 不是命令分隔符，整块字面消费不拆段
+            let j = i + 2;
+            while (j < cmd.length && /\d/.test(cmd[j])) j++;
+            cur += cmd.slice(i, j);
+            i = j - 1;
+            continue;
+        }
+        if (ch === "|" || ch === "&") {
+            if (cmd[i + 1] === ch) i++;   // && / || 合并消费；单 &（后台执行）同样按段边界处理
+            segs.push(cur);
+            cur = "";
+            continue;
+        }
+        cur += ch;
+    }
+    segs.push(cur);
+    return segs;
+};
+
+/**
+ * A1 重定向白名单：仅 `2>&1` / `2>/dev/null` / `1>/dev/null` / `>/dev/null`（容忍 `>` 与目标间空白，
+ * 同一 shell 语义）。白名单外任何 `<` / `>`（写文件 / 追加 / here-doc / 进程替换）→ 不免审。
+ * 判定方式：先把白名单 token 从整串剥除，剥后仍见 `<`/`>` 即拒——引号内出现的 `>` 一并保守拒
+ * （shell 语义下引号内 `>` 无害，多问一次为代价上限；换取判定无需引号内外分析、绝不漏判真重定向）。
+ */
+const REDIRECT_ALLOWLIST: RegExp[] = [
+    /2>&1/g,
+    /2>\s*\/dev\/null/g,
+    /1>\s*\/dev\/null/g,
+    />\s*\/dev\/null/g,
+];
+const stripAllowedRedirects = (cmd: string): string => {
+    let rest = cmd;
+    for (const re of REDIRECT_ALLOWLIST) rest = rest.replace(re, "");
+    return rest;
+};
+const hasForbiddenRedirect = (cmd: string): boolean => /[<>]/.test(stripAllowedRedirects(cmd));
+
+/** A1：`cd <路径>` 段视为只读头——cd 只改工作目录、无副作用（目标仅是路径 token，不读写内容）。 */
+const CD_SEGMENT_HEAD = /^cd(\s|$)/;
+
+/**
+ * ★ A1 补口（2026-11-09 重放实测）：git 全局旗归一化——`git -c k=v diff` / `git -C <path> diff` /
+ * `git --no-pager log` 与 `git diff`/`git log` 同为只读，但 READONLY_HEADS 按 `^git <子命令>` 锚定、
+ * 全局旗夹在中间即漏问（trace 实证 92 条中 3 条此形态）。
+ * 归一化规则（宁窄勿宽）：仅剥已知全局旗白名单——无值布尔旗 + 「旗 + 单 token 值」对 + `--flag=<v>` 形态；
+ * 值缺失/以 - 开头/含引号（空格路径的 token 切分不可靠）→ 原样返回不豁免（转人工）。未知旗 → 同样不剥。
+ * 只影响只读头的锚定；写选项/敏感文件参数复检仍用原串（超集语义，不受影响）。
+ */
+const GIT_GLOBAL_BOOL_FLAGS = new Set(["--no-pager", "--no-optional-locks", "--no-replace-objects", "--literal-pathspecs"]);
+const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"]);
+const normalizeGitGlobalFlags = (s: string): string => {
+    const tokens = s.split(/\s+/).filter(Boolean);
+    if (tokens[0] !== "git") return s;
+    // ★ 引号值修正（2026-11-10 直答真机实锤）：模型习惯给 -C 的路径加引号（`git -C "D:/code/…" log`），
+    //   旧判定对含引号 token 一票否决 → 教学里示范的命令形态反被误杀、直答误升级建票。
+    //   安全边界：仅豁免「单 token 完整闭合引号、内部无引号无空白」的值（split(/\s+/) 保证无空白）；
+    //   开引号未闭合（= 路径含空格被切成多 token）仍不豁免。剥引号只影响只读头锚定——
+    //   写选项/敏感参数/重定向复检均跑在原始整串上，不受影响。
+    const closedQuoteValue = (v: string): string | null => {
+        if (/^"[^"]*"$/.test(v)) return v.slice(1, -1);
+        if (/^'[^']*'$/.test(v)) return v.slice(1, -1);
+        return v.startsWith('"') || v.startsWith("'") ? null : v;
+    };
+    const badValue = (v?: string): boolean => {
+        if (!v) return true;
+        const unquoted = closedQuoteValue(v);
+        if (unquoted === null || !unquoted) return true;   // 未闭合引号 / 空
+        return unquoted.startsWith("-") || unquoted.includes('"') || unquoted.includes("'");
+    };
+    let i = 1;
+    while (i < tokens.length) {
+        const t = tokens[i];
+        if (GIT_GLOBAL_BOOL_FLAGS.has(t)) { i++; continue; }
+        if (/^--(git-dir|work-tree|namespace|super-prefix)=/.test(t)) { i++; continue; }
+        if (GIT_GLOBAL_VALUE_FLAGS.has(t) || t === "-c") {
+            if (badValue(tokens[i + 1])) return s;   // 值缺失/嵌套旗/未闭合引号 → 不归一化
+            i += 2;
+            continue;
+        }
+        break;   // 首个非全局旗 token = 子命令起点
+    }
+    if (i === 1) return s;   // 无全局旗，原样
+    return ["git", ...tokens.slice(i)].join(" ");
+};
+
+/** A1 单段只读判定：只读头（含 cd 段、git 全局旗归一化）+ 无写选项 + 无敏感文件参数，三道闸缺一不可；空段保守拒。 */
+const isReadOnlySegment = (seg: string): boolean => {
+    const s = seg.trim();
+    if (!s) return false;
+    const headCandidate = normalizeGitGlobalFlags(s);
+    if (!CD_SEGMENT_HEAD.test(headCandidate) && !READONLY_HEADS.some(re => re.test(headCandidate))) return false;
+    if (hasWriteModifier(s)) return false;      // sed -i / sort -o / find -delete/-exec/-ok（逐段复检）
+    if (hasSensitiveFileArg(s)) return false;   // grep .env / cat id_rsa（逐段复检）
+    return true;
+};
+
+/**
+ * 只读命令判定（默认模式 run_command 免审用）——★ A1（2026-11-09）升级为链式分段判定：
+ *  - 命令替换（`$(` / 反引号）在【整串任何位置】出现 → 一律不免审（替换内容在执行期才展开，
+ *    静态拆段看不见，故不分析直接拒）；
+ *  - 重定向仅放行白名单（2>&1 / 2>/dev/null / 1>/dev/null / >/dev/null），其余任何 `<`/`>` → 不免审；
+ *  - 引号感知拆段（`;` `&&` `||` `|`，见 splitShellSegments）后逐段独立过 isReadOnlySegment，
+ *    任一段不过 → 整串不免审。
+ * 背景：agent 的自然工作方式是链式探测管道（grep … | head; echo '---'; git show … | head）——
+ * 2026-11-05 会话 trace 92 条 run_command 中 ~60 条是全只读链，整串一票否决的旧判定对真实 agent
+ * 行为覆盖率 <10%（~60 次冤枉点击的来源）。接线点不变（toolExecution perm===null 时评估，
+ * matchCommandDeny 硬闸在其后无条件执行，deny 优先级不受本判定影响）。
  */
 export const isReadOnlyCommand = (cmd: string): boolean => {
     const c = (cmd || "").trim();
-    if (!c || hasShellMetachars(c)) return false;          // 前置：链式/管道/重定向/替换仍挡
-    if (!READONLY_HEADS.some(re => re.test(c))) return false;
-    if (hasWriteModifier(c)) return false;                 // find -delete / sed -i
-    if (hasSensitiveFileArg(c)) return false;              // grep .env / cat id_rsa
-    return true;
+    if (!c) return false;
+    if (c.includes("$(") || c.includes("`")) return false;  // 命令替换（任何位置）→ 一律不免审
+    if (hasForbiddenRedirect(c)) return false;              // 白名单外重定向 → 不免审
+    return splitShellSegments(c).every(isReadOnlySegment);
+};
+
+/**
+ * ★ A2（2026-11-09 审批降噪）：runner 族命令的「入口前缀」归一化——供 permissions.buildScopedAllowRule
+ *  把供应链族（npm/pnpm/yarn/npx/corepack 整族，SCRIPT_RUNNER_HEADS，整族拦截不拆）的
+ *  allow-always / allow-session 从【精确命令串】升级为【入口前缀】规则 `run_command(<前缀> *)`
+ *  （尾随 `空格*` = token 边界，防入口 token 无分隔延续的换文件变体，见 buildScopedAllowRule 注释）。
+ *
+ *  归一化步骤：
+ *   1. 含命令替换（`$(` / 反引号）→ null（执行期才展开的内容不进规则，宁窄勿宽）；
+ *   2. 引号感知拆段 + 剥掉前导 `cd <路径>` 段（`cd src/cli && npx tsx …` ≡ `npx tsx …`——trace 实证
+ *      92 条中 22 条带此前缀，逐变体确认零安全增益）；
+ *   3. 取剥 cd 后【首段】为入口基准（刻意不认链中后段 runner——前缀 glob 是 ^ 锚定的，规则必须
+ *      锚定命令串开头才能在匹配侧命中），runner 段判定前先剥白名单重定向（`2>&1` 会被元字符判定误伤）；
+ *   4. 截取「解释器 + 入口脚本」为止的前缀 token：入口脚本 = 首个仓库内脚本路径 token
+ *      （REPO_SCRIPT_TOKEN，flag 与其取值如 --tsconfig x.json 天然不命中）。
+ *
+ *  语义论证（方案固化的决策，写进注释备查）：同一入口形状的变体（batch status / batch sync --check /
+ *  尾随管道 | head）执行的是同一份入口脚本代码——差异只在运行期参数，逐变体人工确认零安全增益、
+ *  纯摩擦；故每个入口形状「首次人工确认」语义保留（第一次仍问），确认后以入口前缀记忆。
+ *
+ *  保守边界（返回 null = 调用方回退精确串，宁窄勿宽）：
+ *   - 含引号不回退：引号只影响 token 切分整齐度，REPO_SCRIPT_TOKEN 本身拒收含引号 token，前缀照常
+ *     截取（引号字面保留在规则里，匹配更严不更宽；引号形态不同的变体不命中 → 重新首验，可接受）；
+ *   - 非 runner 族 → null（精确串现状，一个字不改）；
+ *   - runner 族但定位不到入口脚本 token（npm test / pnpm dlx x / npm install 等无脚本路径形态）→ null——
+ *     刻意不落 `npm install*` 这类包名通配（会把 npm install <恶意包> 静默放行，M5 教训）；
+ *   - 剥 cd 后首段非 runner（timeout 包装等）→ null。
+ */
+export const scriptRunnerEntryPrefix = (cmd: string): string | null => {
+    const c = (cmd || "").trim();
+    if (!c) return null;
+    if (c.includes("$(") || c.includes("`")) return null;   // 命令替换不进规则
+    const isRunnerSeg = (seg: string): boolean => {
+        const s = stripAllowedRedirects(seg.trim());
+        return !!s && !hasShellMetachars(s) && isScriptRunnerCommand(s);
+    };
+    let base: string | null = null;
+    if (!hasShellMetachars(c)) {
+        if (isScriptRunnerCommand(c)) base = c;
+    } else {
+        const segs = splitShellSegments(c);
+        let i = 0;
+        while (i < segs.length && /^cd(\s|$)/.test(segs[i].trim())) i++;   // 剥前导 cd 段（一个或多个）
+        const rest = segs.slice(i).map(s => s.trim()).filter(Boolean);
+        if (rest.length > 0 && isRunnerSeg(rest[0])) base = rest[0];
+    }
+    if (!base) return null;
+    const tokens = base.split(/\s+/).filter(Boolean);
+    for (let k = 1; k < tokens.length; k++) {
+        if (!tokens[k].startsWith("-") && REPO_SCRIPT_TOKEN.test(tokens[k])) {
+            return tokens.slice(0, k + 1).join(" ");
+        }
+    }
+    return null;   // runner 族但无入口脚本 token（npm test 等）：回退精确串
+};
+
+// ============ ★ A3（2026-11-09 审批降噪）：http_request 字面回环目标免审 ============
+
+/**
+ * URL 目标是否为字面回环地址：仅认 `127.0.0.1` / `localhost` / `[::1]` 三种字面 host（可带端口），
+ * 刻意不做 DNS 解析放行（localhost 解析到哪不归本判定管，工具内 SSRF 闸照跑）。
+ * 非 http(s) 协议 / URL 解析失败 / 其余任何 host → false（转人工）。
+ */
+export const isLoopbackTargetUrl = (url: string): boolean => {
+    try {
+        const u = new URL(url);
+        if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+        const host = u.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+        return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    } catch {
+        return false;
+    }
 };
 
 /** path 是否在 cwd 工作区内（含 cwd 自身）。非字符串/无法解析 → false（转人工）。 */
@@ -292,10 +514,10 @@ const isWithinWorkspace = (p: string, cwd?: string): boolean => {
  *   命中 → allow（确定性、零分类调用），否则恒 ask。分类器只保留给 command/aggressive 类。
  */
 export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, aggressive = false, decl?: AutoApprovalDecl): Promise<AutoVerdict> => {
-    // 1) 范围：default = 文件增删改移（'file'）+ 命令执行（'command'）；
+    // 1) 范围：default = 文件增删改移（'file'）+ 命令执行（'command'）+ 字面回环网络（'loopback'，A3）；
     //         aggressive 再加网络/git_commit（'aggressive'）+ MCP（按合成名前缀判定）
     const isFileTool = decl?.autoApproval === 'file';
-    const inScope = isFileTool || decl?.autoApproval === 'command'
+    const inScope = isFileTool || decl?.autoApproval === 'command' || decl?.autoApproval === 'loopback'
         || (aggressive && (decl?.autoApproval === 'aggressive' || isMcpTool(name)));
     if (!inScope) return 'ask';
     // 2) 文件类：工作区围栏 + 敏感文件 deny。取参按声明 pathArgs（缺省 ['path']；move_file 声明双路径）
@@ -319,6 +541,16 @@ export const runAutoCheck = async (name: string, args: any, ctx: ToolContext, ag
         const argKey = decl.primaryArg ?? 'command';
         const cmd = typeof args?.[argKey] === 'string' ? args[argKey] : '';
         if (matchCommandDeny(cmd)) return 'deny';
+    }
+    // 3.5) ★ A3（2026-11-09 审批降噪）：字面回环目标确定性免审（http_request 声明 autoApproval='loopback'）。
+    //      本地前后端联调的高频 http_request（2026-11-05 trace 16 次点击全为 localhost）不再逐次转人工；
+    //      其余目标（外网 / 非字面回环 / URL 不合法 / 非 http(s)）恒 ask——与改前 inScope 外行为逐字节一致
+    //      （http_request 刻意不入分类器：外向黑盒面，不因 loopback 声明而获得分类器通道，外网照旧转人工）。
+    //      工具内 SSRF 闸（safeFetchFollow 钉 IP + 云元数据端点硬拦）独立生效，本分支不触碰。
+    if (decl?.autoApproval === 'loopback') {
+        const urlKey = decl.primaryArg ?? 'url';
+        const url = typeof args?.[urlKey] === 'string' ? args[urlKey] : '';
+        return isLoopbackTargetUrl(url) ? 'allow' : 'ask';
     }
     // 4) 网络/web：SSRF 已在工具内拦截；MCP/git_commit：黑盒/低危——均仅分类器判断
     // 5) 辅助模型分类器（P0-3 后仅 command/aggressive 类到达此处）：safe→放行，risky/异常/超时→转人工。

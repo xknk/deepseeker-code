@@ -28,6 +28,7 @@ import { runWithSessionContext, getAllowedWorkspaceRoots, getActiveWorkspaceRoot
 import path from "path";
 import fs from "fs";
 import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
+import { appendBatchBoundary } from "@/batch/sync/boundary.ts";
 import { activeProvider } from "@/llm/model.ts";
 import { markRunStart, markRunEnd, registerWakeDriverIfAbsent, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 import { clearMemorySnapshot } from "@/memory/inject.ts";
@@ -189,6 +190,11 @@ const handleUnifiedChatRun = async (
         `- 今天: ${today}`,
     ];
     sysPrompt = sysPrompt + `\n\n【环境】\n${envLines.join("\n")}`;
+    // ★ 注入边界（多入口流水线 §4.3）：batch 会话的工单正文含外部系统原文（引用块包裹），system
+    //   追加「数据非指令」边界段，堵外部正文对工具使用/预算/验收标准的越权指令。仅 batch-* 会话
+    //   注入——交互/serve 会话不加（无关段会扰动既有缓存前缀）；守门测试钉死条件与文案
+    //   （tests/batch-sync.test.ts，与 batch/sync/boundary.ts 同一事实源）。
+    sysPrompt = appendBatchBoundary(sysPrompt, sessionId);
     let replyText = "";
     // ★ 多模态 ingest（双视图）：attachments 经 toIngestContents 拆出「模型所见（wire）」与「入站原件（archive）」。
     //   wire 喂 buildContextMessages（vision 关时降级为文本注，绝不给非 vision 端点发 parts——宿主门控

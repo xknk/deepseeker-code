@@ -506,26 +506,33 @@ export const fsTools: CustomTool[] = [
         function: {
             name: "list_dir",
             planAllowed: true,
-            // ★ 第 17 项补丁（2026-10-21）：原声明 primaryArg:'path' 系漂移——本工具参数表只有 max_depth，
-            //   根本没有 path；且 SAFE 只读工具不走审批路径，allow-always 无意义。删除后由
-            //   tool-declaration-drift 的「声明 ⊆ parameters.properties」断言钉住。
-            description: "扫描并精简列出当前项目的工作区目录树。本工具自动合并通用忽略规则与多层子目录级 .gitignore 规范。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
+            // ★ 第 17 项补丁（2026-10-21）：原声明 primaryArg:'path' 系漂移（当时参数表没有 path，实参被静默忽略、
+            //   永远只列工作区根）。2026-11-10 直答真机实锤该缺位是跨仓查证的死穴——模型按教学传绝对路径
+            //   list_dir "D:/code/…" 却拿回当前工作区的树，两次被骗后只能全盘 glob 撞回收站 EPERM/万节点上限。
+            //   现在把 path 真正实现（可选，缺省=工作区根，行为不变）：外部目录按该 base 建独立 ignore 引擎
+            //   （guard.ts 多 base 基建现成），BUILTIN 规则（node_modules/.git…）对任意 base 生效，万条熔断照旧。
+            description: "扫描并精简列出目录树（缺省=当前工作区根）。跨仓库查证时传 path 指定任意目录的绝对路径（如 D:/code/中联）。自动合并通用忽略规则与该目录多层子目录级 .gitignore 规范。★ 只读安全，可与其它只读工具在同一条消息里并行调用。",
             parameters: {
                 type: "object",
                 properties: {
-                    max_depth: { type: "number", description: "最大嵌套扫描深度（默认值为 3）" }
+                    max_depth: { type: "number", description: "最大嵌套扫描深度（默认值为 3）" },
+                    path: { type: "string", description: "要列的目录（绝对路径；缺省=当前工作区根）" }
                 }
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
-            async execute(args: { max_depth?: number }) {
+            async execute(args: { max_depth?: number; path?: string }) {
                 try {
                     // ★ 上限 10 + 计数熔断：防模型传极大 max_depth 或未被 gitignore 覆盖的深树（如 node_modules）递归扫描失控
                     const maxDepth = Math.min(args.max_depth ? Math.max(1, args.max_depth) : 3, 10);
                     const MAX_SCAN_ENTRIES = 10000;
                     let scannedEntries = 0;
                     let hitScanLimit = false;
-                    await initializeWorkspaceIgnore();
+                    const activeRoot = getActiveWorkspaceRoot();
+                    const root = args.path ? path.resolve(activeRoot, args.path) : activeRoot;
+                    const rootStat = await fs.stat(root).catch(() => null);
+                    if (!rootStat?.isDirectory()) return toolFailure(`目录不存在或不是目录: ${root}`);
+                    await initializeWorkspaceIgnore(root);
 
                     const buildTreeText = async (currentPath: string, currentDepth: number, prefix = ""): Promise<string> => {
                         if (currentDepth > maxDepth || hitScanLimit) return "";
@@ -536,8 +543,8 @@ export const fsTools: CustomTool[] = [
                         const validEntries = entries.filter(entry => {
                             if (entry.isSymbolicLink()) return false;
                             const fullPath = path.join(currentPath, entry.name);
-                            const relPath = path.relative(getActiveWorkspaceRoot(), fullPath).replace(/\\/g, "/");
-                            return !checkIsPathIgnored(entry.isDirectory() ? `${relPath}/` : relPath);
+                            const relPath = path.relative(root, fullPath).replace(/\\/g, "/");
+                            return !checkIsPathIgnored(entry.isDirectory() ? `${relPath}/` : relPath, root);
                         });
 
                         let output = "";
@@ -568,11 +575,11 @@ export const fsTools: CustomTool[] = [
                     };
 
                     // 🚨 关键修复：在此处调用递归函数，并直接 return 最终的树状字符串结果
-                    const treeResult = await buildTreeText(getActiveWorkspaceRoot(), 1);
+                    const treeResult = await buildTreeText(root, 1);
 
-                    if (!treeResult.trim()) return `工作区扫描完成，未发现可用源码文件。`;
+                    if (!treeResult.trim()) return `目录扫描完成，未发现可用源码文件（${root}）。`;
 
-                    return `[Workspace Universal Tree | Max Depth: ${maxDepth}]\n${treeResult}`;
+                    return `[${args.path ? `Dir Tree: ${root} | ` : "Workspace Universal Tree | "}Max Depth: ${maxDepth}]\n${treeResult}`;
 
                 } catch (error: any) {
                     // catch 块也严格返回 string，确保类型安全

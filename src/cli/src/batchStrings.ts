@@ -8,8 +8,8 @@
  */
 import type { Locale } from "@/common/index.ts";
 
-/** 任务终态（batchRunner 与词表共用；setup-failed/timeout/error/watchdog-killed 不跑验收，其余必跑验收定 passed/accept-failed）。 */
-export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed";
+/** 任务终态（batchRunner 与词表共用；setup-failed/baseline-broken/timeout/error/watchdog-killed/stopped 不跑验收，其余必跑验收定 passed/accept-failed）。 */
+export type BatchTaskStatus = "passed" | "accept-failed" | "timeout" | "error" | "setup-failed" | "rejected" | "watchdog-killed" | "baseline-broken" | "stopped";
 
 const ZH = {
     // —— batchAdmin（add / list / clean / help） ——
@@ -18,8 +18,12 @@ const ZH = {
 用法：deepseeker-code batch <子命令>
   add <工单.md> [...]              投递任务（可一次多个文件）
   list                             查看 pending / running / done 三态队列
-  run [--wait-window HH:MM-HH:MM]  执行队列（串行，逐任务出报告；--wait-window 到点再开跑）
-  clean                            清空 done/（已读过的报告与工单存档）
+  run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
+                                   执行队列（串行，逐任务出报告；--wait-window 到点再开跑；--max-total-yuan 本批总花费上限，超限停在下一票之前）
+  pr <票id>                        交付已验收通过的票（重建审查 worktree → push agent/<票id> → 建 Draft PR/MR；落后主干或 needs-review 票一律拒绝；push 走本地 git 配置，代理见 README）
+  status                           汇总最近 7 天挂机账本（run 数/票数/花费）与队列现状
+  clean                            清空 done/（已读过的报告与工单存档），并回收对应/孤儿附件目录（attachments/）
+  listen feishu                    常驻飞书监听（长连接收消息建票 + 卡片审批高危操作；全系统只允许一个进程，配置 .deepseeker-code/batch/feishu.json）
 
 工单格式（Markdown，frontmatter 的 accept 必填——缺验收拒绝入队）：
   ---
@@ -29,12 +33,27 @@ const ZH = {
   budget-yuan: 0.5      # 可选：本任务花费上限（元）
   timeout-min: 30       # 可选：agent 阶段超时（分钟，缺省 30）
   retry: 1              # 可选：被看门狗终止后带证据重试次数（0-3，缺省 0=杀即终态）
-  tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path）
+  tools: run_command    # 可选：显式解锁高危工具（缺省禁 run_command/delete_path；MCP 工具可通配，如 mcp__playwright__* 一条解锁整个服务的工具）
   ---
   任务描述正文（Markdown）…
 
 产物：<项目>/.deepseeker-code/batch/done/<id>.report.md（状态/结算单/验收输出/diff 摘要）；
-改动收割在独立 git worktree（临时分支）上，保留待人工 merge 或丢弃。`,
+改动收割在独立 git worktree（临时分支）上，任务收尾自动 commit 到该分支（跨重启不丢），保留待人工 merge 或丢弃。
+
+sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）：
+  sync [--source github|gitlab] [--dry-run] [--check]
+                                              拉取（配置：<项目>/.deepseeker-code/batch/sync.json）；
+                                              --dry-run 只预演会建哪些票、验收取自哪里，零落盘；
+                                              --check 自检（gh/仓库/label/配置/token 逐项 ✓/✗ + 怎么修）`,
+    commitSkipped: "（未执行——worktree 未创建）",
+    commitNotReached: "未执行（任务在 agent 阶段前终止，没有需要固化的改动）",
+    commitDone: (sha: string) => `${sha.slice(0, 8)}（worktree 改动已固化为分支上的 commit，重启被清扫也不丢）`,
+    commitPre: (sha: string) => `${sha.slice(0, 8)}（agent 自己提交过，本轮未新建 commit）`,
+    commitNone: "无改动（相对基座没有可提交的内容）",
+    commitFail: (e: string) => `⚠️ 未提交成功（${e}）——改动仍在该 worktree 目录内，下次启动清扫后会丢失`,
+    commitEntry: (v: string) => `- 收尾提交：${v}`,
+    commitMsg: (id: string, title: string) => `batch: ${id} ${title}`.slice(0, 120),
+    commitLine: (branch: string, sha: string) => `💾 已提交到分支 ${branch}（${sha.slice(0, 8)}）`,
     adminAddUsage: "用法：deepseeker-code batch add <工单.md> [...]（缺验收命令的工单会被拒绝）\n详情：deepseeker-code batch help",
     readFileFail: (e: string) => `读文件失败：${e}`,
     enqueued: (id: string, title: string) => `📥 已入队 [${id}] ${title}`,
@@ -44,8 +63,41 @@ const ZH = {
     listRunningHead: "▶ 运行中：",
     listPendingHead: (n: number) => `⏳ 待跑 ${n}：`,
     listDoneHead: (n: number) => `✔ 已完成 ${n}：`,
-    cleaned: (n: number) => `🧹 已清空 done/（${n} 个任务存档）。pending/running 不受影响。`,
+    cleaned: (n: number, attachments: number) => `🧹 已清空 done/（${n} 个任务存档，${attachments} 个附件目录）。pending/running 不受影响。`,
     reportMissing: "（报告缺失）",
+
+    // —— batch sync（多入口流水线 P1；拉取/去重/建票文案在 core sync 模块内） ——
+    syncUsage: "用法：deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\n配置：<项目>/.deepseeker-code/batch/sync.json（详见 batch help 与 README）",
+    syncBadFlag: (f: string) => `❌ 未知参数："${f}"`,
+    // P4 飞书监听（listen feishu）：编排文案在 core batch/feishu 内；此处只管 CLI 用法
+    listenUsage: "用法：deepseeker-code batch listen feishu\n前置：环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET + 配置 .deepseeker-code/batch/feishu.json + 全局安装 @larksuiteoapi/node-sdk（可选依赖，不随主包装）\n注意：同应用多客户端不广播——全系统只允许一个监听进程（详见 README「飞书入口」节）",
+    listenBadTarget: (t: string) => `❌ 暂只支持 batch listen feishu（收到 "${t}"）`,
+    // M6 总量硬闸（§5.2.3）：run 侧解析 fail-closed + 每票开始前检查花费上限
+    runUsage: "用法：deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
+    runBadFlag: (f: string) => `❌ 未知参数或非法值："${f}"`,
+    budgetStop: (spent: string, cap: string, id: string) => `💰 本批已花 ¥${spent} / 上限 ¥${cap}，已停在票 \`${id}\` 之前`,
+
+    // —— P2 交付与续修（batch pr / status；编排文案在 core pr/ledger 模块内） ——
+    prUsage: "用法：deepseeker-code batch pr <票id>\n前置：票已跑完且验收通过；needs-review 票一律拒绝（无豁免旗标）。\n注：push 走本地 git 配置——需要代理时先配好 git 的 http.proxy（见 README「交付与 PR」节）。",
+    prBadArgs: "用法：deepseeker-code batch pr <票id>（票 id 必填，不支持其它参数）",
+    statusUsage: "用法：deepseeker-code batch status（汇总最近 7 天挂机账本与队列现状）",
+    statusBadArgs: "用法：deepseeker-code batch status（本子命令不收参数）",
+    statusHead: (since: string) => `📊 最近 7 天（自 ${since}）：`,
+    statusLine: (runs: number, tickets: number, green: number, red: number, cost: string) => `   ${runs} 次 run / ${tickets} 票：✔ ${green} ✘ ${red} · 花费 ¥${cost}`,
+    statusBadLines: (n: number) => `   （账本损坏行 ${n} 条已跳过）`,
+    statusEmpty: "📊 最近 7 天无挂机记录——batch run 一次后这里会有数字。",
+    contBaseNote: (branch: string) => `续修基座 = 前票产物分支 ${branch}`,
+    contBaseBranchGone: (branch: string) => `前票产物分支 ${branch} 已不存在`,
+    contBaseNoBranch: "前票报告无产物分支",
+    contBaseFallback: (prevId: string, why: string) => `续修基座回退 HEAD（continues ${prevId}：${why}）——改动可能与前次修复重叠，验收时留意`,
+    repoRouted: (name: string, ident: string, dir: string) => `🧭 跨仓路由：工单指向 ${name}（命中标识符「${ident}」）→ 在该仓库开 worktree`,
+    repoInherit: (prevId: string, dir: string) => `🧭 续修继承前票仓库 → ${dir}（continues ${prevId}；前次分支只在该仓库存在）`,
+    repoAcceptAdapted: (from: string, to: string) => `验收命令按目标仓适配：${from} → ${to}`,
+    repoSetupDropped: (cmd: string) => `setup 按目标仓丢弃（${cmd}：目标仓无 package.json，npm 族命令必失败）`,
+    repoBodyNote: (name: string) => `\n\n---\n【跨仓执行】本工单已在目标仓库「${name}」的独立 worktree 中执行：你的工作区就是该仓库的检出，文件路径按该仓库的相对路径处理；任务在该仓库内完成，无需也不应访问其他仓库。`,
+    downgradedNote: (n: number) => `改测试即降级：触碰 ${n} 个测试文件，票已标 needs-review——batch pr 将拒绝本票，请人工复核`,
+    testPatternsNote: (n: number) => `🧪 测试路径启发式扩展：sync.json testPathPatterns 追加 ${n} 条`,
+    ledgerFail: (e: string) => `挂机账本写入失败（不影响本次结果）：${e}`,
 
     // —— batchRunner 控制台进度 ——
     ticketRejected: (id: string, err: string) => `🚫 [${id}] 工单被拒：${err}`,
@@ -63,7 +115,24 @@ const ZH = {
     acceptLine: (passed: boolean, id: string, code: number | null) => `${passed ? "✅" : "❌"} [${id}] 验收 exit ${code}`,
     acceptKilledSuffix: "（超时被杀）",
     timeoutAbort: (min: number) => `任务超时（${min} 分钟）`,
-    artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，保留待人工处置）`,
+    baselineGateNote: "基线校验（外部源工单：基线红不进 agent，零花费）",
+    baselineProbeLine: (cmd: string) => `🧪 基线探测：\`${cmd}\`（干净树上先跑验收，红则不进 agent）`,
+    baselineCachedOk: "🧪 基线缓存命中（今日同基座已验通过），跳过探测",
+    baselineCachedBroken: (v: string) => `🧪 基线缓存命中（今日已验：${v}）——不装环境、不进 agent（零花费）`,
+    baselineProbeFail: (v: string) => `🧪 基线探测未过：${v}`,
+    baselineProbeRetrying: "🧪 基线探测红：疑似测试负载 flake，30s 后复测一次（二次红才定罪）",
+    baselineProbePass: "🧪 基线探测通过，恢复干净树后进 agent 阶段",
+    acceptProbeRetrying: "🔁 验收首轮未过：疑似测试负载 flake，30s 后复测一次（二次红才定罪）",
+    testFilesH: "## 触碰的测试文件（信息标注）",
+    testFilesNote: (n: number) => `本次 diff 触碰 ${n} 个测试路径（P1 仅信息标注，不参与状态判定）：`,
+    changedMore: (n: number) => `…（其余 ${n} 个略）`,
+    // B2（2026-11-09）：denied-tool frontmatter 省略行（超 DENIED_FM_CAP 时；解析侧按「 — 」分隔符滤除本行）
+    deniedMore: (n: number) => `…（另有 ${n} 条被拒未列出）`,
+    // B1（2026-11-09 飞书拆软闸门）：挂机窗口内高危不推卡，自动 deny + 留痕（日志/控制台行）
+    windowAutoDeny: (tool: string) => `🌙 挂机窗口内不推审批卡，已自动拒绝并留痕：${tool}（白天/人在场运行照常弹卡；要放行请改白天跑或回复推送续修）`,
+    cardRememberedAllow: (tool: string) => `♻️ 本工单已批过 ${tool}，后续调用直接放行（不再重复弹卡）`,
+    cardRememberedDeny: (tool: string) => `♻️ 本工单已拒过 ${tool}，后续调用直接拒绝（不再重复弹卡；要放行请在工单 tools: 解锁后重跑）`,
+    artifactLine: (p: string, branch: string) => `   产物：${p}（分支 ${branch}，已提交，保留待人工处置）`,
     inWindowNow: (hhmm: string) => `⏰ 当前 ${hhmm} 已在窗口内，立即开跑。`,
     waitWindowWait: (h: number, m: number) => `⏰ --wait-window：${h} 小时 ${m} 分后（窗口起点）开跑。挂机等待中，Ctrl+C 可取消。`,
     waitWindowInvalid: (s: string) => `❌ --wait-window 格式非法："${s}"（应为 HH:MM-HH:MM，如 23:30-06:30）`,
@@ -72,7 +141,7 @@ const ZH = {
     summaryCost: (sum: string, tasks: number) => `💰 总花费：¥${sum}（${tasks} 个任务计价）`,
     summaryCostFree: "💰 总花费：全部无价模型，未计钱",
     failedHead: "⚠️ 未过清单：",
-    artifactsDir: "报告与改动：.deepseeker-code/batch/done/（worktree 均保留待人工处置）",
+    artifactsDir: "报告与改动：.deepseeker-code/batch/done/（改动已提交到 dsc-wt-* 分支，worktree 目录清理不影响交付）",
 
     // —— 状态标签（控制台与报告共用） ——
     statusLabel: (s: BatchTaskStatus) => ({
@@ -83,6 +152,8 @@ const ZH = {
         "setup-failed": "🛠️ 环境准备失败",
         rejected: "🚫 工单被拒",
         "watchdog-killed": "🐕 看门狗终止",
+        "baseline-broken": "🧪 基线未过（本票未执行）",
+        stopped: "🛑 已按指令停下",
     })[s],
 
     // —— 验收命令执行（输出嵌入报告） ——
@@ -100,6 +171,7 @@ const ZH = {
         return `${c.rounds} 轮 · ${money} · 缓存命中 ${hit}% · ${mins}min${c.partialPrice ? "（部分记录无价，钱为部分和）" : ""}${c.subRuns > 0 ? ` · 子 run ${c.subRuns} 个已计入` : ""}${c.toolCostYuan > 0 ? ` · 联网 ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · 辅助 ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "（无结算单——run 未到收尾即被截断，花费以上方 usageLog 聚合为准）",
+    imgReadEntry: (n: number) => `- 图片读取：${n} 张（read_image 调用统计；0 张且票里有图，多半是模型无视觉未读——可用 DEEP_SEEK_VISION=1 翻案）`,
     receiptLine: (r: { rounds: number; costYuan: number | null; cacheHitRate: number; durationMs: number; toolCostYuan?: number; auxCostYuan?: number }) =>
         `${r.rounds} 轮 · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "无价"} · 缓存命中 ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · 联网 ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · 辅助 ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 
@@ -117,13 +189,15 @@ const ZH = {
     noFinal: "（无输出——run 在产出正文前被截断/异常）",
     acceptH: "## 验收",
     acceptCmdLine: (cmd: string, code: number | null) => `命令：\`${cmd}\` → exit ${code}`,
+    acceptSkippedLine: (cmd: string) => `命令：\`${cmd}\` → 未执行（轻量验收：实际改动仅含非代码文件，编译不消费这些内容）`,
+    acceptLightLine: "⚡ 改动仅含非代码文件 → 跳过整仓编译验收（轻量放行；跑偏动了代码则照常全量验收）",
     acceptTimeoutSuffix: "（⏱️ 验收超时被杀）",
     acceptTail: "输出尾部：",
     noAccept: "\n（未执行验收——改动不完整，跑了也是噪声）",
     deniedH: "## 被拒工具调用（fail-closed 记录）",
     deniedNone: "无。",
-    diffH: "## Diff 摘要（worktree 相对基座，未提交，待人工处置）",
-    diffNote: (branch: string, p: string) => `改动在独立 worktree（分支 \`${branch}\`，路径 ${p}）。处置：检查满意 → 在 worktree 内 commit 并合回主仓；丢弃 → 删除该 worktree 目录 + \`git worktree prune\` + \`git branch -D <分支>\`。`,
+    diffH: "## Diff 摘要（worktree 相对基座，已提交到分支，待人工处置）",
+    diffNote: (branch: string, p: string) => `改动已提交到分支 \`${branch}\`（worktree 路径 ${p}；该目录下次启动即被清扫，分支不受影响）。查看：\`git show ${branch}\`；合回：\`git merge ${branch}\`；丢弃：\`git branch -D ${branch}\`。`,
     diffNone: "（无）",
 
     // —— 看门狗（进展感知）报告段与进度行 ——
@@ -137,6 +211,14 @@ const ZH = {
     wdKillRec: (verdict: string, evidence: string) => `⛔ 终止：${verdict} — ${evidence}`,
     wdAtKillRec: (round: number, costYuan: string) => `终止时刻：轮 ${round} · ¥${costYuan}`,
     wdRetryRec: (n: number) => `带证据重试：共 ${n + 1} 轮（同 worktree 续跑，证据见各轮记录）`,
+
+    // —— C4 软停（2026-11-10「指挥台」）：listen 的「停」→ stop 协议文件 → runner 边界查获干净收尾 ——
+    stopRequestNote: "收到停止指令，正在收尾（跑完当前这步就停，改动照常提交到分支）",
+    stopAbortReason: "收到停止指令（软停：当前步跑完即收尾）",
+    stoppedEarlyNote: "开跑前已收到停止指令（点火竞态：起跑前人喊了停）——未执行，零花费",
+    stopAcceptedLine: (id: string) => `🛑 [${id}] 已按指令停下（改动保留在分支上，报告照推）`,
+    // C4 进度心跳（「进度」控制词读）活动短语
+    progressThinking: "思考中",
 };
 
 const EN: typeof ZH = {
@@ -145,8 +227,12 @@ const EN: typeof ZH = {
 Usage: deepseeker-code batch <subcommand>
   add <ticket.md> [...]              Enqueue tasks (multiple files at once)
   list                               Show the pending / running / done queue
-  run [--wait-window HH:MM-HH:MM]    Run the queue (serial, one report per task; --wait-window waits for the window)
-  clean                              Clear done/ (reports and ticket archives you've read)
+  run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]
+                                     Run the queue (serial, one report per task; --wait-window waits for the window; --max-total-yuan caps total batch spend, stops before the next ticket)
+  pr <ticket-id>                     Deliver a passed ticket (rebuild review worktree → push agent/<ticket-id> → open a draft PR/MR; behind-mainline or needs-review tickets are always refused; push uses local git config, proxy per README)
+  status                             Summarize the last 7 days of the batch ledger (runs / tickets / cost) and the queue
+  clean                              Clear done/ (reports and ticket archives you've read) and reclaim matching/orphan attachment dirs (attachments/)
+  listen feishu                      Resident Feishu listener (long-connection ticket intake + card approval for risky operations; only one process system-wide; config .deepseeker-code/batch/feishu.json)
 
 Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, no enqueue):
 ---
@@ -156,13 +242,28 @@ Ticket format (Markdown; frontmatter \`accept\` is required — no acceptance, n
   budget-yuan: 0.5      # optional: per-task cost cap (yuan)
   timeout-min: 30       # optional: agent-phase timeout (minutes, default 30)
   retry: 1              # optional: evidence-carrying retries after a watchdog kill (0-3, default 0 = kill is final)
-  tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default)
+  tools: run_command    # optional: unlock risky tools (run_command/delete_path denied by default; MCP tools accept wildcards, e.g. mcp__playwright__* unlocks the whole server)
 ---
 
   Task description body (Markdown)…
 
 Artifacts: <project>/.deepseeker-code/batch/done/<id>.report.md (status / receipt / acceptance output / diff summary);
-changes are harvested onto an isolated git worktree (temp branch), kept for manual merge or disposal.`,
+changes are harvested onto an isolated git worktree (temp branch) and committed to that branch when the task ends (survives restarts), kept for manual merge or disposal.
+
+sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tickets):
+  sync [--source github|gitlab] [--dry-run] [--check]
+                                              Pull (config: <project>/.deepseeker-code/batch/sync.json);
+                                              --dry-run previews what would be created and where the acceptance comes from, writing nothing;
+                                              --check self-test (gh / repos / labels / config / token, each ✓/✗ + how to fix)`,
+    commitSkipped: "(not run — no worktree was created)",
+    commitNotReached: "not run (the task stopped before the agent phase; nothing to commit)",
+    commitDone: (sha: string) => `${sha.slice(0, 8)} (worktree changes committed onto the branch — a restart sweep will not lose them)`,
+    commitPre: (sha: string) => `${sha.slice(0, 8)} (the agent committed already; no new commit here)`,
+    commitNone: "no changes (nothing to commit against the base)",
+    commitFail: (e: string) => `⚠️ Commit failed (${e}) — changes remain inside the worktree directory and will be lost at the next startup sweep`,
+    commitEntry: (v: string) => `- Final commit: ${v}`,
+    commitMsg: (id: string, title: string) => `batch: ${id} ${title}`.slice(0, 120),
+    commitLine: (branch: string, sha: string) => `💾 Committed to branch ${branch} (${sha.slice(0, 8)})`,
     adminAddUsage: "Usage: deepseeker-code batch add <ticket.md> [...] (tickets without an acceptance command are rejected)\nDetails: deepseeker-code batch help",
     readFileFail: (e) => `Failed to read file: ${e}`,
     enqueued: (id, title) => `📥 Enqueued [${id}] ${title}`,
@@ -172,8 +273,40 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     listRunningHead: "▶ Running:",
     listPendingHead: (n) => `⏳ Pending ${n}:`,
     listDoneHead: (n) => `✔ Done ${n}:`,
-    cleaned: (n) => `🧹 Cleared done/ (${n} task archives). pending/running untouched.`,
+    cleaned: (n, attachments) => `🧹 Cleared done/ (${n} task archives, ${attachments} attachment dirs). pending/running untouched.`,
     reportMissing: "(report missing)",
+
+    syncUsage: "Usage: deepseeker-code batch sync [--source github|gitlab] [--dry-run] [--check]\nConfig: <project>/.deepseeker-code/batch/sync.json (see batch help and the README)",
+    syncBadFlag: (f) => `❌ Unknown flag: "${f}"`,
+    // P4 Feishu listener (listen feishu): orchestration copy lives in core batch/feishu; this is CLI usage only
+    listenUsage: "Usage: deepseeker-code batch listen feishu\nPrereqs: env vars FEISHU_APP_ID / FEISHU_APP_SECRET + config .deepseeker-code/batch/feishu.json + globally installed @larksuiteoapi/node-sdk (optional dependency, not bundled)\nNote: multiple clients on one app do not broadcast — only one listener process is allowed system-wide (see the README Feishu section)",
+    listenBadTarget: (t) => `❌ Only 'batch listen feishu' is supported (got "${t}")`,
+    // M6 total-spend hard cap (§5.2.3): fail-closed run parsing + per-ticket pre-check of the spend cap
+    runUsage: "Usage: deepseeker-code batch run [--wait-window HH:MM-HH:MM] [--max-total-yuan N]",
+    runBadFlag: (f) => `❌ Unknown flag or invalid value: "${f}"`,
+    budgetStop: (spent, cap, id) => `💰 Batch spent ¥${spent} / cap ¥${cap} — stopped before ticket \`${id}\``,
+
+    // —— P2 delivery & continuation (batch pr / status; orchestration copy lives in core pr/ledger modules) ——
+    prUsage: "Usage: deepseeker-code batch pr <ticket-id>\nPrereq: ticket finished and acceptance passed; needs-review tickets are always refused (no override flag).\nNote: push uses your local git config — configure git http.proxy first if you need one (see README \"Delivery & PR\").",
+    prBadArgs: "Usage: deepseeker-code batch pr <ticket-id> (ticket id required; no other args supported)",
+    statusUsage: "Usage: deepseeker-code batch status (summarizes the last 7 days of the batch ledger and the queue)",
+    statusBadArgs: "Usage: deepseeker-code batch status (this subcommand takes no arguments)",
+    statusHead: (since) => `📊 Last 7 days (since ${since}):`,
+    statusLine: (runs, tickets, green, red, cost) => `   ${runs} run(s) / ${tickets} ticket(s): ✔ ${green} ✘ ${red} · cost ¥${cost}`,
+    statusBadLines: (n) => `   (${n} corrupted ledger lines skipped)`,
+    statusEmpty: "📊 No batch activity in the last 7 days — numbers appear here after a batch run.",
+    contBaseNote: (branch) => `continuation base = previous artifact branch ${branch}`,
+    contBaseBranchGone: (branch) => `previous artifact branch ${branch} no longer exists`,
+    contBaseNoBranch: "previous report has no artifact branch",
+    contBaseFallback: (prevId, why) => `continuation base falls back to HEAD (continues ${prevId}: ${why}) — changes may overlap the previous fix; watch acceptance carefully`,
+    repoRouted: (name, ident, dir) => `🧭 cross-repo route: ticket targets ${name} (matched identifier "${ident}") → worktree opened in that repository`,
+    repoInherit: (prevId, dir) => `🧭 continuation inherits the previous ticket's repo → ${dir} (continues ${prevId}; the previous branch only exists there)`,
+    repoAcceptAdapted: (from, to) => `accept adapted for the target repo: ${from} → ${to}`,
+    repoSetupDropped: (cmd) => `setup dropped for the target repo (${cmd}: no package.json there, npm-family commands would certainly fail)`,
+    repoBodyNote: (name) => `\n\n---\n[Cross-repo run] This ticket executes in a dedicated worktree of the target repository "${name}": your workspace IS a checkout of that repo — use repo-relative paths; complete the task inside it and do not access other repositories.`,
+    downgradedNote: (n) => `test-touch downgrade: ${n} test file(s) touched — ticket marked needs-review; batch pr will refuse it, review manually`,
+    testPatternsNote: (n) => `🧪 Test-path heuristic extended: sync.json testPathPatterns adds ${n} pattern(s)`,
+    ledgerFail: (e) => `Failed to write the batch ledger (this run is unaffected): ${e}`,
 
     ticketRejected: (id, err) => `🚫 [${id}] Ticket rejected: ${err}`,
     taskMeta: (budget, timeoutMin, accept) => `   Budget ${budget !== undefined ? `¥${budget}` : "uncapped"} · timeout ${timeoutMin}min · accept \`${accept}\``,
@@ -190,7 +323,22 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     acceptLine: (passed, id, code) => `${passed ? "✅" : "❌"} [${id}] acceptance exit ${code}`,
     acceptKilledSuffix: " (killed on timeout)",
     timeoutAbort: (min) => `Task timed out (${min} minutes)`,
-    artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, kept for manual handling)`,
+    baselineGateNote: "baseline check (external-source ticket: a red baseline never reaches the agent; zero spend)",
+    baselineProbeLine: (cmd) => `🧪 baseline probe: \`${cmd}\` (run acceptance on the clean tree first; red means the agent never runs)`,
+    baselineCachedOk: "🧪 baseline cache hit (same base verified passing today) — probe skipped",
+    baselineCachedBroken: (v) => `🧪 baseline cache hit (verified today: ${v}) — no env setup, no agent (zero spend)`,
+    baselineProbeFail: (v) => `🧪 baseline probe failed: ${v}`,
+    baselineProbeRetrying: "🧪 baseline probe red: likely test flake under load — re-probing once in 30s (only a second red convicts)",
+    baselineProbePass: "🧪 baseline probe passed; restoring the clean tree, entering the agent phase",
+    acceptProbeRetrying: "🔁 accept round 1 failed: likely test flake under load — re-probing once in 30s (only a second red convicts)",
+    testFilesH: "## Touched test files (informational)",
+    testFilesNote: (n) => `This diff touches ${n} test paths (P1: informational only, not part of status judgment):`,
+    changedMore: (n) => `...(and ${n} more)`,
+    deniedMore: (n) => `...(and ${n} more denied, not listed)`,
+    windowAutoDeny: (tool) => `🌙 Wait-window active: card approval skipped for ${tool} — auto-denied and logged (cards return for attended/daytime runs; reply to the push for a follow-up if it should run in the day)`,
+    cardRememberedAllow: (tool) => `♻️ ${tool} already approved on this ticket — subsequent calls auto-allowed (no repeat cards)`,
+    cardRememberedDeny: (tool) => `♻️ ${tool} already denied on this ticket — subsequent calls auto-denied (no repeat cards; unlock via ticket tools: and re-run to allow)`,
+    artifactLine: (p, branch) => `   Artifact: ${p} (branch ${branch}, committed, kept for manual handling)`,
     inWindowNow: (hhmm) => `⏰ It's ${hhmm}, already inside the window — starting now.`,
     waitWindowWait: (h, m) => `⏰ --wait-window: starting in ${h}h ${m}m (at the window start). Waiting — Ctrl+C to cancel.`,
     waitWindowInvalid: (s) => `❌ Invalid --wait-window: "${s}" (expected HH:MM-HH:MM, e.g. 23:30-06:30)`,
@@ -199,7 +347,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     summaryCost: (sum, tasks) => `💰 Total cost: ¥${sum} (${tasks} tasks priced)`,
     summaryCostFree: "💰 Total cost: all records unpriced, no money counted",
     failedHead: "⚠️ Failed tasks:",
-    artifactsDir: "Reports and changes: .deepseeker-code/batch/done/ (worktrees kept for manual handling)",
+    artifactsDir: "Reports and changes: .deepseeker-code/batch/done/ (changes are committed to dsc-wt-* branches; sweeping the worktree directories does not affect delivery)",
 
     statusLabel: (s) => ({
         passed: "✅ acceptance passed",
@@ -209,6 +357,8 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
         "setup-failed": "🛠️ setup failed",
         rejected: "🚫 ticket rejected",
         "watchdog-killed": "🐕 watchdog killed",
+        "baseline-broken": "🧪 baseline broken (ticket not executed)",
+        stopped: "🛑 stopped by you",
     })[s],
 
     spawnFail: (e) => `Spawn failed: ${e}`,
@@ -224,6 +374,7 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
         return `${c.rounds} rounds · ${money} · cache hit ${hit}% · ${mins}min${c.partialPrice ? " (some records unpriced; money is a partial sum)" : ""}${c.subRuns > 0 ? ` · ${c.subRuns} sub-runs included` : ""}${c.toolCostYuan > 0 ? ` · web ¥${c.toolCostYuan.toFixed(4)}` : ""}${c.auxCostYuan > 0 ? ` · aux ¥${c.auxCostYuan.toFixed(4)}` : ""}`;
     },
     noReceipt: "(no receipt — the run was truncated before finishing; cost per the usageLog aggregate above)",
+    imgReadEntry: (n) => `- Images read: ${n} (counted from read_image calls; 0 on an image-bearing ticket usually means the model lacks vision — retry with DEEP_SEEK_VISION=1)`,
     receiptLine: (r) =>
         `${r.rounds} rounds · ${r.costYuan !== null ? `¥${r.costYuan.toFixed(4)}` : "unpriced"} · cache hit ${Math.round(r.cacheHitRate * 100)}% · ${(r.durationMs / 1000).toFixed(0)}s${r.toolCostYuan ? ` · web ¥${r.toolCostYuan.toFixed(4)}` : ""}${r.auxCostYuan ? ` · aux ¥${r.auxCostYuan.toFixed(4)}` : ""}`,
 
@@ -240,13 +391,15 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     noFinal: "(no output — the run was truncated/errored before producing any text)",
     acceptH: "## Acceptance",
     acceptCmdLine: (cmd, code) => `Command: \`${cmd}\` → exit ${code}`,
+    acceptSkippedLine: (cmd) => `Command: \`${cmd}\` → not run (light accept: changes contain no code files, so the build check has nothing to consume)`,
+    acceptLightLine: "⚡ changes contain no code files → skipping full-build accept (light pass; if the agent strayed into code, the full check still runs)",
     acceptTimeoutSuffix: " (⏱️ acceptance timed out, killed)",
     acceptTail: "Output tail:",
     noAccept: "\n(Acceptance not run — changes incomplete, running it would be noise.)",
     deniedH: "## Denied tool calls (fail-closed log)",
     deniedNone: "None.",
-    diffH: "## Diff summary (worktree vs base, uncommitted, awaiting manual handling)",
-    diffNote: (branch, p) => `Changes live in an isolated worktree (branch \`${branch}\`, path ${p}). To keep: commit inside the worktree and merge back. To discard: delete the worktree directory + \`git worktree prune\` + \`git branch -D <branch>\`.`,
+    diffH: "## Diff summary (worktree vs base, committed to the branch, awaiting manual handling)",
+    diffNote: (branch, p) => `Changes are committed onto branch \`${branch}\` (worktree path ${p}; that directory is swept at the next startup, the branch is unaffected). Inspect: \`git show ${branch}\`; merge: \`git merge ${branch}\`; discard: \`git branch -D ${branch}\`.`,
     diffNone: "(none)",
 
     wdH: "## Watchdog (progress-aware)",
@@ -259,6 +412,14 @@ changes are harvested onto an isolated git worktree (temp branch), kept for manu
     wdKillRec: (verdict, evidence) => `⛔ Killed: ${verdict} — ${evidence}`,
     wdAtKillRec: (round, costYuan) => `At kill time: round ${round} · ¥${costYuan}`,
     wdRetryRec: (n) => `Evidence-carrying retries: ${n + 1} rounds total (same worktree; per-round evidence above)`,
+
+    // —— C4 soft stop (2026-11-10 "command center"): listen's "stop" → stop protocol file → runner checks at event boundaries, wraps up cleanly ——
+    stopRequestNote: "Stop received; wrapping up (finishes the current step, changes are committed to the branch as usual)",
+    stopAbortReason: "Stop received (soft stop: finish the current step, then wrap up)",
+    stoppedEarlyNote: "Stop arrived before the run started (ignition race: you called stop while it was starting) — not executed, zero spend",
+    stopAcceptedLine: (id: string) => `🛑 [${id}] Stopped as instructed (changes kept on the branch, report still pushed)`,
+    // C4 progress heartbeat ("progress" control word) activity phrase
+    progressThinking: "thinking",
 };
 
 const DICT: Record<Locale, typeof ZH> = { zh: ZH, en: EN };

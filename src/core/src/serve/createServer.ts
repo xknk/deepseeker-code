@@ -25,6 +25,7 @@ import { pushSessionInbox } from "@/agent/inbox.ts";
 import { appConfig } from "@/config/index.ts";
 import { dumpEffectiveConfig } from "@/config/dump.ts";
 import { createUUID, isSafeSessionId } from "@/common/index.ts";
+import { handleWebhook } from "@/batch/webhook.ts";
 import { requireAuth } from "./auth.ts";
 
 /** 单进程最大并发会话数（本地单机保护，防恶意/失控请求耗尽资源）。 */
@@ -38,6 +39,8 @@ export const createServer = () => {
     //   避免未授权者借大体积 body 拖累服务端（/health 保持开放便于存活探活）。
     app.use("/api", requireAuth);
     app.use("/createJson", requireAuth);
+    // ★ 多入口流水线 P3：/hooks/:channel（webhook → batch 建票）同闸复用 DEEPSEEKER_CODE_TOKEN，零新鉴权代码
+    app.use("/hooks", requireAuth);
     // ★ 多模态：上限放宽到 20mb——attachments 以 base64 随 JSON 携带（约 1.33 倍膨胀，8MB 原图 ≈ 10.7MB payload）
     app.use(express.json({ limit: "20mb" }));
 
@@ -211,6 +214,26 @@ export const createServer = () => {
     //    挂 /api 下自动过 requireAuth——本地程序化诊断入口（「这个行为到底被谁改了」一查便知）。
     app.get("/api/config", (_req, res) => {
         res.json({ ok: true, ...dumpEffectiveConfig() });
+    });
+
+    // ★ 多入口流水线 P3：本地 webhook 建票入口（方案 §7）。内网 CI 失败钩子 / 测试流程 POST →
+    //   统一工单 pending/（与 batch sync 同一建票管线：accept 同闸、引用块边界、附件三态、
+    //   .sync.lock 临界区 + sync-state 去重 + maxTicketsPerDay + 每 channel 限流）。
+    //   handleWebhook 是零 express 依赖的纯逻辑（batch/webhook.ts），此处只做薄适配：
+    //   结果对象 → HTTP 状态码与 JSON；意外异常兜底 500（Express 4 不捕获 async handler 的 reject，
+    //   统一错误中间件收不到——与 /createJson 同款就地兜底）。响应只含 ok/status/ticketId，绝不回显请求正文。
+    app.post("/hooks/:channel", async (req, res) => {
+        try {
+            const r = await handleWebhook(req.params.channel, req.body);
+            if (r.ok) {
+                res.status(r.http).json(r.ticketId !== undefined ? { ok: true, status: r.status, ticketId: r.ticketId } : { ok: true, status: r.status });
+            } else {
+                res.status(r.http).json({ ok: false, error: r.error });
+            }
+        } catch (e) {
+            console.error("[express] /hooks 处理异常:", e);
+            if (!res.writableEnded) res.status(500).json({ ok: false, error: "服务器内部错误" });
+        }
     });
 
     app.post("/createJson", async (req, res) => {

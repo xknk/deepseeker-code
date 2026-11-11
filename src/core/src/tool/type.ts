@@ -214,9 +214,12 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          * - 'file'：default 档（工作区围栏 + 敏感文件 deny，按 pathArgs 取参）
          * - 'command'：default 档（COMMAND_DENY 灾难命令硬拒）
          * - 'aggressive'：仅 /auto 档（web / git_commit 类，prompt injection 重灾区或不可 undo）
+         * - 'loopback'：default 档确定性免审，仅限【字面回环目标】127.0.0.1 / localhost / [::1]（可带端口；
+         *   按 primaryArg 取 URL 判定，A3 2026-11-09）——本地联调零打扰；其余目标恒转人工，
+         *   工具内 SSRF 闸（钉 IP / 元数据端点硬拦）独立生效不受影响。
          * 缺省 = 恒转人工审批（fail-closed，现状语义；如 notebook_edit 刻意不声明以维持恒人工审批）。
          */
-        autoApproval?: 'file' | 'command' | 'aggressive';
+        autoApproval?: 'file' | 'command' | 'aggressive' | 'loopback';
 
         /**
          * 计划模式白名单（替代 planMode.ts PLAN_ALLOWED_TOOLS 名单）：true = 计划期（只读调研）可用。

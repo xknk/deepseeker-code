@@ -19,6 +19,7 @@ import fs from "fs/promises";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
 import { readJSONFile, atomicWriteJSON } from "@/common/index.ts";
+import { scriptRunnerEntryPrefix, splitShellSegments } from "./autoPermission.ts";
 
 export type PermissionVerdict = 'allow' | 'deny' | 'ask' | null;
 
@@ -174,6 +175,27 @@ const toolNameMatches = (pattern: string, name: string): boolean => {
     return false;
 };
 
+/**
+ * ★ A2 匹配侧归一化（2026-11-09 审批降噪）：剥掉命令值的前导 `cd <路径>` 段，返回剥后串；
+ *  无前导 cd 段 / 剥后为空 → null（调用方只按原串匹配）。
+ *  动机：agent 的自然形态是 `cd src/cli && npx tsx … 入口 …`（2026-11-05 trace：92 条 run_command 中
+ *  22 条带此前缀）——生成侧 scriptRunnerEntryPrefix 已剥 cd 前缀落规则，匹配侧若不对称剥前缀，
+ *  cd 形态的变体永远命中不了已确认规则，「记住」不生效、照样逐次弹审批。
+ *  语义：剥掉 cd 后仍以已确认作用域开头的命令视为同一形态。cd 目标不同目录 = 同串不同 cwd 的
+ *  风险面与既有「规则只记命令串、不记 cwd」的形态信任一致（见 toolExecution 的 scriptRunnerCwdDrift
+ *  注释）；COMMAND_DENY 硬闸与 deny 规则在此之上照常兜底。
+ */
+const stripLeadingCdSegments = (cmd: string): string | null => {
+    const trimmed = cmd.trim();
+    if (!/^cd(\s|$)/.test(trimmed)) return null;
+    const segs = splitShellSegments(cmd);
+    let i = 0;
+    while (i < segs.length && /^cd(\s|$)/.test(segs[i].trim())) i++;
+    const rest = segs.slice(i).map(s => s.trim()).filter(Boolean);
+    if (rest.length === 0) return null;
+    return rest.join(" && ");
+};
+
 /** 判断单条编译规则是否命中当前工具调用 */
 const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg?: string): boolean => {
     if (!toolNameMatches(rule.toolName, toolName)) return false;
@@ -181,7 +203,12 @@ const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg
     if (!primaryArg) return true; // 工具未声明主参数：带括号的规则退化为按名匹配
     const val = args?.[primaryArg];
     if (typeof val !== "string") return false;
-    return rule.argRegex.test(val);
+    if (rule.argRegex.test(val)) return true;
+    // ★ A2 匹配侧归一化：剥前导 cd 段后再试（与生成侧 scriptRunnerEntryPrefix 的剥前缀对称）。
+    //   归一化候选对 deny / ask / allow 三类规则同样生效（同一候选集、同一短路序），
+    //   deny > ask > allow 的优先级契约不变；deny/ask 因此覆盖 cd 前缀变体（收紧方向）。
+    const stripped = stripLeadingCdSegments(val);
+    return stripped !== null && rule.argRegex.test(stripped);
 };
 
 /**
@@ -242,11 +269,20 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *
  *  ★ 安全优先（M5 加固）：自动生成的 allow 规则宁可窄不可宽。allow-always = 「以后这类别再问就免审」，
  *    作用域过宽 = 把 prompt 注入驱动的危险变体也静默放行（checkPermission='allow' → needApproval=false）。
- *   - 命令类（run_command/run_in_background，argKey=command）：落【精确命令串】（如 run_command(npm test)）。
- *       旧版取首 token + `:*` 写成 run_command(npm:*)，会把 `npm install <恶意包>` / `npm publish` / 链式
- *       `npm test; evil` 一并静默放行——shell 执行类工具的 allow-always 必须精确，杜绝 payload 空间。
- *       同命令带不同 flag/子命令的变体会重新审批（shell 工具的正确安全姿态）；用户若确需「一族命令免审」，
- *       可手动在 settings.json 写 run_command(npm test:*) 显式声明（globToRegex 仍支持 :*）。
+ *   - 命令类（run_command/run_in_background，argKey=command）：分轨（★ A2，2026-11-09 审批降噪）——
+ *       ① runner 族（npm/pnpm/yarn/npx/corepack 整族，scriptRunnerEntryPrefix 命中）：落【入口前缀】规则
+ *          `run_command(<解释器+入口脚本> *)`（尾随 `空格*` = token 边界），如
+ *          `run_command(npx tsx --tsconfig ./tsconfig.json ./src/main.tsx *)`。
+ *          动机：同一入口形状的变体（batch status / batch sync --check / 尾随 2>&1 | head）执行的是同一份
+ *          入口脚本代码，逐变体确认零安全增益、纯摩擦（2026-11-05 trace：~21 次点击全是同一入口的变体）。
+ *          供应链「首次人工确认」语义保留——每个入口形状第一次仍问；SCRIPT_RUNNER_HEADS 整族拦截不拆，
+ *          本函数只改「记住」的方式。匹配侧在 ruleMatches 对称剥前导 cd 段（cd 前缀变体同样命中）。
+ *       ② 非 runner 族 / runner 族但定位不到入口脚本 token（npm test / npm install / pnpm dlx 等）：
+ *          落【精确命令串】（如 run_command(npm test)），M5 现状一个字不改——刻意不落 `npm install*`
+ *          包名通配（会把 npm install <恶意包> 静默放行）。旧版教训仍有效：取首 token + `:*` 写成
+ *          run_command(npm:*) 会把 `npm install <恶意包>` / `npm publish` / 链式 `npm test; evil`
+ *          一并静默放行；用户若确需「一族命令免审」，可手动在 settings.json 写 run_command(npm test:*)
+ *          显式声明（globToRegex 仍支持 :*）。
  *   - 路径类（argKey=path）：顶层目录 + `*`（edit_file(src/*) 覆盖 src 下任意深度）；根级文件退化为精确值；
  *     非 path 的路径类主参数（如 move_file 的 source）落到下方精确值分支——无 undo 兜底的工具不放大作用域；
  *   - 其余（url/query/pattern 等）：精确值；
@@ -261,7 +297,16 @@ export const buildScopedAllowRule = (toolName: string, args: any, primaryArg?: s
     if (!argKey || typeof val !== 'string' || !val) return null;
     if (argKey === 'command') {
         const cmd = val.trim();
-        return cmd ? `${toolName}(${cmd})` : null; // 精确命令串：杜绝跨子命令 / 链式注入的静默放行
+        if (!cmd) return null;
+        // ★ A2：runner 族落「入口前缀」规则（见上方函数注释的分轨论证）；其余精确串现状不变。
+        //   ★ 尾随 ` *`（带空格，2026-11-09 验证补口）：globToRegex 的裸 `*` → `.*`，若写成 `main.tsx*`
+        //     会连 `main.tsx.evil.mjs`（换了脚本文件、入口 token 的无分隔延续）一并静默放行——注入链
+        //     实证：先 edit_file 写 evil 变体（文件快路径放行）再套前缀规则执行，M5 同款病灶复活。
+        //     空格 = token 边界：变体必须形如「同入口 + 空格 + 运行期参数」才命中；bare 入口（无尾参）
+        //     不命中、重新首验一次（罕见形态，代价可接受）。
+        const prefix = scriptRunnerEntryPrefix(cmd);
+        if (prefix) return `${toolName}(${prefix} *)`;
+        return `${toolName}(${cmd})`; // 精确命令串：杜绝跨子命令 / 链式注入的静默放行
     }
     // ★ 第 17 项补丁（2026-10-21）：'src' 分支已退役——move_file 主参数改称 'source' 后，全仓再无
     //   工具以 'src' 作主参数（gs 声明由 tool-declaration-drift 全表断言钉住），该分支成为死代码。

@@ -84,6 +84,128 @@ The data directory defaults to `~/.deepseeker-code/` (override with `DEEPSEEKER_
 
 ---
 
+## Unattended batch & scheduled sync
+
+`deepseeker-code batch` runs queued work tickets unattended; `batch sync` pulls labeled GitHub/GitLab issues into the local ticket queue. One-time setup:
+
+```bash
+# 1. copy the example config into the project and trim to the source you use
+cp sync.json.example <project>/.deepseeker-code/batch/sync.json
+# 2. self-test first: config / gh auth / repos / labels / token — each ✓/✗ with a fix hint
+deepseeker-code batch sync --check
+# 3. pull once (--dry-run previews without writing anything)
+deepseeker-code batch sync
+# 4. run the queue (--max-total-yuan caps total batch spend; --wait-window defers the start)
+deepseeker-code batch run --max-total-yuan 5
+```
+
+Schedule **detection and work as two separate clocks** (§2.3 of the design doc): sync often, run in your off-peak window. `sync` holds its own lock — an overlapping run just exits — and `batch run --wait-window 01:00-07:00` can also defer a single schedule instead of a second clock.
+
+**`defaultSetup`** (sync.json, optional) — a setup command stamped into every ticket `batch sync` creates (frontmatter `setup:`). With scheduled tickets nobody is around to fill in `setup:`, so a repo that needs `pnpm install` would fail its baseline probe nightly and get cached as `baseline-broken` — the pipeline idles while burning the daily ticket quota. Continuation tickets are unaffected (they inherit the previous ticket's setup).
+
+**Linux (cron)** — `crontab -e`:
+
+```cron
+# detection clock: pull tickets every 30 minutes
+*/30 * * * * cd /path/to/project && deepseeker-code batch sync >> /tmp/dsc-sync.log 2>&1
+# work clock: run the queue nightly at 01:00 (off-peak), capped at ¥5 per batch
+0 1 * * * cd /path/to/project && deepseeker-code batch run --max-total-yuan 5 >> /tmp/dsc-run.log 2>&1
+```
+
+**macOS (launchd)** — `~/Library/LaunchAgents/com.deepseeker-code.sync.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.deepseeker-code.sync</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd /path/to/project &amp;&amp; deepseeker-code batch sync</string>
+  </array>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>StandardOutPath</key><string>/tmp/dsc-sync.log</string>
+  <key>StandardErrorPath</key><string>/tmp/dsc-sync.log</string>
+</dict></plist>
+```
+
+Load with `launchctl load ~/Library/LaunchAgents/com.deepseeker-code.sync.plist`. For the work clock, duplicate the file as `com.deepseeker-code.run.plist`, replace the command with `batch run --max-total-yuan 5`, and swap `StartInterval` for a calendar trigger: `<key>StartCalendarInterval</key><dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>`.
+
+**Windows (Task Scheduler)** — elevated PowerShell:
+
+```powershell
+# detection clock: every 30 minutes
+schtasks /Create /TN "DeepSeeker sync" /SC MINUTE /MO 30 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch sync"
+# work clock: nightly 01:00; --wait-window gives a second guard inside the run itself
+schtasks /Create /TN "DeepSeeker run" /SC DAILY /ST 01:00 `
+  /TR "cmd /c cd /d D:\path\to\project && deepseeker-code batch run --max-total-yuan 5"
+```
+
+> To have the machine wake up for the nightly window: open Task Scheduler → the task's Properties → Conditions → tick **"Wake the computer to run this task"**. Keep "Run only when user is logged on" for interactive-safe defaults; `batch run` needs the same environment (API key) your normal shell has.
+
+### Delivery & PR (`batch pr`), ledger (`batch status`), continuations
+
+- **`deepseeker-code batch pr <ticket-id>`** — deliver a finished ticket whose acceptance passed. It rebuilds a review worktree from the artifact branch, re-checks the latest mainline (a mandatory `git fetch` + behind/conflict precheck), pushes the branch as `agent/<ticket-id>`, and opens a **draft** PR (GitHub: `gh pr create --draft` with `fixes #N`; GitLab: a draft MR with `Closes #iid`). Explicit command = explicit approval; nothing is ever pushed automatically. Refusals: ticket not passed, flagged `needs-review` (test files touched / image attachments / repo mismatch — no override), already delivered (idempotent marker `done/<id>.pr.json`), behind mainline (v1 does **not** auto-rebase; it prints manual rebase commands and flags the ticket), or merge conflicts.
+- **`deepseeker-code batch status`** — summarizes the last 7 days of the append-only batch ledger (`.deepseeker-code/batch/ledger.jsonl`, one line per run: tickets / passed / failed / cost) plus the live queue.
+- **Continuations** — when a synced issue changes after its ticket finished (new comment, reopen, body edit), the next `batch sync` creates a continuation ticket (`continues: <prev-id>`): it inherits the previous ticket's accept/setup/budget and checks out the previous artifact branch as its code base. The previous report summary is embedded; external content stays quoted as data. Fingerprint v2 covers title + body + last 5 comments; P1-era state entries migrate to v2 on first sight without creating continuations (no upgrade flood).
+- **`testPathPatterns`** (sync.json, optional) — extends the built-in test-path heuristic (`tests?/`, `__tests__/`, `*.test.*`, `*.spec.*`) with extra regexes; a passed ticket that touched test paths gets flagged `needs-review` and `batch pr` refuses it.
+- **Proxy**: `batch pr` push uses your **local git config**. If your network needs a proxy for the remote, configure it yourself, e.g. `git config http.proxy http://127.0.0.1:7897` (or `https.proxy`) — the tool never injects proxy flags into commands by default.
+
+### Webhook entry (L2, advanced)
+
+Intranet CI failure hooks / test pipelines can POST directly to the local serve endpoint `/hooks/:channel` to create tickets (the exact same ticket pipeline as `batch sync`: four-tier accept gate, quote-block boundary, three-state attachments, `.sync.lock` critical section, sync-state dedup, `maxTicketsPerDay` cap). **The endpoint is alive only while the serve process runs**, listening on `127.0.0.1:3000` by default:
+
+```bash
+# 1) Start serve at the target project root and pin the auth token (stable across restarts)
+export DEEPSEEKER_CODE_TOKEN=some-random-value-you-picked
+npx tsx --tsconfig src/core/tsconfig.json src/core/src/serve/index.ts
+
+# 2) Two-line CI-side example (same project root; both created/duplicate return 200, ticket id in ticketId)
+curl -s -X POST http://127.0.0.1:3000/hooks/ci-alert -H "Authorization: Bearer $DEEPSEEKER_CODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"login suite failing","body":"3 red, same after retry, logs attached","accept":"npm test","source-url":"https://ci.example.com/runs/42"}'
+```
+
+- **Response semantics**: `200 {ok:true,status:"created"|"duplicate",ticketId}`; `400` malformed field / missing acceptance (with a one-line fix hint — **bad input is an explicit 400, never silently ignored**); `401` auth failed; `429` rate limited (5 tickets/min per channel, tunable via `DEEPSEEKER_CODE_WEBHOOK_RATE`) / over `maxTicketsPerDay` / sync lock busy (retry later).
+- **Reuses existing sync.json keys** (`defaultAccept`/`defaultSetup`/`defaultBudgetYuan`/`maxTicketsPerDay`/`allowExternalAccept`/`maxBodyLength`/`testPathPatterns`) — **no new keys**; works without any GitHub/GitLab source configured. The request body's `accept` field is ignored by default (same gate as in-issue accept blocks); set `"allowExternalAccept": true` in sync.json to trust it (forcing `needs-review`).
+- **Attachments**: request body `attachments: [{url, name?}]` (at most 10), downloaded via plain unauthenticated HTTP GET; three states — text inlined (tail, 8KB) / saved to `batch/attachments/<ticket-id>/` with absolute path / marked "not read + reason"; tickets with images are forced `needs-review`.
+- **Delivery**: `batch pr` only accepts tickets sourced from GitHub/GitLab — webhook / Feishu tickets are pushed **manually** after acceptance passes (`batch pr` refuses and says so; IM/CI-sourced content never auto-publishes PRs).
+- Zero-protocol fallback: dropping ticket files into `.deepseeker-code/batch/pending/` by hand (format in `batch add` help) still works — no serve, no token needed.
+
+### Feishu entry (L2, advanced: ticket from a phone message + card approvals)
+
+With no computer around, just @-mention the bot in Feishu with "fix the login page date parsing" and a ticket is created; when a batch run hits a risky operation (e.g. `run_command`), an approval card is pushed to your direct chat — **tap "Approve" on your phone to allow it** (30 minutes with no tap = auto-deny, fail-closed). It runs as a resident long connection via `batch listen feishu`, configured in a separate `feishu.json` (**sync.json untouched** — the old global CLI's timer still reads it). Step by step:
+
+```bash
+# 1) Create a custom enterprise app: https://open.feishu.cn/app → create, get App ID / App Secret
+# 2) Set user-level env vars; credentials live only in env vars, never in files
+setx FEISHU_APP_ID "cli_xxx" & setx FEISHU_APP_SECRET "your-secret"
+
+# 3) Grant minimal permissions: "read & send direct/group messages" (im:message)
+#    + "read messages users send to the bot in direct chat" + image/file resource upload/download;
+#    subscription mode = 【long connection】 (no public callback URL needed)
+# 4) Event subscriptions: add im.message.receive_v1 (messages); card callback v4.0: enable your own cards (card.action.trigger)
+# 5) Publish an app version (nothing arrives before publishing); add the bot to the target group
+# 6) Install the SDK globally (optional dependency — not bundled, not in the vsix)
+npm install -g @larksuiteoapi/node-sdk
+
+# 7) Whitelist config: copy feishu.json.example from the repo root to <project>/.deepseeker-code/batch/feishu.json,
+#    fill chats (group chat_ids) and users (your open_id). Group messages need @bot by default;
+#    budget is forced to min(budgetYuan, sync.defaultBudgetYuan), IM tickets default to a small 0.5 yuan cap
+# 8) Start the resident listener (a schtasks auto-start entry is recommended)
+deepseeker-code batch listen feishu
+```
+
+- **⚠️ Single-client limit (hard constraint)**: multiple long connections on one app **do not broadcast** — messages reach only one random connection. Only **one** `batch listen feishu` process is allowed system-wide: startup takes an exclusive lock (`.listen.lock`, concurrent double-starts are refused outright) plus a fresh-heartbeat check; both refusals report the pid, and a dead lock left by a crash is auto-taken-over on the next start via pid-liveness detection.
+- **Whitelist gate**: group messages must have chat_id ∈ `chats` and @bot (`mentionOnlyInGroup`, default true); direct messages must be from an open_id ∈ `users`. Out-of-list messages are always rejected (reason logged — fix the config and resend). `users` doubles as the **card-approver whitelist** — taps from anyone else have no effect.
+- **Same ticket pipeline**: identical to sync/webhook — content-hash dedup (resending the same text = duplicate), four-tier accept gate (an IM ticket cannot be created without a configured `defaultAccept` — never guessing), `maxTicketsPerDay` cap, three-state attachments (images/files land via the bot resource API, never silent), quote-block data boundary. A bare image/file message with no one-line description is rejected (no guessing).
+- **Card approvals**: the runner only enters the card wait when the listener is alive (90s fresh heartbeat + non-empty `users`); with the listener absent it keeps the current behavior (auto-deny + record — zero behavior change). Approval = **allow-once**, single use, never widens the tool allowlist; cards never contain diffs or acceptance output.
+- **Reconcile fallback**: events during a disconnection window are not replayed by the platform — the listener keeps a time cursor (`feishu-cursor.json`) and periodically pulls incremental messages to backfill missed tickets (seen ones dedupe idempotently). Coverage spans the group whitelist **plus registered direct chats** (a p2p chat_id is learned automatically from the first live message and persisted to `feishu-p2p-chats.json`; chats that have never messaged the bot cannot be backfilled). Without the history-read permission it degrades to a visible notice (telling you how to recover), while live messaging keeps working. Logs go to `.deepseeker-code/batch/feishu-listen.log`.
+- **Optional LLM gatekeeper** (`feishu.json` `gatekeeper: true`): each message first gets one LLM verdict (work/reject) before the rule gate (needs `DEEP_SEEK_API_KEY`; a failed verdict passes through with a logged warning). Off by default.
+- **Health check**: the listener should run resident with the machine; check the process with `tasklist /FI "IMAGENAME eq node.exe"` and the log tail for liveness (a heartbeat every 30s plus periodic reconcile lines).
+
+---
+
 ## Architecture (monorepo)
 
 ```text

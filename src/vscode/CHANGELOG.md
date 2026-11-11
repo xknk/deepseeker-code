@@ -1,3 +1,34 @@
+## 1.0.77
+
+**飞书远程指挥台全线落地 + 跨仓工单路由 + 审批降噪 + 轻量验收——手机五剧本、中午延迟槽、拟人文案三条真机验收腿全过后发版**——流水线代码由 CLI npm 包承载（实测扩展 bundle 不含 batch/feishu 模块，要用流水线请升级 CLI `deepseeker-code@1.0.73`），本条为对齐记录：
+
+- **C1–C5「指挥台」**（远程入口从「信箱」变「即时指挥」）：① 直答通道——问句走 flash 只读轻会话（¥0.001 级，不建票），写操作零容忍触碰即升级建票，同一回复链续问粘热会话吃前缀缓存；② listen 点火 runner——推任务即跑（有活才起 runner），延迟意图词「今晚跑/明早跑/**中午跑**」排 01:00/07:00/12:00，过了当日点排次日、机器关着票不丢（巡检补跑）；③ 完成推送带结论摘要（≤200 字、剥代码块——外发红线唯一放行形态，diff/代码体仍禁）；④ 控制词四件（队列/进度/停/取消，停=协议文件软停不杀进程）。
+- **文案拟人化 + 票号黑话清零**（用户反馈「太机器话」）：建票回执「🏃 收到，这就去办：「标题」」、延迟「🌙 好的，排在 明 01:00…想撤掉就发 取消 短代号」、完成推送改多行结论式（状态/动了哪些文件/花了多少/报告路径/要跟进直接回这条）；手机上只见标题与 4 位短代号，完整票号只留在报告路径；取消支持短代号（末段唯一命中才动手，宁可不动不误撤）。
+- **跨仓工单路由**：手机发票可指定别的仓库（「在 lg-pms 建…」）——repoRoute 规则路由（零 LLM，扫 D:/code 仓库索引，唯一外部命中+基座不命中+邻近词三护栏）+ 跨仓 worktree + accept 按 CI 构建面收敛适配（Java 走 mvn -pl CI模块 -am）+ 报告 repo frontmatter 供续修继承。
+- **审批降噪三连修**（浏览器票 15 张卡逐张点实锤）：MCP 审批合成名补齐（解锁名单此前永远匹配不上）；工单 `tools:` 支持尾缀通配（`mcp__playwright__*` 一条解锁整个服务）；同票同工具人工决定终身记忆（防磨损式逼批）。
+- **run_command 流式协议修复**：供应链闸门包装误用普通 async 函数包 async generator，命令成功但模型只见空壳——改 async generator + yield* 委托透传（generator 包装三犯定则收官）。
+- **轻量验收**：不碰代码的票（txt/md/图片等，未知扩展按代码处理）跳过整仓编译，报告诚实标注「未执行（轻量验收）」；修复门时序——验收先 `git add -A` 再 numstat，untracked 新文件不再漏计（「建个 txt 也等 20 分钟编译」根治）。
+- **「完成推送双发」排查定案（代码无罪）+ 两真缺陷**：服务端硬对账实证每票仅一条推送，手机第二条为飞书客户端渲染现象；顺带修确认语对账重放连回「👍 收到」（重放路静默）与完成推送花费 ¥null 归一（写点改 `"?"`）。
+- 守门：49 工具全矩阵双向对账（注册表新增未分类必红）、飞书 listen/notify/message/reconcile 全 family 重钉、轻量验收分类器与门时序锚、跨仓路由与 CI 构建面四形态。
+
+## 1.0.76
+
+**多入口流水线 P3（webhook 入口）+ 挂机打磨第一批（defaultSetup / 改动清单交接 / PR 正文小修），随 CLI 1.0.66 同批 core 发版**——流水线代码由 CLI npm 包承载，扩展侧无行为变化，本条为对齐记录：
+
+- **P3 `POST /hooks/:channel`**：内网 CI 钩子 POST 即建票入挂机队列，与 `batch sync` 同闸同管线（引用块边界 / accept 四档 / 附件三态 / 锁互斥 / 内容哈希去重 / 每 channel 限流 + 每日上限共享配额），鉴权复用 serve token，配置面零新键。
+- **`defaultSetup` 配置键**：定时建票自动附带环境准备命令——没人补 setup 的票不再每晚 baseline-broken 空转。
+- **改动清单交接**：报告固化 `changed-file:` 清单、续修票注入【前次改动文件】段，续修免重新探索上票改动。
+- **PR 正文**：剥 name-status 状态前缀 + 中文路径 quotepath 修复（八进制串不再进正文）。
+
+## 1.0.75
+
+**多入口工单流水线 P1+P2：`batch sync` 拉单 + `batch pr` 交付——GitHub/GitLab issue → 挂机票 → agent 修复 → 验收 → 草稿 PR**。真仓闭环实证两单：本仓库 issue #2（dogfood，修的正是流水线自己的遗留「batch clean 不清附件目录」）一单走通——sync 建票 → 基线校验（setup 装依赖 + 干净树探针）→ agent 26 轮 ¥0.38 缓存命中 96% → 验收 exit 0 → 产物分支 → 人工采纳关单：
+
+- **多入口工单流水线 P1（`batch sync`：issue → 修复 → 验收 → 产物分支）**：把打了准入 label 的 GitHub/GitLab issue 自动拉成本地挂机工单。sync 是**零 LLM 轻模块**（不配 API key 也能同步/体检）：三态去重（sync-state.jsonl，正文变化记 changed 续修留 P2）+ 规则闸（作者白名单/屏蔽关键词/正文超长/同标题重复，纯规则无 LLM）+ **accept 四档**（本地配置 > issue 的 accept 块默认完全忽略、显式开启也只收单命令形态并强制人工复核 > 自动探测 package.json/Makefile/go.mod > 拒绝建票；watch 抑制由 runner 注入 CI=1 环境变量，跨平台）+ **基线三态校验**（agent 开跑前在干净树上先跑验收：环境装不上=setup-failed 不缓存、基线红=baseline-broken 当日缓存、超时=疑似 watch 单列——**基线红的仓库零 agent 花费**）+ 附件链 GitHub 单平台（下载落盘到保护段、正文给绝对路径、文本内联尾部、图片/未知类型三态标注，含图强制 needs-review，报告统计 read_image 次数）+ **总量硬闸**（`batch run --max-total-yuan` 每票开工前检查、超限停在票前；sync.json `maxTicketsPerDay` 每日建票上限）+ `.sync.lock` 单飞 + `--check` doctor 逐项体检（每项 ✓/✗+怎么修，失败退出码 1）+ `--dry-run` 零副作用预演 + **注入边界双层**（issue 正文引用块包裹 + 仅 batch-* 会话的 system「数据非指令」段）+ **仓库一致性标注**（多 repo 配置下本地 remote 与 issue 来源不一致→控制台警示+票内注记+强制 needs-review，fork 工作流任一 remote 匹配即不报）+ CLI 退出码透传（定时器/CI 能看见失败）；README 双语三平台（cron/launchd/任务计划）双时钟示例 + sync.json.example。新工单字段 source/source-url/source-id/needs-review/continues/attachments 全部不进模型上下文、非法值 fail-closed 拒收。
+- **多入口工单流水线 P2（交付与续修）**：`batch pr <票id>` 把验收通过的票交付为**草稿 PR**——前置预检（报告+passed → needs-review 闸无豁免 → 幂等标记 done/<id>.pr.json 防重复交付）→ 从产物分支重建审查 worktree → 强制 fetch 主干 + 落后/merge-tree 冲突预检（首版**不自动 rebase**：拒付 + 手工命令 + 打标）→ diff 预览 → push `agent/<票id>` → GitHub `gh pr create --draft`（fixes #N）/ GitLab Draft MR（Closes #iid）；**PR 正文四要素脱敏**（标题/状态与成本/改动文件清单封顶 20/花费——diff 与验收输出永不外发）。**改测试即降级**：路径启发式（tests?/、__tests__/、*.test.*、*.spec.*）+ sync.json `testPathPatterns` 可扩展 → needs-review → 拒交付（「改测试过验收」靠结构检测不靠提示词）。**续修链**：指纹 v2=标题+正文+近 5 条评论 (id,updatedAt)，issue 变化 → 续修票（continues 前票、继承 accept/setup/budget、以前次产物分支为代码基座，不从 main 重做；P1 旧状态首见迁移 v2 无升级洪水）。**账本**：`batch/ledger.jsonl` 每 run 追加 {at,tickets,green,red,costYuan}，`batch status` 汇总近 7 天 + 队列实况。**GitLab 补齐**：附件链三态与仓库一致性标注（P1 只落了 GitHub 侧）。真仓试点实证：issue #3 → 票 20261105-130304-fr7x → agent 4 轮 ¥0.028 → 草稿 PR #4（正文四要素、diff 未外发、幂等标记落盘全验证）。
+- **P1 前置：batch worktree 收尾 commit 快照**：任务收尾把全部改动固化为 dsc-wt-* 分支上的 commit（`--no-verify`/关签名/显式身份兜底无人值守机器，失败不抛错带回报告）——原「改动保留待人工处置」实际只活到下次进程启动（启动清扫 tmpdir worktree），现在跨重启不丢、`batch pr`（P2）才有可交付物。守门 worktree-commit.test.ts 5 例（有改动/无改动/agent 自提交/提交失败/无 git 身份）。
+- **sync 票 id 统一按注入时钟预生成**：github 票走附件分支先占 id（注入 now()），gitlab 票曾落到队列默认真实墙钟——队列按文件名字典序当 FIFO，同 run 多源建票的排序随现实时刻漂移：CI runner（UTC）上午跑时 gitlab 票排到 github 票前，双源测试读「最后一张」读错票断言炸，本地 UTC+8 下午跑恒绿（典型「我机器上没问题」）。修后两票 id 同源，排序确定性成立，原断言成为回归锚。
+- **`batch clean` 回收附件目录（L0 dogfood 产物，agent 修复采纳）**：清 done 存档时同步回收 `attachments/<票id>/`——本次清掉的票直接删；无票可依的真孤儿按 10 分钟宽限期删（防误删在途 sync 的下载目录，clean 与 sync 可并发）；pending/running 的票及附件一律不动。守门测试进 batch-ticket.test.ts。
 ## 1.0.74
 
 **版本口径重置后首个发版（版本号按 Marketplace 线上+1 重编；原本地号链 1.0.75–1.0.77 作废未发布）**，批量携带四组已合入主干但从未单独发版的修复 + 本轮 D5 四轮收尾 + 缓存塌方治理：

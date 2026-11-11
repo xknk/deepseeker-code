@@ -126,7 +126,20 @@ const main = async (): Promise<void> => {
     const batchArgv = parseBatchArgv(process.argv.slice(2));
     if (batchArgv && batchArgv.sub !== "run") {
         await import("./batchAdmin.ts").then((m) => m.handleBatchAdmin(batchArgv));
-        process.exit(0);
+        // ★ 退出码必须透传（sync --check / 配置错 / 未知参数都会设 process.exitCode）：
+        //   硬编码 exit(0) 会让定时器与 CI 永远看不到失败（§5.3「有 ✗ 退出码 1，定时器可感知」）。
+        process.exit(process.exitCode ?? 0);
+    }
+    // ★ run 参数 fail-closed（M6 总量硬闸）：未知 flag / 非法值在 key 校验前直接拒绝——
+    //   挂机脚本拼错参数不能静默全量跑批，更不该为此要求 API key。
+    if (batchArgv?.sub === "run" && batchArgv.unknownFlag) {
+        const savedLoc = await readLocale();
+        if (savedLoc) setLocale(savedLoc);
+        const { batchT } = await import("./batchStrings.ts");
+        const T = batchT((savedLoc ?? "zh") as Locale);
+        process.stdout.write(`${T.runBadFlag(batchArgv.unknownFlag)}\n${T.runUsage}\n`);
+        process.exitCode = 2;
+        return;
     }
 
     // ★ 模型密钥前置校验（核心 OpenAI client 经 DEEP_SEEK_API_KEY 配置）。
@@ -189,11 +202,11 @@ const main = async (): Promise<void> => {
         const dispose = await initEngine(agentTools, { includeProject });
         const { runBatchQueue } = await import("./batchRunner.ts");
         try {
-            await runBatchQueue({ waitWindow: batchArgv.waitWindow });
+            await runBatchQueue({ waitWindow: batchArgv.waitWindow, maxTotalYuan: batchArgv.maxTotalYuan });
         } finally {
             dispose();
         }
-        process.exit(0);
+        process.exit(process.exitCode ?? 0); // 同理：waitWindow 非法/锁被占必须让外层脚本看得见
     }
 
     // ★ 引擎后台初始化（不 await）：MCP spawn+握手通常最慢（秒级），此前 await 后才清屏渲染，

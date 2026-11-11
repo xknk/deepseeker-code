@@ -151,6 +151,6 @@ describe("工具策略声明化防漂移（#8a：新增工具只声明不动名�
                     "move_file 主参数必须为 source（原写 src 使 args['src'] 恒 undefined → 「总是允许」永不生效）");
                     const listDir = (agentTools as any[]).find((t) => t?.function?.name === "list_dir");
                     assert.equal(listDir?.function?.primaryArg, undefined,
-                    "list_dir 参数表只有 max_depth，不得声明 primaryArg（纯漂移；SAFE 只读工具亦不需 allow-always）");
+                    "list_dir 不得声明 primaryArg（2026-10-21 漂移钉零；2026-11-10 path 已成为真实参数，但 SAFE 只读工具仍不需 allow-always）");
             });
         });
