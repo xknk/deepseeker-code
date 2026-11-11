@@ -40,6 +40,7 @@ import { loadSyncConfig } from "@/batch/sync/config.ts";
 import { requestCardApproval } from "@/batch/feishu/approval.ts"; // P4 卡片审批（轻模块：纯 fs 协议零 SDK/LLM）
 import { reportSummary } from "@/batch/feishu/notify.ts"; // C3 结论回传闸（剥代码块/封顶——推送唯一出站形态，轻模块同 approval.ts）
 import { baselineKey, readBaselineCache, writeBaselineCache, classifyProbe, baselineVerdictLabel } from "@/batch/sync/baseline.ts";
+import { isNonCodeDiff } from "@/batch/sync/accept.ts"; // 轻量验收（2026-11-11）：改动仅含非代码文件时跳过机器换上的整仓编译
 import { batchT, type BatchTaskStatus } from "./batchStrings.ts";
 import { getLocale } from "./strings.ts";
 import {
@@ -341,7 +342,7 @@ const buildWatchdogLines = (snaps: WatchdogSnapshot[], costYuan: number | null):
 export const buildReport = (args: {
     id: string; ticket: BatchTicket; status: TaskStatus; budgetTruncated: boolean;
     cost: SessionCost; receipt: Extract<UIEvent, { type: "run.receipt" }> | undefined;
-    finalText: string; accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null;
+    finalText: string; accept: { cmd: string; code: number | null; output: string; timedOut: boolean; skipped?: boolean } | null;
     deniedTools: { tool: string; detail: string }[]; diff: string; wt: WorktreeHandle | null;
     /** 收尾快照提交结果（worktree 未创建时不传）。 */
     commit?: WorktreeCommit | null;
@@ -408,7 +409,9 @@ ${finalText.trim() || T.noFinal}
 
 ${T.acceptH}
 ${accept
-        ? `\n${T.acceptCmdLine(accept.cmd, accept.code)}${accept.timedOut ? T.acceptTimeoutSuffix : ""}\n\n${T.acceptTail}\n\n\`\`\`\n${accept.output}\n\`\`\`\n`
+        ? accept.skipped
+            ? `\n${T.acceptSkippedLine(accept.cmd)}\n`
+            : `\n${T.acceptCmdLine(accept.cmd, accept.code)}${accept.timedOut ? T.acceptTimeoutSuffix : ""}\n\n${T.acceptTail}\n\n\`\`\`\n${accept.output}\n\`\`\`\n`
         : T.noAccept}
 ${testFilesSection}
 ${T.deniedH}
@@ -672,7 +675,7 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
     let wdKill: WatchdogKillInfo | null = null;
     let userStop = false; // C4 软停标志：listen「停」→ stop 文件 → 工具/轮边界查获 → abort 干净收尾（不杀进程）
     let status: TaskStatus;
-    let accept: { cmd: string; code: number | null; output: string; timedOut: boolean } | null = null;
+    let accept: { cmd: string; code: number | null; output: string; timedOut: boolean; skipped?: boolean } | null = null;
     let imagesRead = 0; // §5.2.2 落地要求 6：read_image 调用统计进报告（人要能判断该翻案还是换模型）
     const agentStartedAt = new Date().toISOString(); // C4 进度心跳 startedAt（「进度」算已跑时长用）
 
@@ -928,15 +931,34 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         const quiet = await waitSessionQuiescent(sessionId, undefined, timeoutMin * 60_000);
         if (!quiet) emit(`⏳ [${task.id}] 唤醒链未在时限内收敛，按现状验收`);
         wd?.setPaused(true); // accept 命令执行期豁免判定（§4；看门狗已 stop，防御性对齐）
-        let r = await runAcceptCommand(t.accept, wt.path);
+        // 轻量验收（2026-11-11「建个 txt 也等 20 分钟编译」）：仅当验收命令是跨仓适配机器换上的
+        //（acceptAdapted——票面/配置显式写的验收永不豁免）且实际改动仅含非代码文件时跳过整仓编译。
+        // 以实际 diff 为准不信票面文本：agent 跑偏动了代码 → 照常全量验收。白名单方向性见 accept.ts
+        //（未知扩展名按代码处理——漏放行只是多跑编译，误放行是漏验）。
+        let acceptSkipped = false;
+        let r: { code: number | null; output: string; timedOut: boolean };
+        if (acceptAdapted) {
+            const preNumstat = await gitSimple(["-c", "core.quotepath=false", "diff", "--numstat", wt.baseSha], wt.path);
+            const changedPaths = (preNumstat ?? "").split("\n").map((l) => l.split("\t")[2]).filter(Boolean);
+            if (isNonCodeDiff(changedPaths)) {
+                acceptSkipped = true;
+                r = { code: 0, output: "", timedOut: false };
+                emit(`⚡ [${task.id}] ${T.acceptLightLine}`);
+            } else {
+                r = await runAcceptCommand(t.accept, wt.path);
+            }
+        } else {
+            r = await runAcceptCommand(t.accept, wt.path);
+        }
         // 迟滞复测：与基线探测同款。单轮红可能是测试负载 flake（真机实锤 2026-11-09：README 已修好，
         // 却被 listen 家族 flake 的单轮红判「验收未通过」，假阴性推给了用户手机）——二次红才定罪。
-        if ((r.code ?? 1) !== 0 || r.timedOut) {
+        // （轻量放行路径 code=0 恒真，天然不进复测。）
+        if (!acceptSkipped && ((r.code ?? 1) !== 0 || r.timedOut)) {
             emit(T.acceptProbeRetrying);
             await new Promise((resolve) => setTimeout(resolve, 30_000));
             r = await runAcceptCommand(t.accept, wt.path);
         }
-        accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut };
+        accept = { cmd: t.accept, code: r.code, output: r.output, timedOut: r.timedOut, skipped: acceptSkipped || undefined };
         status = r.code === 0 && !r.timedOut ? "passed" : "accept-failed";
         emit(T.acceptLine(status === "passed", task.id, r.code) + (r.timedOut ? T.acceptKilledSuffix : ""));
         break;

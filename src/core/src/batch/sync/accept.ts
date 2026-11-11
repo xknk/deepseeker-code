@@ -74,6 +74,24 @@ const PM_BY_LOCK: { lock: string; pm: string }[] = [
 /** npm test 空壳脚本（探测到等于没有：跑了也不验任何东西，还给人「有测试」错觉）。 */
 const EMPTY_TEST_SCRIPT = /^\s*(echo\s+["']?no test specified["']?\s*&&\s*exit\s+\d*\s*|:)\s*;?\s*$/;
 
+/**
+ * 从 .gitlab-ci.yml 提取 SUB_MODULE_PATHS（2026-11-11 pms-parent 实锤：公司多模块 Java 仓的官方构建面）。
+ * 返回 null = 无 CI 提示/形态可疑 → 调用方回退全仓编译（宁可慢不可漏验）。
+ * fail-closed 校验：token 只收朴素相对路径字符（字母数字 -_. /，且不以 . / 开头）——
+ * 这串内容会拼进 spawn 命令行，CI 文件里任何 shell 元字符一律整体放弃 CI 提示，不截断不猜测。
+ */
+const ciSubModulePaths = async (projectRoot: string): Promise<string[] | null> => {
+    try {
+        const ci = await fs.readFile(path.join(projectRoot, ".gitlab-ci.yml"), "utf-8");
+        const m = /^\s*SUB_MODULE_PATHS:[ \t]*(.+?)[ \t]*$/m.exec(ci);
+        if (!m) return null;
+        const paths = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+        if (paths.length === 0) return null;
+        const plainPath = /^[A-Za-z0-9][A-Za-z0-9\-_.\/]*$/;
+        return paths.every((p) => plainPath.test(p)) ? paths : null;
+    } catch { return null; }
+};
+
 /** 在项目根探测可用的验收命令。序：package.json scripts.test（按 lockfile 选包管理器）→ Makefile test 目标 → 根 pom.xml（mvn 编译检查）→ go.mod。 */
 export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh"): Promise<DetectResult> => {
     // 1) package.json scripts.test（空壳脚本视为没有）
@@ -97,9 +115,21 @@ export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh
     } catch { /* 无 Makefile → 下一步 */ }
     // 3) 根 pom.xml → mvn 编译检查（2026-11-10 跨仓路由配套）：Java 仓探测验收选编译而非 test——
     //    maven 测试套可能缺失/巨慢/依赖外网，挂机场景编译通过已是「改动不破坏构建」的诚实下界。
+    //    构建面收敛（2026-11-11 pms-parent 实锤）：有 .gitlab-ci.yml 且声明 SUB_MODULE_PATHS 的仓，
+    //    全 reactor 编译是假标准（pms-ops-client 是 JavaFX 桌面端，CI 从不构建、Temurin JDK 也编不过）
+    //    ——按 CI 的官方构建面编译（-pl 子模块 -am 带上依赖）；无 CI 提示回退全仓编译。
     try {
         await fs.access(path.join(projectRoot, "pom.xml"));
-        return { ok: true, accept: "mvn -q -DskipTests compile", source: locale === "zh" ? "根 pom.xml（mvn 编译检查，跳测试；依赖本机 .m2 缓存）" : "root pom.xml (mvn compile check, tests skipped; relies on the local .m2 cache)" };
+        const sub = await ciSubModulePaths(projectRoot);
+        const pl = sub ? ` -pl ${sub.join(",")} -am` : "";
+        const scope = sub ? `CI SUB_MODULE_PATHS（${sub.length} 模块）+ 依赖` : "全仓";
+        return {
+            ok: true,
+            accept: `mvn -q -DskipTests compile${pl}`,
+            source: locale === "zh"
+                ? `根 pom.xml（mvn 编译检查，跳测试；构建面=${scope}；依赖本机 .m2 缓存）`
+                : `root pom.xml (mvn compile check, tests skipped; build scope=${scope}; relies on the local .m2 cache)`,
+        };
     } catch { /* 无 pom.xml → 下一步 */ }
     // 4) go.mod → go test ./...
     try {
@@ -108,6 +138,32 @@ export const detectAccept = async (projectRoot: string, locale: SyncLocale = "zh
     } catch { /* 无 go.mod → 探测失败 */ }
     return { ok: false };
 };
+
+// ============ 轻量验收判定（2026-11-11「建个 txt 也等 20 分钟编译」）：改动不含代码文件 → 机器换上的整仓编译验收可跳过 ============
+
+/**
+ * 非代码文件扩展名白名单（docs/assets/data——编译类验收不消费这些内容）。
+ * 方向性选择（宁可慢不可漏验）：白名单漏掉未知非代码扩展（比如某新型素材格式）只是多跑一次编译（慢而无害）；
+ * 黑名单漏掉一个代码扩展会把没编译过的代码判 passed（快而危险）。故用白名单 + 默认按代码处理。
+ */
+const NON_CODE_DIFF_EXTENSIONS = new Set([
+    "txt", "md", "markdown", "rst", "adoc",
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "csv", "tsv",
+]);
+
+/** numstat 单个路径段是否全为非代码：rename 形态（`old => new`，含 `dir/{a.java => b.md}` 变体）两侧都要非代码；无扩展名/未知扩展名/隐藏文件（.gitignore 等 dot=0）一律按代码处理。 */
+export const isNonCodeDiffPath = (p: string): boolean =>
+    p.split("=>").every((side) => {
+        const base = side.trim().replace(/^\{|\}$/g, "").split(/[\\/]/).pop() ?? "";
+        const dot = base.lastIndexOf(".");
+        return dot > 0 && NON_CODE_DIFF_EXTENSIONS.has(base.slice(dot + 1).toLowerCase());
+    });
+
+/** 改动路径清单（numstat 第三列原样）全为非代码 → true。空清单恒 false：没改动就不适用轻量通道（照常真跑验收）。 */
+export const isNonCodeDiff = (paths: string[]): boolean =>
+    paths.length > 0 && paths.every(isNonCodeDiffPath);
 
 // ============ 解析主入口（异步：探测要读文件） ============
 
