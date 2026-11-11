@@ -91,9 +91,10 @@ const makeFakeSdk = () => {
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 4));
 /**
  * 轮询直到断言成立（常驻进程异步抵达用）；时间预算制（CI 慢机上 4ms tick 会被拖长，按次数算会假超时）；超时抛出。
- * 缺省预算 20s：全量并行 + 真实监听器同机运行时 8s 曾两轮假超时（白天用机时段负载更高）。
+ * 缺省预算 45s：8s 曾假超时→20s（全量并行+真实监听器同机）→45s（2026-11-11 CI 2 核机全量并行下 20s 默认档再爆
+ * 「会话对账」；单跑恒秒级绿 → 预算只是耐心上限，绿路径零成本，加大不拖慢）。长链路 LOOP_BUDGET 同理 30s→60s。
  */
-const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 20_000): Promise<void> => {
+const until = async (probe: () => Promise<boolean> | boolean, what: string, budgetMs = 45_000): Promise<void> => {
     const deadline = Date.now() + budgetMs;
     for (;;) {
         if (await probe()) return;
@@ -625,7 +626,7 @@ test("反馈闭环全链：建票即回执（带票号）；回复回执消息=�
         let stop = false;
         // 全量套件并行时 CPU 争抢会拉长每段循环（单跑 ~2s、全量下 8s 预算曾两轮连续假超时）：
         // 三段全链测试单独放宽预算；正常路径仍是秒级，只有真卡死才会撞上限。
-        const LOOP_BUDGET = 30_000;
+        const LOOP_BUDGET = 60_000;
         const deadline = Date.now() + 90_000;
         const running = runFeishuListen({
             env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
@@ -746,7 +747,7 @@ test("B3 闸接线：整句确认语 → 「👍 收到」不开票不登记映�
         } as any;
         const lines: string[] = [];
         let stop = false;
-        const LOOP_BUDGET = 30_000;
+        const LOOP_BUDGET = 60_000;
         const deadline = Date.now() + 90_000;
         const queue = await import("@/batch/queue.ts");
         const { lookupMsgMap } = await import("@/batch/feishu/notify.ts");
@@ -944,7 +945,7 @@ test("C1 直答链路（假 SDK 全链）：问句→注入 runDa 回话+会话�
         } as any;
         const lines: string[] = [];
         let stop = false;
-        const LOOP_BUDGET = 30_000;
+        const LOOP_BUDGET = 60_000;
         const deadline = Date.now() + 90_000;
         const queue = await import("@/batch/queue.ts");
         const { lookupDaSession } = await import("@/batch/feishu/notify.ts");
@@ -1083,7 +1084,7 @@ test("C4 控制面（假 SDK 全链）：队列/进度/停/取消 + 闲聊引导
         const { sdk, state } = makeFakeSdk();
         const lines: string[] = [];
         let stop = false;
-        const LOOP_BUDGET = 30_000;
+        const LOOP_BUDGET = 60_000;
         const deadline = Date.now() + 90_000;
         const running = runFeishuListen({
             env: ENV, locale: "zh", loadSdk: async () => sdk, log: (l) => lines.push(l),
@@ -1173,7 +1174,7 @@ test("C2 点火器（假 SDK 全链）：即时票建票即点（spawnRunner 注
         const ignites: number[] = [];
         const lines: string[] = [];
         let stop = false;
-        const LOOP_BUDGET = 30_000;
+        const LOOP_BUDGET = 60_000;
         const deadline = Date.now() + 90_000;
         const queue = await import("@/batch/queue.ts");
         const running = runFeishuListen({

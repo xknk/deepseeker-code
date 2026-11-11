@@ -128,8 +128,9 @@ test("报告：changed-file 清单固化进 frontmatter（改动清单交接，2
 });
 
 test("装配：终局验收红有迟滞复测（与基线同款；防负载 flake 假阴性判「验收未通过」推给用户手机——2026-11-09 真机实锤）", () => {
-    const accIdx = RUNNER_SRC.indexOf("let r = await runAcceptCommand(t.accept, wt.path)");
-    assert.ok(accIdx > 0, "终局验收调用点存在（let r 区别于基线探测的 let probe）");
+    // 锚=let r 声明行（轻量验收把「let r = await …」拆成声明+分支赋值，声明区别于基线探测的 let probe）
+    const accIdx = RUNNER_SRC.indexOf("let r: { code: number | null; output: string; timedOut: boolean };");
+    assert.ok(accIdx > 0, "终局验收调用点存在（let r 声明区别于基线探测的 let probe）");
     const nextIdx = RUNNER_SRC.indexOf("accept = { cmd: t.accept", accIdx);
     assert.ok(nextIdx > accIdx, "复测在 accept 赋值之前完成（报告取复测结论）");
     const between = RUNNER_SRC.slice(accIdx, nextIdx);
