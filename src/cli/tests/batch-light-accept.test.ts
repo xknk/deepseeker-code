@@ -27,12 +27,17 @@ const RUNNER_SRC = fs.readFileSync(path.join(CLI_ROOT, "src", "batchRunner.ts"),
 test("装配：豁免门=acceptAdapted 且判定用验收前 pre-numstat（实际 diff，不信票面文本）", () => {
     const gateIdx = RUNNER_SRC.indexOf("if (acceptAdapted) {");
     assert.ok(gateIdx > 0, "acceptAdapted 豁免门存在");
-    const gateBody = RUNNER_SRC.slice(gateIdx, gateIdx + 900);
-    assert.ok(gateBody.includes('diff", "--numstat", wt.baseSha'), "判定读验收前实际 diff（pre-numstat vs baseSha）");
+    const gateBody = RUNNER_SRC.slice(gateIdx, gateIdx + 1200);
+    // 门在收尾提交前跑：agent 新建文件还是 untracked，裸 diff 看不见（028v 真机实锤：空清单误判
+    // 「无改动」门关死照跑编译）——必须先 add -A 再 --cached numstat（harvestDiff 同口径）
+    const addIdx = gateBody.indexOf('gitSimple(["add", "-A"], wt.path)');
+    assert.ok(addIdx > 0, "门内先 add -A（新文件只有 staged 后才进 numstat）");
+    assert.ok(addIdx < gateBody.indexOf('"diff", "--cached", "--numstat"'), "add -A 必须先于 numstat（顺序锚）");
+    assert.ok(gateBody.includes('"diff", "--cached", "--numstat", wt.baseSha'), "判定读 staged diff vs baseSha（与收尾报告 981 同口径）");
     assert.ok(gateBody.includes("isNonCodeDiff(changedPaths)"), "判定走 core isNonCodeDiff（单一事实源）");
     assert.ok(gateBody.includes("acceptSkipped = true"), "命中即置轻量标志");
     // 票面显式 accept 的路径（else 分支）必须原样真跑
-    assert.match(RUNNER_SRC.slice(gateIdx, gateIdx + 900), /\} else \{\s*\r?\n\s*r = await runAcceptCommand\(t\.accept, wt\.path\);/, "非适配票原样真跑（永不豁免）");
+    assert.match(RUNNER_SRC.slice(gateIdx, gateIdx + 1200), /\} else \{\s*\r?\n\s*r = await runAcceptCommand\(t\.accept, wt\.path\);/, "非适配票原样真跑（永不豁免）");
 });
 
 test("装配：迟滞复测被轻量标志短路；skipped 落进报告 accept 对象", () => {

@@ -938,7 +938,12 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         let acceptSkipped = false;
         let r: { code: number | null; output: string; timedOut: boolean };
         if (acceptAdapted) {
-            const preNumstat = await gitSimple(["-c", "core.quotepath=false", "diff", "--numstat", wt.baseSha], wt.path);
+            // ★ 先 add -A 再 --cached numstat（harvestDiff 同口径，manager.ts「确保新文件也被纳入」）：
+            //   门在收尾提交【前】跑，agent 新建的 test.txt 这类文件还是 untracked——裸 diff 看不见 →
+            //   空清单 → 分类器 false → 门关死照跑全量编译（028v 真机实锤：报告 exit 0、门没开、
+            //   target 10:15:12 指纹=验收期第二次编译）。add -A 幂等：收尾提交随后自己再 add -A。
+            await gitSimple(["add", "-A"], wt.path);
+            const preNumstat = await gitSimple(["-c", "core.quotepath=false", "diff", "--cached", "--numstat", wt.baseSha], wt.path);
             const changedPaths = (preNumstat ?? "").split("\n").map((l) => l.split("\t")[2]).filter(Boolean);
             if (isNonCodeDiff(changedPaths)) {
                 acceptSkipped = true;
