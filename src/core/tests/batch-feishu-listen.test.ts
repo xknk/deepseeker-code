@@ -847,9 +847,11 @@ test("C1 路由二分：规则先行（问号/疑问词/查询动词→问句；
     assert.equal(await classifyMessageKind("这个项目结构挺有意思的"), "task", "无 flash → task");
 });
 
-test("C2 意图词：今晚跑→下个 01:00、明早跑→下个 07:00（本地时区「下个 occurrence」语义）；无意图词不命中（不做语义猜测）", () => {
+test("C2 意图词：今晚跑→下个 01:00、明早跑→下个 07:00、中午跑→下个 12:00（本地时区「下个 occurrence」语义）；无意图词不命中（不做语义猜测）", () => {
     assert.equal(matchDelayIntent("这三件事今晚跑"), "tonight");
     assert.equal(matchDelayIntent("修复登录页，明早跑"), "morning");
+    assert.equal(matchDelayIntent("这两件事中午跑"), "noon");
+    assert.equal(matchDelayIntent("午休跑一下这个"), "noon");
     assert.equal(matchDelayIntent("run tonight please"), "tonight");
     assert.equal(matchDelayIntent("修复日期解析 bug"), null, "无意图词不猜");
     assert.equal(matchDelayIntent("今晚跑的票有哪些？"), "tonight", "意图词命中，但路由分类先把它判问句去直答");
@@ -860,6 +862,10 @@ test("C2 意图词：今晚跑→下个 01:00、明早跑→下个 07:00（本�
     assert.equal(`${tonight.getFullYear()}-${tonight.getMonth() + 1}-${tonight.getDate()} ${hm(tonight)}`, "2026-11-11 1:00", "22 点说今晚跑 → 已过当日 01:00，排次日");
     const morning = at("明早跑");
     assert.equal(`${morning.getFullYear()}-${morning.getMonth() + 1}-${morning.getDate()} ${hm(morning)}`, "2026-11-11 7:00");
+    const noon = at("中午跑");
+    assert.equal(`${noon.getFullYear()}-${noon.getMonth() + 1}-${noon.getDate()} ${hm(noon)}`, "2026-11-11 12:00", "22 点说中午跑 → 已过当日 12:00，排次日");
+    const noonMorning = new Date(nextRunAtISO("noon", new Date("2026-11-10T09:00:00")));
+    assert.equal(`${noonMorning.getDate()} ${hm(noonMorning)}`, "10 12:00", "09:00 说中午跑 → 当日 12:00（还没过点）");
     const tonightEarly = new Date(nextRunAtISO("tonight", new Date("2026-11-10T00:30:00")));
     assert.equal(`${tonightEarly.getDate()} ${hm(tonightEarly)}`, "10 1:00", "00:30 说今晚跑 → 当天 01:00（还没过点）");
 });

@@ -430,19 +430,21 @@ export const isHelloPhrase = (text: string): boolean =>
     /^(在吗|在么|在不在|你还在吗|hello|hi|hey)[?？。.!！]?$/.test(normalizePhrase(text));
 
 /** 延迟意图（短语包含即命中——「这三件事今晚跑」正文+意图词一体；不做语义猜测）。 */
-export type DelayIntent = "tonight" | "morning";
+export type DelayIntent = "tonight" | "morning" | "noon";
 export const matchDelayIntent = (text: string): DelayIntent | null => {
     const t = normalizePhrase(text);
     if (/今晚跑|今晚跑批|晚上跑|今晚处理|run tonight|tonight/.test(t)) return "tonight";
     if (/明早跑|明早跑批|明天早上跑|明早处理|run tomorrow morning|tomorrow morning/.test(t)) return "morning";
+    if (/中午跑|午休跑|中午跑批|中午处理|run at noon|at noon/.test(t)) return "noon";
     return null;
 };
 
-/** 意图 → 最早可跑时刻（ISO）：今晚=下个 01:00、明早=下个 07:00（本地时区；cron 定时批 01:00 清 pending，
- *  早于 01:00 的「今晚」票由 cron 清、晚于的与「明早」票由点火器到点起跑——即跑不分昼夜，攒只攒到点）。 */
+/** 意图 → 最早可跑时刻（ISO）：今晚=下个 01:00、明早=下个 07:00、中午=下个 12:00（本地时区；
+ *  cron 定时批 01:00 清 pending，早于 01:00 的「今晚」票由 cron 清、晚于的与「明早」「中午」票由
+ *  点火器到点起跑——即跑不分昼夜，攒只攒到点；机器关着就等下次开机巡检补跑，票不丢）。 */
 export const nextRunAtISO = (intent: DelayIntent, from = new Date()): string => {
     const d = new Date(from);
-    d.setHours(intent === "tonight" ? 1 : 7, 0, 0, 0);
+    d.setHours(intent === "tonight" ? 1 : intent === "noon" ? 12 : 7, 0, 0, 0);
     if (d.getTime() <= from.getTime()) d.setDate(d.getDate() + 1);
     return d.toISOString();
 };
