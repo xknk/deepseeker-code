@@ -58,7 +58,13 @@ const withTempEnv = async (fn: (env: { batchDir: string; repoDir: string; git: (
     process.env.DEEPSEEKER_CODE_BATCH_DIR = batchDir;
     try {
         await gitRun(repoDir, ["init"]);
-        await gitRun(repoDir, ["-c", "user.email=t@t.local", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"]);
+        // 仓库级身份：CI runner 无全局 git 身份（Author identity unknown exit 128 本机不可复现——
+        // 本机有全局配置，白板环境首跑即红）。写进 .git/config 让本仓后续任意 commit 都成立。
+        // 与 worktree-commit.test.ts 惯例对齐（含 gpgsign false 防 contributor 机器全局签名配置）。
+        await gitRun(repoDir, ["config", "user.email", "t@t.local"]);
+        await gitRun(repoDir, ["config", "user.name", "t"]);
+        await gitRun(repoDir, ["config", "commit.gpgsign", "false"]);
+        await gitRun(repoDir, ["commit", "--allow-empty", "-m", "init"]);
         await fn({ batchDir, repoDir, git: (args) => gitRun(repoDir, args) });
     } finally {
         if (prev === undefined) delete process.env.DEEPSEEKER_CODE_BATCH_DIR;
