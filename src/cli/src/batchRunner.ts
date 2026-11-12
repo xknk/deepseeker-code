@@ -32,6 +32,7 @@ import type { BatchTicket } from "@/batch/ticket.ts";
 import { parseBatchTicket } from "@/batch/ticket.ts";
 import { acquireRunLock, releaseRunLock, takeNextTicket, peekNextTicket, finishTicket, markTicketNeedsReview, readStopRequest, writeTicketProgress } from "@/batch/queue.ts";
 import { continuationBaseBranch, continuationRepoRoot, doneTicketPath } from "@/batch/continuation.ts";
+import { readRecentTickets, type RecentTicketEntry } from "@/batch/recent.ts"; // 记忆策略窄口径 ②（2026-11-12）
 import { loadRepoIndex, routeRepoByRules } from "@/batch/repoRoute.ts";
 import { detectAccept } from "@/batch/sync/accept.ts";
 import { appendLedgerEntry } from "@/batch/ledger.ts";
@@ -260,6 +261,28 @@ export const numstatToChangedFiles = (raw: string): string[] =>
         const counts = added === "-" && removed === "-" ? "(binary)" : `(+${added}/-${removed})`;
         return `${file} ${counts}`;
     });
+
+/**
+ * 票 body 尾部附录（记忆策略窄口径 ①+②，2026-11-12，纯函数——守门测试直接验证）：
+ *  - ② 同仓近况段（有历史票才渲染，零历史 = 整段省略、零注入幂等）：done/ 报告 frontmatter 摘录
+ *    （id/标题/状态/分支四字段，readRecentTickets 所得——报告正文/diff/文件清单永不进此段）；
+ *  - ① 蒸馏引导段（每票必有）：收尾前判断「跨票可复用」的坑/事实 → memory_save 沉淀一条。
+ *    只是提示词引导，不强制、无任何强制机制（没写不算失败）。
+ *
+ * 红线：本函数产物只准追加在票 body 尾部（repoBodyNote 之后、恒为 body 最末段），绝不进
+ * system 首槽——首槽逐字节稳定是跨 run 前缀缓存命中的硬约束（守门测试按字面扫描本文件，
+ * 故本注释也不得出现该槽位的代码字面）。
+ */
+export const buildBodyAppendix = (recent: RecentTicketEntry[]): string => {
+    const T = batchT(getLocale());
+    const parts: string[] = [];
+    if (recent.length > 0) {
+        parts.push(T.recentNoteH(recent.length));
+        parts.push(...recent.map((e) => T.recentLine(e.id, e.title, e.status, e.branch)));
+    }
+    parts.push(T.distillNote);
+    return parts.join("\n");
+};
 
 // ============ 结算单聚合（usageLog 真实回传数字，可对账） ============
 
@@ -552,6 +575,20 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         }
         t.body = t.body + T.repoBodyNote(routedRepoName);
     }
+
+    // ①+② 记忆策略窄口径（2026-11-12）：同仓近况注入 + 蒸馏引导，一并追加在 body 尾部
+    //（repoBodyNote 之后，附录恒为 body 最末段）。★ 位置红线：必须在路由定型【后】执行——
+    // 近况段含历史票标题（可能提到其他仓名），若拼在路由前会被 routeRepoByRules 的标识符
+    // 匹配扫到，历史票标题就能把本票误路由。★ 桶回落（方案 ① 的 ★ 坑）经查证无须 runner 迁移：
+    // memory_save 的落盘路径（memoryFilePath）钉在全局目录/进程启动目录（= 基座仓，批处理全程
+    // 不 chdir），不经活动工作区（getActiveCwd）——worktree 激活时写记忆也落在基座桶/全局，
+    // worktree 删除零损失；该不变量由 core/tests/batch-memory-bucket.test.ts 钉死防回归。
+    let recentTickets: RecentTicketEntry[] = [];
+    try {
+        recentTickets = await readRecentTickets({ repoRoot }); // done/ 报告 frontmatter 确定性提取（零检索零 LLM）
+    } catch { /* fail-safe：近况缺失不致命，零注入回落现状 */ }
+    t.body = t.body + buildBodyAppendix(recentTickets);
+    if (recentTickets.length > 0) emit(`📰 [${task.id}] ${T.recentInjected(recentTickets.length)}`);
 
     // worktree：改动隔离 + 产物载体（非 git 项目在此失败 → error 报告，继续下一任务）。
     // ★ stepId 用任务全局唯一 id（不用 "batch" 常量）：worktree 保留策略下分支常驻，而 manager 的
