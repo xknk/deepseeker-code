@@ -170,7 +170,8 @@ test("装配：近况注入在路由定型【后】——历史票标题不得�
 
 test("装配：附录追加在 repoBodyNote 之后（附录恒为 body 最末段）；content 仍 = t.body（user 消息通道）", () => {
     const noteIdx = RUNNER_SRC.indexOf("t.body = t.body + T.repoBodyNote(routedRepoName)");
-    const injectIdx = RUNNER_SRC.indexOf("t.body = t.body + buildBodyAppendix(recentTickets)");
+    // ③ 仓库地图并单（2026-11-12）：附录签名追加第二参 map（缺省 null 零改动幂等），调用点带 repoMap
+    const injectIdx = RUNNER_SRC.indexOf("t.body = t.body + buildBodyAppendix(recentTickets, repoMap)");
     assert.ok(noteIdx > 0 && injectIdx > noteIdx, "附录在跨仓注记之后");
     assert.match(RUNNER_SRC, /let content = t\.body;/, "工单正文仍整体走 user 消息（body 是注入唯一通道）");
     assert.match(RUNNER_SRC, /buildRetryTaskContent\(t\.body,/, "重试轮内容同样从 t.body 派生（不改注入通道）");

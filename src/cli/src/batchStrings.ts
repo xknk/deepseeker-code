@@ -99,6 +99,11 @@ sync（多入口流水线，把 GitHub/GitLab label issue 拉成本地工单）�
     recentNoteH: (n: number) => `\n\n---\n【本仓挂机近况】本仓最近 ${n} 张挂机票（报告 frontmatter 摘录；未合并不代表没做过——改动在各票的 dsc-wt-* 分支上，动手前先确认不与它们撞车）：`,
     recentLine: (id: string, title: string, status: string, branch: string | null) => `- #${id} ${title} [${status}]${branch ? ` [${branch}]` : ""}`,
     recentInjected: (n: number) => `同仓近况注入 ${n} 条（done/ 报告 frontmatter 确定性提取）`,
+    // 记忆策略窄口径 ③（2026-11-12 定案：取票开工时生成或读缓存，首票即受益——SHA 键控下「首票
+    // 收尾生成」= 绝大多数票都是该 SHA 第一张，等于绝大多数票享受不到）。散文包装在此（zh/en）；
+    // 缓存正文是白名单数据行（pkg:/scripts:/…），不落散文。
+    repoMapNoteH: (name: string, sha8: string) => `\n\n---\n【仓库地图】${name} @ ${sha8} 的结构速览（确定性提取：包名/脚本/构建文件/目录，无主观总结；随代码提交自动重建。动手前扫一眼，可省去自己摸索仓库结构的轮次）：`,
+    mapInjected: (sha8: string, fromCache: boolean) => `仓库地图注入 @ ${sha8}（${fromCache ? "缓存命中" : "本次生成"}）`,
     // 记忆策略窄口径 ①（2026-11-12）：情景→语义蒸馏收尾引导（只是提示词，不强制、无任何强制机制）
     distillNote: `\n\n---\n【收尾沉淀】收尾汇报前，请判断本次是否学到「跨票可复用」的坑或事实（例：该仓测试必须 pnpm 而非 npm、某目录是生成物勿手改、某验收命令有隐藏前置）。若有，用 memory_save 沉淀一条，形态照抄：\nmemory_save({ name: "batch-<仓库/主题 kebab-case>", description: "<一句话现象/结论>", body: "<现象与正确做法，写给下一张同仓票>", type: "project" })\n只沉淀跨票可复用的：会话内即抛的细节、代码或 git 里能直接查到的信息不写；没有可沉淀的就跳过，勿为写而写——不写不算失败。`,
     downgradedNote: (n: number) => `改测试即降级：触碰 ${n} 个测试文件，票已标 needs-review——batch pr 将拒绝本票，请人工复核`,
@@ -314,6 +319,9 @@ sync (multi-entry pipeline — pull labeled GitHub/GitLab issues into local tick
     recentNoteH: (n) => `\n\n---\n[Recent batch tickets in this repo] The ${n} most recent finished tickets here (report frontmatter excerpt; an unmerged branch does NOT mean nothing was done — the changes live on each ticket's dsc-wt-* branch; make sure you don't collide with them before starting):`,
     recentLine: (id, title, status, branch) => `- #${id} ${title} [${status}]${branch ? ` [${branch}]` : ""}`,
     recentInjected: (n) => `injected ${n} recent same-repo ticket(s) (deterministic frontmatter extraction from done/ reports)`,
+    // Memory narrow-scope ③ (2026-11-12, decided: generate/read cache at ticket claim time so even the first ticket benefits — under SHA keying, "generate at first-ticket finish" would leave most tickets empty-handed). Prose wrapper lives here (zh/en); the cached body is whitelist data lines (pkg:/scripts:/…), no prose.
+    repoMapNoteH: (name, sha8) => `\n\n---\n[Repo map] Structural overview of ${name} @ ${sha8} (deterministic extraction: package name / scripts / build files / dirs, no subjective summary; rebuilt automatically on each commit. Scan it before starting — saves rounds of exploring the repo layout):`,
+    mapInjected: (sha8, fromCache) => `repo map injected @ ${sha8} (${fromCache ? "cache hit" : "generated this time"})`,
     // Memory narrow-scope ① (2026-11-12): episodic→semantic distillation closing guidance (prompt only; never enforced)
     distillNote: `\n\n---\n[Closing distillation] Before your final report, decide whether you learned anything cross-ticket reusable (e.g. this repo's tests must run via pnpm, not npm; some dir is generated and must not be hand-edited; some accept command has a hidden prerequisite). If yes, save one memory with memory_save, copying this shape:\nmemory_save({ name: "batch-<repo-or-topic kebab-case>", description: "<one-line symptom/conclusion>", body: "<symptom and the correct approach, written for the next ticket in this repo>", type: "project" })\nOnly persist cross-ticket reusable facts: skip session-scoped details and anything code/git already answers; if there is nothing worth saving, skip it — saving nothing is not a failure.`,
     downgradedNote: (n) => `test-touch downgrade: ${n} test file(s) touched — ticket marked needs-review; batch pr will refuse it, review manually`,
