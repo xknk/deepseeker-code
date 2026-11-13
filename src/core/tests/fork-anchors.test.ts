@@ -1,7 +1,8 @@
 /**
  * @file tests/fork-anchors.test.ts
- * @description listForkAnchors（会话历史 UX ③ 分叉选择器数据源，2026-08-18）纯函数回归：
- *  锚点 = assistant 消息行；事件行/工具行/user 行跳过；纯工具轮用工具名序列作预览；
+ * @description listForkAnchors（会话历史 UX ③ 分叉选择器数据源，2026-08-18；2026-11-13 UX 修订）纯函数回归：
+ *  锚点 = **每 run 的最后一条 assistant 行**（旧口径每条 assistant 一锚，长 run 渲染成几十条同题重复行）；
+ *  事件行/工具行/user 行跳过；纯工具轮末条用工具名序列作预览；
  *  userPreview 取该轮之前最近 user 提问（跨轮保持）；空转录 → 空列表。
  */
 import { describe, it } from "node:test";
@@ -18,7 +19,7 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 const { listForkAnchors, derivePrefix } = await import("@/session/fork.ts");
 
 describe("listForkAnchors（分叉锚点派生）", () => {
-    it("多轮 transcript：每轮 assistant 一锚点，userPreview 跨轮保持，lineId/roundNo 正确", () => {
+    it("多轮 transcript：每 run 只留末条 assistant 锚点（2026-11-13 UX 修订，长 run 不再渲染成同题重复行）", () => {
         const lines: any[] = [
             { id: "u1", role: "user", content: "帮我读 fixture 并汇报" },
             { id: "e1", dscEvent: "run.start", runId: "r1" },
@@ -32,17 +33,29 @@ describe("listForkAnchors（分叉锚点派生）", () => {
             { id: "a3", role: "assistant", content: "总结完毕。" },
         ];
         const anchors = listForkAnchors(lines);
-        assert.equal(anchors.length, 3);
-        assert.equal(anchors[0]!.lineId, "a1");
+        assert.equal(anchors.length, 2, "两个 run 各一锚（run1 的中间工具轮 a1 不再单独出锚）");
+        assert.equal(anchors[0]!.lineId, "a2", "run1 取末条 assistant");
         assert.equal(anchors[0]!.roundNo, 1);
         assert.equal(anchors[0]!.userPreview, "帮我读 fixture 并汇报");
-        assert.match(anchors[0]!.assistantPreview, /🔧 read_file/, "纯工具轮用工具名序列");
-        assert.equal(anchors[1]!.lineId, "a2");
+        assert.match(anchors[0]!.assistantPreview, /已完成/, "末条正文预览最有信息量");
+        assert.equal(anchors[1]!.lineId, "a3");
         assert.equal(anchors[1]!.roundNo, 2);
-        assert.equal(anchors[1]!.userPreview, "帮我读 fixture 并汇报", "同 run 内跨轮保持同一提问");
-        assert.match(anchors[1]!.assistantPreview, /已完成/);
-        assert.equal(anchors[2]!.lineId, "a3");
-        assert.equal(anchors[2]!.userPreview, "再总结一下", "新 run 取新提问");
+        assert.equal(anchors[1]!.userPreview, "再总结一下", "新 run 取新提问");
+    });
+
+    it("长 run 全工具轮：末条为纯工具轮时锚点仍产出，预览用工具名序列（不再每轮一行重复）", () => {
+        const lines: any[] = [
+            { id: "u1", role: "user", content: "跑全量测试" },
+            { id: "a1", role: "assistant", content: null, tool_calls: [{ id: "c1", function: { name: "run_command", arguments: "{}" } }] },
+            { id: "t1", role: "tool", tool_call_id: "c1", content: "ok" },
+            { id: "a2", role: "assistant", content: null, tool_calls: [{ id: "c2", function: { name: "read_file", arguments: "{}" } }] },
+            { id: "t2", role: "tool", tool_call_id: "c2", content: "内容" },
+            { id: "a3", role: "assistant", content: null, tool_calls: [{ id: "c3", function: { name: "edit_file", arguments: "{}" } }] },
+        ];
+        const anchors = listForkAnchors(lines);
+        assert.equal(anchors.length, 1, "同 run 三条 assistant 只出一锚");
+        assert.equal(anchors[0]!.lineId, "a3", "取末条");
+        assert.match(anchors[0]!.assistantPreview, /🔧 edit_file/);
     });
 
     it("空转录 / 仅事件行 / 仅 user 行 → 空列表（无可分叉检查点）", () => {

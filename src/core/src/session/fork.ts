@@ -47,16 +47,24 @@ export type ForkAnchor = {
 
 /**
  * 从 transcript 行序派生可分叉锚点列表（纯函数，CLI/VSCode 选择器共用）。
- * 锚点 = assistant 消息行（前缀含该行 = 一个完整检查点）；事件行/工具行/user 行跳过——
- * mid-run（工具行中间）分叉 derivePrefix 层面支持，仅 UX 不暴露（对用户不可理解）。
+ * ★ 2026-11-13 UX 修订：锚点 = **每 run 的最后一条 assistant 行**（前缀含该行 = 该轮对话的完整检查点）。
+ *   旧口径「每条 assistant 行一锚」在长 run（几十轮工具/文本交替）下渲染成几十条同题重复行
+ *   （用户实投诉「分叉列表好多重复的」，会话 a1c117ca 单轮 50+ 锚点同 preview）。
+ *   mid-run 中间检查点 derivePrefix 层面仍支持分叉，仅 UX 不暴露（对齐下条注释的既定取向）。
+ *   事件行/工具行/user 行跳过；无 assistant 行的 run（如瞬败请求）不产锚点。
  */
 export const listForkAnchors = (lines: TranscriptLine[]): ForkAnchor[] => {
     const anchors: ForkAnchor[] = [];
     let lastUser = "";
+    let pending: ForkAnchor | null = null;
+    const flush = (): void => {
+        if (pending) { anchors.push(pending); pending = null; }
+    };
     for (const l of lines) {
         if (isEventLine(l)) continue;
         const row = l as any;
         if (row?.role === "user") {
+            flush();   // 新 run 开始：上一 run 的末条 assistant 锚点定稿
             // ★ 多模态：数组 content（贴图轮）取纯文本视图；空文本兜底占位，锚点列表不出现空 preview
             lastUser = msgText(row.content) || (hasImagePart(row.content) ? "🖼 [图片消息]" : "");
         } else if (row?.role === "assistant") {
@@ -64,14 +72,17 @@ export const listForkAnchors = (lines: TranscriptLine[]): ForkAnchor[] => {
             const names = Array.isArray(row.tool_calls)
                 ? row.tool_calls.map((tc: any) => tc?.function?.name ?? "").filter(Boolean).join(", ")
                 : "";
-            anchors.push({
+            // 同 run 内后一条 assistant 覆盖前一条（pending）——只留末条；末条的正文预览也最有信息量
+            pending = {
                 lineId: row.id,
-                roundNo: anchors.length + 1,
+                roundNo: 0,
                 userPreview: lastUser,
                 assistantPreview: content || (names ? `🔧 ${names}` : "(空回复)"),
-            });
+            };
         }
     }
+    flush();
+    anchors.forEach((a, i) => { a.roundNo = i + 1; });
     return anchors;
 };
 
