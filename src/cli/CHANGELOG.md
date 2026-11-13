@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.75
+
+Agent 能力面三卡落地 + 「会话无法继续」400 事故根治 + evals 成本真口径（施工单 2026-11-13，全量 1145/1146 绿·typecheck 0，唯一失败为既有 listen 并发 flake 单跑恒绿）：
+
+- **T1 nudge 计量 + VERIFY_UNPROVEN 判据（dry 档默认）**：`nudge.injected` trace 事件双出口记账（:334 真注入 / :424 dry-run+解除，每 nudge 恰一条无双计数，disposition=fired/verified/disclaimed 三态）；第 5 类 fence 武装/解除走执行后 outcome 回调（失败编辑不武装），免责预检放行不推轮；`DEEP_SEEK_VERIFY_FENCE=off/dry/on` 三档。Gate 裁决挂账：真实使用一周后按 would_fire 率 = fired/(fired+verified+disclaimed) 判（`npm run nudge-stats` 直出）。
+- **T2 跨压缩存活题**：compact-survival 入池（28 题，windowTokens=16K 单任务小窗逼真实压缩），`--repeat=N` + passRate 入基线（发布对比判 3 跑 ≥2 过）+ compactCount=0 作废重跑护栏（上限 2 次防死循环）；反向验证按执行勘误判据完成（双段同丢 0/3 必败、丢叙述段 ≤1/3 且 token 膨胀 ≥3×、丢索引结构性良性归档）。
+- **T3 数字自证**：`npm run facts`（分层行数/题数/registry 最大文件，取数带日期）+ evals 池一致性 CI 守护（漏注册/幽灵条目/EXPECTED_POOL_SIZE 锁死）——文档口径漂移（21/27 题、39/69 文件）不再复发。
+- **截断防劈代理对 + 发送前守门（事故根治）**：折叠/截断裸 slice 劈开 emoji 代理对 → 孤立 \ud83d 被 DeepSeek 400 拒收（报错措辞误导为 hex escape 截断）→ 会话每次装载必死。`sliceHeadNoSplit`/`sliceTailNoSplit` 覆盖全部已知切点（decay 折叠 + truncate 四处 + http/web/bashDirect/continuation/classifyRisk），`llm/surrogateGuard.ts` 守门挂两条 API 出口（存量受害会话自动净除即恢复，未来漏劈出不了门）。
+- **分叉锚点收敛**：每 run 只留末条 assistant 检查点（旧口径长 run 渲染成几十条同题重复行）；mid-run 分叉仍可经 derivePrefix，仅 UX 不暴露。
+- **evals 成本口径 v2**：task.eval 接 onAuxUsage 旁路（压缩/分类器 aux 花费入账）+ config/prices.ts 真表（峰谷按调用时刻判档）——旧 USD 近似表漏 aux，compact-survival 全套真实 ¥2.7 vs 账面 ¥1.19；作废跑 token/成本进 invalidRuns。
+
 ## 1.0.74
 
 记忆策略窄口径三件套进挂机流水线（零向量检索、确定性提取、全链 fail-safe；同仓真机验收票 🗺️📰 注入 + 验收 exit 0 过后发版）：
