@@ -18,7 +18,7 @@ import { toIngestContents, WirePart } from "@/session/contentParts.ts";
 import { ensureVisionCacheLoaded } from "@/llm/visionCapability.ts";
 import { emitTrace } from "@/observability/trace.ts";
 import { TraceBase, UIEvent } from "@/observability/type.ts";
-import { RunAgentOptions, ThinkingLevel, PermissionMode } from "@/agent/type.ts";
+import { RunAgentOptions, ThinkingLevel, PermissionMode, AuxUsageReporter } from "@/agent/type.ts";
 import type { Locale } from "@/common/index.ts";
 import { createWebRequestApproval } from "@/host/webHost.ts";
 import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
@@ -72,6 +72,10 @@ export interface HostOptions {
     modelWindow?: number;
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
+    /** 辅助模型用量旁路（成本信任链 P0-2 同款钩子，2026-11-13 eval 成本对账勘误引入）：
+     *  压缩摘要/风险分类器的 aux 调用 usage 原样转发（runAgent→runLedger 链的观察者位）。
+     *  缺省 undefined → 行为不变；eval 用它把 aux 花费计入 costYuan（旧口径 aux 全隐形）。 */
+    onAuxUsage?: AuxUsageReporter;
 }
 
 /**
@@ -262,6 +266,7 @@ const handleUnifiedChatRun = async (
             locale: opts?.locale,
             outputStyle: opts?.outputStyle,
             budgetYuan: opts?.budgetYuan, // ★ 预算制运行（成本信任链第二环 E1）：主 run 传入，子 run 经 costSink 回灌
+            onAuxUsage: opts?.onAuxUsage, // ★ aux 用量旁路（2026-11-13）：eval 等程序化入口计 aux 成本用；缺省不转发
             // ★ P0-1：本轮用户输入原文（inbound.content 已过 slash 展开与 hook 注入定型），供 firstPrompt
             //   判定取「当前轮」而非消息数组首条（首条复杂 + 本轮寒暄曾误触发 PLAN_FIRST/EARLY_FINAL）。
             currentUserText: inbound.content,

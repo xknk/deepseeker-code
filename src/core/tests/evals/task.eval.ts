@@ -29,6 +29,10 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "
 const { evalTasks } = await import("./tasks/index.ts");
 const { handleUnifiedChat } = await import("@/serve/chatProcessing.ts");
 const { initEngine } = await import("@/bootstrap.ts");
+// ★ 成本口径 v2（2026-11-13）：唯一价格源 = config/prices.ts（峰谷按各调用时刻判档），
+//   aux（压缩摘要/分类器）经 onAuxUsage 旁路入账。无价条目 → costYuan=null（绝不编数）。
+const { calcCostYuan } = await import("@/config/prices.ts");
+const { MODEL_NAME, AUX_MODEL_NAME } = await import("@/llm/providers/deepseek/client.ts");
 
 // ==================== 参数解析 ====================
 
@@ -57,25 +61,14 @@ const BASELINE_PATH = path.join(RESULTS_DIR, 'baseline.json');
 
 // ==================== 结果与基线类型 ====================
 
-/**
- * ★ 单价表（路线 #3「折算成本」）：USD / 1M tokens。
- *   用途是**跨 run 可比性**（本轮 vs 基线贵了还是便宜了），不是账单——官网数字≠实际花的钱
- *   （trace 折算权重、阶梯折扣、夜间半价等都会造成偏差），结论只看相对变化。
- *   ★ 校准：换价先改这里（改完跑一次记录新口径，勿与旧口径数字直接对比）。
- *   最后校准日期：2026-09-15（近似值，用前自查官网当期价）。
- */
-const PRICE_TABLE: Record<string, { miss: number; hit: number; output: number }> = {
-    'deepseek-chat': { miss: 0.28, hit: 0.028, output: 0.42 },
-    'deepseek-flash': { miss: 0.28, hit: 0.028, output: 0.42 }, // 占位：暂按 chat 档，官网出价后校准
-};
-const DEFAULT_PRICE = PRICE_TABLE['deepseek-chat']!;
-/** 折算成本（美分）：(prompt−cacheHit)×miss + cacheHit×hit + completion×output */
-const estimateCostCents = (r: Pick<TaskResult, 'promptTokens' | 'completionTokens' | 'cacheHitTokens'>): number => {
-    const p = PRICE_TABLE[process.env.DEEP_SEEK_MODEL ?? ''] ?? DEFAULT_PRICE;
-    const missTokens = Math.max(0, r.promptTokens - r.cacheHitTokens);
-    const usd = (missTokens * p.miss + r.cacheHitTokens * p.hit + r.completionTokens * p.output) / 1e6;
-    return Math.round(usd * 10000) / 100; // 美分，两位小数
-};
+// ==================== 成本口径 v2（2026-11-13 对账勘误，替代旧 PRICE_TABLE） ====================
+// 旧口径两宗罪（实测 compact-survival 全套：账面 ¥1.19 vs 真实 ≈¥2.7）：
+//   ① 自带 2026-09 的 USD 近似单价表，与 config/prices.ts 真表构成双价格源；
+//   ② 只累计主循环 llm.response——压缩摘要/分类器的 aux 调用零埋点（truncate.ts emitTrace=0），
+//     compact-survival 单跑最多 24 次压缩，98 次 aux ≈¥1.5 全部隐形。
+// 新口径：calcCostYuan 真表逐调用折算（峰谷按调用时刻）+ aux 经 handleUnifiedChat 的
+//   onAuxUsage 旁路入账（RunAgentOptions 同款钩子，chatProcessing 2026-11-13 起转发）。
+//   无价条目 → costYuan=null（报告显 '-'，只计 token）。旧 run json 的 costCents 是另一口径，勿混比。
 
 interface TaskResult {
     id: string;
@@ -97,7 +90,14 @@ interface TaskResult {
     completionTokens: number;
     totalTokens: number;
     cacheHitTokens: number;
-    costCents: number;
+    /** ★ 成本口径 v2（2026-11-13）：全口径成本（元）= 主循环 + aux（压缩摘要/分类器），
+     *  config/prices.ts 真表按各调用时刻峰谷判档。null = 模型无价条目（绝不编数，只计 token）。
+     *  替代旧 costCents（USD 近似且漏 aux；历史 run json 里旧字段原样在盘，两口径勿直接对比）。 */
+    costYuan: number | null;
+    /** aux 旁账（主循环 token 字段不含）：压缩摘要 + 风险分类器的调用次数与 token */
+    auxCalls: number;
+    auxPromptTokens: number;
+    auxCompletionTokens: number;
     checkerDetail: string;
     finalPreview: string;
     error?: string;
@@ -199,13 +199,36 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
     // ★ T2：本跑压缩完成次数（样本有效性判据）。eval 走 sseWrite 通道收 UIEvent（opts.onUIEvent 未传，
     //   serve 层把 compact.done 等 UIEvent 转投 sseWrite），在此单点旁路计数、不拦截不转发。
     let compactCount = 0;
+    // ★ 成本口径 v2：主循环逐响应折算（峰谷按响应时刻判档）+ aux 旁路（压缩摘要/分类器，onAuxUsage）。
+    //   无价（calcCostYuan=null）→ priceKnown=false，最终 costYuan=null 只计 token（红线：绝不编数）。
+    let mainCostYuan = 0, mainPriceKnown = true;
+    let auxCostYuan = 0, auxPriceKnown = true;
+    let auxCalls = 0, auxPromptTokens = 0, auxCompletionTokens = 0;
     const onTrace = (base: any): void => {
         if (base?.eventType === 'llm.response' && base.usage) {
             promptTokens += base.usage.prompt_tokens ?? 0;
             completionTokens += base.usage.completion_tokens ?? 0;
             totalTokens += base.usage.total_tokens ?? 0;
             cacheHitTokens += base.usage.prompt_cache_hit_tokens ?? 0;
+            const c = calcCostYuan(MODEL_NAME, {
+                promptTokens: base.usage.prompt_tokens,
+                completionTokens: base.usage.completion_tokens,
+                cachedTokens: base.usage.prompt_cache_hit_tokens,
+            }, new Date());
+            if (c === null) mainPriceKnown = false; else mainCostYuan += c;
         }
+    };
+    const onAuxUsage = (usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cached_tokens?: number } | undefined | null): void => {
+        auxCalls++;   // usage 缺省回调仍触发（runLedger 契约），计次不计 token
+        if (!usage) return;
+        auxPromptTokens += usage.prompt_tokens ?? 0;
+        auxCompletionTokens += usage.completion_tokens ?? 0;
+        const c = calcCostYuan(AUX_MODEL_NAME, {
+            promptTokens: usage.prompt_tokens,
+            completionTokens: usage.completion_tokens,
+            cachedTokens: usage.cached_tokens,
+        }, new Date());
+        if (c === null) auxPriceKnown = false; else auxCostYuan += c;
     };
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), (task.maxMinutes ?? 10) * 60_000);
@@ -237,6 +260,7 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
                 // ★ T2：本任务窗口旋钮（仅声明了 windowTokens 的任务生效；其他题 undefined → 逐字节同旧）
                 modelWindow: task.windowTokens,
                 onTrace,
+                onAuxUsage,
             },
         );
     } catch (e: any) {
@@ -275,7 +299,8 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
         thinkingMs: firstThinkAt !== undefined ? firstThinkAt - t0 : null,
         durationMs: Date.now() - t0,
         promptTokens, completionTokens, totalTokens, cacheHitTokens,
-        costCents: estimateCostCents({ promptTokens, completionTokens, cacheHitTokens }),
+        costYuan: mainPriceKnown && auxPriceKnown ? Math.round((mainCostYuan + auxCostYuan) * 1000) / 1000 : null,
+        auxCalls, auxPromptTokens, auxCompletionTokens,
         checkerDetail: check.detail ?? '',
         finalPreview: ctx.finalText.slice(0, 200),   // ★ 顺带修复：流式轮此处理前恒空串（final.text 被清空）
         error,
@@ -285,6 +310,8 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
 // ==================== 报告 ====================
 
 const fmtK = (n: number): string => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+/** 成本列（元，三位小数）：null=无价条目（模型不在 config/prices.ts 表内，绝不编数） */
+const fmtCostYuan = (c: number | null): string => c === null ? '-' : c.toFixed(3);
 /** TTFT/思考首帧列：null（本轮未出现）显示 '-' */
 const fmtSec = (ms: number | null): string => (ms === null ? '-' : `${(ms / 1000).toFixed(1)}s`);
 const fmtDelta = (cur: number, base: number): string => {
@@ -312,7 +339,7 @@ const printReport = (rows: TaskAgg[], baseline: Baseline | null): void => {
         'id'.padEnd(18) + '结果'.padEnd(12)
         + 'vs基线'.padEnd(8) + '轮次'.padEnd(10) + '工具'.padEnd(6)
         + '首字'.padEnd(7) + '思考'.padEnd(7)
-        + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8) + '成本¢'.padEnd(8),
+        + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8) + '成本¥'.padEnd(8),
     );
     let regressions = 0;
     let passes = 0;
@@ -331,7 +358,7 @@ const printReport = (rows: TaskAgg[], baseline: Baseline | null): void => {
             + vs.padEnd(8) + `${r.rounds}${roundDelta}`.padEnd(10) + String(r.toolCalls).padEnd(6)
             + fmtSec(r.ttftMs).padEnd(7) + fmtSec(r.thinkingMs).padEnd(7)
             + fmtK(r.totalTokens).padEnd(10) + fmtK(r.cacheHitTokens).padEnd(10)
-            + `${Math.round(r.durationMs / 1000)}s`.padEnd(8) + String(r.costCents).padEnd(8),
+            + `${Math.round(r.durationMs / 1000)}s`.padEnd(8) + fmtCostYuan(r.costYuan).padEnd(8),
         );
         if (r.invalidCount > 0) console.log(`  ⚠️ ${r.invalidCount} 跑压缩未发生（compactCount=0）作废单列——窗口疑过大，建议重调 windowTokens`);
         if (r.validCount === 0) console.log('  ⚠️ 0 个有效跑（全部作废）→ INVALID，无门禁结论');
@@ -339,8 +366,9 @@ const printReport = (rows: TaskAgg[], baseline: Baseline | null): void => {
     }
     console.log(line);
     console.log(`通过 ${passes}/${rows.length}` + (baseline ? `，对比基线：回退 ${regressions} 个` : '（无基线，本轮可用 --save-baseline 固化）'));
-    const totalCost = rows.reduce((s, r) => s + r.costCents, 0);
-    console.log(`折算成本合计 ≈ ${totalCost.toFixed(2)}¢（近似口径，看相对变化勿当账单；单价表见文件头 PRICE_TABLE）`);
+    const totalCost = rows.reduce((s, r) => s + (r.costYuan ?? 0), 0);
+    const unpricedNote = rows.some((r) => r.costYuan === null) ? '；含无价模型行（该行只计 token）' : '';
+    console.log(`折算成本合计 ≈ ¥${totalCost.toFixed(2)}（主+aux，config/prices.ts 真表按调用时刻峰谷判档${unpricedNote}）`);
     console.log(line);
     if (regressions > 0) process.exitCode = 1;
 };
@@ -391,20 +419,22 @@ try {
  *  → 作废重跑不计 fail；补跑 ≤INVALID_RETRIES 次仍压不动 → 标 invalid 单列，不死循环）。
  *  n=1 且非窗口任务：行为与旧实现逐字节一致（单跑即结果）。
  */
-const runTaskRepeat = async (task: EvalTask, extension = false): Promise<{ valid: TaskResult[]; invalidCount: number }> => {
+const runTaskRepeat = async (task: EvalTask, extension = false): Promise<{ valid: TaskResult[]; invalidCount: number; invalidRows: TaskResult[] }> => {
     const valid: TaskResult[] = [];
+    const invalidRows: TaskResult[] = [];
     let invalidCount = 0;
     while (valid.length < REPEAT && valid.length + invalidCount < REPEAT + INVALID_RETRIES) {
         const row = await runOneTask(task, extension);
         if (task.windowTokens !== undefined && row.compactCount === 0) {
             invalidCount++;
+            invalidRows.push(row);   // ★ 作废跑也留 token/成本（2026-11-13 对账勘误：作废跑不进 run json → 钱追不到）
             console.log(`  ⚠️ 第 ${valid.length + invalidCount} 跑 compactCount=0（压缩未发生）→ 本次作废，不计 passRate${valid.length + invalidCount < REPEAT + INVALID_RETRIES ? '，作废重跑' : '；已到重跑上限，标 INVALID 单列'}`);
             continue;
         }
         valid.push(row);
         if (REPEAT > 1) console.log(`  · 第 ${valid.length}/${REPEAT} 跑：${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  压缩×${row.compactCount}  ${Math.round(row.durationMs / 1000)}s`);
     }
-    return { valid, invalidCount };
+    return { valid, invalidCount, invalidRows };
 };
 
 /** 单任务聚合：数值列取有效跑均值（n=1 = 原值），pass 按 passRate ≥ 2/3 门禁（3 跑 ≥2 过）。 */
@@ -429,7 +459,12 @@ const aggregate = (task: EvalTask, valid: TaskResult[], invalidCount: number): T
         completionTokens: mean((r) => r.completionTokens),
         totalTokens: mean((r) => r.totalTokens),
         cacheHitTokens: mean((r) => r.cacheHitTokens),
-        costCents: valid.length ? Math.round(valid.reduce((s, r) => s + r.costCents, 0) / valid.length * 100) / 100 : 0,
+        costYuan: valid.length && valid.every((r) => r.costYuan !== null)
+            ? Math.round(valid.reduce((s, r) => s + (r.costYuan ?? 0), 0) / valid.length * 1000) / 1000
+            : null,
+        auxCalls: mean((r) => r.auxCalls),
+        auxPromptTokens: mean((r) => r.auxPromptTokens),
+        auxCompletionTokens: mean((r) => r.auxCompletionTokens),
         checkerDetail: rep?.checkerDetail ?? '',
         finalPreview: rep?.finalPreview ?? '',
         error: rep?.error,
@@ -441,7 +476,7 @@ const aggregate = (task: EvalTask, valid: TaskResult[], invalidCount: number): T
 
 const aggs: TaskAgg[] = [];
 const allValidRuns: TaskResult[] = [];
-const invalidLog: Array<{ id: string; invalid: number }> = [];
+const invalidLog: Array<{ id: string; invalid: number; totalTokens: number; costYuan: number | null }> = [];
 try {
     // 标准任务先行（共享引擎、工具表恒定——既有基线的可比性不被扩展面任务扰动）；
     // 扩展面任务（extensionFixture 声明者）排后、逐任务重启引擎（洁净水别的反向补课，路线 #10④）。
@@ -450,9 +485,9 @@ try {
     for (let i = 0; i < standardTasks.length; i++) {
         const t = standardTasks[i];
         console.log(`\n▶ [${i + 1}/${selected.length}] ${t.id} — ${t.name}${t.windowTokens ? `（window=${t.windowTokens}）` : ''}${REPEAT > 1 ? ` ×${REPEAT} 跑` : ''}`);
-        const { valid, invalidCount } = await runTaskRepeat(t);
+        const { valid, invalidCount, invalidRows } = await runTaskRepeat(t);
         allValidRuns.push(...valid);
-        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount });
+        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount, totalTokens: invalidRows.reduce((s, r) => s + r.totalTokens, 0), costYuan: invalidRows.every((r) => r.costYuan !== null) ? invalidRows.reduce((s, r) => s + (r.costYuan ?? 0), 0) : null });
         const agg = aggregate(t, valid, invalidCount);
         aggs.push(agg);
         console.log(`  ${agg.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${agg.rounds}  工具 ${agg.toolCalls}  首字 ${fmtSec(agg.ttftMs)}  ${fmtK(agg.totalTokens)} tok  ${Math.round(agg.durationMs / 1000)}s`);
@@ -460,9 +495,9 @@ try {
     for (let i = 0; i < extensionTasks.length; i++) {
         const t = extensionTasks[i];
         console.log(`\n▶ [扩展面 ${i + 1}/${extensionTasks.length}] ${t.id} — ${t.name}${REPEAT > 1 ? ` ×${REPEAT} 跑` : ''}`);
-        const { valid, invalidCount } = await runTaskRepeat(t, true);
+        const { valid, invalidCount, invalidRows } = await runTaskRepeat(t, true);
         allValidRuns.push(...valid);
-        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount });
+        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount, totalTokens: invalidRows.reduce((s, r) => s + r.totalTokens, 0), costYuan: invalidRows.every((r) => r.costYuan !== null) ? invalidRows.reduce((s, r) => s + (r.costYuan ?? 0), 0) : null });
         const agg = aggregate(t, valid, invalidCount);
         aggs.push(agg);
         console.log(`  ${agg.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${agg.rounds}  工具 ${agg.toolCalls}  首字 ${fmtSec(agg.ttftMs)}  ${fmtK(agg.totalTokens)} tok  ${Math.round(agg.durationMs / 1000)}s`);
