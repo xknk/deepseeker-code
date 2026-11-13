@@ -66,6 +66,10 @@ export interface HostOptions {
     /** 工具 schema 覆盖（成本信任链第四环 F2 挂机批处理：按工单裁剪高危工具——缺省禁 run_command/delete_path
      *  同 SUBAGENT_DENYLIST，frontmatter tools 显式解锁）。未传 = 全量 agentTools，行为零变化。 */
     toolSchemas?: any[];
+    /** ★ T2 跨压缩存活题（2026-11-13）：单次调用的窗口覆盖（token）。仅 eval 等程序化入口按需传入；
+     *  缺省 undefined → resolveModelWindow(opts?.model) 既有判定逐字节不变（MODEL_WINDOWS 表 / 全局回退）。
+     *  红线：不许把小窗口写进 MAX_HISTORY_TOKENS / MODEL_WINDOWS——那是全局表，改了会污染其他 26 题。 */
+    modelWindow?: number;
     /** trace 透传（观察用，不落盘重复）：CLI 等可据此读取 llm.response 的 usage（真实 token）。 */
     onTrace?: (base: TraceBase) => void;
 }
@@ -238,7 +242,7 @@ const handleUnifiedChatRun = async (
             cwd: process.cwd(),
             toolSchemas: opts?.toolSchemas ?? agentTools, // 宿主可按需裁剪（挂机批处理）；缺省全量，行为不变
             abortSignal,                        // ← 透传中止信号
-            modelWindow: resolveModelWindow(opts?.model), // ★ P1-4：窗口按本轮模型解析（MODEL_WINDOWS 表 / 全局回退）
+            modelWindow: opts?.modelWindow ?? resolveModelWindow(opts?.model), // ★ P1-4：窗口按本轮模型解析（MODEL_WINDOWS 表 / 全局回退）；T2：eval 单任务旋钮单点覆盖（缺省 undefined 时行为逐字节不变）
             keepRecentUnits: appConfig.KEEP_RECENT_UNITS,
             compactRatio: appConfig.COMPACT_RATIO,
             parentSystemPrompt: sysPrompt,

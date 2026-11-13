@@ -131,6 +131,11 @@ export const appConfig = {
      *  默认 false——关闭时记忆行为与未引入本功能逐字节一致。开启即意味着同意把这些文件内容随请求发给
      *  DeepSeek API（loader 首次接入时 console 提示一次）。外部条目只读：memory_save/delete 拒 ext- 前缀。 */
     memoryExternal: false,
+    /** VERIFY_UNPROVEN 三档（T1 nudge 计量配套，2026-11-13）：off=不判定 / dry=只记录 would_fire（不推轮）/
+     *  on=真拦（final 时推一轮）。默认 dry（T1 阶段只收数据）；是否切 on 由 §5 Gate 决策矩阵裁定——
+     *  dry 跑满一周后按 would_fire 率（fired/(fired+verified+disclaimed)）与免责吃掉比例定，勿提前拍脑袋。 */
+    verifyFenceMode: (process.env.DEEP_SEEK_VERIFY_FENCE === 'off' ? 'off'
+        : process.env.DEEP_SEEK_VERIFY_FENCE === 'on' ? 'on' : 'dry') as 'off' | 'dry' | 'on',
 };
 
 // —— P1-4 按模型的上下文窗口（内核审查报告第二批） ——
@@ -174,6 +179,7 @@ export const ENV_SOURCES: Record<string, string> = {
     transcriptEvents: "DEEP_SEEK_TRANSCRIPT_EVENTS",
     inboxSteering: "DEEP_SEEK_INBOX",
     hookRewrite: "DEEP_SEEK_HOOK_REWRITE",
+    verifyFenceMode: "DEEP_SEEK_VERIFY_FENCE",
 };
 
 /** 配置值来源标签：内置默认 / 环境变量 / 全局 settings.json / 项目 settings.json（后者覆盖前者）。 */

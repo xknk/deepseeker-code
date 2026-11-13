@@ -39,6 +39,10 @@ export type TraceEventType =
     | "tool.validation.failed"  // 校验失败：工具入参不符合定义（Schema 校验失败）
     | "tool.failed"            // 工具执行失败：工具执行过程中发生错误
     | "tool.batch.budget"      // A 批并行批批级预算校准埋点：批大小/批上限/每工具上限 + 实际注入字符数与 token 增量（§1.4-6，密度校准数据源）
+    | "nudge.injected"         // ephemeral nudge 计量（T1，2026-11-13）：哪个 fence 真注入/本该注入（dry-run），
+                               //   9 个 fence 触发频次的数据源（机制台账「连续 90 天 0 次 → 候选删除」判据用）。
+                               //   injected:true=真注入（推了一轮）；false=dry-run / 武装后被解除（verified/disclaimed）。
+                               //   同一事件名承担「已注入」与「本该注入」两种语义——统计脚本一个过滤条件搞定，勿拆第二个事件名。
     | "user.aborted"           // 会话开始：用户发起请求，系统初始化
     | "approval_request"        // 审批请求：需要用户手动审批的操作
     | "tool_guard_block"        //工具
@@ -80,6 +84,11 @@ export interface TraceBase {
         cacheFactorAtCheck?: number;    // 判定时缓存感知阈值系数（∈[0.9,1.1]，无 usage 时 1.0）
         decayTokensBefore?: number;     // context.decay：衰减前 token 快照
         decayTokensAfter?: number;      // context.decay：衰减后 token 快照
+        // —— nudge.injected 计量随附（T1，2026-11-13）——
+        fence?: string;                     // 命中/将命中的 fence 标识（⟦DSC:XXX⟧ 内的 XXX，如 NUDGE / VERIFY_UNPROVEN）
+        injected?: boolean;                 // true=真的注入了（推了一轮）；false=dry-run / 已解除（Gate 分母事件恒 false）
+        disposition?: 'fired' | 'verified' | 'disclaimed';  // 仅 VERIFY_UNPROVEN 有实际语义：会拦 / 已跑成功验证 / 文案已交代；
+                                                            //   其余 fence 恒 'fired'（§2.2② 施工单 2026-11-13）
     };
     // 商业级大模型 Agent 上下文可观测性的灵魂计费数据资产
     usage?: {

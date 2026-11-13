@@ -7,6 +7,8 @@
  *
  *   四类 nudge 均走 ephemeral 尾部副本（推理时附加，不进 message 数组/transcript/压缩 → 保 message[0] 前缀稳定，
  *   DeepSeek 隐式缓存跨轮命中）：
+ *   - VERIFY_UNPROVEN（T1，2026-11-13）：「改过代码 + 无成功验证 + 未交代」判据，默认 dry 档只记账不推轮
+ *     （DEEP_SEEK_VERIFY_FENCE=on 真拦 / off 全关）；走执行后 outcome 回调武装（noteToolOutcome），详见下方常量区。
  *   - PLAN_FIRST：首轮规划引导——顶层非计划模式下，用户首条 prompt 疑似非平凡实现任务时，引导先调 enter_plan_mode 规划（仅首轮一次）。
  *   - PHANTOM：空 content 守护（空包/纯崩溃）——既无实质文本又无 tool_calls 时注入重试（上限 PHANTOM_RETRY_MAX）。
  *   - EARLY_FINAL：早收尾守护——有实质文本、但轮次极少且无明确完成声明时推一轮让其自检（上限 EARLY_FINAL_MAX）。
@@ -18,8 +20,27 @@
  *   有 tool_calls 即重置。两者互斥（空 content 走 PHANTOM，非空走 EARLY_FINAL）。
  */
 
-/** ephemeral nudge 消息（role=system，作为推理时尾部副本追加，不落盘）。 */
-export type NudgeMsg = { role: 'system'; content: string };
+import { appConfig } from "@/config/index.ts";
+
+/** ephemeral nudge 消息（role=system，作为推理时尾部副本追加，不落盘）。
+ *  disposition（T1 计量，2026-11-13）：仅 VERIFY_UNPROVEN pending 携带 'fired'，pickNudge 消费透传到
+ *  nudge.injected 事件 metadata——否则 Gate 在 on 档只能看到 fired 一个值（§2.2⑤）。其余 fence 不带。 */
+export type NudgeMsg = { role: 'system'; content: string; disposition?: string };
+
+/** interceptFinal 命中结果（T1 返回类型改造，2026-11-13）：原来是 boolean（true=已注入应 continue），
+ *  现在带 fence 名与注入事实，供 runAgent 的 :424 出口发 nudge.injected 计量事件。
+ *  injected:true → runAgent continue（pending 下一轮经 pickNudge 消费、:334 记账 injected:true）；
+ *  injected:false → dry-run / 武装后被解除，runAgent 放行收尾并在 :424 出口记账（不 continue）。
+ *  ★ disposition 仅 VERIFY_UNPROVEN 有 verified/disclaimed 两种解除语义，其余 fence 恒 'fired'。 */
+export type NudgeFinalHit = { fence: string; injected: boolean; disposition: 'fired' | 'verified' | 'disclaimed' };
+
+/** 从 nudge 文案首行提取 fence 标识（⟦DSC:XXX⟧ 内的 XXX）：nudge.injected 计量事件的 fence 字段来源。
+ *  所有 nudge 文案的首行都是 fence 行（构造惯例：`${FENCE}\n${TEXT}`），无命中返回 'UNKNOWN'（不应出现，出现即文案构造惯例被破坏）。 */
+export const nudgeFenceOf = (content: string): string => {
+    const firstLine = (content || '').split('\n')[0] || '';
+    const m = /⟦DSC:([A-Z_]+)⟧/.exec(firstLine);
+    return m ? m[1] : 'UNKNOWN';
+};
 
 // —— 阈值 / fence ——
 const NUDGE_EVERY = 40;                  // 每 N 轮注入一次周期自评
@@ -50,6 +71,27 @@ const REPEAT_NUDGE_MAX = 3;          // 整个 run 最多推 3 次重复检索 n
 //   发生过 todo_write 才拦（没建过清单的任务无从核对，不误伤）。预算 1 次/run（防模型有意弃单时拉扯）。
 const TODO_INCOMPLETE_FENCE = "⟦DSC:TODO_INCOMPLETE⟧";
 const TODO_INCOMPLETE_MAX = 1;       // 整个 run 最多推 1 次（与 EARLY_FINAL 同级死循环保险）
+
+// —— 「改过代码但未验证」判据（VERIFY_UNPROVEN，T1 dry-run，施工单 2026-11-13 §2.2②）——
+//   语义最弱的第 5 类 interceptFinal 判定：本 run 改过代码文件（ok===true 的写工具、代码扩展名），
+//   收尾时既没有成功的验证命令、文案也没交代验证情况 → 记一次 hit。默认 dry 档只记账不推轮
+//   （would_fire 数据收一周后由 Gate 决策矩阵裁定是否切 on）；off 档完全不判定。
+//   ★ 已知漏洞故意留着（§2.3 原文）：isVerifyCommand 对 `echo "test"` 这类假命令同样放行——
+//     方向是「宁多认、少拦」（与降噪目标一致，代价是多放过一些应拦场景），不是 bug，勿顺手收紧。
+const VERIFY_FENCE = "⟦DSC:VERIFY_UNPROVEN⟧";
+/** 代码扩展名（§2.3 照抄）：改文档/配置不该武装（.md/.json/.yaml 一律不武装）。 */
+const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|hpp|sh|ps1)$/i;
+/** 验证命令识别（§2.3 照抄）：宁多认（少拦），但排掉 git 只读子命令。 */
+const isVerifyCommand = (cmd: string): boolean => {
+    const c = String(cmd || '').trim();
+    if (/^git\s+(checkout|check-ignore|check-attr|status|diff|log)\b/i.test(c)) return false;
+    return /\b(test|tests|typecheck|tsc|build|lint|check|spec|vitest|jest|pytest)\b/i.test(c);
+};
+/** 免责预检（先于拦截，§2.2② 照抄）：finalText 已交代验证情况 → 不推轮，仍记账（disposition:'disclaimed'）。 */
+const VERIFY_DISCLAIM_RE = /未验证|未测试|未跑|没跑|无法验证|not\s+(yet\s+)?(run|tested|verified|validated)/i;
+/** VERIFY 文案：三条出路（跑验证 / 说明不适用 / 声明未验证说清风险）+「已重读确认」出口——
+ *  systemPrompt 认可重读属于验证手段，本 fence 只认命令，不给出口模型找不到自己的处境（§2.2② ★）。 */
+const VERIFY_UNPROVEN_TEXT = `你本任务修改过代码文件，但期间没有执行过成功的验证命令，回复中也没交代验证情况。请选择其一收尾：① 运行验证命令（如 npm test / tsc / 构建 / lint）确认改动无回归；② 说明为何验证不适用（如用户明确要求不要运行）；③ 明确声明「未验证」并说清风险与建议的验证方式；④ 若你已重读全部改动确认无误（重读属于认可的验证手段），请明确写出「已重读确认」。不要不作交代就收尾。`;
 
 // —— 预算 soft 提醒（BUDGET，成本信任链第二环 E2）——
 //   主 run 花费触顶时的经济熔断提醒（硬截断在 runAgent 轮边界，此处只管文案投递）。
@@ -144,16 +186,25 @@ const TODO_INCOMPLETE_TEXT = (openItems: string[]): string =>
 /**
  * 创建一个 nudge 调度器（持有跨轮可变状态）。runAgent 每次 run 创建一个实例。
  *
- * 三方法对应主循环三个决策点：
+ * 四方法对应主循环决策点：
  * - pickNudge(round)：每轮推理前调用，返回本轮要注入的尾部 nudge（消费上轮设的 pending，或周期触发），无则 null。
- * - interceptFinal(finalText, round)：收尾分支（无 tool_calls）调用；返回 true 表示已注入 nudge、应 continue 推进，
- *   false 表示放行真实收尾（主循环 yield final）。
+ * - interceptFinal(finalText, round)：收尾分支（无 tool_calls）调用；命中返回 {fence, injected, disposition}——
+ *   injected=true 表示已设 pending、应 continue 推进（下一轮 pickNudge 消费）；injected=false 是 dry-run /
+ *   武装后被解除的记账 hit，放行真实收尾；null 表示放行（主循环 yield final）。
  * - noteToolCall()：本轮有 tool_calls（实质推进）时调用，重置空响应预算。
+ * - noteToolOutcome(name, args, ok)（T1，2026-11-13）：工具执行【后】回传结局——VERIFY_UNPROVEN 判据的
+ *   武装/解除信号源。刻意不复用 noteToolCall 的 editedPaths：那是执行前从 tool_calls 参数收集的，
+ *   失败/被拒/校验不过的编辑同样会武装（施工单 §2.2③ 终审 Q1 修正）。只认「成功」——失败的编辑
+ *   不算改过，失败的命令不算验证。
  */
 export const createNudgeScheduler = (opts: {
     firstPrompt?: string;
     planMode?: boolean;
     noEarlyFinal?: boolean;
+    /** 子 agent 嵌套深度（T1 VERIFY_UNPROVEN 不武装条件之一：depth>0 直接不判定）。 */
+    depth?: number;
+    /** VERIFY_UNPROVEN 三档覆盖（单测用）；缺省读 appConfig.verifyFenceMode（env DEEP_SEEK_VERIFY_FENCE）。 */
+    verifyFenceMode?: 'off' | 'dry' | 'on';
     /** P1-2 上下文用量快照闭包（惰性）：estimateTokens(message) 是全量扫描，而 pickNudge 每轮都调，
      *  故闭包只在真正要返回 NUDGE / REPEAT_RETRIEVAL nudge 的分支内调用，其余轮零调用。 */
     getContextUsage?: () => ContextUsage | null;
@@ -162,8 +213,11 @@ export const createNudgeScheduler = (opts: {
     getBudgetStatus?: () => { spent: number; budget: number } | null;
 } = {}): {
     pickNudge: (round: number) => NudgeMsg | null;
-    interceptFinal: (finalText: string, round: number) => boolean;
+    interceptFinal: (finalText: string, round: number) => NudgeFinalHit | null;
     noteToolCall: (round: number, toolCalls?: any[]) => void;
+    /** T1 VERIFY_UNPROVEN 武装/解除信号：写工具成功且 path 命中代码扩展名 → 武装（新 arm 周期）；
+     *  武装后 run_command 成功且命中验证命令 → 解除（verified）。 */
+    noteToolOutcome: (name: string, args: any, ok: boolean) => void;
     /** P1-7 计划拒绝熔断：runAgent 在写工具被拒后回传累计次数；达 NUDGE_AT 设转向 nudge（下一轮消费）。 */
     notePlanWriteRejected: (total: number) => void;
     /** P1-7 已知的累计被拒次数（runAgent 据此对照 FORCE_AT 决定强制收尾）。 */
@@ -203,6 +257,16 @@ export const createNudgeScheduler = (opts: {
     let planRejectCount = 0;                         // 累计被拒次数（runAgent 增量后回传的累计值）
     let planRejectNudged = false;                    // 转向 nudge 是否已发（每 run 一次，FORCE 之前给过机会）
     let planRejectPending: NudgeMsg | null = null;
+    // —— VERIFY_UNPROVEN 状态（per-run，T1）——
+    //   ★ 每次 arm 周期只报一次（verifyReported）：发过 fired/verified/disclaimed 任一即置位，后续 final
+    //   不再重复报（否则一个 run 里每轮 final 都会再发一条，Gate 分母自己又被污染）；下一次代码编辑
+    //   重新武装时清零（arm 周期重置——否则一轮只算一次，测不到「改完又改」的真实路径）。
+    const verifyMode = opts.verifyFenceMode ?? appConfig.verifyFenceMode;
+    const verifyDepth = opts.depth ?? 0;
+    let verifyArmed = false;                         // 已武装：本 run 发生过 ok===true 的代码文件写工具
+    let verifyDone = false;                          // 武装后出现过 ok===true 的验证命令（解除）
+    let verifyReported = false;                      // 本 arm 周期已报过 hit（每周期恰好一条记账）
+    let verifyPending: NudgeMsg | null = null;       // on 档 fired 的待消费 nudge（下一轮 pickNudge 推给模型）
 
     return {
         pickNudge(round) {
@@ -237,6 +301,9 @@ export const createNudgeScheduler = (opts: {
                 const usage = opts.getContextUsage?.() ?? null;
                 return usage ? { ...m, content: `${m.content}${usageNoteText(usage)}` } : m;
             }
+            // VERIFY_UNPROVEN pending（T1，on 档 fired 才会设入）：语义最弱、优先级最低（施工单 §2.2②）——
+            //   排在全部 pending 之后、周期 NUDGE 之前；disposition 随 NudgeMsg 透传到 :334 记账（§2.2⑤）。
+            if (verifyPending) { const m = verifyPending; verifyPending = null; return m; }
             if (round > 1 && round % NUDGE_EVERY === 1) {
                 // ★ P1-2 惰性调用点：只在真正返回周期 NUDGE 的这一轮才全量扫描估算用量（闭包缺省/返回 null → 文案不带用量，行为不变）
                 const usage = opts.getContextUsage?.() ?? null;
@@ -257,13 +324,13 @@ export const createNudgeScheduler = (opts: {
                 && text.length < TOOL_DIGEST_TEXT_MAX_LEN && !looksComplete(finalText)) {
                 toolDigestNudges++;
                 toolDigestPending = { role: 'system', content: `${TOOL_DIGEST_FENCE}\n${TOOL_DIGEST_TEXT}` };
-                return true;
+                return { fence: 'TOOL_DIGEST', injected: true, disposition: 'fired' };
             }
             // PHANTOM：空 content（空包/纯崩溃）
             if (text === "" && phantomRetries < PHANTOM_RETRY_MAX) {
                 phantomRetries++;
                 phantomPending = { role: 'system', content: `${PHANTOM_FENCE}\n${PHANTOM_TEXT}` };
-                return true;
+                return { fence: 'PHANTOM', injected: true, disposition: 'fired' };
             }
             // EARLY_FINAL：有 content 但轮次极少且无完成声明（疑似拿部分结果草率收尾）
             //   ★ 按信号武装（2026-09-11 重构，替代寒暄白名单——非任务型输入枚举不完，白名单是打地鼠）：
@@ -275,7 +342,7 @@ export const createNudgeScheduler = (opts: {
                 && earlyFinalNudges < EARLY_FINAL_MAX && !looksComplete(finalText)) {
                 earlyFinalNudges++;
                 earlyFinalPending = { role: 'system', content: `${EARLY_FINAL_FENCE}\n${EARLY_FINAL_TEXT(round)}` };
-                return true;
+                return { fence: 'EARLY_FINAL', injected: true, disposition: 'fired' };
             }
             // TODO_INCOMPLETE：本 run 建过/更新过任务清单，final 时清单仍有未完成项 → 推一轮核对。
             //   与 EARLY_FINAL 互补：那个只管 ≤2 轮的草率收尾，这个管全程（任何轮次收尾都核对清单）。
@@ -285,10 +352,33 @@ export const createNudgeScheduler = (opts: {
                 if (open.length > 0) {
                     todoNudges++;
                     todoPending = { role: 'system', content: `${TODO_INCOMPLETE_FENCE}\n${TODO_INCOMPLETE_TEXT(open)}` };
-                    return true;
+                    return { fence: 'TODO_INCOMPLETE', injected: true, disposition: 'fired' };
                 }
             }
-            return false;
+            // VERIFY_UNPROVEN（T1，语义最弱、优先级最低——排 TODO_INCOMPLETE 之后）：改过代码 + 无成功
+            //   验证 + 文案未交代 → 记一次 hit。三档：off 不判定 / dry 全部 injected:false（只记账不推轮）/
+            //   on 的 fired injected:true（设 pending 推一轮）。每次 arm 周期只报一条（verifyReported 门）。
+            //   不武装：planMode（写操作本就被拒）/ depth>0（子 agent）/ 从未改过代码（纯问答/只读任务）。
+            if (verifyMode !== 'off' && !planMode && verifyDepth === 0 && verifyArmed && !verifyReported) {
+                // ① 解除-已验证：武装后出现过 ok===true 的验证命令（事实核查优先于文案预检）
+                if (verifyDone) {
+                    verifyReported = true;
+                    return { fence: 'VERIFY_UNPROVEN', injected: false, disposition: 'verified' };
+                }
+                // ② 免责预检（先于拦截）：文案已交代验证情况 → 不推轮，仍记账（Gate 分母的一半）
+                if (VERIFY_DISCLAIM_RE.test(finalText)) {
+                    verifyReported = true;
+                    return { fence: 'VERIFY_UNPROVEN', injected: false, disposition: 'disclaimed' };
+                }
+                // ③ fired：dry 只记账（injected:false，runAgent :424 出口发事件后放行）；on 设 pending 真推一轮
+                verifyReported = true;
+                if (verifyMode === 'on') {
+                    verifyPending = { role: 'system', content: `${VERIFY_FENCE}\n${VERIFY_UNPROVEN_TEXT}`, disposition: 'fired' };
+                    return { fence: 'VERIFY_UNPROVEN', injected: true, disposition: 'fired' };
+                }
+                return { fence: 'VERIFY_UNPROVEN', injected: false, disposition: 'fired' };
+            }
+            return null;
         },
         noteToolCall(round, toolCalls) {
             // 有 tool_calls = 实质推进 → 重置空响应预算（只计连续空包）+ 工具消化预算（下次消化又给新鲜预算）
@@ -340,6 +430,25 @@ export const createNudgeScheduler = (opts: {
                     }
                     continue;
                 }
+            }
+        },
+        noteToolOutcome(name, args, ok) {
+            // T1 VERIFY_UNPROVEN 信号源（施工单 §2.2②）：只认「成功」——失败的编辑不算改过，失败的命令不算验证。
+            //   off 档零判定（连武装都不做，interceptFinal 的 off 分支天然短路，这里省掉无谓的状态翻转）。
+            if (verifyMode === 'off' || !ok) return;
+            if (name === "edit_file" || name === "write_file" || name === "create_file") {
+                // 武装：写工具成功且是代码文件（.md/.json/.yaml 等文档/配置不武装，CODE_EXT 红线照抄 §2.3）
+                const p = normPath(args?.path);
+                if (p && CODE_EXT.test(p)) {
+                    verifyArmed = true;
+                    verifyDone = false;
+                    verifyReported = false;   // 新 arm 周期：清报告门（verified/disclaimed/fired 都可再报一次）
+                }
+                return;
+            }
+            if (name === "run_command") {
+                // 解除：武装后出现成功验证命令（git 只读子命令不算，isVerifyCommand 排除表 §2.3）
+                if (verifyArmed && isVerifyCommand(String(args?.command ?? ''))) verifyDone = true;
             }
         },
         notePlanWriteRejected(total) {

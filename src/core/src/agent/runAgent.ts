@@ -29,7 +29,7 @@ import { createRepeatBreaker } from "./repeatBreaker.ts";
 import { prepareToolsAndInjections } from "./systemInjections.ts";
 import { scheduleToolCalls, ScheduleResult } from "./toolScheduling.ts";
 import { streamInference, InferenceResult } from "./streamInference.ts";
-import { createNudgeScheduler, PLAN_REJECT_FORCE_AT, PLAN_REJECT_FORCE_FINAL_TEXT } from "./agentNudges.ts";
+import { createNudgeScheduler, nudgeFenceOf, PLAN_REJECT_FORCE_AT, PLAN_REJECT_FORCE_FINAL_TEXT } from "./agentNudges.ts";
 import { createRunLedger } from "./runLedger.ts";
 import { recordUsageRun } from "@/observability/usageLog.ts";
 import { flushTraceBuffer } from "@/observability/trace.ts";
@@ -144,6 +144,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         firstPrompt,
         planMode: !!options.planMode,
         noEarlyFinal: !!options.noEarlyFinal,
+        depth, // ★ T1：VERIFY_UNPROVEN 不武装子 agent（depth>0 直接不判定）
         getContextUsage: () => ({ usedTokens: Math.round(estimateTokens(message) * calibRatio + toolsTokens), windowTokens: modelWindow }),
         getBudgetStatus: ledger.getBudgetStatus, // ★ E2 预算 soft 读数（闭包在账本内 O(1) 读数；未武装返回 null，管线自判）
     });
@@ -332,6 +333,24 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // ★ ephemeral nudge（NUDGE/PHANTOM/EARLY_FINAL 三类）：走「推理时附加尾部副本」，不进 message 数组/
             //   transcript/压缩 → 保 message[0] 前缀绝对稳定，DeepSeek 隐式缓存跨轮命中。优先级与文案见 agentNudges.ts。
             const nudgeMsg = nudges.pickNudge(round);
+            // ★ T1 nudge 计量（2026-11-13，施工单 §2.2⑤）：本处 = 真注入的唯一记账点。pickNudge 返回非 null
+            //   即本轮推理将携带该 nudge（含 4 个 interceptFinal pending 的消费 + BUDGET/PLAN_REJECT/周期
+            //   NUDGE/REPEAT/PLAN_FIRST 直返），按 fence 记一条 nudge.injected(injected:true)。
+            //   injected:false 的 dry-run/解除事件在下方 :424 interceptFinal 出口发——两出口分工避免双计数。
+            //   fire-and-forget（旁路埋点不 await，与既有调用点同款）。
+            if (nudgeMsg) {
+                events({
+                    sessionId,
+                    eventType: 'nudge.injected',
+                    metadata: {
+                        depth,
+                        round,
+                        fence: nudgeFenceOf(nudgeMsg.content),
+                        injected: true,
+                        ...(nudgeMsg.disposition ? { disposition: nudgeMsg.disposition } as any : {}),
+                    },
+                });
+            }
             // ★ 流式推理抽出到 streamInference.ts：yield text.delta/thinking.delta/text.reset，return InferenceResult。
             //   yield* 委托透传流式事件并取 return value（内含 idle/API/context_length 三道有限重试、abort partial 落盘、
             //   llm.request/response/error 埋点、assistantMessage 拼装）。final 永远在此处 yield，streamInference 不 yield final。
@@ -419,10 +438,22 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ P1-5：本 run 若为子 run，逐轮把增量报给父累计器（基数=预算圈子树完整口径，论证统一见 runLedger.ts 文件头）。主 run 无 sink，flush 为 no-op。
                 ledger.flushRelay();
                 const finalText = (typeof assistantMessage.content === 'string' ? assistantMessage.content : "") || "";
-                // ★ 收尾拦截（PHANTOM 空 content / EARLY_FINAL 早收尾）：命中即注入 nudge 并 continue 推进，
-                //   否则放行真实收尾。判定 / 文案 / 预算 / 死循环保险全在 agentNudges.interceptFinal。
+                // ★ 收尾拦截（TOOL_DIGEST / PHANTOM / EARLY_FINAL / TODO_INCOMPLETE / VERIFY_UNPROVEN）：
+                //   命中返回 {fence, injected, disposition}，判定/文案/预算/死循环保险全在 agentNudges.interceptFinal。
+                //   ★ T1 发射规则（施工单 §2.2⑤，防双计数）：本出口只发「没真注入」的事件（dry-run/解除，
+                //   injected:false）——injected:true 的 pending 交给下一轮 :334 pickNudge 消费时记账；
+                //   则 dry 档 VERIFY 事件只在此出现（1 条）、on 档只在 :334 出现（1 条），每 nudge 恰好一条。
                 const intercepted = nudges.interceptFinal(finalText, round);
-                if (intercepted) continue;
+                if (intercepted) {
+                    if (!intercepted.injected) {
+                        events({
+                            sessionId,
+                            eventType: 'nudge.injected',
+                            metadata: { depth, round, fence: intercepted.fence, injected: false, disposition: intercepted.disposition },
+                        });
+                    }
+                    if (intercepted.injected) continue;
+                }
                 // 优先用当前轮 content，避免纯工具轮后 lastContent 陈旧导致终态回显旧文本
                 yield { type: 'final', text: finalText || lastContent || "" };
                 return;
@@ -490,6 +521,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ A 批批级预算：主循环不设（undefined）；仅并行批 ≥2 时由调度层浅拷贝下发（R4/R5：
                 //   required 字段，构造处显式对齐，漏写即 tsc 打红）
                 batchBudgetChars: undefined,
+                // ★ T1 VERIFY_UNPROVEN 武装/解除信号（required 字段结构）：工具执行后结局回传 nudge 调度器
+                onToolOutcome: (name: string, args: any, ok: boolean) => nudges.noteToolOutcome(name, args, ok),
             };
             // ★ 分波调度抽出到 toolScheduling.ts：yield tool.start/tool.end/plan.*，return ScheduleResult。
             //   yield* 委托透传工具事件并取 return value；aborted/terminal yield final + return，completed 继续下一轮。

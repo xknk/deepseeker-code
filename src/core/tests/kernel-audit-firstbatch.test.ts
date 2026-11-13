@@ -95,7 +95,7 @@ describe("内核审查报告第一批守门", () => {
             // firstPrompt 解析为寒暄 → looksComplex 不命中 → 首轮无 PLAN_FIRST、第 2 轮收尾不拦
             const fixed = createNudgeScheduler({ firstPrompt: resolveFirstPrompt(CONV, {}) });
             assert.equal(fixed.pickNudge(1), null, "寒暄轮首轮不得注入 PLAN_FIRST");
-            assert.equal(fixed.interceptFinal("谢谢", 2), false, "寒暄轮第 2 轮收尾不得被 EARLY_FINAL 拦截");
+            assert.equal(fixed.interceptFinal("谢谢", 2), null, "寒暄轮第 2 轮收尾不得被 EARLY_FINAL 拦截");
             // 对照组：同一调度器语义下，首条确实是复杂任务 → PLAN_FIRST 照常触发（修复不砍功能）
             const complex = createNudgeScheduler({ firstPrompt: "请把整个认证模块重构一遍，涉及多个文件的改造与端到端流程梳理" });
             const nudge = complex.pickNudge(1);

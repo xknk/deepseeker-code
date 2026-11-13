@@ -68,63 +68,63 @@ describe("TOOL_DIGEST（工具消化收尾守护）", () => {
     it("消化期内空手收尾（空文本）→ 拦，且优先于 PHANTOM", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("", 2), true);
+        assert.ok(s.interceptFinal("", 2));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TOOL_DIGEST));
     });
 
     it("消化期内短文本无完成声明 → 拦", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("好的", 2), true);
+        assert.ok(s.interceptFinal("好的", 2));
         assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.TOOL_DIGEST));
     });
 
     it("实质长总结（≥30 字）放行 —— 2026-08-11 连续 final 事故回归钉", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 3), false);
+        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 3), null);
     });
 
     it("含完成声明的短文本放行（looksComplete 豁免）", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("已全部完成", 2), false);
+        assert.equal(s.interceptFinal("已全部完成", 2), null);
     });
 
     it("消化窗外（距上次工具 >2 轮）不拦", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("好的", 4), false);
+        assert.equal(s.interceptFinal("好的", 4), null);
     });
 
     it("消化窗内最多拦 2 次，出窗即放行", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("嗯", 2), true);
-        assert.equal(s.interceptFinal("嗯", 3), true);
-        assert.equal(s.interceptFinal("嗯", 4), false, "第 3 次已出消化窗（4-1>2）");
+        assert.ok(s.interceptFinal("嗯", 2));
+        assert.ok(s.interceptFinal("嗯", 3));
+        assert.equal(s.interceptFinal("嗯", 4), null, "第 3 次已出消化窗（4-1>2）");
     });
 });
 
 describe("PHANTOM（空回复守护）", () => {
     it("空 content 无工具史 → 拦", () => {
         const s = createNudgeScheduler();
-        assert.equal(s.interceptFinal("", 1), true);
+        assert.ok(s.interceptFinal("", 1));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.PHANTOM));
     });
 
     it("连续空包最多拦 2 次，第 3 次放行", () => {
         const s = createNudgeScheduler();
-        assert.equal(s.interceptFinal("", 1), true);
-        assert.equal(s.interceptFinal("", 2), true);
-        assert.equal(s.interceptFinal("", 3), false);
+        assert.ok(s.interceptFinal("", 1));
+        assert.ok(s.interceptFinal("", 2));
+        assert.equal(s.interceptFinal("", 3), null);
     });
 
     it("工具调用后预算重置；重置后空包落进消化窗 → 由 TOOL_DIGEST 接管", () => {
         const s = createNudgeScheduler();
-        assert.equal(s.interceptFinal("", 1), true);
+        assert.ok(s.interceptFinal("", 1));
         s.noteToolCall(2, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("", 3), true);
+        assert.ok(s.interceptFinal("", 3));
         assert.ok(s.pickNudge(4)!.content.startsWith(FENCE.TOOL_DIGEST), "消化窗内空包归 TOOL_DIGEST 管");
     });
 });
@@ -133,7 +133,7 @@ describe("EARLY_FINAL（早收尾守护）", () => {
     it("开工后 2 轮内的长文本无完成声明 → 拦（带轮次号）", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 2), true);
+        assert.ok(s.interceptFinal(LONG_INCOMPLETE, 2));
         const m = s.pickNudge(2)!;
         assert.ok(m.content.startsWith(FENCE.EARLY_FINAL));
         assert.ok(m.content.includes("仅 2 轮"));
@@ -142,25 +142,25 @@ describe("EARLY_FINAL（早收尾守护）", () => {
     it("整个 run 最多拦 1 次（死循环保险，不随工具调用重置）", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 2), true);
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 2), false, "预算已用尽");
+        assert.ok(s.interceptFinal(LONG_INCOMPLETE, 2));
+        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 2), null, "预算已用尽");
     });
 
     it("纯寒暄无工具史不拦 —— 2026-09-11「你好」事故回归钉", () => {
         const s = createNudgeScheduler({ firstPrompt: "你好" });
-        assert.equal(s.interceptFinal("你好呀！很高兴见到你，有什么我可以帮你的吗？", 1), false);
+        assert.equal(s.interceptFinal("你好呀！很高兴见到你，有什么我可以帮你的吗？", 1), null);
     });
 
     it("复杂任务未开工也拦（文本-only 逃避干活）", () => {
         const s = createNudgeScheduler({ firstPrompt: COMPLEX_PROMPT });
-        assert.equal(s.interceptFinal("好的明白了", 1), true);
+        assert.ok(s.interceptFinal("好的明白了", 1));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.EARLY_FINAL));
     });
 
     it("子代理 noEarlyFinal 不拦 EARLY，但短文本仍被 TOOL_DIGEST 接管（开关只关 EARLY）", () => {
         const s = createNudgeScheduler({ noEarlyFinal: true });
         s.noteToolCall(1, [readCall("a.ts")]);
-        assert.equal(s.interceptFinal("先这样", 2), true);
+        assert.ok(s.interceptFinal("先这样", 2));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TOOL_DIGEST));
     });
 });
@@ -168,7 +168,7 @@ describe("EARLY_FINAL（早收尾守护）", () => {
 describe("TODO_INCOMPLETE（todo 完成度守卫，2026-09-16）", () => {
     it("本 run 未碰过 todo_write → 永不拦（武装条件）", () => {
         const s = createNudgeScheduler();
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 5), false, "无 todo 史不拦");
+        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 5), null, "无 todo 史不拦");
     });
 
     it("todo_write 后 final 仍有未完成项 → 拦一次，文案带未完成项与前 3 项列举", () => {
@@ -179,7 +179,7 @@ describe("TODO_INCOMPLETE（todo 完成度守卫，2026-09-16）", () => {
             { content: "写集成测试", status: "pending" },
         ])]);
         // LONG_INCOMPLETE（≥30 字）在 round 3 已出 EARLY_FINAL 窗、超 TOOL_DIGEST 限长 → 落到 TODO 守卫
-        assert.equal(s.interceptFinal(LONG_INCOMPLETE, 3), true);
+        assert.ok(s.interceptFinal(LONG_INCOMPLETE, 3));
         const m = s.pickNudge(3)!;
         assert.ok(m.content.startsWith(FENCE.TODO_INCOMPLETE));
         assert.ok(m.content.includes("2 项未完成"));
@@ -193,22 +193,22 @@ describe("TODO_INCOMPLETE（todo 完成度守卫，2026-09-16）", () => {
             { content: "任务A", status: "completed" },
             { content: "任务B", status: "completed" },
         ])]);
-        assert.equal(s.interceptFinal("已全部完成，总结如下。", 3), false);
+        assert.equal(s.interceptFinal("已全部完成，总结如下。", 3), null);
     });
 
     it("预算 1 次：拦截消费后第二次 final 放行（死循环保险）", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [todoCall([{ content: "未竟之事", status: "pending" }])]);
-        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.interceptFinal("已全部完成", 2));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE));
-        assert.equal(s.interceptFinal("已全部完成", 3), false, "预算已用尽");
+        assert.equal(s.interceptFinal("已全部完成", 3), null, "预算已用尽");
     });
 
     it("中途 todo_write 全勾 → 快照以最后一次为准，放行", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [todoCall([{ content: "未竟之事", status: "pending" }])]);
         s.noteToolCall(2, [todoCall([{ content: "未竟之事", status: "completed" }])]);
-        assert.equal(s.interceptFinal("已全部完成", 4), false);
+        assert.equal(s.interceptFinal("已全部完成", 4), null);
     });
 
     it("优先级：TODO pending 高于 REPEAT（同轮双命中时先消费 TODO）", () => {
@@ -217,7 +217,7 @@ describe("TODO_INCOMPLETE（todo 完成度守卫，2026-09-16）", () => {
             todoCall([{ content: "未竟之事", status: "pending" }]),
             readCall("a.ts"), readCall("a.ts"), readCall("a.ts"),
         ]);
-        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.interceptFinal("已全部完成", 2));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE));
         assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.REPEAT), "REPEAT pending 顺延消费");
     });
@@ -237,7 +237,7 @@ describe("pickNudge —— 周期自评与 pending 优先级", () => {
     it("pending 优先级：TOOL_DIGEST > REPEAT_RETRIEVAL > 周期", () => {
         const s = createNudgeScheduler();
         s.noteToolCall(1, [readCall("a.ts"), readCall("a.ts"), readCall("a.ts")]);
-        assert.equal(s.interceptFinal("", 1), true);
+        assert.ok(s.interceptFinal("", 1));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TOOL_DIGEST));
         assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.REPEAT));
         assert.equal(s.pickNudge(4), null);
@@ -306,7 +306,7 @@ describe("预算 soft 提醒（成本信任链第二环 E2）", () => {
             todoCall([{ content: "未竟之事", status: "pending" }]),
             readCall("a.ts"), readCall("a.ts"), readCall("a.ts"),
         ]);
-        assert.equal(s.interceptFinal("已全部完成", 2), true);
+        assert.ok(s.interceptFinal("已全部完成", 2));
         assert.ok(s.pickNudge(2)!.content.startsWith(FENCE.TODO_INCOMPLETE), "todo 先消费");
         assert.ok(s.pickNudge(3)!.content.startsWith(FENCE.BUDGET), "预算 soft 居中");
         assert.ok(s.pickNudge(4)!.content.startsWith(FENCE.REPEAT), "REPEAT 顺延消费");

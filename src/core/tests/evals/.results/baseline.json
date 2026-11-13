@@ -163,6 +163,13 @@
       "rounds": 4,
       "totalTokens": 61806,
       "durationMs": 3908
+    },
+    "compact-survival": {
+      "pass": true,
+      "passRate": 0.6667,
+      "rounds": 6,
+      "totalTokens": 78128,
+      "durationMs": 39579
     }
   }
 }

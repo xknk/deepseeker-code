@@ -42,6 +42,11 @@ export interface EvalTask {
     /** 确定性成功判定：在 fixture 工作区里跑测试/脚本/源码断言。绝不调用 LLM。
      *  第二参 ctx 可选：需要看模型回复/工具序列的任务（「应拒绝」类）才用，旧式 (ws)=>… checker 不受影响 */
     checker: (ws: string, ctx?: CheckerContext) => Promise<CheckResult>;
+    /** ★ T2 跨压缩存活题（2026-11-13）：仅本任务生效的小窗口（token），经 runOneTask → handleUnifiedChat
+     *  opts.modelWindow 单点覆盖（其他 27 题不声明 → undefined → 全局判定逐字节不变）。
+     *  声明了本字段的任务，某跑 compactCount===0 即「压缩未发生」→ 该次作废重跑（≤2 次，仍 0 标 invalid），
+     *  见 task.eval.ts 样本有效性过滤。 */
+    windowTokens?: number;
     /** 单任务时长熔断（分钟）。缺省 10：超时 abort，按 fail 记录（runAgent 自身的 idle/stall 守护在其之内） */
     maxMinutes?: number;
     /**

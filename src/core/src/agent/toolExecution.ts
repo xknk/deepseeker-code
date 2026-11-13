@@ -132,6 +132,11 @@ export type ToolCallContext = {
      *  read_file 单次 128K × 并行 N 个无总量控制会一次注入十余万 token 直击压缩阈值——本字段把
      *  「距压缩阈值的剩余窗口」按批分摊，目标是降低压缩触发频率（降频非消灭，越阈由 ensureFitsWindow 兜底）。 */
     batchBudgetChars: number | undefined;
+    /** ★ T1 VERIFY_UNPROVEN 武装/解除信号（2026-11-13）：工具执行【后】的结局回传（name/args/ok）。
+     *  在 processToolCall 包装层单点调用——processToolCallInner 有 6+ 个提前 return（计划类/中止/
+     *  审批拒绝/校验失败…），只有包装层能无遗漏拿到最终结果；aborted:true 的 outcome 也回传
+     *  （ok:false 天然不武装，不必特判）。回调自身异常由消费侧 catch，不影响工具结果。 */
+    onToolOutcome: ((name: string, args: any, ok: boolean) => void) | undefined;
 };
 
 /**
@@ -564,8 +569,9 @@ const previewArgs = (raw: string | undefined, max: number): string | undefined =
  * ok:false + 文案明确「已隔离」、tool.failed 埋点照发（埋点自身再包一层，防 mock/旁路异常破坏隔离）。
  */
 export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Promise<ToolCallOutcome> => {
+    let outcome: ToolCallOutcome;
     try {
-        return await processToolCallInner(toolCall, ctx);
+        outcome = await processToolCallInner(toolCall, ctx);
     } catch (e: any) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`❌ 工具调用处理异常（已隔离，不影响同批其他工具）: ${msg}`);
@@ -576,7 +582,7 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
                 payload: { output: `工具执行异常：${msg}` },
             });
         } catch { /* 埋点失败不影响隔离 outcome */ }
-        return {
+        outcome = {
             toolCallId: toolCall?.id ?? "",
             calledName: toolCall?.function?.name ?? "unknown",
             calledArgs: { _preview: previewArgs(toolCall?.function?.arguments, 300) },  // ★ 保留参数上下文（截断预览）：否则 tool.failed 排查时看不到模型当时传了什么
@@ -586,6 +592,11 @@ export const processToolCall = async (toolCall: any, ctx: ToolCallContext): Prom
             aborted: ctx.signal?.aborted ? true : undefined,   // ★ 不吞 abort
         };
     }
+    // ★ T1 VERIFY_UNPROVEN 计量（2026-11-13）：执行【后】结局单点回传——成功路径与 catch 兜底路径统一
+    //   在此接住（内层 6+ 个提前 return 全被覆盖）。aborted:true 的 outcome 同样回传（ok:false，
+    //   天然不武装）。旁路计量绝不阻塞主链路：回调异常吞掉，工具结果照常返回。
+    try { ctx.onToolOutcome?.(outcome.calledName, outcome.calledArgs, outcome.ok); } catch { /* 计量旁路不阻塞 */ }
+    return outcome;
 };
 
 /**

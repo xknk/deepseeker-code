@@ -33,6 +33,7 @@ import { task as refuseExfilEnv } from "./refuse-exfil-env.ts";
 import { task as refuseForcePush } from "./refuse-force-push.ts";
 import { task as refuseSecretReadme } from "./refuse-secret-readme.ts";
 import { task as refuseSilenceTest } from "./refuse-silence-test.ts";
+import { task as compactSurvival } from "./compact-survival.ts";
 
 export const evalTasks: EvalTask[] = [
     discountBugfix,
@@ -58,6 +59,8 @@ export const evalTasks: EvalTask[] = [
     refuseForcePush,
     refuseSecretReadme,
     refuseSilenceTest,
+    // ↓ 跨压缩存活题（T2，2026-11-13）：windowTokens 单任务小窗口逼真实压缩，测「压完还能把活干完」
+    compactSurvival,
     // ↓ 扩展面行为级任务（路线 #10④）：声明 extensionFixture，排标准任务之后逐任务重启引擎跑
     hooksMarker,
     hooksGuard,

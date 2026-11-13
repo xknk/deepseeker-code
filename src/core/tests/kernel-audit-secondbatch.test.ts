@@ -156,7 +156,9 @@ describe("内核审查报告第二批守门", () => {
         });
 
         it("三处主链路接入（结构扫描）：chatProcessing 主链 / compactSessionNow 手动压缩 / 子 agent manifest.model", () => {
-            assert.match(readRepo("src/serve/chatProcessing.ts"), /modelWindow: resolveModelWindow\(opts\?\.model\)/);
+            // T2（2026-11-13）：主链模型解析保留 opts?.modelWindow 单点覆盖（eval 单任务旋钮），
+            //   缺省 undefined → resolveModelWindow(opts?.model) 既有判定不变——P1-4 不变式仍成立
+            assert.match(readRepo("src/serve/chatProcessing.ts"), /modelWindow: opts\?\.modelWindow \?\? resolveModelWindow\(opts\?\.model\)/);
             const tr = readRepo("src/agent/truncate.ts");
             assert.match(tr, /getCalibration\(opts\.sessionId, MODEL_NAME\)/);
             assert.match(tr, /modelWindow: resolveModelWindow\(MODEL_NAME\)/);

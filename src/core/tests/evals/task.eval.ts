@@ -43,6 +43,14 @@ const saveBaseline = hasFlag('--save-baseline');
 const keepWs = hasFlag('--keep-ws');
 const listOnly = hasFlag('--list');
 const skipEngine = hasFlag('--no-engine');
+// ★ T2（2026-11-13）：--repeat=<n> 同一任务串行跑 n 次，报告出 passRate（发布对比判 3 跑 ≥2 过，
+//   单跑二值不进门禁）。缺省 n=1：不作废重跑逻辑不生效、报告/基线逐字节同旧（红线）。
+const repeatArg = argv.find((a) => a?.startsWith('--repeat='));
+const REPEAT = repeatArg ? Math.max(1, Number(repeatArg.split('=')[1]) || 1) : 1;
+/** 作废重跑上限（终审护栏）：声明 windowTokens 的任务单跑 compactCount===0 视为「压缩未发生」作废，
+ *  补跑 ≤2 次；仍压不动 → 标 invalid 单列（不计 passRate、不死循环）——同时是「窗口给太大」的信号，
+ *  触发窗口重调（compact-survival 的 12K 初值校准依据，见 tasks/compact-survival.ts）。 */
+const INVALID_RETRIES = 2;
 
 const RESULTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.results');
 const BASELINE_PATH = path.join(RESULTS_DIR, 'baseline.json');
@@ -73,6 +81,9 @@ interface TaskResult {
     id: string;
     name: string;
     pass: boolean;
+    /** ★ T2：本次跑 UIEvent.type==='compact.done' 次数（onUIEvent 旁路数，observability/type.ts:122）。
+     *  声明 windowTokens 的任务以此做样本有效性：compactCount===0 = 压缩未发生 → 作废重跑。 */
+    compactCount: number;
     rounds: number;
     toolCalls: number;
     /** 归因埋点：每轮工具名序列（同一轮多个 = 并行批次）。不进基线，仅供 run 记录归因 */
@@ -92,11 +103,32 @@ interface TaskResult {
     error?: string;
 }
 // ★ TTFT/thinkingMs 刻意不入基线：网络抖动敏感，只进报告列与 run 记录，不进门禁对比
-type BaselineEntry = Pick<TaskResult, 'pass' | 'rounds' | 'totalTokens' | 'durationMs'>;
+type BaselineEntry = {
+    pass: boolean;
+    /** ★ T2：基线存 passRate（valid 跑中通过比例，0~1）。发布对比判 3 跑 ≥2 过（passRate ≥ 2/3）。
+     *  旧基线无此字段 → 回退 pass 二值（vsBaseline 兼容读）。 */
+    passRate?: number;
+    rounds: number;
+    totalTokens: number;
+    durationMs: number;
+};
 interface Baseline {
     createdAt: string;
     model: string;
     tasks: Record<string, BaselineEntry>;
+}
+
+/**
+ * ★ T2（2026-11-13）：单任务的多次跑聚合（--repeat=N）。形状沿用 TaskResult（报告列零改动），
+ *  外加三个聚合字段。n=1 且无作废时各数值字段 = 该单跑原值（逐字节同旧）。
+ */
+interface TaskAgg extends TaskResult {
+    /** 有效跑数（passRate 分母；作废跑不计入）。 */
+    validCount: number;
+    /** 作废跑数（compactCount=0 的压缩未发生跑，单列报告）。 */
+    invalidCount: number;
+    /** 有效跑通过率（0~1）。null = 0 个有效跑（全部作废 → INVALID 单列，无门禁结论）。 */
+    passRate: number | null;
 }
 
 // ==================== 执行器 ====================
@@ -164,6 +196,9 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
     const sessionId = `eval-${task.id}-${Date.now().toString(36)}`;
     const agentEvents: any[] = [];   // 只留 round.start / tool.start / final（delta 类噪音不入内存）
     let promptTokens = 0, completionTokens = 0, totalTokens = 0, cacheHitTokens = 0;
+    // ★ T2：本跑压缩完成次数（样本有效性判据）。eval 走 sseWrite 通道收 UIEvent（opts.onUIEvent 未传，
+    //   serve 层把 compact.done 等 UIEvent 转投 sseWrite），在此单点旁路计数、不拦截不转发。
+    let compactCount = 0;
     const onTrace = (base: any): void => {
         if (base?.eventType === 'llm.response' && base.usage) {
             promptTokens += base.usage.prompt_tokens ?? 0;
@@ -191,6 +226,7 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
                 const type = evt?.type;
                 if (type === 'text.delta') { firstTextAt ??= Date.now(); streamedText += String(evt.text ?? ''); }
                 else if (type === 'thinking.delta') { firstThinkAt ??= Date.now(); }
+                else if (type === 'compact.done') compactCount++;
                 if (type === 'round.start' || type === 'tool.start' || type === 'final') agentEvents.push(evt);
             },
             ac.signal,
@@ -198,6 +234,8 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
                 // ★ 无头审批：一律 allow-once（内存放行，绝不 allow-always 写持久规则污染用户配置）。
                 //   COMMAND_DENY 灾难清单等硬闸门照常生效——eval 度量的是「安全管线内的真实能力」。
                 requestApproval: async () => 'allow-once',
+                // ★ T2：本任务窗口旋钮（仅声明了 windowTokens 的任务生效；其他题 undefined → 逐字节同旧）
+                modelWindow: task.windowTokens,
                 onTrace,
             },
         );
@@ -229,6 +267,7 @@ const runOneTask = async (task: EvalTask, extension = false): Promise<TaskResult
         id: task.id,
         name: task.name,
         pass: check.ok,
+        compactCount,
         rounds: agentEvents.filter((e) => e?.type === 'round.start').length,
         toolCalls: agentEvents.filter((e) => e?.type === 'tool.start').length,
         roundTools: collectRoundTools(agentEvents),
@@ -254,21 +293,23 @@ const fmtDelta = (cur: number, base: number): string => {
     return pct === 0 ? '=' : (pct > 0 ? `+${pct}%` : `${pct}%`);
 };
 
-const vsBaseline = (row: TaskResult, base?: BaselineEntry): string => {
+const vsBaseline = (row: TaskAgg, base?: BaselineEntry): string => {
     if (!base) return '新增';
-    if (base.pass && row.pass) return '=';
-    if (base.pass && !row.pass) return '回退!';
-    if (!base.pass && row.pass) return '修复';
+    // ★ T2：基线有 passRate（3 跑 ≥2 过门禁）按比率判，旧基线回退 pass 二值——单跑二值语义不变
+    const basePass = base.passRate !== undefined ? base.passRate >= 2 / 3 : base.pass;
+    if (basePass && row.pass) return '=';
+    if (basePass && !row.pass) return '回退!';
+    if (!basePass && row.pass) return '修复';
     return '仍败';
 };
 
-const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
+const printReport = (rows: TaskAgg[], baseline: Baseline | null): void => {
     const line = '─'.repeat(100);
     console.log('\n' + line);
-    console.log('任务级 eval 结果（' + new Date().toLocaleString() + '）');
+    console.log('任务级 eval 结果（' + new Date().toLocaleString() + '）' + (REPEAT > 1 ? `（每任务 ×${REPEAT} 跑，结果 = passRate ≥ 2/3 门禁）` : ''));
     console.log(line);
     console.log(
-        'id'.padEnd(18) + '结果'.padEnd(6)
+        'id'.padEnd(18) + '结果'.padEnd(12)
         + 'vs基线'.padEnd(8) + '轮次'.padEnd(10) + '工具'.padEnd(6)
         + '首字'.padEnd(7) + '思考'.padEnd(7)
         + 'tokens'.padEnd(10) + '缓存命中'.padEnd(10) + '耗时'.padEnd(8) + '成本¢'.padEnd(8),
@@ -281,13 +322,19 @@ const printReport = (rows: TaskResult[], baseline: Baseline | null): void => {
         const vs = vsBaseline(r, base);
         if (vs === '回退!') regressions++;
         const roundDelta = base?.pass && r.pass ? `(${fmtDelta(r.rounds, base.rounds)})` : '';
+        // 结果列：n=1 且无作废 → 逐字节同旧（PASS/FAIL）；多跑 → 附 (x/y)；有作废 → 附 +N作废
+        const passLabel = (r.pass ? 'PASS' : 'FAIL')
+            + (r.validCount > 1 && r.passRate !== null ? `(${Math.round(r.passRate * r.validCount)}/${r.validCount})` : '')
+            + (r.invalidCount > 0 ? `+${r.invalidCount}作废` : '');
         console.log(
-            r.id.padEnd(18) + (r.pass ? 'PASS' : 'FAIL').padEnd(6)
+            r.id.padEnd(18) + passLabel.padEnd(12)
             + vs.padEnd(8) + `${r.rounds}${roundDelta}`.padEnd(10) + String(r.toolCalls).padEnd(6)
             + fmtSec(r.ttftMs).padEnd(7) + fmtSec(r.thinkingMs).padEnd(7)
             + fmtK(r.totalTokens).padEnd(10) + fmtK(r.cacheHitTokens).padEnd(10)
             + `${Math.round(r.durationMs / 1000)}s`.padEnd(8) + String(r.costCents).padEnd(8),
         );
+        if (r.invalidCount > 0) console.log(`  ⚠️ ${r.invalidCount} 跑压缩未发生（compactCount=0）作废单列——窗口疑过大，建议重调 windowTokens`);
+        if (r.validCount === 0) console.log('  ⚠️ 0 个有效跑（全部作废）→ INVALID，无门禁结论');
         if (!r.pass) console.log(`  ↳ ${r.checkerDetail.split('\n').slice(0, 3).join(' ⏎ ')}`);
     }
     console.log(line);
@@ -339,7 +386,62 @@ try {
     modelName = p?.id ? `${p.id}/${p?.modelLabel ?? ''}` : modelName;
 } catch { /* 保底 env 值 */ }
 
-const rows: TaskResult[] = [];
+/**
+ * ★ T2：单任务重复跑 + 样本有效性过滤（声明 windowTokens 的任务 compactCount===0 = 压缩未发生
+ *  → 作废重跑不计 fail；补跑 ≤INVALID_RETRIES 次仍压不动 → 标 invalid 单列，不死循环）。
+ *  n=1 且非窗口任务：行为与旧实现逐字节一致（单跑即结果）。
+ */
+const runTaskRepeat = async (task: EvalTask, extension = false): Promise<{ valid: TaskResult[]; invalidCount: number }> => {
+    const valid: TaskResult[] = [];
+    let invalidCount = 0;
+    while (valid.length < REPEAT && valid.length + invalidCount < REPEAT + INVALID_RETRIES) {
+        const row = await runOneTask(task, extension);
+        if (task.windowTokens !== undefined && row.compactCount === 0) {
+            invalidCount++;
+            console.log(`  ⚠️ 第 ${valid.length + invalidCount} 跑 compactCount=0（压缩未发生）→ 本次作废，不计 passRate${valid.length + invalidCount < REPEAT + INVALID_RETRIES ? '，作废重跑' : '；已到重跑上限，标 INVALID 单列'}`);
+            continue;
+        }
+        valid.push(row);
+        if (REPEAT > 1) console.log(`  · 第 ${valid.length}/${REPEAT} 跑：${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  ${fmtK(row.totalTokens)} tok  压缩×${row.compactCount}  ${Math.round(row.durationMs / 1000)}s`);
+    }
+    return { valid, invalidCount };
+};
+
+/** 单任务聚合：数值列取有效跑均值（n=1 = 原值），pass 按 passRate ≥ 2/3 门禁（3 跑 ≥2 过）。 */
+const aggregate = (task: EvalTask, valid: TaskResult[], invalidCount: number): TaskAgg => {
+    const mean = (pick: (r: TaskResult) => number): number =>
+        valid.length ? Math.round(valid.reduce((s, r) => s + pick(r), 0) / valid.length) : 0;
+    const passRate = valid.length ? valid.filter((r) => r.pass).length / valid.length : null;
+    const failed = valid.find((r) => !r.pass);
+    const rep = failed ?? valid[0];
+    return {
+        id: task.id,
+        name: task.name,
+        pass: passRate !== null && passRate >= 2 / 3,
+        compactCount: mean((r) => r.compactCount),
+        rounds: mean((r) => r.rounds),
+        toolCalls: mean((r) => r.toolCalls),
+        roundTools: valid.flatMap((r) => r.roundTools),
+        ttftMs: valid.length ? Math.round(valid.reduce((s, r) => s + (r.ttftMs ?? 0), 0) / valid.length) : null,
+        thinkingMs: valid.length ? Math.round(valid.reduce((s, r) => s + (r.thinkingMs ?? 0), 0) / valid.length) : null,
+        durationMs: mean((r) => r.durationMs),
+        promptTokens: mean((r) => r.promptTokens),
+        completionTokens: mean((r) => r.completionTokens),
+        totalTokens: mean((r) => r.totalTokens),
+        cacheHitTokens: mean((r) => r.cacheHitTokens),
+        costCents: valid.length ? Math.round(valid.reduce((s, r) => s + r.costCents, 0) / valid.length * 100) / 100 : 0,
+        checkerDetail: rep?.checkerDetail ?? '',
+        finalPreview: rep?.finalPreview ?? '',
+        error: rep?.error,
+        validCount: valid.length,
+        invalidCount,
+        passRate,
+    };
+};
+
+const aggs: TaskAgg[] = [];
+const allValidRuns: TaskResult[] = [];
+const invalidLog: Array<{ id: string; invalid: number }> = [];
 try {
     // 标准任务先行（共享引擎、工具表恒定——既有基线的可比性不被扩展面任务扰动）；
     // 扩展面任务（extensionFixture 声明者）排后、逐任务重启引擎（洁净水别的反向补课，路线 #10④）。
@@ -347,28 +449,34 @@ try {
     const extensionTasks = selected.filter((t) => t.extensionFixture);
     for (let i = 0; i < standardTasks.length; i++) {
         const t = standardTasks[i];
-        console.log(`\n▶ [${i + 1}/${selected.length}] ${t.id} — ${t.name}`);
-        const row = await runOneTask(t);
-        rows.push(row);
-        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  首字 ${fmtSec(row.ttftMs)}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
+        console.log(`\n▶ [${i + 1}/${selected.length}] ${t.id} — ${t.name}${t.windowTokens ? `（window=${t.windowTokens}）` : ''}${REPEAT > 1 ? ` ×${REPEAT} 跑` : ''}`);
+        const { valid, invalidCount } = await runTaskRepeat(t);
+        allValidRuns.push(...valid);
+        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount });
+        const agg = aggregate(t, valid, invalidCount);
+        aggs.push(agg);
+        console.log(`  ${agg.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${agg.rounds}  工具 ${agg.toolCalls}  首字 ${fmtSec(agg.ttftMs)}  ${fmtK(agg.totalTokens)} tok  ${Math.round(agg.durationMs / 1000)}s`);
     }
     for (let i = 0; i < extensionTasks.length; i++) {
         const t = extensionTasks[i];
-        console.log(`\n▶ [扩展面 ${i + 1}/${extensionTasks.length}] ${t.id} — ${t.name}`);
-        const row = await runOneTask(t, true);
-        rows.push(row);
-        console.log(`  ${row.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${row.rounds}  工具 ${row.toolCalls}  首字 ${fmtSec(row.ttftMs)}  ${fmtK(row.totalTokens)} tok  ${Math.round(row.durationMs / 1000)}s`);
+        console.log(`\n▶ [扩展面 ${i + 1}/${extensionTasks.length}] ${t.id} — ${t.name}${REPEAT > 1 ? ` ×${REPEAT} 跑` : ''}`);
+        const { valid, invalidCount } = await runTaskRepeat(t, true);
+        allValidRuns.push(...valid);
+        if (invalidCount > 0) invalidLog.push({ id: t.id, invalid: invalidCount });
+        const agg = aggregate(t, valid, invalidCount);
+        aggs.push(agg);
+        console.log(`  ${agg.pass ? '✅ PASS' : '❌ FAIL'}  轮次 ${agg.rounds}  工具 ${agg.toolCalls}  首字 ${fmtSec(agg.ttftMs)}  ${fmtK(agg.totalTokens)} tok  ${Math.round(agg.durationMs / 1000)}s`);
     }
 } finally {
     dispose?.();
 }
 
-// 落盘 run 记录（全字段，供事后翻查；对比表只打印摘要）
+// 落盘 run 记录（全字段，供事后翻查；对比表只打印摘要）——aggs + 有效跑明细 + 作废计数
 await fs.mkdir(RESULTS_DIR, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-await fs.writeFile(path.join(RESULTS_DIR, `run-${stamp}.json`), JSON.stringify({ model: modelName, rows }, null, 2), 'utf-8');
+await fs.writeFile(path.join(RESULTS_DIR, `run-${stamp}.json`), JSON.stringify({ model: modelName, rows: aggs, runs: allValidRuns, invalidRuns: invalidLog }, null, 2), 'utf-8');
 
-printReport(rows, baseline);
+printReport(aggs, baseline);
 
 // ★ 可比性护栏：基线与本轮的模型不一致时数字不可比（不同模型水位不同，「回退/修复」失真）——显式警告。
 if (baseline && baseline.model && baseline.model !== modelName) {
@@ -378,15 +486,24 @@ if (baseline && baseline.model && baseline.model !== modelName) {
 if (saveBaseline) {
     // ★ 防失真：全败（或全部回退）的轮次不允许固化基线——网络抖动 / 环境故障固化后，真实回退会
     //   永久伪装成「仍败」而非「回退!」，门禁（退出码 1）失明。先修环境再重跑。
-    const passed = rows.filter(r => r.pass).length;
+    const passed = aggs.filter(r => r.pass).length;
     if (passed === 0) {
         console.error('\n❌ 拒绝固化基线：本轮 0 个任务通过（疑似环境/网络故障而非真实水位）。请修复后重跑。');
         process.exitCode = 1;
     } else {
         const tasks: Record<string, BaselineEntry> = {};
-        for (const r of rows) tasks[r.id] = { pass: r.pass, rounds: r.rounds, totalTokens: r.totalTokens, durationMs: r.durationMs };
+        // ★ T2：基线存 passRate（3 跑 ≥2 过门禁口径）；轮次/tokens/耗时取有效跑均值
+        for (const r of aggs) {
+            tasks[r.id] = {
+                pass: r.pass,
+                passRate: r.passRate ?? undefined,
+                rounds: r.rounds,
+                totalTokens: r.totalTokens,
+                durationMs: r.durationMs,
+            };
+        }
         const next: Baseline = { createdAt: new Date().toISOString(), model: modelName, tasks };
         await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
-        console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${rows.length} 个任务，模型 ${modelName}）`);
+        console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${aggs.length} 个任务，模型 ${modelName}）`);
     }
 }
