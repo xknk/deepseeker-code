@@ -11,6 +11,7 @@ import { Msg } from "@/session/contextCore.ts";
 import { toolMsg, MsgParams } from "../../type.ts";
 import { ProviderStreamChunk, ProviderStreamOpts } from "../../provider.ts";
 import { getModel, MODEL_NAME, MODEL_REASONING_EFFORT, MODEL_THINKING_ENABLED } from "./client.ts";
+import { sanitizeChatMessages } from "@/llm/surrogateGuard.ts";
 
 /** 流式 idle 超时阈值（ms）：两 chunk 间隔超过此值即判定为 stall（连接保持但不吐 chunk），
  *  中止底层 fetch 并上抛带标记错误（stream_idle_timeout），供 streamInference 重试或优雅收尾。
@@ -102,7 +103,7 @@ export const streamChat = async function* (
         : level === "off" ? "high"        // 关思考时 effort 无意义，回落默认 high
         : MODEL_REASONING_EFFORT;          // undefined → 回退全局 env
     const requestBody = {
-        messages: stripHistoricalReasoning(messages),   // ★ 出口剥离历史思考记录（见函数注释；默认开）
+        messages: sanitizeChatMessages(stripHistoricalReasoning(messages)),   // ★ 出口剥离历史思考记录（见函数注释；默认开）+ 孤立代理守门（2026-11-13 事故终防线，surrogateGuard.ts）
         model: opts.model ?? MODEL_NAME, // per-agent 覆盖（声明式子 Agent）；缺省回退全局
         tool_choice: "auto", // 让模型自动选择工具
         tools: tools,

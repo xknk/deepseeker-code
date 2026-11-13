@@ -14,6 +14,7 @@ import { lookup as dnsLookupCb } from "dns";    // 回调风格，供 undici con
 import { Agent, fetch as undiciFetch } from "undici"; // 显式用 undici fetch：钉 IP dispatcher 选项有类型保证、不被静默吞掉
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { appConfig } from "@/config/index.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";   // 截断防劈代理对（2026-11-13 事故：裸 slice 劈 emoji → 孤立代理 → DS 400）
 
 // ---- 抓取相关常量 ----
 const FETCH_TIMEOUT_MS = 15000; // 单次请求超时（ms）
@@ -591,7 +592,7 @@ export const readBodyCapped = async (
     // 无流式句柄（罕见）回退 text()，并按字节上限截断（此前 content-type 已判定为文本，风险可控）
     if (!body || typeof body.getReader !== "function") {
         const t = await res.text();
-        return { text: t.length > maxBytes ? t.slice(0, maxBytes) : t, truncated: t.length > maxBytes };
+        return { text: t.length > maxBytes ? sliceHeadNoSplit(t, maxBytes) : t, truncated: t.length > maxBytes };
     }
     const reader = body.getReader();
     const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -668,7 +669,7 @@ export const webTools: CustomTool[] = [
                         if (body.length > maxChars) {
                             return [
                                 `[web_fetch | deepseek | ${dsUrl.href} | 已截断前 ${maxChars} 字符，原文共 ${body.length} 字符]`,
-                                body.slice(0, maxChars),
+                                sliceHeadNoSplit(body, maxChars),
                                 `\n[... ⚠️ 内容过长，已隐藏剩余 ${body.length - maxChars} 字符，可调大 max_length ...]`,
                             ].join("\n");
                         }
@@ -739,7 +740,7 @@ export const webTools: CustomTool[] = [
                     if (body.length > maxChars) {
                         return [
                             `[web_fetch | ${parsed.href} | 已截断前 ${maxChars} 字符，原文共 ${body.length} 字符]`,
-                            body.slice(0, maxChars),
+                            sliceHeadNoSplit(body, maxChars),
                             `\n[... ⚠️ 内容过长，已隐藏剩余 ${body.length - maxChars} 字符，可调大 max_length 或改用更精确的 URL ...]`,
                             truncNote,
                         ].join("\n");

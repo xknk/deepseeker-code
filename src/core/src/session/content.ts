@@ -26,6 +26,25 @@ import { recoverSession, repairOrphanToolCalls, RecoveryReport } from "./recover
  *  按对话单元边界切分，永不切断 tool_calls↔tool 配对；仅衰减 tool content 长度，assistant 文本/方案不动。
  *  只作用于内存视图，不改写 transcript。导出供 truncate.ensureFitsWindow 复用（压缩前免费衰减，2026-09-15）。
  */
+/** ★ 防劈代理对切头（2026-11-13 事故）：UTF-16 码元切点落在增补平面字符（emoji 等）的代理对中间
+ *  会产出孤立高代理 → JSON.stringify 成 \udXXX → DeepSeek 解析器 400（措辞误导为
+ *  "unexpected end of hex escape"，实为不配对代理转义），会话每次装载必死。切点前一位是高代理时回退一位。 */
+export const sliceHeadNoSplit = (s: string, keep: number): string => {
+    if (keep >= s.length) return s;
+    let end = keep;
+    const prev = s.charCodeAt(end - 1);
+    if (prev >= 0xd800 && prev <= 0xdbff) end -= 1;
+    return s.slice(0, end);
+};
+/** 防劈代理对切尾（同上）：tail 起点若落在代理对中间会产出孤立低代理，起点是低代理时前进一位。 */
+export const sliceTailNoSplit = (s: string, keep: number): string => {
+    if (keep >= s.length) return s;
+    let start = s.length - keep;
+    const first = s.charCodeAt(start);
+    if (first >= 0xdc00 && first <= 0xdfff) start += 1;
+    return s.slice(start);
+};
+
 export const decayOldToolResults = (msgs: Msg[]): Msg[] => {
     const units = groupUnits(msgs); // assistant(tool_calls)+紧跟 tool = 不可分割单元
     const cutoffUnitIdx = Math.max(0, units.length - appConfig.KEEP_RECENT_UNITS);
@@ -50,7 +69,8 @@ export const decayOldToolResults = (msgs: Msg[]): Msg[] => {
         if (!oldRefs.has(m)) return m;
         const mm = m as any;
         if (mm.role === 'tool' && decayIds.has(mm.tool_call_id) && typeof mm.content === 'string' && mm.content.length > keep) {
-            const head = mm.content.slice(0, keep);
+            // ★ 折叠头走防劈代理对切法（见 sliceHeadNoSplit 注释，2026-11-13 事故）
+            const head = sliceHeadNoSplit(mm.content, keep);
             // ★ 提示与摘要槽头部引导（truncate.ts）同口径：先 recall 检索、with_full 取存档原文，
             //   均无果再重跑工具——只说「重新调用工具」会诱导模型白白重跑昂贵调用。
             //   tool_call_id 本消息自带，with_full 有确切值可传（未存档时 recall 会明确回报「未曾触发截断」）。

@@ -201,6 +201,37 @@ describe("decayOldToolResults 衰减折叠提示指向 recall（路线 #10②）
         // 保留区最近单元不折叠
         assert.equal(out.some((m: any) => m.role === "tool" && m.tool_call_id === "call_7" && m.content === longText), true, "最近单元全文保留");
     });
+
+    it("★ 2026-11-13 事故回归：折叠切点不得劈开代理对（孤立高代理 → DeepSeek 400 parse error，会话必死）", async () => {
+        const { decayOldToolResults } = await import("@/session/content.ts");
+        // 构造：500 恰好落在 emoji 代理对中间（499=高代理 U+D83D、500=低代理）——实测事故形态
+        const emoji = "📋"; // 📌 完整代理对
+        const prefix = "x".repeat(499);
+        const longText = prefix + emoji + "y".repeat(300); // 长度 499+2+300 > 500，切点 499/500 劈在代理对中间
+        const msgs: any[] = [];
+        for (let i = 0; i < 8; i++) {
+            msgs.push({ role: "user", content: `u${i}` });
+            msgs.push({ role: "assistant", content: "", tool_calls: [{ id: `call_${i}`, type: "function", function: { name: "search_grep", arguments: "{}" } }] });
+            msgs.push({ role: "tool", tool_call_id: `call_${i}`, content: longText });
+        }
+        const out = decayOldToolResults(msgs);
+        const hasLone = out.some((m: any) => {
+            if (m.role !== "tool" || typeof m.content !== "string") return false;
+            const c = m.content;
+            for (let j = 0; j < c.length; j++) {
+                const code = c.charCodeAt(j);
+                if (code >= 0xd800 && code <= 0xdbff && !(c.charCodeAt(j + 1) >= 0xdc00 && c.charCodeAt(j + 1) <= 0xdfff)) return true;
+                if (code >= 0xdc00 && code <= 0xdfff && !(c.charCodeAt(j - 1) >= 0xd800 && c.charCodeAt(j - 1) <= 0xdbff)) return true;
+            }
+            return false;
+        });
+        assert.ok(!hasLone, "折叠后的 tool 内容不得含孤立代理（JSON.stringify 成 \\udXXX 会被 DeepSeek 解析器拒收）");
+        // 上面这条逐码元 hasLone 扫描才是真守卫（劈对必现孤立代理，必被它抓住）。
+        const decayed = out.find((m: any) => m.role === "tool" && String(m.content).includes("已折叠")) as any;
+        assert.ok(decayed, "应存在折叠消息");
+        // （2026-11-13 删原「emoji 不被劈半」断言：!includes("📋") 前半在劈对形态下也为真 → 短路永真，
+        //   带 bug 与不带 bug 都通过，护不了任何东西——劈对检出已由 hasLone 全覆盖。）
+    });
 });
 
 describe("parseSummarySlot 对检查点式叙述的宽容解析", () => {

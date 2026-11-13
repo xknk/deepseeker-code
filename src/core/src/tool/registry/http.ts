@@ -14,6 +14,7 @@
  */
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { safeFetchFollow, readBodyCapped } from "./web.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";   // 截断防劈代理对（2026-11-13 事故同款）
 
 const HTTP_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_CHARS = 16000;
@@ -129,7 +130,7 @@ export const httpTools: CustomTool[] = [
                     const cl = res.headers.get("content-length");
                     const headerBits = [`content-type: ${ct || "(无)"}`];
                     if (cl) headerBits.push(`content-length: ${cl}`);
-                    const body = text.slice(0, maxChars);
+                    const body = sliceHeadNoSplit(text, maxChars);   // 防劈代理对（2026-11-13 事故同款）
                     const truncNote = truncated || text.length > maxChars
                         ? `\n[... ⚠️ 响应体过大，已截断（原始约 ≥ ${MAX_RAW_BYTES} 字节或超出 max_length） ...]`
                         : "";
@@ -212,7 +213,7 @@ export const httpTools: CustomTool[] = [
                         }
                         lastLine = `HTTP ${status} ${res.statusText}（期望 ${args.expect_status}，继续等）`;
                         try {
-                            lastClue = (await readBodyCapped(res, READY_CLUE_CHARS * 4)).text.slice(0, READY_CLUE_CHARS);
+                            lastClue = sliceHeadNoSplit((await readBodyCapped(res, READY_CLUE_CHARS * 4)).text, READY_CLUE_CHARS);   // 防劈代理对（2026-11-13 事故同款：readBodyCapped 的 800 缘已防，外层 200 裸切会劈回来）
                         } catch { /* 线索拿不到就算了 */ }
                     } catch (e: any) {
                         lastLine = e?.name === "TimeoutError" ? "探测超时（服务未响应）" : `连接失败：${e?.message ?? e}`;

@@ -10,6 +10,7 @@
 import { exec } from "node:child_process";
 import { appendMessage } from "@/session/transcript.ts";
 import { scrubCommandEnv } from "@/tool/guard.ts";
+import { sliceHeadNoSplit, sliceTailNoSplit } from "@/session/content.ts";   // 截断防劈代理对（2026-11-13 事故同款）
 
 /** 回显/落盘共用的输出截断上限（超出省略中段；防超大日志灌爆上下文与终端）。 */
 const OUTPUT_MAX_CHARS = 4000;
@@ -28,11 +29,12 @@ export interface BashDirectResult {
     durationMs: number;
 }
 
-/** 输出截断：保头保尾，中段以省略标注替代（头尾通常各含命令回显与最终结果/报错）。 */
+/** 输出截断：保头保尾，中段以省略标注替代（头尾通常各含命令回显与最终结果/报错）。
+ *  ★ 头尾两缘都走防劈切（2026-11-13 事故同款）：头切点劈高代理 / 尾切点劈低代理都会产出孤立代理 → DS 400。 */
 export const truncateOutput = (s: string): string => {
     if (s.length <= OUTPUT_MAX_CHARS) return s;
     const half = Math.floor(OUTPUT_MAX_CHARS / 2);
-    return `${s.slice(0, half)}\n…（中段省略 ${s.length - OUTPUT_MAX_CHARS} 字符）…\n${s.slice(-half)}`;
+    return `${sliceHeadNoSplit(s, half)}\n…（中段省略 ${s.length - OUTPUT_MAX_CHARS} 字符）…\n${sliceTailNoSplit(s, half)}`;
 };
 
 /** 一次性 Buffer 解码（修 Windows 中文乱码）：中文 Windows 子进程以 OEM 代码页（cp936/GBK）输出，

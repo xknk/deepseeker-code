@@ -45,17 +45,20 @@ const ALLOWLIST = new Set([
     //（行号含 #8a 声明插入的偏移；75→80 为 P1-6 argKind/subagentAllowed/batchAllowed 三声明插入的偏移）
     "command.ts:80",
     // 用户主动中止 ≠ 工具失败（⏹️ 通知；ok 语义刻意维持现状，勿顺手改成 ❌）
-    //（http.ts:123→142→149：wait_http_ready 入列与注释扩写顶到 142；196 为同语义新增中止分支；
-    //  A3 审批降噪给 http_request 加 primaryArg/autoApproval 声明（+7 行）后顶到 149/203——2026-11-09）
+    //（http.ts:123→142→149→150：wait_http_ready 入列与注释扩写顶到 142；196 为同语义新增中止分支；
+    //  A3 审批降噪给 http_request 加 primaryArg/autoApproval 声明（+7 行）后顶到 149/203——2026-11-09；
+    //  149/203→150/204：防劈代理对导入行（surrogateGuard 同批，+1 行）——2026-11-13）
     //（web.ts 三个中止行：681=fetch deepseek 后端、753=fetch local 后端、805=search——2026-10-19 DeepSeek
-    //  Search/Fetch 后端接入 + 0 命中误用签名分支把 local 分支顶下移）
-    "http.ts:149", "http.ts:203", "web.ts:681", "web.ts:753", "web.ts:805",
+    //  Search/Fetch 后端接入 + 0 命中误用签名分支把 local 分支顶下移；
+    //  681/753/805→682/754/806：防劈代理对导入行（+1 行）——2026-11-13）
+    "http.ts:150", "http.ts:204", "web.ts:682", "web.ts:754", "web.ts:806",
     // recall 检索成功后的 staleness 标注（⚠️ 文件已变动提示，属信息性附注非工具失败）
     "recall.ts:63",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）
     "search.ts:114", "search.ts:124",
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）
-    "web.ts:723",
+    //（723→724：防劈代理对导入行（+1 行）——2026-11-13）
+    "web.ts:724",
     // 工作流聚合报告内的步骤级中止标注（该步未执行，非工具调用失败）
     //（192/209 → 206/223：2026-11 子代理异步化重写编排段（isSync:false + 完成回调）把两处中止分支顶下移）
     "workflow.ts:206", "workflow.ts:223",

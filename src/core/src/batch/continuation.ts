@@ -17,6 +17,7 @@ import fs from "fs/promises";
 import path from "path";
 import { batchQueueRoot, reportPath } from "./queue.ts";
 import { parseBatchTicket, type BatchTicket } from "./ticket.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";   // 截断防劈代理对（2026-11-13 事故同款）
 import { buildQuotedExternalBody, QUOTE_PREAMBLE } from "./sync/boundary.ts";
 import type { SyncCandidate } from "./sync/github.ts";
 import type { SyncLocale } from "./sync/config.ts";
@@ -106,7 +107,7 @@ export const extractPrevReportSummary = (report: string | null, locale: SyncLoca
         const end = rest.search(/^## /m);
         const finalText = (end >= 0 ? rest.slice(0, end) : rest).trim();
         if (finalText) {
-            const clipped = finalText.length > maxChars ? `${finalText.slice(0, maxChars)}…（截断）` : finalText;
+            const clipped = finalText.length > maxChars ? `${sliceHeadNoSplit(finalText, maxChars)}…（截断）` : finalText;   // 防劈代理对：汇报截断进续修票正文 → 入模型上下文（2026-11-13 事故同款）
             lines.push("", "【前次模型收尾汇报 / previous model final report】", "", clipped);
         }
     }

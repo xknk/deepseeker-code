@@ -16,7 +16,7 @@ import { appConfig, resolveModelWindow } from "@/config/index.ts";
 import { chatWithModelWithSummary } from "@/llm/model.ts";
 import { estimateTokens, groupUnits, Msg, splitUntils } from "@/session/contextCore.ts";
 import { msgText, degradeImagesForAux, collapseToText } from "@/session/contentParts.ts";
-import { decayOldToolResults, buildContextMessages } from "@/session/content.ts";
+import { decayOldToolResults, buildContextMessages, sliceHeadNoSplit, sliceTailNoSplit } from "@/session/content.ts";
 import { buildSystemPrompt } from "@/agent/systemPrompt.ts";
 import { activeProvider } from "@/llm/model.ts";
 import { MODEL_NAME } from "@/llm/createModel.ts";
@@ -136,8 +136,8 @@ export const truncateToolResult = (result: string, maxChars?: number, sidecarNot
     if (!newResult || newResult.length <= finalMaxChars) return newResult;
 
     const half = Math.floor(finalMaxChars / 2);
-    const head = newResult.slice(0, half);
-    const tail = newResult.slice(-half);
+    const head = sliceHeadNoSplit(newResult, half);   // ★ 防劈代理对（2026-11-13 事故类）：孤立代理 = DeepSeek 400
+    const tail = sliceTailNoSplit(newResult, half);
     const totalLines = newResult.split("\n").length;
     const omitted = Math.max(0, totalLines - head.split("\n").length - tail.split("\n").length);
     const note = sidecarNote ? `；${sidecarNote}` : '';
@@ -159,8 +159,8 @@ export const truncateApprovalDetail = (detail: string, maxChars = 2000): string 
     if (!detail || detail.length <= maxChars) return detail;
 
     const half = Math.floor(maxChars / 2);
-    const head = detail.slice(0, half);
-    const tail = detail.slice(-half);
+    const head = sliceHeadNoSplit(detail, half);   // ★ 防劈代理对（2026-11-13 事故类）
+    const tail = sliceTailNoSplit(detail, half);
     const omitted = detail.length - maxChars;
     return `${head}\n\n[… 已折叠 ${omitted} 字符，完整改动请用 read_file 或核对工具参数 …]\n\n${tail}`;
 }
@@ -466,9 +466,11 @@ const foldTextToTarget = (text: string, curTokens: number, targetTokens: number)
     const density = text.length / Math.max(1, curTokens); // 字符/token
     const keepChars = Math.max(64, Math.floor(targetTokens * density));
     const half = Math.floor(keepChars / 2);
+    const headTxt = sliceHeadNoSplit(text, half);   // ★ 防劈代理对（2026-11-13 事故类）
+    const tailTxt = sliceTailNoSplit(text, half);
     const totalLines = text.split("\n").length;
-    const omitted = Math.max(0, totalLines - text.slice(0, half).split("\n").length - text.slice(-half).split("\n").length);
-    return [text.slice(0, half), "", `…[压缩预截断：超出单批压缩预算，已去中段约 ${omitted} 行（共 ${totalLines} 行）；完整内容可经 recall 工具检索]…`, "", text.slice(-half)].join("\n");
+    const omitted = Math.max(0, totalLines - headTxt.split("\n").length - tailTxt.split("\n").length);
+    return [headTxt, "", `…[压缩预截断：超出单批压缩预算，已去中段约 ${omitted} 行（共 ${totalLines} 行）；完整内容可经 recall 工具检索]…`, "", tailTxt].join("\n");
 };
 
 /**
@@ -930,7 +932,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             let summary: string | undefined;
             try {
                 const slotRaw = event.messageArr[1]?.content;
-                summary = parseSummarySlot(typeof slotRaw === "string" ? slotRaw : "").notes.slice(0, 6000) || undefined;
+                summary = sliceHeadNoSplit(parseSummarySlot(typeof slotRaw === "string" ? slotRaw : "").notes, 6000) || undefined;
             } catch { /* 摘要提取失败不影响压缩完成通知 */ }
             event.onUIEvent({
                 type: 'compact.done',
