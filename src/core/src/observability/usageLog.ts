@@ -23,6 +23,9 @@ export type UsageRunRecord = {
     ts: string;                    // run 结束时刻（ISO；分片月 = ts 前 7 位）
     sessionId: string;
     runId: string;
+    /** ★ 并行链标识（评审 #9，2026-11-19）：runId 在并行扇出下不唯一（5 路子代理共父 runId+sid），
+     *  成本分账/失败归因按 agentId 拆链。附加字段，历史行缺省（读侧容错）。 */
+    agentId?: string;
     depth: number;                 // 0=主 agent run，>0=子 agent run（run 数/轮数口径在展示层拆分，token 恒全量）
     model: string;                 // 生效模型 id（options.model 覆盖优先，回退全局 MODEL_NAME）
     stopReason: UsageStopReason;

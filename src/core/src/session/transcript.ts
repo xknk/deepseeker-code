@@ -25,11 +25,11 @@ export type UsageSnapshot = {
 /** transcript 事件负载（不含 id/ts，由 appendEvent 统一盖章） */
 export type TranscriptEvent =
     /** 一次 runAgent 调用（= 一次用户输入的 turn）开始。消费：run 配对恢复、fork turn 锚点、回放分 turn */
-    | { dscEvent: 'run.start'; runId: string; depth: number }
+    | { dscEvent: 'run.start'; runId: string; depth: number; /** ★ 并行链标识（评审 #9 agentId）：同一 sid+runId 下多路并行子代理各持唯一 agentId——链归属/成本分账/失败归因的真地基。附加字段，旧行缺省（读侧容错）。 */ agentId?: string }
     /** run 闭合。stopReason 与 runAgent Stop hook 同枚举。消费：恢复判定（缺失=崩溃）、审计、永久计量 */
-    | { dscEvent: 'run.end'; runId: string; stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit'; rounds: number; usage?: UsageSnapshot }
+    | { dscEvent: 'run.end'; runId: string; stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit'; rounds: number; usage?: UsageSnapshot; agentId?: string }
     /** 一个 round 完整落盘（assistant + 全部 tool 结果已 flush）后才写；abort/error/repeat 路径不写——缺失即取证信号 */
-    | { dscEvent: 'round.end'; runId: string; round: number; usage?: UsageSnapshot }
+    | { dscEvent: 'round.end'; runId: string; round: number; usage?: UsageSnapshot; agentId?: string }
     /** 压缩边界（truncate 两处 setRollingState 成功后）。消费：desync 交叉校验、fork 摘要派生（transcript 自包含） */
     | { dscEvent: 'compaction'; archivedMessageCount: number; summary: string }
     /** 恢复层补写的闭墓标记（幂等）：崩溃 run 一次性闭合，回放「已中断」标记 */

@@ -60,6 +60,10 @@ export interface TraceBase {
         tools_id?: string;  // 选填：关联的工具调用唯一 ID
         runId?: string;     // 选填：所属 run（一次用户输入的回合）ID——runAgent 事件包装层自动注入，
                             //  trace 据此按 run 聚合切片（单 run token/耗时/工具序列），与 transcript 事件行同源
+        agentId?: string;   // 选填：本 run 的子代理链标识（评审 #9，2026-11-19）——runAgent 每 run 生成唯一
+                            //  ID 随包装层注入。runId 在并行扇出下不唯一（5 路子代理共父 runId+sid），链归属/
+                            //  成本分账/失败归因靠 agentId 区分。★ 附加字段，勿动 store.ts 的 __sub__ 归一
+                            //  rootId（防双重计量的有意设计，agentId 是补充维度不是替代）。
         depth: number;      // 强力穿透主子宇宙，标记当前的嵌套深度层级（主Agent为0，子Agent为1）
         decisionSource?: TraceDecisionSource; // 路由/编排决策来源
         toolName?: string;  // 调用工具的名称

@@ -82,15 +82,22 @@ export const resolveFirstPrompt = (
 export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[], options: RunAgentOptions): AsyncGenerator<AgentEvent> {
     const sessionId = options.sessionId; // 本次会话id
     const runId = createUUID(); // 本次 run（一次用户输入的回合）唯一 ID：事件行 + 埋点 metadata.runId 同源
+    // ★ agentId（评审 #9，2026-11-19）：本 run 的子代理链唯一标识。runId 在并行扇出下不唯一
+    //   （spawn_agent/run_workflow 的 5 路并行子代理共享父 sessionId+runId+depth），链归属/成本
+    //   分账/失败归因都缺唯一键——每 run（主/子一视同仁）生成 agentId，随事件包装层注入所有
+    //   metadata、随 run.start/run.end/round.end/usageLog 落盘。★ 勿动 store.ts 的 __sub__ 归一
+    //   rootId（防双重计量的有意设计；agentId 是附加字段不是替代）。
+    const agentId = createUUID();
     // ★ 可观测性埋点安全包装：trace/落盘层异常（磁盘满、JSON 序列化失败、网络上报失败）一律 catch，
     //   绝不冒泡成 unhandled rejection 击垮 agent 主循环（旁路埋点不应拖垮主业务推理）。
     //   全部埋点点位自动获得该保护，无需逐个 await/.catch。
     // ★ runId 自动注入（P2）：主/子/压缩/工具各埋点统一带 metadata.runId——trace 可按 run 聚合切片
     //   （单 run token/耗时/工具序列），与 transcript 的 run.start/run.end 事件行同 ID 互查。
-    //   子 agent 传入的 ctx.events 已含父级包装，此处再包一层以本 run runId 覆盖（spread 序：内层胜出）。
+    //   ★ agentId 同注入（评审 #9）：并行子代理共父 runId 时的链唯一键，见上方声明处。
+    //   子 agent 传入的 ctx.events 已含父级包装，此处再包一层以本 run runId/agentId 覆盖（spread 序：内层胜出）。
     const rawEvents = options.events; // 原始回调方法
     const events: typeof rawEvents = async (base) => {
-        try { await rawEvents({ ...base, metadata: { ...base.metadata, runId } }); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
+        try { await rawEvents({ ...base, metadata: { ...base.metadata, runId, agentId } }); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
     };
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
@@ -129,7 +136,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     //   防「永不抛错」契约被未来改动破坏（D1 教训：别假设内层永远可靠）。★ P1-D：置于 setup 两 await
     //   之前——setup 异常时 trace 仍见 run.start（排障能看到本次 run 存在过，事件行不缺记）。
     try {
-        const ok = await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
+        const ok = await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth, agentId });
         if (!ok) markDegraded('appendEvent(run.start)');
     } catch { markDegraded('appendEvent(run.start)'); /* 兜底：违反吞错契约的异常信号 */ }
     let rawTools: any[] = [];
@@ -447,7 +454,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 //   放 interceptFinal 之前：被拦截续跑的轮同样已完整落盘，事件不缺记。
                 //   ★ D5 三轮：round.end 缺失即异常收尾取证信号 → 写失败同样可观测（消费内层返回值）。
                 try {
-                    const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                    const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage, agentId });
                     if (!ok) markDegraded('appendEvent(round.end)');
                 } catch { markDegraded('appendEvent(round.end)'); /* 兜底：违反吞错契约的异常信号 */ }
                 emitContextUsage();
@@ -560,7 +567,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             //   此处与无工具收尾处；abort/error/repeat/terminal 不写，缺失即取证信号）。
             //   ★ D5 三轮：写失败可观测（消费内层返回值，理由同无工具收尾处）。
             try {
-                const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage });
+                const ok = await appendEvent(sessionId, { dscEvent: 'round.end', runId, round, usage: infResult.usage, agentId });
                 if (!ok) markDegraded('appendEvent(round.end)');
             } catch { markDegraded('appendEvent(round.end)'); /* 兜底：违反吞错契约的异常信号 */ }
             emitContextUsage();
@@ -620,7 +627,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
         //   AgentEvent 通道送不出去）；stopReason 与 Stop hook 同口径（signal.aborted 覆盖推断）。
         //   放 Stop hook / updateCalibration 之前：run 边界元数据先于旁路持久化。
         try {
-            const ok = await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary() });
+            const ok = await appendEvent(sessionId, { dscEvent: 'run.end', runId, stopReason: signal?.aborted ? 'aborted' : stopReason, rounds: round, usage: ledger.usageSummary(), agentId });
             if (!ok) markDegraded('appendEvent(run.end)'); // 内层吞错只回 false（D5 二轮）
         } catch { markDegraded('appendEvent(run.end)'); /* 兜底：appendEvent 契约是吞错回 false，抛错即异常信号 */ }
         // ★ D 批（§4.2-3）显式 drain：trace 批量缓冲收尾不丢尾——200ms 窗口内的普通事件尾巴在此落盘
@@ -638,7 +645,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             const ok = await recordUsageRun({
                 v: 1,
                 ts: new Date().toISOString(),
-                sessionId, runId, depth,
+                sessionId, runId, depth, agentId, // ★ agentId（评审 #9）：usageLog 行级并行链标识——分账读侧按 agentId 拆并行子 run
+
                 model: options.model?.trim() || MODEL_NAME,
                 stopReason: signal?.aborted ? 'aborted' : stopReason,
                 rounds: round,
