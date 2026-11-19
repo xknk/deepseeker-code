@@ -17,6 +17,11 @@
  */
 const markedSessions = new Set<string>();
 
+/** 标记集合容量上限（★ 终审 P2，2026-11-19）：长驻宿主下「跑过且不再用」的会话 ID 无清理钩子
+ *  会永久驻留（每个只是一个短字符串，量级极小，但不是有界的）。取 500 后按插入顺序丢最旧——
+ *  被丢的恰好是「最久没开新回合」的会话，而下一回合主 run 启动本就会 reset，语义无损。 */
+const MARKED_SESSIONS_MAX = 500;
+
 /** 清空某会话的外部内容标记（runAgent 主 run 启动时调用；子 run depth>0 不清——它们共享父回合）。 */
 export const resetExternalContent = (sessionId: string): void => {
     if (sessionId) markedSessions.delete(sessionId);
@@ -24,7 +29,15 @@ export const resetExternalContent = (sessionId: string): void => {
 
 /** 标记某会话本回合已消费外部内容（externalContent 声明工具成功执行后由执行层调用）。 */
 export const markExternalContent = (sessionId: string): void => {
-    if (sessionId) markedSessions.add(sessionId);
+    if (!sessionId) return;
+    if (!markedSessions.has(sessionId)) {
+        markedSessions.add(sessionId);
+        while (markedSessions.size > MARKED_SESSIONS_MAX) {
+            const oldest = markedSessions.values().next().value;
+            if (oldest === undefined) break;
+            markedSessions.delete(oldest);
+        }
+    }
 };
 
 /** 查询某会话本回合是否消费过外部内容（provenanceGate 门与 memory_save 硬拒的判定源）。 */

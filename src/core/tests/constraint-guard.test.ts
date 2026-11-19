@@ -151,3 +151,39 @@ describe("P1-B 检查点 prompt 对保护位的指引", () => {
         assert.match(checkpointPrompt(false), /如实整理本轮可见的用户约束/);
     });
 });
+
+// ★ 终审 P2（2026-11-19）：撤销语法与标题级别容错——补齐 13.3 两处实测缺口。
+describe("P1-B 补强：撤销语法 + 标题级别容错", () => {
+    it("撤销标记：旧约束被剔除、其余保留、标记行不入保护位", () => {
+        const oldSlot = ASSEMBLE(
+            ["a.ts"],
+            "## 目标\n- x\n## 约束与偏好\n- 只接 API\n- 不要动 UI\n## 进度\n- y",
+            ["- 只接 API", "- 不要动 UI"],
+        );
+        const newNotes = "## 目标\n- x\n## 约束与偏好\n- [撤销] 不要动 UI\n## 进度\n- y";
+        const out = applyConstraintProtection(oldSlot, ["a.ts"], newNotes);
+        const p = parseSummarySlot(out);
+        assert.deepEqual(p.constraints, ["- 只接 API"], "仅剔除被撤销那条");
+        assert.ok(!p.notes.split("\n").some((l) => l.trim() === "- 不要动 UI"), "notes 旧行同步剔除");
+        assert.ok(!p.constraints.some((c) => /撤销/.test(c)), "撤销标记行本身不入保护位");
+    });
+
+    it("撤销后在下一轮仍幂等（标记行留驻不复活旧约束）", () => {
+        const slot1 = applyConstraintProtection(
+            ASSEMBLE(["a.ts"], "## 目标\n- x\n## 约束与偏好\n- 不要动 UI\n## 进度\n- y", ["- 不要动 UI"]),
+            ["a.ts"],
+            "## 目标\n- x\n## 约束与偏好\n- [撤销] 不要动 UI\n## 进度\n- y",
+        );
+        const slot2 = applyConstraintProtection(slot1, ["a.ts"], parseSummarySlot(slot1).notes);
+        assert.deepEqual(parseSummarySlot(slot2).constraints, [], "重复压缩不复活");
+    });
+
+    it("### 级别标题：不再生成重复约束段", () => {
+        const oldSlot = ASSEMBLE(["a.ts"], "## 目标\n- x\n## 约束与偏好\n- A\n- B\n## 进度\n- y", ["- A", "- B"]);
+        const newNotes = "## 目标\n- x\n### 约束与偏好\n- A\n## 进度\n- y"; // ### + 缩水
+        const p = parseSummarySlot(applyConstraintProtection(oldSlot, ["a.ts"], newNotes));
+        const heads = p.notes.split("\n").filter((l) => /约束与偏好/.test(l));
+        assert.equal(heads.length, 1, `应只有一个约束标题，实际：${JSON.stringify(heads)}`);
+        assert.deepEqual(p.constraints, ["- A", "- B"], "缩水回补仍生效");
+    });
+});

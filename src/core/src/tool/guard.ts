@@ -10,6 +10,7 @@ import path from "path";
 import ignore from "ignore"; // 需要安装: npm install ignore
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ToolContext, ToolSafetyLevel } from "./type.ts";
+import type { ApprovalMeta } from "@/host/type.ts";
 import { truncateApprovalDetail } from "@/agent/truncate.ts";
 import { addPermissionRule, addSessionPermissionRule, buildScopedAllowRule } from "./permissions.ts";
 import { dispatch } from "./hooks.ts";
@@ -473,10 +474,13 @@ export const requestApproval = async (
     safetyLevel?: ToolSafetyLevel,
     // 本次调用的参数：仅供构造精确值作用域的 allow 规则（宿主审批通道不感知）。
     args?: any,
-    // 工具声明的主参数名（CustomTool.function.primaryArg，#8a 声明化透传）：allow-always 持久化作用域用；
-    //   缺省 = 无法安全作用域 → 不持久化，降级 allow-once（宁窄勿宽现状语义）。
-    primaryArg?: string,
-): Promise<boolean> => {
+        // 工具声明的主参数名（CustomTool.function.primaryArg，#8a 声明化透传）：allow-always 持久化作用域用；
+        //   缺省 = 无法安全作用域 → 不持久化，降级 allow-once（宁窄勿宽现状语义）。
+        primaryArg?: string,
+        // ★ P1-B（终审，2026-11-19）：审批触发原因——透传进 ApprovalMeta.cause，供宿主区分「常规安全级」
+        //   与「provenance 不可信来源」（batch 无人值守对后者一律拒绝，不因白名单而自动放行）。
+        cause?: ApprovalMeta['cause'],
+    ): Promise<boolean> => {
     // 🔒 审批详情瘦身闸：大 diff（如上千行 edit_file 的 old_str/new_str）仅保留头尾，
     //   防止单条 SSE 帧过大与前端渲染卡顿；完整改动可经工具参数或 read_file 核对。
     const safeDetail = truncateApprovalDetail(detail);
@@ -496,7 +500,7 @@ export const requestApproval = async (
 
     // ★ 四态决策（I-4 扩会话级）：allow-once 仅本次 / allow-session 本会话内存规则 / allow-always 写持久规则 / deny 拒绝
     //   ★ I-6：meta 附截断前全文（fullDetail）——宿主「查看完整 diff」入口用；SSE 宿主可不透传。
-    const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId, fullDetail: detail });
+    const decision = await ctx.requestApproval(safeDetail, { toolName, toolCallId, sessionId: ctx.sessionId, fullDetail: detail, cause });
     const approved = decision !== 'deny';
 
     if (!approved) {

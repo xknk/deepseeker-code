@@ -24,11 +24,17 @@ export interface ApprovalMeta {
     toolCallId: string;
     /** 所属会话 ID（Web 宿主据此做跨会话审批越权校验） */
     sessionId: string;
-    /** ★ I-6（内核审查报告第三批，2026-10-20）：截断前的审批说明全文——detail 进审批流前经
-     *  truncateApprovalDetail（2000 字符）防大帧，宿主若提供「查看完整 diff」入口（VSCode overlay）
-     *  用本字段渲染全文。可选：带宽受限通道（SSE）可不附带。 */
-    fullDetail?: string;
-}
+        /** ★ I-6（内核审查报告第三批，2026-10-20）：截断前的审批说明全文——detail 进审批流前经
+         *  truncateApprovalDetail（2000 字符）防大帧，宿主若提供「查看完整 diff」入口（VSCode overlay）
+         *  用本字段渲染全文。可选：带宽受限通道（SSE）可不附带。 */
+        fullDetail?: string;
+        /** ★ P1-B（终审，2026-11-19）：本次审批的触发原因。
+         *  'provenance' = 内容/来源不可信（本回合消费过外部内容、或写入内容含权限类表述）——
+         *  宿主应把它当【不可自动放行】处理：无人值守场景（batch）直接拒绝并留痕；交互场景
+         *  照常弹审批，但不因「工具在白名单」而自动放行，也不因 allow-always 规则而免审。
+         *  缺省 undefined = 常规 safetyLevel / 权限规则触发（宿主既有行为不变）。 */
+        cause?: 'provenance' | 'safety' | 'permission' | 'classifier';
+    }
 
 /**
  * 审批决策（对标 Claude Code 的三选一；I-4 扩出会话级记忆）：

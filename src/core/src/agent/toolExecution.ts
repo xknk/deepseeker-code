@@ -14,7 +14,7 @@ import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus, ToolExecuteRes
 import { validateToolArgs } from "@/tool/argsValidator.ts";
 import { requestApproval, isProtectedWrite, getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
-import { hasExternalContent, markExternalContent } from "@/tool/provenance.ts";
+import { markExternalContent } from "@/tool/provenance.ts";
 import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
@@ -178,10 +178,17 @@ type ToolCallState = {
     /** 视觉读取：工具结果附带的 images（read_image）——不在 result 文本里（base64 三不进），
      *  由调度层在本波工具 flush 完后组装成独立 user 附件消息（tool role 携带 image part 会被端点 400）。 */
     imageAttachments: ToolExecuteResult['images'];
-    /** isSync:false 后台工具标记 + 互斥锁 key（安全链中段判定，execute 阶段消费）。 */
-    isBgTool: boolean;
-    lockKey: string | null;
-};
+        /** isSync:false 后台工具标记 + 互斥锁 key（安全链中段判定，execute 阶段消费）。 */
+        isBgTool: boolean;
+        lockKey: string | null;
+        /** ★ P1-B（终审，2026-11-19）：本次审批的触发原因——宿主（尤其无人值守的 batch）据此裁决：
+         *  'provenance' = 内容/来源不可信（不接受"白名单自动放行"，必须人工或直接拒绝）。
+         *  缺省 undefined = 常规 safetyLevel / 权限规则触发。 */
+        approvalCause?: ApprovalCause;
+    };
+
+    /** 审批触发原因（ApprovalMeta.cause 的取值源）。 */
+    export type ApprovalCause = 'provenance' | 'safety' | 'permission' | 'classifier';
 
 /** 置失败文案 + 状态（errorCategory 缺省 runtime；syntax 收模型调用形态错）。 */
 const failResult = (state: ToolCallState, text: string, cat: ToolExecuteResult['errorCategory'] = 'runtime'): void => {
@@ -322,22 +329,27 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
         else if (perm === 'allow') { needApproval = false; }
         else if (perm === 'ask') { needApproval = true; }
     } catch { perm = null; /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
-    // ★ P0-A provenance 门（评审修复批 2026-11-19）：本回合消费过外部内容（web_fetch/web_search/
-    //   命令输出——见 tool/provenance.ts 威胁模型）后，声明 provenanceGate 的工具降权：
+    // ★ P0-A provenance 门（评审修复批 2026-11-19；终审 P1-A 改为恒调用 + 三态）：声明 provenanceGate
+    //   的工具在 checkPermission 之后获得一次「覆盖既有授权」的机会：
     //   'confirm' = 既有 allow 规则（含 allow-always 持久规则）本次不生效、强制人工过目一次；
-    //   'reject' = 硬拒不发审批（外部来源绝不应触发的写入，如 memory_save 的 project 源）。
-    //   置于 checkPermission 之后：门命中时显式规则不再享有免审——「被注入内容诱导的写入」
-    //   不能借既有授权静默通过。未命中（无外部内容）时本块零作用，一切如旧。
-    if (!state.denied && matchedTool.function.provenanceGate && hasExternalContent(sessionId)) {
+    //   'reject'  = 硬拒不发审批（外部来源绝不应触发的写入，如 memory_save 的 project 源）；
+    //   'pass'    = 不干预，保留 checkPermission 裁定（工具自行用 hasExternalContent 判断场景）。
+    //   ★ 为何从「有外部内容才调」改为「总是调」：内容级防线（如 memory_save 对「权限修饰语」的
+    //   检查）不依赖来源——投毒文本可能经 read_file / 项目内的 CLAUDE.md 进入上下文，而这些路径
+    //   未声明 externalContent。由工具自己决定看不看来源，比外层硬编码更准（#8a 声明化纪律）。
+    //   置于 checkPermission 之后：「被注入内容诱导的写入」不能借既有授权静默通过。
+    if (!state.denied && matchedTool.function.provenanceGate) {
         const decl = matchedTool.function.provenanceGate;
-        let policy: 'confirm' | 'reject';
+        let policy: 'confirm' | 'reject' | 'pass';
         try { policy = typeof decl === 'function' ? decl(state.calledArgs, toolCtx) : decl; }
         catch { policy = 'confirm'; /* 判定异常 fail-closed：宁多审一次 */ }
         if (policy === 'reject') {
             state.denied = true;
-            failResult(state, `❌ [provenance] 本回合已消费外部内容（网页/搜索/命令输出），[${calledName}] 的本次写入被硬拒——外部文本可能含提示词注入，来源不可信。如确需写入：改用受人工确认的通道，或在新回合（无外部内容）重试。`, 'permission');
-        } else {
+            failResult(state, `❌ [provenance] 本回合已消费外部内容（网页/搜索/命令输出）或写入内容含权限类表述，[${calledName}] 的本次写入被硬拒——外部文本可能含提示词注入，来源不可信。如确需写入：改用受人工确认的通道，或在新回合（无外部内容）重试。`, 'permission');
+            state.approvalCause = 'provenance';
+        } else if (policy === 'confirm') {
             needApproval = true;
+            state.approvalCause = 'provenance';
         }
     }
     // ★ 命令语义判定（P1-6 声明化）：「命令执行器」改读工具声明 argKind==='command'，
@@ -431,7 +443,7 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
             //   每次调用都落人工卡（浏览器票真机 15 卡实锤）。补齐后逐名解锁、mcp__server__* 通配、
             //   审批记忆键粒度全部恢复语义；detail 文案与 UI 展示同步拿到具体工具名。
             const approvalName = resolveMcpPermissionName(calledName, state.calledArgs);
-            try { approved = await requestApproval(approvalName, toolCall.id, detail, toolCtx, level, state.calledArgs, matchedTool.function.primaryArg); }
+            try { approved = await requestApproval(approvalName, toolCall.id, detail, toolCtx, level, state.calledArgs, matchedTool.function.primaryArg, state.approvalCause); }
             catch (e: any) { state.denied = true; failResult(state, `❌ [审批流程异常]：${e?.message ?? e}。出于安全默认拒绝 [${calledName}] 的执行。`, 'permission'); }
             if (!approved && !state.denied) { state.denied = true; failResult(state, `❌ [安全熔断]：用户拒绝了 [${calledName}] 的执行申请。`, 'permission'); }
         }

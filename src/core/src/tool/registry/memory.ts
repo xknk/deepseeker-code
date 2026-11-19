@@ -45,6 +45,37 @@ const MAX_DESCRIPTION_CHARS = 200; // description 是唯一逐轮注入提示词
 const NAME_RE = /^[a-z0-9-]+$/;
 const VALID_TYPES: MemoryType[] = ['user', 'feedback', 'project', 'reference'];
 
+/**
+ * ★ P1-A 内容级防线（评审终审 2026-11-19）：识别「意图改变工具行为」的记忆文本。
+ *
+ *  为何需要：来源级 provenance（hasExternalContent）只看本回合是否调过 web_fetch/run_command，
+ *  而投毒文本常常通过 read_file（未声明 externalContent）、项目内 CLAUDE.md、甚至 issue 正文进入
+ *  上下文——来源级拦不到。而“外部文本能改变工具行为”才是唯一有价值的目标，与来源无关。
+ *
+ *  命中口径：中英文的「权限/审批豁免」类表述。宁宽勿窄（误报代价 = 多一次人工确认，
+ *  漏报代价 = 一条免审批约束永久驻进后续所有会话）。
+ */
+const PERMISSION_GRANT_RE = new RegExp(
+    [
+        // 中：无需/不必 + 确认/审批（中间可隔少量字符，如「无需再确认」「不用每次都审批」）
+        '无需[\\s\\S]{0,6}?(?:确认|审批|批准|过目|询问|问我)',
+        '不必[\\s\\S]{0,6}?(?:确认|审批|批准|过目|询问|问我)',
+        '不用[\\s\\S]{0,6}?(?:确认|审批|批准|过目|询问|问我)',
+        '不需要[\\s\\S]{0,6}?(?:确认|审批|批准|过目)',
+        '免(?:审批|确认|询问)',
+        '跳过(?:审批|确认)',
+        '直接(?:放行|通过并执行|执行无需)',
+        // 英：always/never/skip/without/no + 审批类动词
+        '(?:always|never)[\\s\\S]{0,24}?(?:ask|approv|confirm|permission)',
+        '(?:skip|without|bypass|no)[\\s\\S]{0,16}?(?:approval|confirmation|permission|asking)',
+    ].join('|'),
+    'i',
+);
+
+/** 记忆文本（name+description+body）是否含权限/审批类表述（内容级 provenance 判定）。 */
+const looksLikePermissionGrant = (args: any): boolean =>
+    PERMISSION_GRANT_RE.test(`${args?.name ?? ''}\n${args?.description ?? ''}\n${args?.body ?? ''}`);
+
 /** 计算落盘绝对路径（global 或 project 源）。 */
 const memoryFilePath = (name: string, project: boolean): string =>
     project
@@ -116,12 +147,21 @@ export const memoryTools: CustomTool[] = [
             //   内容每轮注入系统提示词、影响之后所有会话，而 save 恰是注入面（被注入的工具结果可诱导
             //   模型把外部文本写进记忆 = 跨会话持久提示词注入）。未声明 autoApproval → 分类器恒 'ask'
             //   → 转人工；allow-always 经 primaryArg 落精确名作用域规则，一次授权后日常保存零摩擦。
-            //   provenanceGate：本回合消费过外部内容后降权——project 源硬拒（随 git 扩散 = 供应链投毒面）、
-            //   global 源既有 allow 规则本次失效（人工确认后才写）。
+            // ★ 终审 P1-A（2026-11-19）门改三态 + 自主判定，两条独立防线合成一个门：
+            //   ① 来源级：本回合消费过外部内容（web_fetch/web_search/命令输出）；
+            //   ② 内容级：记忆文本含「权限修饰语」（「以后 run_command 不必审批」这类）——不看来源。
+            //   为何需要②：投毒文本可经 read_file（未声明 externalContent）或项目内 CLAUDE.md 进上下文，
+            //   ① 拦不到；而「外部文本能改变工具行为」才是唯一有价值的目标，与来源无关。
+            //   无风险时返回 'pass' → 保住 allow-always 的零摩擦（否则每条记忆都弹审批）。
             safetyLevel: ToolSafetyLevel.MUTATION,
             isSync: true,
             primaryArg: "name",
-            provenanceGate: (args: any): 'confirm' | 'reject' => (args?.project === true ? 'reject' : 'confirm'),
+            provenanceGate: (args: any, ctx?: ToolContext): 'confirm' | 'reject' | 'pass' => {
+                const risky = hasExternalContent(ctx?.sessionId) || looksLikePermissionGrant(args);
+                if (!risky) return 'pass';
+                // 项目源随 git 扩散给所有克隆者——任一风险信号即硬拒（供应链投毒面，不接受「确认后放行」）。
+                return args?.project === true ? 'reject' : 'confirm';
+            },
             requireApproval: (args: any, ctx?: ToolContext) => {
                 const name = sanitizeLine(args?.name);
                 const project = args?.project === true;
@@ -130,6 +170,9 @@ export const memoryTools: CustomTool[] = [
                     : `保存持久记忆 **${name}**（全局源，仅本机；跨会话注入系统提示词）`;
                 if (hasExternalContent(ctx?.sessionId)) {
                     return base + `\n⚠️ [provenance] 本回合已消费外部内容（网页/搜索/命令输出）——该记忆可能源自不可信文本（提示词注入面）。请核对内容确出自你的意图或用户原话，而非外部页面/命令输出诱导。`;
+                }
+                if (looksLikePermissionGrant(args)) {
+                    return base + `\n⚠️ [provenance] 本条记忆含「权限/审批类」表述（如「以后无需审批」）——记忆会被当作约束逐轮注入后续所有会话，这类表述能实质改变工具行为。请确认这是用户明确要求的，且不会放宽任何安全闸门。`;
                 }
                 return base;
             },
@@ -140,9 +183,9 @@ export const memoryTools: CustomTool[] = [
                 const type = (sanitizeLine(args?.type) as MemoryType) || "reference";
                 const project = args?.project === true;
                 // ★ P0-A provenance 硬拒（第二道闸；第一道在 processToolCall 的 provenanceGate 门）：
-                //   project 源随 git 扩散给所有克隆者，外部内容触发的写入 = 供应链投毒，无论授权与否一律拒。
-                if (project && hasExternalContent(ctx?.sessionId)) {
-                    return toolFailure(`[memory_save] provenance 硬拒：本回合已消费外部内容（web_fetch/web_search/命令输出），project 源（随 git 共享给所有克隆者）的写入被拒绝——外部文本可能含提示词注入。请改存 global 源（走人工确认），或在无外部内容的新回合再存。`, 'permission');
+                //   project 源随 git 扩散给所有克隆者，外部内容/权限修饰语触发的写入 = 供应链投毒，无论授权与否一律拒。
+                if (project && (hasExternalContent(ctx?.sessionId) || looksLikePermissionGrant(args))) {
+                    return toolFailure(`[memory_save] provenance 硬拒：本回合已消费外部内容（web_fetch/web_search/命令输出）或本条含权限/审批类表述，project 源（随 git 共享给所有克隆者）的写入被拒绝——外部文本可能含提示词注入。请改存 global 源（走人工确认），或在无外部内容的新回合再存。`, 'permission');
                 }
                 if (!NAME_RE.test(name)) return toolFailure(`[memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`);
                 // 外部记忆桥接保留字（2026-11-02）：ext- 条目由 loader 从其他 agent 规则文件只读接入，用户不可占名。

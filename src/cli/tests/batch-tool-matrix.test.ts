@@ -15,7 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const { agentTools } = await import("@/tool/index.ts");
-const { buildBatchToolPolicy, makeInterpreterGateWrapper } = await import("../src/batchRunner.ts");
+const { buildBatchToolPolicy, makeInterpreterGateWrapper, isProvenanceApproval } = await import("../src/batchRunner.ts");
 
 // ============ S0 全量分类表（无 tools: 解锁） ============
 
@@ -214,4 +214,18 @@ test("闸门协议：tools: interpreter 解锁后同命令放行；非命令工�
     assert.deepEqual(chunks, ["out:node ./scripts/build.js", SENTINEL]);
     const other = fakeCommandTool("read_file");
     assert.equal(wrap(other), other, "非 run_command/run_in_background 不包装");
+});
+
+
+// ★ P1-B 终审（2026-11-19）：provenance 审批不得被白名单自动放行。
+test("batch provenance 审批拦截：cause='provenance' 即拒绝自动放行（与工具名无关）", () => {
+    assert.equal(isProvenanceApproval("provenance"), true);
+    assert.equal(isProvenanceApproval(undefined), false);
+    assert.equal(isProvenanceApproval("safety"), false);
+});
+
+test("memory_save 在编辑类白名单内（故必须靠 cause 拦，不能靠工具名）", () => {
+    const policy = buildBatchToolPolicy([]);
+    assert.equal(policy.isApprovalAllowed("memory_save"), true, "白名单确实收编了 memory_save");
+    assert.equal(isProvenanceApproval("provenance"), true, "provenance 在 isApprovalAllowed 之前拦");
 });

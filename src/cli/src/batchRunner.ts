@@ -108,6 +108,11 @@ export const makeInterpreterGateWrapper = (opts: {
     };
 };
 
+/** ★ P1-B（终审，2026-11-19）：provenance 类审批必须拒绝自动放行——抽为纯函数以便守门与复用。
+ *  背景：isApprovalAllowed 只看工具名，而 memory_save 已收编进编辑类白名单；挂机工单读投毒文本
+ *  后写 global 记忆会被应答器 auto allow。无人值守场景没有「人工确认」可言，只能拒。 */
+export const isProvenanceApproval = (cause?: string): boolean => cause === "provenance";
+
 /** batch 工具策略单一真相源（runOneTask 装配与全量矩阵测试共用，2026-11-10）：
  *  可见性 = 精确/通配解锁 ∪（声明未收权 batchAllowed≠false 且 不在缺省禁用清单）；
  *  审批自动放行 = 编辑类白名单 ∪ 精确/通配解锁（放行者不问，其余按 SAFETY 等级走卡片/夜间自动拒）。 */
@@ -799,7 +804,17 @@ const runOneTask = async (task: { id: string; path: string }): Promise<{ status:
         // ★ B1（2026-11-09 飞书拆软闸门）：挂机窗口内不推卡——半夜无人点卡，30min 空等 = 注定拒绝；
         //   直接走自动应答器（deny + deniedTools 留痕 + 会话继续、票不死，agent 绕路）。判定与
         //   分叉收在 batchApprovalRoute 纯函数（守门测试钉窗口内外两形态）。
-        const requestApprovalWithCard = async (detail: string, meta: { toolName: string }): Promise<"allow-once" | "deny"> => {
+        const requestApprovalWithCard = async (detail: string, meta: { toolName: string; cause?: string }): Promise<"allow-once" | "deny"> => {
+            // ★ P1-B（评审终审 2026-11-19）：provenance 类审批【不接受自动放行】。
+            //   原先 isApprovalAllowed 只看工具名，而 memory_save 已收编进编辑类白名单 → 挂机工单
+            //   调 web_fetch 读到投毒文本后写 global 记忆，会被应答器 auto allow → 毒记忆驻进本机、
+            //   污染之后所有会话（无人值守场景没有“人工确认”可言，只能拒）。project 源在审批前
+            //   已被 provenanceGate 'reject' 硬拒，这里处理的是 global 源。
+            if (isProvenanceApproval(meta.cause)) {
+                deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) });
+                emit(`⛔ [${task.id}] provenance 拒放行：${meta.toolName}（来源/内容不可信，挂机场景不自动放行）`);
+                return "deny";
+            }
             const route = batchApprovalRoute({ unlocked: policy.isApprovalAllowed(meta.toolName), windowActive: inWaitWindow(activeWaitWindow, nowMinutes()) });
             if (route === "auto-deny") {
                 deniedTools.push({ tool: meta.toolName, detail: detail.replace(/\n+/g, " ").slice(0, 140) }); // 与卡片拒绝同一留痕口径，绝不静默吞

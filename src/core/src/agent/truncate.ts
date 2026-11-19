@@ -343,10 +343,24 @@ export type ArchiveIndexUsage = { tick: Map<string, number>; counter: number };
 
 const indexUsageBySession = new Map<string, ArchiveIndexUsage>();
 
+/** 会话级使用表容量上限（★ 终审 P2，2026-11-19）：长驻宿主（VSCode）不重启、且 spawn_agent /
+ *  workflow 每次派生新 subSessionId——Map 只增不减会无界增长。取 200（远超单会话并发量级），
+ *  超出按插入顺序淘汰最旧会话（Map 天然保序）；被淘汰的会话只是退回「无表 → 保新弃旧」退化行为，
+ *  不会更差，且下次合并会惰性重建。 */
+const INDEX_USAGE_MAX_SESSIONS = 200;
+
 /** 取（惰性建）某会话的索引使用表——ensureFitsWindow 压缩路径与测试共用。 */
 export const getArchiveIndexUsage = (sessionId: string): ArchiveIndexUsage => {
     let u = indexUsageBySession.get(sessionId);
-    if (!u) { u = { tick: new Map(), counter: 0 }; indexUsageBySession.set(sessionId, u); }
+    if (!u) {
+        u = { tick: new Map(), counter: 0 };
+        indexUsageBySession.set(sessionId, u);
+        while (indexUsageBySession.size > INDEX_USAGE_MAX_SESSIONS) {
+            const oldest = indexUsageBySession.keys().next().value;
+            if (oldest === undefined) break;
+            indexUsageBySession.delete(oldest);
+        }
+    }
     return u;
 };
 
@@ -441,15 +455,37 @@ const CONSTRAINTS_HEADING = '## 约束与偏好';
 const CONSTRAINTS_MAX_LINES = 40;
 /** "(无)" 类占位行（CHECKPOINT_FORMAT 允许的合法输出）不入保护位 */
 const CONSTRAINT_PLACEHOLDER_RE = /^[-*]?\s*[「'"]?\(?无\)?[」'"]?$/;
+/**
+ * ★ P1-C 撤销标记（评审终审 2026-11-19）：`- [撤销] <原约束原文>` → 从保护位剔除该条。
+ *
+ *  为何必需：「只增不删」使保护位单调膨胀——用户说「现在可以改 UI 了」，旧约束「不要动 UI」
+ *  仍会永久留在槽里（封顶保先 = 最旧的优先，方向恰好与用户最新意图相反）。撤销标记是唯一退出通道。
+ *
+ *  为何不做自动衰减（连续 2 次「(无)」即清空）：LLM 单次漏写约束段就会误将用户红线清掉
+ *  （那是本保护位要防的事故本身）；显式标记才能区分「用户真的撤销」与「模型忘了写」。
+ */
+const CONSTRAINT_REVOKE_RE = /^[-*]\s*\[(?:撤销|失效|取消|作废|revoke|revoked)\]\s*(.+)$/i;
 
-/** 从检查点文本抽取「约束与偏好」段行（保序保原样；遇下一级标题即止；占位行不入）。 */
+/** 从检查点文本抽取「约束与偏好」段行（保序保原样；遇下一级标题即止；占位行/撤销行不入）。 */
 export const extractConstraintLines = (notes: string): string[] => {
     const out: string[] = [];
     let inSection = false;
     for (const l of (notes ?? '').split('\n')) {
         const t = l.trim();
         if (/^#{1,6}\s/.test(t)) { inSection = t.replace(/^#{1,6}\s*/, '').startsWith('约束与偏好'); continue; }
-        if (inSection && t && !CONSTRAINT_PLACEHOLDER_RE.test(t.replace(/^[-*]\s*/, '').trim())) out.push(t);
+        if (!inSection || !t) continue;
+        if (CONSTRAINT_REVOKE_RE.test(t)) continue; // 撤销行不是约束，由 extractConstraintRevokes 消费
+        if (!CONSTRAINT_PLACEHOLDER_RE.test(t.replace(/^[-*]\s*/, '').trim())) out.push(t);
+    }
+    return out;
+};
+
+/** 从检查点文本抽取撤销声明（全文扫，不限段——撤销行写在哪里都算数）。 */
+export const extractConstraintRevokes = (notes: string): string[] => {
+    const out: string[] = [];
+    for (const l of (notes ?? '').split('\n')) {
+        const m = CONSTRAINT_REVOKE_RE.exec(l.trim());
+        if (m && m[1]?.trim()) out.push(m[1].trim());
     }
     return out;
 };
@@ -458,14 +494,15 @@ export const extractConstraintLines = (notes: string): string[] => {
 const constraintKey = (line: string): string =>
     line.trim().replace(/^[-*]\s*/, '').replace(/\s+/g, ' ').toLowerCase();
 
-/** 约束 union（保序：先入者在前、新条目追加；按归一键去重；封顶保先——旧约束优先于新表述） */
-const unionConstraints = (groups: string[][]): string[] => {
+/** 约束 union（保序：先入者在前、新条目追加；按归一键去重；封顶保先——旧约束优先于新表述）。
+ *  revokes：归一化后的被撤销条键——命中则从输出剔除（含旧槽旧段里的同条）。 */
+const unionConstraints = (groups: string[][], revokes: Set<string> = new Set()): string[] => {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const g of groups) {
         for (const l of g) {
             const k = constraintKey(l);
-            if (!k || seen.has(k)) continue;
+            if (!k || seen.has(k) || revokes.has(k)) continue;
             seen.add(k);
             out.push(l.trim());
             if (out.length >= CONSTRAINTS_MAX_LINES) return out;
@@ -480,7 +517,7 @@ const spliceConstraintSection = (notes: string, sectionLines: string[]): string 
     if (sectionLines.length === 0) return notes;
     const section = [CONSTRAINTS_HEADING, ...sectionLines];
     const lines = notes.split('\n');
-    const startIdx = lines.findIndex(l => l.trim() === CONSTRAINTS_HEADING);
+    const startIdx = lines.findIndex(l => /^#{1,6}\s*约束与偏好/.test(l.trim()));
     if (startIdx !== -1) {
         let endIdx = lines.length;
         for (let i = startIdx + 1; i < lines.length; i++) {
@@ -512,8 +549,13 @@ export const applyConstraintProtection = (oldSlotContent: string, index: string[
     const parsed = parseSummarySlot(oldSlotContent);
     const oldSection = extractConstraintLines(parsed.notes);
     const newSection = extractConstraintLines(newNotes);
-    const union = unionConstraints([parsed.constraints, oldSection, newSection]);
-    const repairedNotes = newSection.length < oldSection.length
+    // 撤销声明（旧/新检查点两处都认）：命中即从 union 剔除，并强制回写——否则旧行会因
+    // 「newSection 未缩水」而不触发 splice，撤销形同无效。
+    const revokes = new Set(
+        [...extractConstraintRevokes(parsed.notes), ...extractConstraintRevokes(newNotes)].map(constraintKey).filter(Boolean),
+    );
+    const union = unionConstraints([parsed.constraints, oldSection, newSection], revokes);
+    const repairedNotes = (newSection.length < oldSection.length || revokes.size > 0)
         ? spliceConstraintSection(newNotes, union)
         : newNotes;
     return assembleSlot(index, repairedNotes, union);
@@ -527,6 +569,7 @@ const CHECKPOINT_FORMAT =
     '严格按以下格式输出：\n\n'
     + '## 目标\n[用户要完成什么；多任务分段列出]\n'
     + '## 约束与偏好\n- [用户明示的约束、偏好与技术要求；无则写"(无)"]\n'
+    + '  （用户明确撤销/取消某条旧约束时，写 `- [撤销] <该约束原文>`；这类行不进保护位，仅用于剔除）\n'
     + '## 进度\n### 已完成\n- [x] [已完成的事项]\n### 进行中\n- [ ] [进行中的事项及其最新状态]\n### 受阻\n- [卡点；无则写"(无)"]\n'
     + '## 关键决策\n- **[决策]**: [简要理由]\n'
     + '## 下一步\n1. [按顺序列出接下来该做什么]\n'

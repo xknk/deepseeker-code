@@ -282,16 +282,20 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         externalContent?: boolean;
 
         /**
-         * ★ P0-A provenance 门（评审修复批 2026-11-19）：本回合消费过外部内容后，本工具的降权策略——
+         * ★ P0-A provenance 门（评审修复批 2026-11-19；评审终审 P1-A 扩三态 + 恒调用）：本工具的降权策略——
          * - 'confirm'：既有 allow 规则（含 allow-always 持久规则）本次不生效，强制转人工审批一次
          *   （审批 detail 应带外部内容警示——「可能源自不可信文本」）；
          * - 'reject'：直接拒绝执行（不发审批弹窗）——用于「外部来源绝不应触发的写入」硬闸
-         *   （如 memory_save 的 project 源：随 git 扩散给所有克隆者，注入面 = 供应链投毒）。
-         * 函数形态可按 args 细分两态。判定时机：checkPermission 显式 allow 之后、分类器之前——
-         * provenance 命中时显式规则不再享有免审（防「被注入内容诱导的写入」借既有授权静默通过）。
-         * 缺省 = 无 provenance 门（现状语义）。
+         *   （如 memory_save 的 project 源：随 git 扩散给所有克隆者，注入面 = 供应链投毒）；
+         * - 'pass'：不干预，一切按 checkPermission / safetyLevel 既定语义（工具可据此在「无风险
+         *   场景」上保住 allow-always 的零摩擦）。
+         * ★ 判定时机（P1-A 修正）：门【总是】被调用，不再要求外层先命中 hasExternalContent——
+         *   否则「内容级防线」（如 memory_save 对权限修饰语的检查）无从表达：投毒文本可能经
+         *   read_file（未声明 externalContent）而非 web_fetch 进入上下文。是否看"本回合有无外部
+         *   内容"由工具自己经 hasExternalContent(ctx.sessionId) 决定（已传 ctx）。
+         * 函数形态可按 args 细分。缺省 = 无 provenance 门（现状语义，绝大多数工具如是）。
          */
-        provenanceGate?: 'confirm' | 'reject' | ((args: any, ctx: ToolContext) => 'confirm' | 'reject');
+        provenanceGate?: 'confirm' | 'reject' | 'pass' | ((args: any, ctx: ToolContext) => 'confirm' | 'reject' | 'pass');
 
         /**
          * 敏感数据动态脱敏标记（数据隐私与防外泄护城河）
