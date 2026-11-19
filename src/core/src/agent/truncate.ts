@@ -203,19 +203,24 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailConte
     return `- ${resp.choices[0].message.content || ''}`;
 }
 
-// ==================== 滚动摘要槽 · 双段结构（实体索引 + 叙述） ====================
+// ==================== 滚动摘要槽 · 三段结构（实体索引 + 叙述 + 约束保护位） ====================
 //
 // ★ 设计动机：摘要自收敛（摘要的摘要）几乎必然丢实体名，而实体名恰是 recall 检索的查询词来源——
-//   索引系统会在最需要它的超长会话里率先失效。故摘要槽分两段分别治理：
+//   索引系统会在最需要它的超长会话里率先失效。故摘要槽分段分别治理：
 //   · ⟦DSC:ARCHIVE-INDEX⟧ 实体索引：代码侧正则从被压缩原文【确定性提取】，只去重合并。索引段会随
 //     摘要槽原样进入辅助压缩请求（作为合成档案上下文），但重建时按旧值原样回写、不被 LLM 改写——
 //     见 assembleSlot（检索索引无损是硬约束，「无损」指输出侧）；
 //   · ⟦DSC:ARCHIVE-NOTES⟧ 叙述：LLM 每轮压缩合成的结构化检查点（整段重写；行式摘要只是中间交换
-//     格式，不落槽——见下方「检查点式摘要合成」）。
-//   槽格式（parseSummarySlot 容忍无标记的旧格式——整体当叙述，实体索引为空，向后兼容）：
+//     格式，不落槽——见下方「检查点式摘要合成」）；
+//   · ⟦DSC:CONSTRAINTS⟧ 约束保护位（P1-B，评审修复批 2026-11-19）：用户明示约束的「只增不删」位——
+//     LLM 经检查点「约束与偏好」段发现新约束，代码侧 union 合并回写、压缩改写不触及（见
+//     applyConstraintProtection）——「越聊越不听话」的根治位。
+//   槽格式（parseSummarySlot 容忍无标记的旧格式——整体当叙述，实体索引/约束为空，向后兼容）：
 //     ⟦DSC:ARCHIVE-INDEX⟧ <实体1> | <实体2> | ...
 //     ⟦DSC:ARCHIVE-NOTES⟧
 //     - 叙述行…
+//     ⟦DSC:CONSTRAINTS⟧
+//     - 用户明示的约束行…（段可为整段缺省）
 
 /** 实体索引去重后的全局上限（超限按 LRU 淘汰：最久未使用的先出——见下方 usage 表；无表退化保新弃旧） */
 const ARCHIVE_INDEX_MAX_ENTRIES = 120;
@@ -303,18 +308,25 @@ export const extractArchiveEntities = (batch: Msg[]): string[] => {
     return found.slice(0, ARCHIVE_INDEX_BATCH_CAP);
 }
 
-/** 解析摘要槽为 { index, notes }。无标记的旧格式（或空槽）→ 全部当叙述，索引为空。 */
-export const parseSummarySlot = (content: string): { index: string[]; notes: string } => {
+/** 解析摘要槽为 { index, notes, constraints }。无标记的旧格式（或空槽）→ 全部当叙述，索引/约束为空。 */
+export const parseSummarySlot = (content: string): { index: string[]; notes: string; constraints: string[] } => {
     const raw = content ?? '';
     const idxMark = raw.indexOf('⟦DSC:ARCHIVE-INDEX⟧');
     const notesMark = raw.indexOf('⟦DSC:ARCHIVE-NOTES⟧');
-    if (idxMark === -1 || notesMark === -1 || notesMark < idxMark) return { index: [], notes: raw };
+    const consMark = raw.indexOf('⟦DSC:CONSTRAINTS⟧');
+    if (idxMark === -1 || notesMark === -1 || notesMark < idxMark) return { index: [], notes: raw, constraints: [] };
     const indexText = raw.slice(idxMark + '⟦DSC:ARCHIVE-INDEX⟧'.length, notesMark);
     // 标记行内嵌使用指引（首行，供模型阅读），实体列表自第二行起按 | 分隔——指引不得混入实体元素
     const entityText = indexText.includes('\n') ? indexText.slice(indexText.indexOf('\n') + 1) : '';
-    const notes = raw.slice(notesMark + '⟦DSC:ARCHIVE-NOTES⟧'.length).replace(/^\n+/, '');
+    const notesRaw = raw.slice(notesMark + '⟦DSC:ARCHIVE-NOTES⟧'.length, consMark > notesMark ? consMark : raw.length);
+    // 有约束段时切分残留的尾随换行归段边界清理（无约束段的旧格式路径不动，零回归）
+    const notes = (consMark > notesMark ? notesRaw.replace(/\n+$/, '') : notesRaw).replace(/^\n+/, '');
+    // 约束保护位段（P1-B）：标记行独占一行，约束行逐行紧随其后
+    const constraints = consMark > notesMark
+        ? raw.slice(consMark + '⟦DSC:CONSTRAINTS⟧'.length).split('\n').map(s => s.trim()).filter(Boolean)
+        : [];
     const index = entityText.split('|').map(s => s.trim()).filter(Boolean);
-    return { index, notes };
+    return { index, notes, constraints };
 }
 
 // ==================== 实体索引 LRU 使用频次（P1-C，评审修复批 2026-11-19） ====================
@@ -354,7 +366,7 @@ export const touchArchiveIndexOnQuery = (sessionId: string, query: string): void
  *  整段重写，不再逐行追加；传行只为兼容旧调用形态）。
  */
 export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[], usage?: ArchiveIndexUsage): string => {
-    const { index, notes } = parseSummarySlot(oldContent);
+    const { index, notes, constraints } = parseSummarySlot(oldContent);
     // tick 登记：旧实体保留既有 tick，缺表者按位置赋序（倒序遍历 → 位置越靠前 tick 越大 = 越新入档）；
     // 新实体 = 本轮归档即最新使用。
     if (usage) {
@@ -389,12 +401,16 @@ export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntiti
         merged.push(...kept);
     }
     const newNotes = noteLine ? (notes ? `${notes}\n${noteLine}` : noteLine) : notes;
-    return [
+    const parts = [
         '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
         merged.join(' | '),
         '⟦DSC:ARCHIVE-NOTES⟧',
         newNotes,
-    ].join('\n');
+    ];
+    // ★ P1-B：约束保护位段原样透传（索引先行落位与约束解耦；合并后由合成路径经
+    //   applyConstraintProtection 做 union——此处不增不改，只保段不丢）
+    if (constraints.length > 0) parts.push('⟦DSC:CONSTRAINTS⟧', ...constraints);
+    return parts.join('\n');
 }
 
 // ==================== 检查点式摘要合成（借 pi 的 checkpoint / SUMMARIZATION+UPDATE 语义） ====================
@@ -410,6 +426,98 @@ export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntiti
 
 /** 检查点输出字数预算：防合成结果膨胀吃窗口（中文 1 字≈1 token，约对应 800 token）。 */
 const CHECKPOINT_MAX_CHARS = 800;
+
+// ==================== 约束保护位（P1-B，评审修复批 2026-11-19） ====================
+//
+// 「越聊越不听话」的根治位：用户明示的约束旧路线下躺在摘要重写区——每次压缩都是一次有损重写，
+// 800 字预算 + 「可删除过期细节」授权让「约束与偏好」段单调衰减（"(无)" 是合法输出且无校验），
+// 信息单调递减且不可逆。摘要槽加第三段 ⟦DSC:CONSTRAINTS⟧，与 ⟦DSC:ARCHIVE-INDEX⟧ 同构：
+//  · LLM 只负责在新归档中发现约束（经检查点「约束与偏好」段表达，无新 LLM 契约）；
+//  · 代码侧 union 合并只增不删——段随槽进请求、重建时按代码侧合并结果回写，压缩改写不触及；
+//  · 立即缓解同步内置：压缩产物约束段行数缩水 → 旧行 splice 回新检查点（检查点自身不缩水）。
+
+const CONSTRAINTS_HEADING = '## 约束与偏好';
+/** 约束保护位条数上限：约束句天然少量（两位数封顶），防极端会话无界侵蚀槽空间；封顶保先（旧约束优先） */
+const CONSTRAINTS_MAX_LINES = 40;
+/** "(无)" 类占位行（CHECKPOINT_FORMAT 允许的合法输出）不入保护位 */
+const CONSTRAINT_PLACEHOLDER_RE = /^[-*]?\s*[「'"]?\(?无\)?[」'"]?$/;
+
+/** 从检查点文本抽取「约束与偏好」段行（保序保原样；遇下一级标题即止；占位行不入）。 */
+export const extractConstraintLines = (notes: string): string[] => {
+    const out: string[] = [];
+    let inSection = false;
+    for (const l of (notes ?? '').split('\n')) {
+        const t = l.trim();
+        if (/^#{1,6}\s/.test(t)) { inSection = t.replace(/^#{1,6}\s*/, '').startsWith('约束与偏好'); continue; }
+        if (inSection && t && !CONSTRAINT_PLACEHOLDER_RE.test(t.replace(/^[-*]\s*/, '').trim())) out.push(t);
+    }
+    return out;
+};
+
+/** 约束行归一键（去列表符/空白归一/小写）——union 去重口径（措辞微调视为同条，只保留先入形态） */
+const constraintKey = (line: string): string =>
+    line.trim().replace(/^[-*]\s*/, '').replace(/\s+/g, ' ').toLowerCase();
+
+/** 约束 union（保序：先入者在前、新条目追加；按归一键去重；封顶保先——旧约束优先于新表述） */
+const unionConstraints = (groups: string[][]): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const g of groups) {
+        for (const l of g) {
+            const k = constraintKey(l);
+            if (!k || seen.has(k)) continue;
+            seen.add(k);
+            out.push(l.trim());
+            if (out.length >= CONSTRAINTS_MAX_LINES) return out;
+        }
+    }
+    return out;
+};
+
+/** 把约束行回写进检查点文本的「约束与偏好」段：有段则整段替换（缺失旧行即补回），无段则重建
+ *  （插在「## 进度」之前；无「## 进度」则插在「## 目标」段后；再无则置顶）。 */
+const spliceConstraintSection = (notes: string, sectionLines: string[]): string => {
+    if (sectionLines.length === 0) return notes;
+    const section = [CONSTRAINTS_HEADING, ...sectionLines];
+    const lines = notes.split('\n');
+    const startIdx = lines.findIndex(l => l.trim() === CONSTRAINTS_HEADING);
+    if (startIdx !== -1) {
+        let endIdx = lines.length;
+        for (let i = startIdx + 1; i < lines.length; i++) {
+            if (/^#{1,6}\s/.test(lines[i].trim())) { endIdx = i; break; }
+        }
+        lines.splice(startIdx + 1, endIdx - startIdx - 1, ...sectionLines);
+        return lines.join('\n');
+    }
+    const progressIdx = lines.findIndex(l => /^#{1,6}\s*进度/.test(l.trim()));
+    if (progressIdx !== -1) { lines.splice(progressIdx, 0, ...section, ''); return lines.join('\n'); }
+    const goalIdx = lines.findIndex(l => /^#{1,6}\s*目标/.test(l.trim()));
+    if (goalIdx !== -1) {
+        let insertAt = goalIdx + 1;
+        while (insertAt < lines.length && lines[insertAt].trim() && !/^#{1,6}\s/.test(lines[insertAt].trim())) insertAt++;
+        lines.splice(insertAt, 0, '', ...section);
+        return lines.join('\n');
+    }
+    return [...section, '', ...lines].join('\n');
+};
+
+/**
+ * P1-B 约束保护位合并（三条合成路径共用出口——新归档合成 / 叙述改写 / 自收敛安全网）：
+ *  1) union 三源：旧槽 CONSTRAINTS 段（既有保护位，永不被改写）+ 旧检查点「约束与偏好」段
+ *     （迁移种子：启用保护位前的存量会话首轮即收编）+ 新检查点「约束与偏好」段（本轮 LLM 发现）；
+ *  2) 立即缓解：新检查点约束段行数 < 旧段 → union 整段回写新检查点（旧行缺失即补回，自身不缩水）；
+ *  3) 装配时约束段与索引段同为代码侧回写——LLM 改写叙述不触及（只增不删）。
+ */
+export const applyConstraintProtection = (oldSlotContent: string, index: string[], newNotes: string): string => {
+    const parsed = parseSummarySlot(oldSlotContent);
+    const oldSection = extractConstraintLines(parsed.notes);
+    const newSection = extractConstraintLines(newNotes);
+    const union = unionConstraints([parsed.constraints, oldSection, newSection]);
+    const repairedNotes = newSection.length < oldSection.length
+        ? spliceConstraintSection(newNotes, union)
+        : newNotes;
+    return assembleSlot(index, repairedNotes, union);
+};
 
 /** ensureSummarySlot 塞的占位文本——出现在叙述段位置时不算既有检查点（防被当上下文喂给合成模型）。 */
 const SLOT_PLACEHOLDER = 'SYSTEM_ROLLING_SUMMARY_SLOT';
@@ -438,8 +546,8 @@ const checkpointRules = (hasPrevious: boolean, isRaw = false): string =>
  */
 export const checkpointPrompt = (hasPrevious: boolean): string =>
     (hasPrevious
-        ? '以上是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点。请把既有检查点与用户消息中的本轮新归档摘要行合并改写为一份新的结构化检查点，供后续模型续接工作。'
-        : '用户消息是本会话本轮归档出的摘要行。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引由系统另行确定性维护，无需你输出）。')
+        ? '以上是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）、⟦DSC:CONSTRAINTS⟧ 约束保护位（系统维护，无需你输出）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点。请把既有检查点与用户消息中的本轮新归档摘要行合并改写为一份新的结构化检查点，供后续模型续接工作。'
+        : '用户消息是本会话本轮归档出的摘要行。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引与约束保护位由系统另行确定性维护，无需你输出；但「约束与偏好」段请如实整理本轮可见的用户约束）。')
     + CHECKPOINT_FORMAT
     + checkpointRules(hasPrevious);
 
@@ -449,27 +557,32 @@ export const checkpointPrompt = (hasPrevious: boolean): string =>
  */
 const checkpointDirectPrompt = (hasPrevious: boolean): string =>
     (hasPrevious
-        ? 'system 消息是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点；其后的对话消息是本轮新归档的会话原文（未经行式压缩）。请把既有检查点与这些原文合并改写为一份新的结构化检查点，供后续模型续接工作。'
-        : '本轮归档出的会话原文以对话消息形式附后（未经行式压缩）。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引由系统另行确定性维护，无需你输出）。')
+        ? 'system 消息是本会话的归档档案：⟦DSC:ARCHIVE-INDEX⟧ 实体索引（检索线索，不要改动其内容）、⟦DSC:CONSTRAINTS⟧ 约束保护位（系统维护，无需你输出）与 ⟦DSC:ARCHIVE-NOTES⟧ 既有检查点；其后的对话消息是本轮新归档的会话原文（未经行式压缩）。请把既有检查点与这些原文合并改写为一份新的结构化检查点，供后续模型续接工作。'
+        : '本轮归档出的会话原文以对话消息形式附后（未经行式压缩）。请把它们整理为一份结构化检查点，供后续模型续接工作（实体索引与约束保护位由系统另行确定性维护，无需你输出；但「约束与偏好」段请如实整理本轮可见的用户约束）。')
     + '这批原文紧邻未压缩的保留区，请额外写明其中对紧随其后的近期工作有用的背景（已确认的约束、数据、结论）。'
     + CHECKPOINT_FORMAT
     + checkpointRules(hasPrevious, true);
 
 /**
  * 槽叙述段合成：本轮归档行（可空）+ 旧叙述 → 新检查点，输出只【替换】叙述段——
- *  实体索引段原样保留，永不被 LLM 改写（索引无损硬约束）。输出不守格式时由 parseSummarySlot
- *  的宽容解析兜底（整体当叙述，不影响槽结构）。
+ *  实体索引段原样保留、约束保护位段代码侧 union（只增不删），均永不被 LLM 改写
+ *  （索引无损硬约束 + P1-B 约束保护位；出口统一走 applyConstraintProtection）。
+ *  输出不守格式时由 parseSummarySlot 的宽容解析兜底（整体当叙述，不影响槽结构）。
  *  调用时机：每轮压缩末尾（newLines = compactToLine 产出的状态序行）；
  *  自收敛安全网复用同一路径（newLines='' → 纯改写既有叙述）。
  */
-/** 槽装配（索引段原样保留 + 新叙述段替换）——行式与直通两条合成路线共用（索引无损硬约束）。 */
-const assembleSlot = (index: string[], newNotes: string): string =>
-    [
+/** 槽装配（索引段原样保留 + 新叙述段替换 + 约束保护位段）——行式与直通两条合成路线共用
+ *  （索引无损硬约束；约束段为空时整段省略，槽格式对旧会话零增量）。 */
+const assembleSlot = (index: string[], newNotes: string, constraints: string[] = []): string => {
+    const parts = [
         '⟦DSC:ARCHIVE-INDEX⟧ 精确细节可用 recall 工具检索本会话全量历史；以下为归档实体索引（检索关键词线索）：',
         index.join(' | '),
         '⟦DSC:ARCHIVE-NOTES⟧',
         newNotes,
-    ].join('\n');
+    ];
+    if (constraints.length > 0) parts.push('⟦DSC:CONSTRAINTS⟧', ...constraints);
+    return parts.join('\n');
+};
 
 const parseSlotNarrativeState = (slotContent: string) => {
     const { index, notes } = parseSummarySlot(slotContent);
@@ -490,7 +603,7 @@ export const synthesizeSlotNarrative = async (slotContent: string, newLines: str
         { signal, onAuxUsage }
     );
     const newNotes = (resp.choices[0].message.content || '').trim();
-    return assembleSlot(index, newNotes);
+    return applyConstraintProtection(slotContent, index, newNotes);
 }
 
 /**
@@ -511,7 +624,7 @@ export const synthesizeSlotNarrativeFromBatch = async (slotContent: string, batc
         { signal, onAuxUsage }
     );
     const newNotes = (resp.choices[0].message.content || '').trim();
-    return assembleSlot(index, newNotes);
+    return applyConstraintProtection(slotContent, index, newNotes);
 }
 
 /**
