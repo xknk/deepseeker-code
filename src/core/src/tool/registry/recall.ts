@@ -15,6 +15,7 @@
  */
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot } from "../guard.ts";
+import { touchArchiveIndexOnQuery } from "@/agent/truncate.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
 import { getToolOutputSidecarPath, safeSidecarId, SIDECAR_ARCHIVED_MARK } from "@/session/sidecar.ts";
 import fs from "fs/promises";
@@ -186,6 +187,9 @@ export const recallTools: CustomTool[] = [
                             "· 记得归档区在摘要槽之前的更早轮次——用更早阶段出现过的词"].join('\n');
                     }
                     recallHitCounts.set(ctx.sessionId, (recallHitCounts.get(ctx.sessionId) ?? 0) + 1); // H3 /context 召回命中计数
+                    // ★ P1-C（评审修复批 2026-11-19）：命中即触达索引实体 LRU——模型按索引线索检索成功
+                    //   = 该线索仍在服役，满编淘汰时不被逐出（truncate.touchArchiveIndexOnQuery）。
+                    touchArchiveIndexOnQuery(ctx.sessionId, cleanQuery);
                     return [`[recall] 本会话全量转录命中 ${blocks.length} 条（按时间旧→新，含已归档消息）：`, '', blocks.join('\n\n'), '',
                         '提示：⚠️ 标注的文件必须重新 read_file 验证后才能据以修改；本工具结果仅作历史线索，不替代当前文件状态。'].join('\n');
                 } catch (e) {

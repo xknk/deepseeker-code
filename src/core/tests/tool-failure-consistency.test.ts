@@ -55,7 +55,8 @@ const ALLOWLIST = new Set([
     //  682/754/806→683/755/808：P0-A externalContent 声明（fetch/search 各 +1 行，806 在两行后=+2）——2026-11-19）
     "http.ts:150", "http.ts:204", "web.ts:683", "web.ts:755", "web.ts:808",
     // recall 检索成功后的 staleness 标注（⚠️ 文件已变动提示，属信息性附注非工具失败）
-    "recall.ts:63",
+    //（63→64：P1-C touchArchiveIndexOnQuery 导入行（+1 行）——2026-11-19）
+    "recall.ts:64",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）
     "search.ts:114", "search.ts:124",
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）

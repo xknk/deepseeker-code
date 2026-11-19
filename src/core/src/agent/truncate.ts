@@ -217,13 +217,31 @@ export const compactBatch = async (batch: Msg[], signal?: AbortSignal, tailConte
 //     ⟦DSC:ARCHIVE-NOTES⟧
 //     - 叙述行…
 
-/** 实体索引去重后的全局上限（超限保新弃旧：近期的路径/符号对后续检索更有价值） */
+/** 实体索引去重后的全局上限（超限按 LRU 淘汰：最久未使用的先出——见下方 usage 表；无表退化保新弃旧） */
 const ARCHIVE_INDEX_MAX_ENTRIES = 120;
 /** 单批次提取的实体数上限（防一个巨型工具结果把索引撑爆） */
 const ARCHIVE_INDEX_BATCH_CAP = 60;
 
 /** 实体入索长度下限：ASCII 实体 3 字符起（2 字符误报率高），含 CJK 的 2 字符即可（中文词信息密度高） */
 const entityMinLen = (s: string): number => (/[一-鿿]/.test(s) ? 2 : 3);
+
+/** 实体入索长度上限（P1-C）：超过不再整条丢弃，压缩为「前缀 + 哈希尾」。
+ *  Windows 深路径常态超 60 字符——旧实现整条丢弃永久掐断 recall 的查询词线索（评审 P1-C）。 */
+const ENTITY_MAX_CHARS = 60;
+/** 压缩形态保留的前缀长度：44 + `~` + 8 位哈希 = 53 ≤ 上限，前缀仍是原实体的可检索子串 */
+const ENTITY_KEEP_CHARS = 44;
+
+/** FNV-1a 32bit → 8 位 hex（确定性、跨重启稳定；仅用于索引去重歧义消除，非安全哈希）。 */
+const fnv1aHex = (s: string): string => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0).toString(16).padStart(8, '0');
+};
+
+/** 超长实体压缩（P1-C）：截前缀 + `~` + 全文哈希尾——前缀保可匹配性（recall 按子串命中原文），
+ *  哈希尾保跨轮去重稳定（同一长路径再提取产出同一形态）与同前缀不同路径的歧义消除。 */
+const compressLongEntity = (s: string): string =>
+    `${sliceHeadNoSplit(s, ENTITY_KEEP_CHARS)}~${fnv1aHex(s)}`;
 
 /**
  * 从待压缩消息中确定性提取检索实体（召回辅助，尽力而为，纯代码零 LLM）：
@@ -250,12 +268,16 @@ export const extractArchiveEntities = (batch: Msg[]): string[] => {
     const found: string[] = [];
     const seen = new Set<string>(); // 小写归一键（保留首个原始写法；与 recall 大小写不敏感检索同口径）
     const push = (raw: string) => {
-        const s = raw.trim();
-        if (!s || s.length < entityMinLen(s) || s.length > 60 || seen.has(s.toLowerCase()) || s.includes('|')) return;
+        const s0 = raw.trim();
+        if (!s0 || s0.length < entityMinLen(s0) || seen.has(s0.toLowerCase()) || s0.includes('|')) return;
         // ★ 版本号形态过滤：末段纯数字/点（如 UA 碎片 AppleWebKit/537.36、Chrome/152.0.0.0）恰似
         //   「路径+数字扩展名」会被路径正则误收，挤占 120 条实体名额（真实索引中曾占 ~10 条）。
-        const lastSeg = s.split(/[\\/]/).pop() ?? '';
+        const lastSeg = s0.split(/[\\/]/).pop() ?? '';
         if (/^[\d.]+$/.test(lastSeg)) return;
+        // ★ P1-C：超长实体不再整条丢弃——压缩为「前缀~哈希尾」保可匹配性与去重稳定性。
+        //   版本号过滤按原文判定（压缩形态末段是哈希，可能恰为纯数字）。
+        const s = s0.length > ENTITY_MAX_CHARS ? compressLongEntity(s0) : s0;
+        if (seen.has(s.toLowerCase())) return;
         seen.add(s.toLowerCase());
         found.push(s);
     };
@@ -295,20 +317,76 @@ export const parseSummarySlot = (content: string): { index: string[]; notes: str
     return { index, notes };
 }
 
+// ==================== 实体索引 LRU 使用频次（P1-C，评审修复批 2026-11-19） ====================
+//
+// ★ 旧满编策略「保新弃旧」的三宗罪（评审 P1-C）：早期路径满编后永久消失、不会因后续需要被找回；
+//   而「被用过」恰是「对当前工作仍有价值」的最强信号。use 事件两来源：
+//   ① recall 查询命中（touchArchiveIndexOnQuery——模型按索引线索检索成功 = 该线索仍在服役）；
+//   ② 再合并时出现在新归档批次（mergeSummarySlot 内：新实体 tick = 最新）。
+// 进程内存活（重启即失）：缺表/无表时按槽内位置赋序（靠前=新入档）重建近似时序，退化行为
+// = 保新弃旧（与旧实现等价），不会更差。
+
+/** 每 session 一份：实体小写键 → 最后使用 tick（单调递增计数器）。 */
+export type ArchiveIndexUsage = { tick: Map<string, number>; counter: number };
+
+const indexUsageBySession = new Map<string, ArchiveIndexUsage>();
+
+/** 取（惰性建）某会话的索引使用表——ensureFitsWindow 压缩路径与测试共用。 */
+export const getArchiveIndexUsage = (sessionId: string): ArchiveIndexUsage => {
+    let u = indexUsageBySession.get(sessionId);
+    if (!u) { u = { tick: new Map(), counter: 0 }; indexUsageBySession.set(sessionId, u); }
+    return u;
+};
+
+/** recall 查询命中后触达索引实体（双向子串命中即视为「该线索被用过」），LRU 淘汰据此保活。 */
+export const touchArchiveIndexOnQuery = (sessionId: string, query: string): void => {
+    const q = query.trim().toLowerCase();
+    if (!q) return;
+    const usage = getArchiveIndexUsage(sessionId);
+    for (const entity of usage.tick.keys()) {
+        if (entity.includes(q) || q.includes(entity)) usage.tick.set(entity, usage.counter++);
+    }
+};
+
 /**
- * 合并一轮新归档的实体索引：去重合并（新实体优先、封顶保新弃旧）。
+ * 合并一轮新归档的实体索引：去重合并（新实体优先）；满编按 LRU 淘汰（usage 表缺失时退化保新弃旧）。
  *  noteLine 为空 → 仅做索引合并，叙述原样保留（检查点路线下叙述由 synthesizeSlotNarrative
  *  整段重写，不再逐行追加；传行只为兼容旧调用形态）。
  */
-export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[]): string => {
+export const mergeSummarySlot = (oldContent: string, noteLine: string, newEntities: string[], usage?: ArchiveIndexUsage): string => {
     const { index, notes } = parseSummarySlot(oldContent);
+    // tick 登记：旧实体保留既有 tick，缺表者按位置赋序（倒序遍历 → 位置越靠前 tick 越大 = 越新入档）；
+    // 新实体 = 本轮归档即最新使用。
+    if (usage) {
+        for (let i = index.length - 1; i >= 0; i--) {
+            const k = index[i].toLowerCase();
+            if (!usage.tick.has(k)) usage.tick.set(k, usage.counter++);
+        }
+        for (const e of newEntities) usage.tick.set(e.toLowerCase(), usage.counter++);
+    }
     const merged: string[] = [];
     const seen = new Set<string>(); // 小写归一（与提取端、recall 大小写不敏感检索同口径，README.md/readme.md 不再各占名额）
     for (const e of [...newEntities, ...index]) {
         if (!e || seen.has(e.toLowerCase())) continue;
         seen.add(e.toLowerCase());
         merged.push(e);
-        if (merged.length >= ARCHIVE_INDEX_MAX_ENTRIES) break;
+    }
+    // 满编淘汰：LRU（tick 最小 = 最久未用先出；同时清出使用表防无界增长）。
+    // 无 usage 表（旧调用形态/直测）退化为保新弃旧——尾部即最旧，行为与旧实现逐字节一致。
+    if (merged.length > ARCHIVE_INDEX_MAX_ENTRIES) {
+        const drop = new Set<string>();
+        if (usage) {
+            const t = (e: string): number => usage.tick.get(e.toLowerCase()) ?? -1;
+            for (const e of [...merged].sort((a, b) => t(a) - t(b)).slice(0, merged.length - ARCHIVE_INDEX_MAX_ENTRIES)) {
+                drop.add(e.toLowerCase());
+            }
+        } else {
+            for (let i = ARCHIVE_INDEX_MAX_ENTRIES; i < merged.length; i++) drop.add(merged[i].toLowerCase());
+        }
+        for (const k of drop) usage?.tick.delete(k);
+        const kept = merged.filter(e => !drop.has(e.toLowerCase()));
+        merged.length = 0;
+        merged.push(...kept);
     }
     const newNotes = noteLine ? (notes ? `${notes}\n${noteLine}` : noteLine) : notes;
     return [
@@ -791,7 +869,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                     // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先）。索引段随槽进入辅助
                     //   压缩请求，但合成产物重建时按旧值原样回写、不被改写——见 assembleSlot——与叙述合成解耦；
                     //   noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
-                    summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact));
+                    summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact), getArchiveIndexUsage(event.sessionId));
                     // ★ 检查点合成（首轮生成语义、后续更新语义），整段替换叙述段。行是批量归档的交换格式、不落槽——
                     //   槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
                     //   ★ 单批直通：常见形态（1–3 批中的单批）批次原文直接交合成，跳过行式中转——
