@@ -152,23 +152,74 @@ describe("P0-A ③ provenanceGate 门（审批层降权）", () => {
         assert.equal(executed, false, "execute 不执行");
     });
 
-    it("无风险：门返回 'pass' 零作用，allow 规则照常免审（allow-always 日常零摩擦）", async () => {
-        const s = sid();
-        const rule = buildScopedAllowRule("prov_save", { name: "x" }, "name")!;
-        addSessionPermissionRule(rule, "allow", s);
-        assert.equal(hasExternalContent(s), false);
+        it("无风险：门返回 'pass' 零作用，allow 规则照常免审（allow-always 日常零摩擦）", async () => {
+            const s = sid();
+            const rule = buildScopedAllowRule("prov_save", { name: "x" }, "name")!;
+            addSessionPermissionRule(rule, "allow", s);
+            assert.equal(hasExternalContent(s), false);
 
-        let approvals = 0;
-        // ★ 终审 P1-A：门改为「总是调用 + 自主判定」，工具可返回 'pass' 保住既有授权。
-        const ctx = makeCtx([gatedTool((_a: any, c: any) => (hasExternalContent(c?.sessionId) ? "confirm" : "pass"))], {
-            sessionId: s,
-            requestApproval: async () => { approvals++; return "allow-once"; },
+            let approvals = 0;
+            // ★ 终审 P1-A：门改为「总是调用 + 自主判定」，工具可返回 'pass' 保住既有授权。
+            const ctx = makeCtx([gatedTool((_a: any, c: any) => (hasExternalContent(c?.sessionId) ? "confirm" : "pass"))], {
+                sessionId: s,
+                requestApproval: async () => { approvals++; return "allow-once"; },
+            });
+            const out = await processToolCall(tc("g3", "prov_save", { name: "x" }), ctx);
+            assert.equal(approvals, 0, "免审——日常 save 零摩擦");
+            assert.equal(out.ok, true);
         });
-        const out = await processToolCall(tc("g3", "prov_save", { name: "x" }), ctx);
-        assert.equal(approvals, 0, "免审——日常 save 零摩擦");
-        assert.equal(out.ok, true);
+
+        /**
+         * ★ 门之后的下游免审批分支不得顶掉 provenance（终审补漏，2026-11-19）。
+         *  顺序事实：provenance 门在 checkPermission 之后，但它后面还有「只读命令免审」与
+         *  「分类器 auto==='allow'」两处把 needApproval 改回 false——若工具同时声明
+         *  provenanceGate + autoApproval，强制人工会被静默取消。当前无工具兼有两者（巧合安全），
+         *  故用闩锁把这条路结构性关死，并在此钉死回归。
+     *  选用 autoApproval='loopback' 的**确定性 allow 分支**（autoPermission.ts:550-553：字面回环目标
+     *  → 直接 'allow'），无需 LLM、不碰磁盘即可稳定复现「auto==='allow' → needApproval=false」这条赋值。
+         */
+        const fastPathGatedTool = (gate: any): any => ({
+            type: "function",
+            function: {
+                name: "prov_fast", description: "", parameters: { type: "object", properties: {} },
+                safetyLevel: ToolSafetyLevel.MUTATION, isSync: true,
+                autoApproval: "loopback", primaryArg: "url", // → 分类器确定性 allow
+                provenanceGate: gate,
+                requireApproval: (a: any) => `调用 ${a?.url}`,
+                execute: async () => "fast-ok",
+            },
+        });
+
+        it("分类器 auto==='allow' 不得顶掉 provenance confirm（闩锁生效）", async () => {
+            const s = sid();
+            markExternalContent(s); // 来源级命中 → 工具判 confirm
+            let approvals = 0;
+            let executed = false;
+            const tool = fastPathGatedTool((_a: any, c: any) => (hasExternalContent(c?.sessionId) ? "confirm" : "pass"));
+            tool.function.execute = async () => { executed = true; return "fast-ok"; };
+            const ctx = makeCtx([tool], {
+                sessionId: s,
+                requestApproval: async () => { approvals++; return "allow-once"; },
+            });
+            const out = await processToolCall(tc("g4", "prov_fast", { url: "http://127.0.0.1:3000/ping" }), ctx);
+            assert.equal(approvals, 1, `auto==='allow' 被 provenance 闩锁压住 → 仍强制人工一次（result=${out.resultForModel}）`);
+            assert.equal(out.ok, true, "用户放行后照常执行");
+            assert.equal(executed, true);
+        });
+
+        it("对照：门返回 pass 时分类器快路径照常免审（闩锁不误伤正常放行）", async () => {
+            const s = sid();
+            assert.equal(hasExternalContent(s), false);
+            let approvals = 0;
+            const ctx = makeCtx([fastPathGatedTool(() => "pass")], {
+                sessionId: s,
+                requestApproval: async () => { approvals++; return "allow-once"; },
+            });
+            const out = await processToolCall(tc("g5", "prov_fast", { url: "http://127.0.0.1:3000/ping" }), ctx);
+            assert.equal(approvals, 0, `无 provenance 风险 → auto==='allow' 正常免审（result=${out.resultForModel}）`);
+            assert.equal(out.ok, true);
+        });
     });
-});
 
 describe("P0-A ④ memory_save 安全级与 provenance 硬拒", () => {
     const find = (n: string) => (memoryTools as any[]).find((x) => x.function.name === n)!;

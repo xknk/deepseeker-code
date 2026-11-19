@@ -268,6 +268,14 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
     const level = matchedTool.function.safetyLevel;
     let needApproval = level === ToolSafetyLevel.MUTATION || level === ToolSafetyLevel.DANGER;
     let autoGateAsked = false; // ★ I-5：auto 分类器未放行（'ask'）→ 审批 detail 补来由说明
+    // ★ provenance 强制人工闩锁（终审 P1-A 补漏，2026-11-19）：provenanceGate 判 'confirm' 后置 true，
+    //   审批条件改读 `needApproval || provenancePinned`。为何需要闩锁而非仅置 needApproval=true：
+    //   门之后还有两处会把它改回 false——只读命令免审（下方）与分类器 auto==='allow'（下方分类器段）；
+    //   当前无工具同时声明 provenanceGate 与 autoApproval/命令语义，故未真正失守，但那是「巧合安全」：
+    //   新工具一旦两者兼有，分类器的确定性快路径（autoApproval='file' + 非 DANGER + 有 undo 兜底）
+    //   或只读命令免审就会把 provenance 的强制人工直接顶掉。用独立闩锁而非逐处打补丁，
+    //   使未来任何新增的 needApproval=false 分支都结构性地无法覆盖 provenance。
+    let provenancePinned = false;
     // ★ 改写型 PreToolUse（第二梯队 #3，开关开时的正确位置）：位于全部安全门禁之前——
     //   改写后的 args 才是被保护路径/权限规则/灾难命令/互斥锁/审批/undo 备份评估的对象
     //   （否则 hook 改写会绕过门禁，或用户批了 X 而 hook 已改成 Y）。deny 亦前置（省无谓审批
@@ -349,6 +357,7 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
             state.approvalCause = 'provenance';
         } else if (policy === 'confirm') {
             needApproval = true;
+            provenancePinned = true; // 闩锁：后续只读免审/分类器 allow 不得回落
             state.approvalCause = 'provenance';
         }
     }
@@ -426,7 +435,7 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
         else if (auto === 'deny') { state.denied = true; failResult(state, `❌ [auto] 内置高危清单拦截：[${calledName}] ${state.calledArgs?.path ?? ''}。`, 'permission'); }
         else { autoGateAsked = true; } // ★ I-5：'ask'（risky/不确定/超时/异常/未声明 autoApproval/工作区外）→ 落人工，审批 detail 补说明
     }
-    if (needApproval && !state.denied) {
+    if ((needApproval || provenancePinned) && !state.denied) {
         const ra = matchedTool.function.requireApproval;
         let detail = `申请执行高危工具 [${calledName}]`;
         try { if (ra) detail = typeof ra === 'function' ? await ra(state.calledArgs, toolCtx) : ra; }
