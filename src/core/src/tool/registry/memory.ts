@@ -8,7 +8,13 @@
  *   也避免给通用 fs 工具开「越界写」的口子。
  *
  *  设计要点：
- *   - memory_save/read/list 均 SAFE + isSync：记忆写入是低风险元数据操作（不碰用户代码），免审批降低摩擦；
+ *   - memory_save/delete 升 MUTATION 审批 + memory_read/list 保持 SAFE：记忆写入是「沙箱外持久状态」
+ *     操作（写进去的内容每轮进系统提示词、影响之后所有会话）——层级错配修正（评审 P0-A，2026-11-19）：
+ *     注入面恰在 save（被注入的工具结果可诱导模型把外部文本写进记忆 = 跨会话持久提示词注入），
+ *     配合 allow-always 一次性授权后日常保存零摩擦（与 memory_delete 同款机制）；read/list 纯读免审；
+ *   - memory_save 带 provenanceGate（评审 P0-A，2026-11-19）：本回合消费过外部内容（web_fetch/
+ *     web_search/命令输出，tool/provenance.ts）后——project 源硬拒（随 git 扩散给所有克隆者，
+ *     注入面 = 供应链投毒）、global 源降权待确认（既有 allow 规则本次失效，人工过目一次）；
  *   - memory_delete 升 MUTATION 审批（后续路线 #9，2026-09-16）：记忆目录在工作区沙箱外，被注入的
  *     工具结果可诱导模型删除/篡改跨会话记忆，删除又不可 undo（目录不在工作区备份范围内）——删除必须人工过目；
  *   - memory_save 带条数 + 索引字节双上限（#9②）：索引是唯一逐轮注入提示词的组件，只增不减会持续
@@ -23,8 +29,9 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { toolFailure, CustomTool, ToolSafetyLevel } from "@/tool/type.ts";
+import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "@/tool/type.ts";
 import { makeTmpPath } from "./fs.ts";
+import { hasExternalContent } from "@/tool/provenance.ts";
 import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
 import { registerMemory, getMemory, unregisterMemory, listMemories, getMemoryIndex, memoryIndexLine, MEMORY_LIMITS, MemoryType, MemoryManifest } from "@/memory/registry.ts";
 import { recordMemoryUse } from "@/memory/usage.ts";
@@ -105,14 +112,38 @@ export const memoryTools: CustomTool[] = [
                 },
                 required: ["name", "description", "body"],
             },
-            safetyLevel: ToolSafetyLevel.SAFE,
+            // ★ P0-A（评审修复批 2026-11-19）：SAFE → MUTATION。记忆是「沙箱外持久状态」——写进去的
+            //   内容每轮注入系统提示词、影响之后所有会话，而 save 恰是注入面（被注入的工具结果可诱导
+            //   模型把外部文本写进记忆 = 跨会话持久提示词注入）。未声明 autoApproval → 分类器恒 'ask'
+            //   → 转人工；allow-always 经 primaryArg 落精确名作用域规则，一次授权后日常保存零摩擦。
+            //   provenanceGate：本回合消费过外部内容后降权——project 源硬拒（随 git 扩散 = 供应链投毒面）、
+            //   global 源既有 allow 规则本次失效（人工确认后才写）。
+            safetyLevel: ToolSafetyLevel.MUTATION,
             isSync: true,
-            async execute(args: any) {
+            primaryArg: "name",
+            provenanceGate: (args: any): 'confirm' | 'reject' => (args?.project === true ? 'reject' : 'confirm'),
+            requireApproval: (args: any, ctx?: ToolContext) => {
+                const name = sanitizeLine(args?.name);
+                const project = args?.project === true;
+                const base = project
+                    ? `保存持久记忆 **${name}** 到【项目源】（.deepseeker-code/memory，可提交 git——将随仓库共享给所有克隆者；跨会话注入系统提示词）`
+                    : `保存持久记忆 **${name}**（全局源，仅本机；跨会话注入系统提示词）`;
+                if (hasExternalContent(ctx?.sessionId)) {
+                    return base + `\n⚠️ [provenance] 本回合已消费外部内容（网页/搜索/命令输出）——该记忆可能源自不可信文本（提示词注入面）。请核对内容确出自你的意图或用户原话，而非外部页面/命令输出诱导。`;
+                }
+                return base;
+            },
+            async execute(args: any, ctx?: ToolContext) {
                 const name = sanitizeLine(args?.name);
                 const description = sanitizeLine(args?.description);
                 const body = typeof args?.body === "string" ? args.body : "";
                 const type = (sanitizeLine(args?.type) as MemoryType) || "reference";
                 const project = args?.project === true;
+                // ★ P0-A provenance 硬拒（第二道闸；第一道在 processToolCall 的 provenanceGate 门）：
+                //   project 源随 git 扩散给所有克隆者，外部内容触发的写入 = 供应链投毒，无论授权与否一律拒。
+                if (project && hasExternalContent(ctx?.sessionId)) {
+                    return toolFailure(`[memory_save] provenance 硬拒：本回合已消费外部内容（web_fetch/web_search/命令输出），project 源（随 git 共享给所有克隆者）的写入被拒绝——外部文本可能含提示词注入。请改存 global 源（走人工确认），或在无外部内容的新回合再存。`, 'permission');
+                }
                 if (!NAME_RE.test(name)) return toolFailure(`[memory_save] name 非法：仅允许小写字母/数字/连字符，收到 "${name}"。`);
                 // 外部记忆桥接保留字（2026-11-02）：ext- 条目由 loader 从其他 agent 规则文件只读接入，用户不可占名。
                 if (name.startsWith("ext-")) return toolFailure(`[memory_save] "ext-" 名称前缀为外部记忆保留字（该前缀条目由 loader 从其他 agent 的规则/指令文件只读桥接，名称固定分配）。请改用其他名称。`);
@@ -136,7 +167,9 @@ export const memoryTools: CustomTool[] = [
                 }
                 const file = await writeAndRegister(name, description, type, body, project);
                 await recordMemoryUse(name, "save"); // #9③ 触碰 last-used（供淘汰参考；best-effort，内部不抛）
-                return `✅ 已保存记忆 **${name}**（${type}${project ? "，项目源" : "，全局源"}）→ ${file}`;
+                // ★ P0-A provenance 留痕：外部内容回合的 global 写入已过人工确认（审批层强制），结果行留痕供 transcript 审计。
+                const provNote = hasExternalContent(ctx?.sessionId) ? "（⚠️ 本回合消费过外部内容——本条写入已经人工确认）" : "";
+                return `✅ 已保存记忆 **${name}**（${type}${project ? "，项目源" : "，全局源"}）→ ${file}${provNote}`;
             },
         },
     },

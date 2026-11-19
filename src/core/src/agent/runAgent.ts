@@ -24,6 +24,7 @@ import { getCalibration, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
 import { AgentEvent, RunAgentOptions, WindowCheckInfo } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
+import { resetExternalContent } from "@/tool/provenance.ts";
 import { ToolCallContext } from "./toolExecution.ts";
 import { createRepeatBreaker } from "./repeatBreaker.ts";
 import { prepareToolsAndInjections } from "./systemInjections.ts";
@@ -94,6 +95,10 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
     const depth = options.depth ?? 0;
+    // ★ P0-A provenance（评审修复批 2026-11-19）：主 run 启动清上一回合的外部内容标记（回合粒度，
+    //   见 tool/provenance.ts）。子 run（depth>0）不清——并行子代理与父 run 共享 sessionId，
+    //   它们命中的外部内容同属本回合，父回合的 memory_save 门照常生效。
+    if (depth === 0) resetExternalContent(sessionId);
     // ★ 工作目录：hook 子进程 cwd / 工具相对路径基准；缺省取 process.cwd()，spawn_agent 透传以保持一致
     const cwd = options.cwd ?? process.cwd();
     const keepRecentUnits = options.keepRecentUnits

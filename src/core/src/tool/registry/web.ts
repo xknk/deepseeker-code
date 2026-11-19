@@ -642,6 +642,7 @@ export const webTools: CustomTool[] = [
                 required: ["url"]
             },
             safetyLevel: ToolSafetyLevel.DANGER, // 对外网络请求，强制审批
+            externalContent: true, // ★ P0-A provenance：抓回的网页文本是外部内容（可能含注入），成功后同回合 memory_save 降权
             isSync: true,
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: { url: string; allow_private?: boolean }) =>
@@ -775,6 +776,7 @@ export const webTools: CustomTool[] = [
                 required: ["query"]
             },
             safetyLevel: ToolSafetyLevel.DANGER, // 对外网络请求，强制审批
+            externalContent: true, // ★ P0-A provenance：搜索结果摘要属外部内容（可能含注入），成功后同回合 memory_save 降权
             isSync: true,
             maxOutputCharacters: DEFAULT_MAX_CHARS,
             requireApproval: (args: { query: string }) =>

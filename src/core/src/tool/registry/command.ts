@@ -59,6 +59,8 @@ export const commandTools: CustomTool[] = [
                 required: ["command"],
             },
             safetyLevel: ToolSafetyLevel.DANGER,
+            // ★ P0-A provenance：命令 stdout 属外部内容（仓库脚本/网络命令均可产出注入文本），成功后同回合 memory_save 降权
+            externalContent: true,
             isSync: true,
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【命令执行审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}`,

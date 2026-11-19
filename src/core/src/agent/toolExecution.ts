@@ -14,6 +14,7 @@ import { ToolContext, ToolSafetyLevel, ToolExecutionResultStatus, ToolExecuteRes
 import { validateToolArgs } from "@/tool/argsValidator.ts";
 import { requestApproval, isProtectedWrite, getActiveWorkspaceRoot } from "@/tool/guard.ts";
 import { checkPermission } from "@/tool/permissions.ts";
+import { hasExternalContent, markExternalContent } from "@/tool/provenance.ts";
 import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
@@ -321,6 +322,24 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
         else if (perm === 'allow') { needApproval = false; }
         else if (perm === 'ask') { needApproval = true; }
     } catch { perm = null; /* fail-safe：权限裁决异常 → 走默认 safetyLevel 行为 */ }
+    // ★ P0-A provenance 门（评审修复批 2026-11-19）：本回合消费过外部内容（web_fetch/web_search/
+    //   命令输出——见 tool/provenance.ts 威胁模型）后，声明 provenanceGate 的工具降权：
+    //   'confirm' = 既有 allow 规则（含 allow-always 持久规则）本次不生效、强制人工过目一次；
+    //   'reject' = 硬拒不发审批（外部来源绝不应触发的写入，如 memory_save 的 project 源）。
+    //   置于 checkPermission 之后：门命中时显式规则不再享有免审——「被注入内容诱导的写入」
+    //   不能借既有授权静默通过。未命中（无外部内容）时本块零作用，一切如旧。
+    if (!state.denied && matchedTool.function.provenanceGate && hasExternalContent(sessionId)) {
+        const decl = matchedTool.function.provenanceGate;
+        let policy: 'confirm' | 'reject';
+        try { policy = typeof decl === 'function' ? decl(state.calledArgs, toolCtx) : decl; }
+        catch { policy = 'confirm'; /* 判定异常 fail-closed：宁多审一次 */ }
+        if (policy === 'reject') {
+            state.denied = true;
+            failResult(state, `❌ [provenance] 本回合已消费外部内容（网页/搜索/命令输出），[${calledName}] 的本次写入被硬拒——外部文本可能含提示词注入，来源不可信。如确需写入：改用受人工确认的通道，或在新回合（无外部内容）重试。`, 'permission');
+        } else {
+            needApproval = true;
+        }
+    }
     // ★ 命令语义判定（P1-6 声明化）：「命令执行器」改读工具声明 argKind==='command'，
     //   原 run_command / run_in_background 按名特判退役（两者已带声明）。前台性看 isSync：
     //   argKind='command' 且 isSync !== false 才是前台命令（run_in_background 后台工具不享受只读免审）。
@@ -468,6 +487,9 @@ const executeTool = async (ctx: ToolCallContext, toolCall: any, state: ToolCallS
         }
         // ★ #8b：end 事件按结构化成败分流（原硬编码 ok:true——toolFailure 字符串返回时误报成功）
         if (state.resultStatus === 'success') {
+            // ★ P0-A provenance 标记（评审修复批）：externalContent 声明工具成功执行 = 外部内容已进
+            //   上下文——同回合内 provenanceGate 受门工具据此降权（仅成功标记：失败输出非注入面）。
+            if (matchedTool.function.externalContent) markExternalContent(sessionId);
             events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: state.result } });
         } else {
             events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round, errorCategory: state.errorCategory ?? 'unknown' }, payload: { output: state.result } });

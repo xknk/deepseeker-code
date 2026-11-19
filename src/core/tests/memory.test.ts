@@ -374,17 +374,22 @@ describe("memory_* 工具：校验、落盘与注册表同步", () => {
 });
 
 describe("记忆生命周期治理（#9，2026-09-16）", () => {
-    it("① memory_delete 升 MUTATION 审批：safetyLevel/requireApproval/primaryArg 三声明齐备", () => {
+    it("① memory_delete / memory_save 升 MUTATION 审批：safetyLevel/requireApproval/primaryArg 三声明齐备", () => {
         const del = (memoryTools as any[]).find((x) => x.function.name === "memory_delete")!;
         assert.equal(del.function.safetyLevel, ToolSafetyLevel.MUTATION, "删除跨会话记忆必须人工审批");
         assert.equal(del.function.primaryArg, "name", "allow-always 落精确名作用域规则");
         assert.equal(del.function.autoApproval, undefined, "未声明分类器作用域 → 恒转人工（fail-closed）");
         const detail = (del.function.requireApproval as (a: any) => string)({ name: "some-mem" });
         assert.match(detail, /some-mem/);
-        // 其余三工具仍 SAFE（save 免审降低摩擦；read/list 纯读）
-        for (const n of ["memory_save", "memory_read", "memory_list"]) {
+        // ★ P0-A（评审修复批 2026-11-19）：save 亦升 MUTATION——save 恰是注入面（跨会话持久提示词注入），
+        //   与 delete 同款 allow-always 一次性授权机制；read/list 纯读免审。
+        const save2 = (memoryTools as any[]).find((x) => x.function.name === "memory_save")!;
+        assert.equal(save2.function.safetyLevel, ToolSafetyLevel.MUTATION, "保存跨会话记忆必须人工审批（allow-always 一次授权后零摩擦）");
+        assert.equal(save2.function.primaryArg, "name", "allow-always 落精确名作用域规则");
+        assert.equal(save2.function.autoApproval, undefined, "未声明分类器作用域 → 恒转人工（fail-closed）");
+        for (const n of ["memory_read", "memory_list"]) {
             const t = (memoryTools as any[]).find((x) => x.function.name === n)!;
-            assert.equal(t.function.safetyLevel, ToolSafetyLevel.SAFE, `${n} 保持 SAFE`);
+            assert.equal(t.function.safetyLevel, ToolSafetyLevel.SAFE, `${n} 保持 SAFE（纯读）`);
         }
     });
 

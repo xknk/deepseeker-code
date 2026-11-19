@@ -274,6 +274,26 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         requireApproval?: string | ((args: any, ctx: ToolContext) => string | Promise<string>);
 
         /**
+         * ★ P0-A provenance 声明（评审修复批 2026-11-19）：true = 本工具的【输出】是外部内容
+         * （网页/搜索结果/命令 stdout——可能携带不可信的注入文本）。此类工具成功执行后，同回合内
+         * provenance 即视为命中（tool/provenance.ts）：声明 provenanceGate 的工具（如 memory_save）
+         * 的既有 allow 规则不再免审。#8a 声明化纪律：新增外部内容源在此声明，执行层不按工具名特判。
+         */
+        externalContent?: boolean;
+
+        /**
+         * ★ P0-A provenance 门（评审修复批 2026-11-19）：本回合消费过外部内容后，本工具的降权策略——
+         * - 'confirm'：既有 allow 规则（含 allow-always 持久规则）本次不生效，强制转人工审批一次
+         *   （审批 detail 应带外部内容警示——「可能源自不可信文本」）；
+         * - 'reject'：直接拒绝执行（不发审批弹窗）——用于「外部来源绝不应触发的写入」硬闸
+         *   （如 memory_save 的 project 源：随 git 扩散给所有克隆者，注入面 = 供应链投毒）。
+         * 函数形态可按 args 细分两态。判定时机：checkPermission 显式 allow 之后、分类器之前——
+         * provenance 命中时显式规则不再享有免审（防「被注入内容诱导的写入」借既有授权静默通过）。
+         * 缺省 = 无 provenance 门（现状语义）。
+         */
+        provenanceGate?: 'confirm' | 'reject' | ((args: any, ctx: ToolContext) => 'confirm' | 'reject');
+
+        /**
          * 敏感数据动态脱敏标记（数据隐私与防外泄护城河）
          * 场景：DeepSeek 是云端模型，当本工具（如 read_file）读到**非敏感名文件**（如 config.js）
          * 中的内联密钥（apiKey/token 等）时，执行层在把文本发给云端前，会根据此策略将密钥替换为

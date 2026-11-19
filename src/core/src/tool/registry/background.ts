@@ -277,6 +277,8 @@ export const backgroundTools: CustomTool[] = [
                 required: ["command"]
             },
             safetyLevel: ToolSafetyLevel.DANGER,
+            // ★ P0-A provenance：后台命令输出同属外部内容（与 run_command 同类），成功后同回合 memory_save 降权
+            externalContent: true,
             isSync: false, // 后台任务：首个 yield 立即返回 task_id，进程生命周期由 generator 挂起承载，结束自动释放 exclusiveLock
             // 锁 key 归一化：命令压缩多空格 + 拼 cwd，避免 'npm run dev' / 'npm  run dev' 漏判、
             //   不同 cwd 下同命令误共享锁

@@ -56,7 +56,7 @@ const S0: Record<string, "hidden" | "safe" | "edit" | "card"> = {
     list_dir: "safe",
     memory_list: "safe",
     memory_read: "safe",
-    memory_save: "safe", // 有意设计：记忆写入非破坏性、免审
+    memory_save: "edit", // P0-A（2026-11-19）：save 升 MUTATION；挂机白名单收编（batchRunner.BATCH_EDIT_TOOLS），蒸馏引导照常免审
     read_docx: "safe",
     read_file: "safe",
     read_image: "safe",

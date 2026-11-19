@@ -54,8 +54,14 @@ import { registerWakeDriver, unregisterWakeDriver, waitSessionQuiescent, AGENT_D
 
 // ============ 白名单与缺省禁用（审批自动应答器的判定表） ============
 
-/** 编辑类白名单：挂机任务的核心动作（MUTATION 级文件编辑），自动 allow-once。 */
-const BATCH_EDIT_TOOLS = new Set(["edit_file", "create_file", "write_file", "move_file", "notebook_edit"]);
+/** 编辑类白名单：挂机任务的核心动作（MUTATION 级文件编辑），自动 allow-once。
+ *  ★ memory_save 收编（P0-A 评审修复批 2026-11-19）：save 升 MUTATION 后挂机收尾蒸馏引导（#12，
+ *  batchStrings.distillNote）会被审批应答器当「高危」拒掉——挂机是工单作者显式的自主授权环境
+ *  （edit_file 全文件写都在本白名单），memory_save 是有界元数据写（64KB 单条 + 桶钉死基座仓），
+ *  爆炸半径更小，收编进白名单语义一致。provenance 硬拒（project 源 × 外部内容回合）在审批层
+ *  之前生效（processToolCall provenanceGate 'reject' 直接 denied），不受本白名单影响。
+ *  注：stallDetector.EDIT_TOOLS 是「文件编辑产出」判定面，刻意不收 memory_save（非文件编辑）。 */
+const BATCH_EDIT_TOOLS = new Set(["edit_file", "create_file", "write_file", "move_file", "notebook_edit", "memory_save"]);
 /** 缺省禁用清单（对模型不可见，同 SUBAGENT_DENYLIST）：工单 tools: 字段可显式解锁。
  *  run_in_background 同步收权（审查报告 P1-8′）：挂机是无人值守场景，后台孤儿任务产物无人验收。 */
 const BATCH_DEFAULT_DENYLIST = new Set(["run_command", "delete_path", "run_in_background"]);
