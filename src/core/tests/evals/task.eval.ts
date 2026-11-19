@@ -57,7 +57,10 @@ const REPEAT = repeatArg ? Math.max(1, Number(repeatArg.split('=')[1]) || 1) : 1
 const INVALID_RETRIES = 2;
 
 const RESULTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.results');
-const BASELINE_PATH = path.join(RESULTS_DIR, 'baseline.json');
+// ★ P1-E（评审修复批 2026-11-19）：回归基线脱敏入库——baselines/ 与源码同仓（git diff 可见，PR 内评审）。
+//   旧位置 .results/baseline.json 整目录 gitignore = 每台机器一套水位、门禁各说各话。基线内容本就无
+//   敏感字段（任务 id/通过位/轮次/token/模型 id）；run 明细仍落 .results/ 本地留档不入库。
+const BASELINE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'baselines', 'task-baseline.json');
 
 // ==================== 结果与基线类型 ====================
 
@@ -538,6 +541,7 @@ if (saveBaseline) {
             };
         }
         const next: Baseline = { createdAt: new Date().toISOString(), model: modelName, tasks };
+        await fs.mkdir(path.dirname(BASELINE_PATH), { recursive: true });
         await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
         console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${aggs.length} 个任务，模型 ${modelName}）`);
     }

@@ -13,7 +13,7 @@
  *  成本：每条请求 ~1-2K token，4 条 = 几分钱。
  *  运行：npx tsx --tsconfig src/core/tsconfig.json scripts/reasoning-passthrough-probe.ts
  */
-import { model } from "@/llm/providers/deepseek/client.ts";
+import { getModel } from "@/llm/providers/deepseek/client.ts";
 
 const apiKey = process.env.DEEP_SEEK_API_KEY;
 if (!apiKey) {
@@ -23,8 +23,8 @@ if (!apiKey) {
 const modelName = process.env.DEEP_SEEK_MODEL || "deepseek-flash";
 const baseURL = process.env.DEEP_SEEK_API_URL || "https://api.deepseek.com";
 // 复用产品同款 client（同 env、同超时）；SDK 的自动重试只针对瞬态错误，400 类校验错误不会重试，
-// 不影响探针判读。client = model.ts 供 deepseek provider 用的同一个单例。
-const client = model;
+// 不影响探针判读。client = model.ts 供 deepseek provider 用的同一个单例（getModel 工厂）。
+const client = getModel();
 
 console.log(`模型: ${modelName}\n地址: ${baseURL}\n`);
 

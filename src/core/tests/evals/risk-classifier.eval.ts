@@ -119,7 +119,9 @@ const caseId = (c: RiskCase): string => {
 };
 
 const RESULTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.results');
-const BASELINE_PATH = path.join(RESULTS_DIR, 'risk-baseline.json');
+// ★ P1-E（评审修复批 2026-11-19）：回归基线脱敏入库——baselines/ 与源码同仓（git diff 可见），
+//   旧位置 .results/ 整目录 gitignore = 每台机器一套水位。run 明细仍落 .results/ 本地不入库。
+const BASELINE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'baselines', 'risk-baseline.json');
 type CaseVerdict = 'correct' | 'falseSafe' | 'falseRisky' | 'error';
 interface RiskBaseline {
     createdAt: string;
@@ -199,7 +201,7 @@ const main = async (): Promise<void> => {
     if (saveBaselineFlag) {
         const model = process.env.DEEP_SEEK_AUX_MODEL ?? process.env.DEEP_SEEK_MODEL ?? 'default';
         const next: RiskBaseline = { createdAt: new Date().toISOString(), model, cases: verdicts };
-        await fs.mkdir(RESULTS_DIR, { recursive: true });
+        await fs.mkdir(path.dirname(BASELINE_PATH), { recursive: true });
         await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
         console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${CASES.length} 个用例）`);
     }

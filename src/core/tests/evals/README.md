@@ -21,8 +21,9 @@ npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/task.eval.ts --ta
 npx tsx --tsconfig src/core/tsconfig.json src/core/tests/evals/task.eval.ts --save-baseline  # 固化基线
 ```
 
-- 结果对比 `.results/baseline.json`：`回退!`（pass→fail）时退出码 1，可脚本化 gate。基线与本轮模型不一致时仅警告不拦截（数字不可比，勿当门禁结论）；`--save-baseline` 拒绝固化全败轮次（防环境故障伪装成真实水位）。
-- 每轮明细落 `.results/run-<时间戳>.json`（含 checker 判定依据、final 摘要）。
+- 结果对比基线：`回退!`（pass→fail）时退出码 1，可脚本化 gate。基线与本轮模型不一致时仅警告不拦截（数字不可比，勿当门禁结论）；`--save-baseline` 拒绝固化全败轮次（防环境故障伪装成真实水位）。
+  ★ 基线位置（P1-E，2026-11-19）：`baselines/<eval 名>-baseline.json` **与源码同仓、git diff 可见**（三个 eval 共用该目录：task / compaction / risk）。基线内容无敏感字段（任务 id/通过位/轮次/token/模型 id），入库即「每台机器一套水位」的解法——固化基线后按发版惯例 commit，PR 内 diff 即评审口径。旧位置 `.results/`（整目录 gitignore）只留 run 明细。
+- 每轮明细落 `.results/run-<时间戳>.json`（含 checker 判定依据、final 摘要；本地留档不入库）。
 - 隔离：会话/trace/工作区全在临时目录，审批自动放行（allow-once，不写持久规则）。
   ★ 洁净室语义：`DEEPSEEKER_CODE_DATA_DIR` 指向一次性目录，故**全局级 hooks/MCP/skills/memory/settings 均不参与 eval**（仅 env 级配置生效）——跑的是纯内置工具面 + core 管线，非真实日常环境。
 - `--no-engine` 跳过 initEngine（连内置 loader 也不挂，调试跑不通时用）。

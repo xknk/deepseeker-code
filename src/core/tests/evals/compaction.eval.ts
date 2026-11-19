@@ -234,7 +234,9 @@ const SCENARIOS: Scenario[] = [
 // ==================== 主流程 ====================
 
 const RESULTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '.results');
-const BASELINE_PATH = path.join(RESULTS_DIR, 'compaction-baseline.json');
+// ★ P1-E（评审修复批 2026-11-19）：回归基线脱敏入库——baselines/ 与源码同仓（git diff 可见），
+//   旧位置 .results/ 整目录 gitignore = 每台机器一套水位。run 明细仍落 .results/ 本地不入库。
+const BASELINE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'baselines', 'compaction-baseline.json');
 interface CompactionBaseline {
     createdAt: string;
     model: string;
@@ -297,7 +299,7 @@ const main = async (): Promise<void> => {
         const results: Record<string, boolean> = {};
         for (const r of rows) results[`${r.scenario}/${r.path}`] = r.pass;
         const next: CompactionBaseline = { createdAt: new Date().toISOString(), model, results };
-        await fs.mkdir(RESULTS_DIR, { recursive: true });
+        await fs.mkdir(path.dirname(BASELINE_PATH), { recursive: true });
         await fs.writeFile(BASELINE_PATH, JSON.stringify(next, null, 2), 'utf-8');
         console.log(`\n💾 基线已固化: ${path.relative(process.cwd(), BASELINE_PATH)}（${Object.keys(results).length} 格）`);
     }

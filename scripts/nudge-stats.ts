@@ -58,7 +58,7 @@ console.log(`nudge.injected 计量报表（共 ${rows.length} 条，trace 根 = 
 console.log("");
 console.log("【按 fence】（fired=true 真注入 / dry=false 本该注入或已解除）");
 console.log(padR("fence", 20) + padL("injected:true", 14) + padL("injected:false", 15) + padL("合计", 8));
-for (const [fence, c] of [...byFence.entries()].sort((a, b) => (b.fire + b.dry) - (a.fire + a.dry))) {
+for (const [fence, c] of [...byFence.entries()].sort(([, ca], [, cb]) => (cb.fire + cb.dry) - (ca.fire + ca.dry))) {
     console.log(padR(fence, 20) + padL(String(c.fire), 14) + padL(String(c.dry), 15) + padL(String(c.fire + c.dry), 8));
 }
 
