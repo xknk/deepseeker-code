@@ -56,6 +56,25 @@ export const getActiveWorkspaceRoot = (): string => {
     return process.env.WORKSPACE_ROOT || process.cwd();
 };
 
+/**
+ * 当前活动 worktree 根（P0-B 围栏精确取源，评审修复批 2026-11-19）：只读两档安全源——
+ *  ① ALS.workspaceRoot（run_workflow 的 worktree 隔离，runWithWorkspaceRoot 设置）
+ *  ② session 注册表（ALS.sessionId 命中——enter_worktree 激活的 session worktree）
+ * 都未命中返回 undefined。刻意【不回退】env WORKSPACE_ROOT / process.cwd（与 getActiveWorkspaceRoot
+ * 的第三档兜底不同）：本值用于【扩】围栏根集（allowedBoundaryRoots 的 union），兜底档会把与
+ * worktree 无关的目录（可能是用户 home）永久写进白名单——多根工作区下等价于静默放宽围栏。
+ * 放行面最小化：仅真实的 worktree 激活态（两入口 run_workflow / enter_worktree）才并入围栏。
+ */
+export const getActiveWorktreeRoot = (): string | undefined => {
+    const store = workspaceAls.getStore();
+    if (store?.workspaceRoot) return store.workspaceRoot;
+    if (store?.sessionId) {
+        const wtRoot = getSessionWorktreeRoot(store.sessionId);
+        if (wtRoot) return wtRoot;
+    }
+    return undefined;
+};
+
 /** 显式覆盖活动根（run_workflow 的 worktree 隔离用；替换 store，不合并 sessionId——保 workflow 子 agent 用 wt.path）。 */
 export const runWithWorkspaceRoot = <T>(root: string, fn: () => T): T =>
     workspaceAls.run({ workspaceRoot: root }, fn);
@@ -149,9 +168,21 @@ export const getContainingRoot = (absPath: string): string => {
     }
     return best ?? realpathNativeSync(getActiveWorkspaceRoot());
 };
-/** 围栏判定用的根集合：有注册用注册集，否则回退单活动根（realpath，失败用原值）。 */
+/**
+ * 围栏判定用的根集合：注册集 ∪ 活动 worktree 根（P0-B，评审修复批 2026-11-19）。
+ *  ★ 根因修复：旧实现「有注册集就不再回退活动根」在 VSCode 多根工作区 + enter_worktree /
+ *    run_workflow 场景【完全屏蔽】worktree 根——wt 落在 os.tmpdir() 下、不在任何注册文件夹内，
+ *    写工具（resolveSafePath / assertWithinWorkspace）必现 SECURITY ALERT（读得到写不进）。
+ *  union 的取源经 getActiveWorktreeRoot 精确限定两档安全源、【无 env/cwd 兜底】——非 worktree
+ *  场景该值为 undefined，union 是真 no-op，围栏语义与旧实现逐字节一致（fail-closed 方向不弱化）。
+ *  无注册集分支不动：CLI 单目录场景活动根本就含 worktree（getActiveWorkspaceRoot 命中同两档）。
+ */
 const allowedBoundaryRoots = (): string[] => {
-    if (allowedRootsReal.length > 0) return allowedRootsReal;
+    if (allowedRootsReal.length > 0) {
+        const wt = getActiveWorktreeRoot();
+        if (!wt) return allowedRootsReal;
+        try { return [...allowedRootsReal, fsSync.realpathSync(wt)]; } catch { return [...allowedRootsReal, wt]; }
+    }
     const r = getActiveWorkspaceRoot();
     try { return [fsSync.realpathSync(r)]; } catch { return [r]; }
 };
