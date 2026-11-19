@@ -26,6 +26,7 @@ import { batchQueueRoot, enqueueTicketFile, readReport, acquireRunLock, releaseR
 import { generateBatchId, parseBatchTicket, type BatchTicket } from "../ticket.ts";
 import { doneTicketPath, extractPrevReportSummary } from "../continuation.ts";
 import { recordMsgMap } from "./notify.ts";
+import { renameWithRetry } from "./fsRetry.ts";
 import { loadSyncConfig, type SyncConfig, type SyncLocale } from "../sync/config.ts";
 import { acquireSyncLock, releaseSyncLock } from "../sync/lock.ts";
 import { loadSyncState, appendSyncState, syncFingerprint, todayTicketCount, type SyncStateEntry } from "../sync/state.ts";
@@ -602,7 +603,7 @@ export const handleFeishuFollowup = async (candidate: FeishuMessageCandidate, pr
                 const updated = src + buildAppendSection(title, candidate.text, now().toISOString(), locale);
                 const tmp = `${pendingFile}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
                 await fs.writeFile(tmp, updated, "utf-8");
-                await fs.rename(tmp, pendingFile); // 原子换：锁内无取票竞争，rename 即成
+                await renameWithRetry(tmp, pendingFile); // 原子换：锁内无取票竞争；EPERM 瞬时锁重试（2026-11-19 CI 事故同源）
                 await appendSyncState({ sourceId, ticketId: prevTicketId, seenAt: now().toISOString(), fingerprint, verdict: "work", title }).catch(() => { });
                 await recordMsgMap(candidate.messageId, prevTicketId);
                 const prevTitle = titleOfTicketSource(src) ?? prevTicketId;

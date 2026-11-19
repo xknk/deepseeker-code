@@ -21,6 +21,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { SyncLocale } from "../sync/config.ts";
+import { renameWithRetry } from "./fsRetry.ts";
 
 /** 队列根（与 queue.ts 同源逻辑但零 import——queue 会 import 本模块做收尾钩子，反向依赖成环）。 */
 const batchRoot = (): string =>
@@ -74,7 +75,7 @@ export const recordMsgMap = async (msgId: string, ticketId: string): Promise<voi
             for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k]; // 丢最旧
             const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
             await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
-            await fs.rename(tmp, target);
+            await renameWithRetry(tmp, target); // EPERM 瞬时锁重试（2026-11-19 CI 事故：登记失败 → 回执 id 缺席映射表 → 全链测试假超时）
         });
     } catch (e) {
         // 映射失败只影响回复路由（降级为当新票），不阻塞建票主流程——但必须留痕：
@@ -121,7 +122,7 @@ export const recordDaSession = async (msgId: string, sessionId: string): Promise
             for (const k of keys.slice(0, Math.max(0, keys.length - MSG_MAP_CAP))) delete map[k];
             const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
             await fs.writeFile(tmp, JSON.stringify({ map, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
-            await fs.rename(tmp, target);
+            await renameWithRetry(tmp, target); // 同 recordMsgMap：EPERM 瞬时锁重试
         });
     } catch (e) {
         // 映射失败只影响追问粘住（降级为新会话），不阻塞直答主流程——留痕同理（静默曾无从发现）。
@@ -247,7 +248,7 @@ export const writeFinishNotification = async (args: { ticketId: string; reportMd
         await fs.mkdir(notificationsDir(), { recursive: true });
         const tmp = `${notificationPath(args.ticketId)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
         await fs.writeFile(tmp, JSON.stringify(n, null, 2), "utf-8");
-        await fs.rename(tmp, notificationPath(args.ticketId));
+        await renameWithRetry(tmp, notificationPath(args.ticketId));
     } catch { /* 见文件头：通知失败不击垮收尾 */ }
 };
 
@@ -284,7 +285,7 @@ export const bumpNotificationRetries = async (n: FinishNotification): Promise<bo
     else {
         const tmp = `${notificationPath(n.ticketId)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
         await fs.writeFile(tmp, JSON.stringify(n, null, 2), "utf-8").catch(() => { });
-        await fs.rename(tmp, notificationPath(n.ticketId)).catch(() => { });
+        await renameWithRetry(tmp, notificationPath(n.ticketId)).catch(() => { });
     }
     return giveUp;
 };

@@ -18,6 +18,7 @@ import path from "path";
 import { batchQueueRoot } from "../queue.ts";
 import type { SyncLocale } from "../sync/config.ts";
 import type { FeishuMessageCandidate, FeishuTicketResult } from "./message.ts";
+import { renameWithRetry } from "./fsRetry.ts";
 import { serializedMapWrite } from "./notify.ts";
 
 /** 对账拉取注入面：按 [startMs, endMs) 时间窗拉候选（升序）。 */
@@ -53,7 +54,7 @@ export const saveCursor = async (cursor: string, now: Date = new Date()): Promis
     const tmp = `${cursorPath()}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     try {
         await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf-8");
-        await fs.rename(tmp, cursorPath());
+        await renameWithRetry(tmp, cursorPath());
     } catch (e) {
         await fs.unlink(tmp).catch(() => { });
         throw e;
@@ -103,7 +104,7 @@ export const recordKnownChat = async (chatId: string): Promise<boolean> => {
         const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
         try {
             await fs.writeFile(tmp, JSON.stringify(next, null, 2), "utf-8");
-            await fs.rename(tmp, target);
+            await renameWithRetry(tmp, target);
         } catch (e) {
             await fs.unlink(tmp).catch(() => { }); // tmp 自净（与 saveCursor 同一泄漏教训）
             throw e;

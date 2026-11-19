@@ -26,6 +26,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { batchQueueRoot } from "../queue.ts";
 import type { SyncLocale } from "../sync/config.ts";
+import { renameWithRetry } from "./fsRetry.ts";
 
 /** 审批等待超时（分钟，方案 §5：缺省 30 = deny fail-closed）。 */
 export const APPROVAL_TIMEOUT_MIN = 30;
@@ -97,12 +98,12 @@ const msg = (locale: SyncLocale, key: string, ...args: any[]): string => {
 /** 默认轮询等待（真实定时器；测试注入 sleep 免真等）。 */
 const defaultSleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
 
-/** 原子写 JSON（临时文件 + rename——读侧永远见不到半截文件）。 */
+/** 原子写 JSON（临时文件 + rename——读侧永远见不到半截文件；rename 走瞬时锁重试，审批决定文件丢写=丢真实审批）。 */
 const atomicWriteJson = async (filePath: string, value: unknown): Promise<void> => {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf-8");
-    await fs.rename(tmp, filePath);
+    await renameWithRetry(tmp, filePath);
 };
 
 const readJson = async <T>(filePath: string): Promise<T | null> => {
