@@ -109,12 +109,38 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ setup：工具表裁剪（planMode/env）+ schema 清洗 + 摘要槽 + fence 注入（locale/outputStyle/skills/
     //   agents/projectGuide/memory）。抽出到 systemInjections.ts；validationCtx 在其内部构造。
     //   fence 注入幂等、不动 message 下标——保 DeepSeek 隐式前缀缓存（P0-4）。
-    const { rawTools, cleanedToolSchemas, toolsTokens } = await prepareToolsAndInjections(message, options, events);
+    //   ★ P1-D（评审修复批 2026-11-19）：两处 setup await（prepareToolsAndInjections / getCalibration）
+    //   原在主 try 之外——任一抛出（磁盘满/权限/memory 文件畸形，prepareToolsAndInjections 内串
+    //   validateEnvironment/injectMemory 等多个 IO 点）→ 异常冲出 generator → final 永不发（宿主 busy
+    //   永不清）、run.start 不落盘（trace 断链）。改为：run.start 先落盘 → setup 移入主 try 顶部
+    //   （异常走主 catch：final 必发 + finally 全套收尾 run.end/结算单/Stop hook）。结果变量 let
+    //   声明在函数体（try 块级作用域不可外泄）、赋值在 try 内。
     let round = 0;
     let lastContent: string | undefined = "";
     let stopReason: 'normal' | 'aborted' | 'error' | 'repeat' | 'limit' = 'normal';
     // ★ 预算硬截断标记（成本信任链第二环 E2）：true 时 final 提示 /budget 可调，结算单行同步标注
     let budgetTruncated = false;
+    // ★ D5 三轮（8bdb712 遗留项工单 2026-11-03）：degraded/markDegraded 上提到函数体顶部——主循环里
+    //   的调用点（round.end 事件行 / assistant/user 消息落盘）同样要上报降级，定义在 finally 内则
+    //   主循环作用域不可达。finally 收尾段沿用同一份列表（去重语义不变）。（P1-D 后前移至 run.start 之前）
+    const degraded: string[] = [];
+    const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
+    // run.start 事件行：appendEvent 契约是吞错回 false，此处消费返回值上报降级；仍包 try/catch——
+    //   防「永不抛错」契约被未来改动破坏（D1 教训：别假设内层永远可靠）。★ P1-D：置于 setup 两 await
+    //   之前——setup 异常时 trace 仍见 run.start（排障能看到本次 run 存在过，事件行不缺记）。
+    try {
+        const ok = await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
+        if (!ok) markDegraded('appendEvent(run.start)');
+    } catch { markDegraded('appendEvent(run.start)'); /* 兜底：违反吞错契约的异常信号 */ }
+    let rawTools: any[] = [];
+    let cleanedToolSchemas: any[] = [];
+    let toolsTokens = 0;
+    // ★ 估算校准 + 缓存感知压缩状态（跨轮维护）：calibRatio 用「真实 prompt_tokens / 本地估算」的 EMA
+    //   修正 estimateTokens 的系统性低估（实测约 31%）；lastReal/lastCached 取自上一轮 API 真实 usage。
+    //   ★ 跨 run 持久化：复用前一 run 攒的真实校准与缓存数据（getCalibration；P1-4 按模型维度分键）。
+    let calibRatio = 1.4;  // 回落 1.4（保守偏高，偏早压缩，安全侧）
+    let lastRealPromptTokens: number | undefined;
+    let lastCachedTokens: number | undefined;
     // F-1：轮数治理——"让模型自决"为主，硬上限仅作极高兜底（零用户配置、零心智负担）。
     //  主机制：周期性 ephemeral nudge（NUDGE 周期自评 / PHANTOM 空 content / EARLY_FINAL 早收尾）由模型自决
     //         "收尾给答案"还是"继续推进"（对标 CC：不在低轮数硬停，靠模型自收敛 + 用户中止）。
@@ -175,20 +201,6 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     };
 
     const startTime = performance.now();
-    // ★ 估算校准 + 缓存感知压缩状态（跨轮维护）：
-    //   calibRatio 用「真实 prompt_tokens / 本地估算」的 EMA 修正 estimateTokens 的系统性低估（实测约 31%），
-    //   让 ensureFitsWindow 按「真实 token 口径」判定压缩时机，避免长任务真实逼近窗口而估算仍以为安全 → 靠 API 400 兜底。
-    //   lastReal/lastCached 取自上一轮 API 真实 usage：算缓存命中率，驱动「缓存感知」的压缩阈值——
-    //   DS 前缀缓存命中时压缩会击穿 message[1]+ 的缓存（message[0] 系统提示词段保住），故命中率越高越推迟、
-    //   越低越早压（详见 truncate.ts 的 effectiveRatio）。message[0] 前缀稳定性（P0-4）不受影响。
-    // ★ 跨 run 持久化：复用前一 run 攒的真实校准与缓存数据，避免每 run 从 1.4 重零
-    //   （实测致实现 run 压缩判定滞后、更晚压缩）。详见 store.ts updateCalibration。
-    //   ★ P1-4 按模型维度：会话切模型后各模型校准互不污染（getCalibration per-model 命中优先，
-    //   旧扁平字段兜底——P1-4 之前会话的盘上形状直接沿用）。
-    const persistedCalib = await getCalibration(sessionId, effectiveModel);
-    let calibRatio = persistedCalib.calibRatio ?? 1.4;  // 回落 1.4（保守偏高，偏早压缩，安全侧）
-    let lastRealPromptTokens = persistedCalib.lastRealPromptTokens;
-    let lastCachedTokens = persistedCalib.lastCachedTokens;
     // ★ 重复工具调用熔断器（完整签名连续 3 次 / 后台忙轮询同任务连续 4 轮，带 wait_seconds 的等待查询豁免）：
     //   跨轮有状态，每轮推理后 check()。从 runAgent 抽出到 repeatBreaker.ts；
     //   breaker 持有安全 events 自行发 tool.resolve / tool.repeat_break 埋点。
@@ -207,19 +219,18 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ 使用日志（路线 #6 真实使用数据回路）：本 run 工具分布，按模型请求的 tool_calls 按名计数
     //   （请求口径而非执行口径：含被拒/校验失败——工具分布反映模型行为；随 finally 的 run 记录一并落盘）
     const toolCounts: Record<string, number> = {};
-    // ★ D5 三轮（8bdb712 遗留项工单 2026-11-03）：degraded/markDegraded 上提到函数体顶部——主循环里
-    //   的调用点（round.end 事件行 / assistant/user 消息落盘）同样要上报降级，定义在 finally 内则
-    //   主循环作用域不可达。finally 收尾段沿用同一份列表（去重语义不变）。
-    const degraded: string[] = [];
-    const markDegraded = (name: string): void => { if (!degraded.includes(name)) degraded.push(name); };
-    // run.start 事件行：appendEvent 契约是吞错回 false，此处消费返回值上报降级；仍包 try/catch——
-    //   防「永不抛错」契约被未来改动破坏（D1 教训：别假设内层永远可靠）。本处在主 try 之外，异常若
-    //   冲出 generator → final 永不发 → 前端 busy 永不清（见下方 catch 注释点名要防的事故）。
     try {
-        const ok = await appendEvent(sessionId, { dscEvent: 'run.start', runId, depth });
-        if (!ok) markDegraded('appendEvent(run.start)');
-    } catch { markDegraded('appendEvent(run.start)'); /* 兜底：违反吞错契约的异常信号 */ }
-    try {
+        // ★ P1-D：setup 两 await 在主 try 内执行——任一抛出走下方主 catch（final 必发，round===0 时
+        //   文案区分「初始化失败」）+ finally 全套收尾（run.end stopReason='error'/结算单/Stop hook/
+        //   usageLog/校准回写），异常收尾语义与工具执行段完全同款。
+        const setup = await prepareToolsAndInjections(message, options, events);
+        rawTools = setup.rawTools;
+        cleanedToolSchemas = setup.cleanedToolSchemas;
+        toolsTokens = setup.toolsTokens;
+        const persistedCalib = await getCalibration(sessionId, effectiveModel);
+        calibRatio = persistedCalib.calibRatio ?? 1.4;
+        lastRealPromptTokens = persistedCalib.lastRealPromptTokens;
+        lastCachedTokens = persistedCalib.lastCachedTokens;
         while (true) {
             round++;
             if (round > MAX_AGENT_ROUNDS) {
@@ -565,18 +576,21 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             }
         }
     } catch (toolErr) {
-        // ★ 工具执行段兜底（P0）：assistantMessage 落盘 / processToolCall / appendMessage / Promise.all
-        //   等若抛出未守护异常（磁盘 IO 失败、锁/截断边界异常等），原先会逃出 generator → 消费层 for-await
-        //   无 catch → final 永不发 → 前端 busy 永不清（永久卡死）。此处兜住，必定 yield final 收尾。
+        // ★ 兜底收尾（P0 + P1-D）：工具执行段（assistantMessage 落盘 / processToolCall / appendMessage /
+        //   Promise.all）与初始化段（setup 两 await 移入主 try）任一抛出未守护异常——原先会逃出 generator
+        //   → 消费层 for-await 无 catch → final 永不发 → 前端 busy 永不清（永久卡死）。此处兜住，必定
+        //   yield final 收尾；finally 全套收尾照常执行（run.end/结算单/Stop hook/usageLog/校准回写）。
         //   流式推理段的异常已被上方内层 catch 处理（yield final + return），不会到达此处。
         if (signal?.aborted) {
             yield { type: 'final', text: lastContent || "（已中止）" };
             return;
         }
         const errMsg = toolErr instanceof Error ? toolErr.message : String(toolErr);
-        console.error('❌ agent 工具执行段异常（兜底收尾）:', errMsg);
+        // round===0 = 尚未进入推理循环 → 初始化段（setup）异常，文案如实区分（排障一眼定位段位）
+        const isSetupErr = round === 0;
+        console.error(isSetupErr ? '❌ agent 初始化段异常（兜底收尾）:' : '❌ agent 工具执行段异常（兜底收尾）:', errMsg);
         stopReason = 'error';
-        yield { type: 'final', text: (lastContent || "") + `\n（工具执行异常：${errMsg}）` };
+        yield { type: 'final', text: (lastContent || "") + `\n（${isSetupErr ? '初始化失败' : '工具执行异常'}：${errMsg}）` };
         return;
     } finally {
         // ★ D5 聚合健康信号（审查报告 2026-11-03）：收尾段 8 个旁路逐个容错（单点判断正确、任何依赖
