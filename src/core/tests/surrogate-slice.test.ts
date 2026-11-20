@@ -4,6 +4,8 @@
  *  sliceHeadNoSplit / sliceTailNoSplit 的边界——keep=0、全 emoji 串（切点必劈）、尾切起点恰在低代理、
  *  输入自带孤立代理时的契约（只护切缘、不清存量——存量是 surrogateGuard 出口守门的事）。
  *  补 truncateToolResult 代理对用例（此前全 ASCII，劈对回归零覆盖）。
+ *  另收口「失败文案回灌模型」两处（灾难命令拦截 / 参数解析失败，2026-11-20）：failResult 文案直接
+ *  进 resultForModel，即进 API 消息——裸 slice 劈出孤立代理同样能让下一次请求 400。
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -16,6 +18,7 @@ process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 
 const { sliceHeadNoSplit, sliceTailNoSplit } = await import("@/session/content.ts");
 const { truncateToolResult } = await import("@/agent/truncate.ts");
+const { processToolCall } = await import("@/agent/toolExecution.ts");
 
 const loneHigh = "\ud83d";   // 孤立高代理（emoji 前半被劈）
 const loneLow = "\udc4d";    // 孤立低代理（emoji 后半被劈）
@@ -124,5 +127,60 @@ describe("commands loader body 截断（斜杠命令正文经 expand 进上下�
         assert.match(cmd!.body, /已截断/, "含截断说明");
         assert.ok(noLoneEscape(cmd!.body), "序列化无孤立代理转义");
         assert.ok(!cmd!.body.includes(emoji), "边界 emoji 整体舍去（不劈半）");
+    });
+});
+
+// ============ 工具失败文案截断（failResult → resultForModel = 进 API 消息，2026-11-20 补收口） ============
+
+/** 最小运行上下文（仅本组用到的字段；字段集对齐 ToolCallContext，缺省即空实现）。 */
+const mkCtx = (rawTools: any[]): any => ({
+    sessionId: "surr-msg", cwd: SANDBOX, depth: 0, round: 1, startTime: performance.now(),
+    llmDecisionSource: "llm", signal: undefined, rawTools, events: async () => { },
+    permissionMode: undefined, planMode: false,
+    onUIEvent: undefined, requestApproval: undefined, requestQuestion: undefined, ideAction: undefined,
+    keepRecentUnits: 5, compactRatio: 0.72, modelWindow: 250000, parentSystemPrompt: "",
+    contextTokensEst: undefined, readTracker: undefined, reportCost: undefined, toolCostSink: undefined,
+    onAuxUsage: undefined, planWriteRejections: undefined, budgetCheck: undefined, batchBudgetChars: undefined,
+});
+
+/** 假命令工具（argKind='command' 即灾难命令硬闸的判定依据；无 parameters 以跳过 schema 校验）。 */
+const mkCmdTool = (executed: { v: boolean }): any => ({
+    type: "function",
+    function: {
+        name: "fake_cmd", description: "fake command tool", parameters: undefined,
+        safetyLevel: "danger", isSync: true, argKind: "command", primaryArg: "command",
+        execute: async () => { executed.v = true; return "不该执行"; },
+    },
+});
+
+describe("工具失败文案截断（failResult 文案回灌模型 = 进 API 消息）", () => {
+    it("灾难命令拦截文案：命令里的 emoji 不被劈半，且被拒后不执行", async () => {
+        const executed = { v: false };
+        // "rm -rf /x" 长 9，后接 emoji：切点 100 落在某个 emoji 的代理对中间（起点 9 + 偶数偏移 = 高代理）
+        const command = "rm -rf /x" + emoji.repeat(80);
+        assert.ok(!noLoneEscape(command.slice(0, 100)), "夹具有效性：裸 slice(0,100) 确实劈出孤立代理");
+
+        const out = await processToolCall(
+            { id: "surr-deny", type: "function", function: { name: "fake_cmd", arguments: JSON.stringify({ command }) } },
+            mkCtx([mkCmdTool(executed)]),
+        );
+        assert.match(out.resultForModel, /灾难命令清单拦截/, "命中灾难命令硬闸");
+        assert.equal(executed.v, false, "被拒即不执行");
+        assert.ok(noLoneEscape(out.resultForModel), "文案无孤立代理（否则下一次请求 400）");
+    });
+
+    it("参数解析失败文案：畸形 arguments 里的 emoji 不被劈半", async () => {
+        // arguments 非法 JSON（不以 { 开头）；填充长度由夹具自证选出——保证裸切 300 确实落在 emoji 中间
+        const build = (pad: number) => ({
+            id: "surr-parse", type: "function",
+            function: { name: "fake_cmd", arguments: "x".repeat(pad) + emoji.repeat(60) },
+        });
+        const pad = [190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
+            .find(n => !noLoneEscape(JSON.stringify(build(n)).slice(0, 300)));
+        assert.notEqual(pad, undefined, "夹具有效性：存在填充长度使裸切 300 劈出孤立代理");
+
+        const out = await processToolCall(build(pad!), mkCtx([]));
+        assert.match(out.resultForModel, /参数解析失败/, "走畸形 arguments 分支");
+        assert.ok(noLoneEscape(out.resultForModel), "文案无孤立代理（否则下一次请求 400）");
     });
 });

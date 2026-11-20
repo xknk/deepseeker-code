@@ -404,7 +404,8 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
     if (isCommandTool
         && matchCommandDeny(typeof state.calledArgs?.command === 'string' ? state.calledArgs.command : '')) {
         state.denied = true;
-        failResult(state, `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${String(state.calledArgs?.command ?? '').slice(0, 100)}`, 'permission');
+        // ★ 防劈代理对切头：文案回灌模型（= 进 API 消息），裸 slice 会把命令里的 emoji 劈半（2026-11-13 事故形态）
+        failResult(state, `❌ [安全] 灾难命令清单拦截（不可被 allow 规则绕过）：[${calledName}] ${sliceHeadNoSplit(String(state.calledArgs?.command ?? ''), 100)}`, 'permission');
     }
     // ★ isSync:false 后台工具的互斥锁（快查）：锁被持有则直接拒绝，省去一次无谓审批弹窗。
     //   真正的获锁在 runBackgroundTool 启动时执行、其 finalize 必定释放——
@@ -688,7 +689,8 @@ const processToolCallInner = async (toolCall: any, ctx: ToolCallContext): Promis
         keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, readTracker, reportCost, toolCostSink, onAuxUsage, budgetCheck } = ctx;
     const toolCtx: ToolContext = { sessionId, cwd: getActiveWorkspaceRoot(), abortSignal: signal, depth, keepRecentUnits, compactRatio, modelWindow, parentSystemPrompt, events, onUIEvent, requestApproval: hostRequestApproval, requestQuestion: hostRequestQuestion, ideAction, emitProgress: (m: string) => onUIEvent?.({ type: 'tool.progress', toolsId: toolCall.id, toolName: state.calledName, message: m }), permissionMode, readTracker, reportCost, toolCostSink, onAuxUsage, budgetCheck };
     if (state.parseFailed) {
-        failResult(state, `参数解析失败：模型返回的 arguments 不是合法 JSON${JSON.stringify(toolCall).slice(0, 300)}`, 'syntax');
+        // ★ 同上（畸形 arguments 原文里同样可能带 emoji：裸 slice 劈半即回灌孤立代理给模型）
+        failResult(state, `参数解析失败：模型返回的 arguments 不是合法 JSON${sliceHeadNoSplit(JSON.stringify(toolCall), 300)}`, 'syntax');
         emitValidationFailed(ctx, toolCall, state);
     } else if (state.matchedTool && typeof state.matchedTool.function.execute === 'function') {
         // 安全链（顺序敏感）：pre-hook→参数校验→保护路径→权限规则→命令语义→灾难命令→锁→分类器→人工审批→旧位 pre-hook→undo 备份
