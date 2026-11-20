@@ -54,3 +54,36 @@ describe("sanitizeChatMessages（发送前守门）", () => {
         assert.ok(!/\\ud[89abc-f][0-9a-f]{2}/i.test(cleaned), "序列化产物无孤立代理转义");
     });
 });
+
+describe("classifyRisk 第三通道守门（2026-11-13 事故终防线收口，2026-11-20 补齐）", () => {
+    // 背景：streamChat / summarize 两条出口已接 sanitizeChatMessages，唯分类器自拼 messages 直发漏接
+    //（登记级剩余③——异常仅降级 risky 多一次审批不崩，故低危）。本组钉死「分类器请求体也过守门」。
+    it("detail 含存量孤立代理 → 出站请求体净除且 verdict 正常；成对 emoji 原样保留", async () => {
+        process.env.DEEP_SEEK_API_KEY ||= "test-key-guard";   // 懒加载单例构造需要（真请求不会发出——create 已被 stub）
+        const { getModel } = await import("@/llm/providers/deepseek/client.ts");
+        const { deepseekProvider } = await import("@/llm/providers/deepseek/index.ts");
+
+        const client = getModel();
+        const origCreate = client.chat.completions.create.bind(client);
+        let captured: any = null;
+        (client.chat.completions as any).create = async (body: any) => {
+            captured = body;
+            return { choices: [{ message: { content: "SAFE" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+        };
+        try {
+            const verdict = await deepseekProvider.classifyRisk(
+                "run_command", { command: "npm test" }, `diff 预览${loneHigh}与成对${emoji}`,
+            );
+            // ★ 夹具只用孤立高代理（勿用 loneHigh+loneLow 相邻——两半截恰相邻在码元层=合法代理对，守门会当正常文本保留）
+            assert.equal(verdict, "safe", "stub 返回 SAFE → 分类器判 safe");
+            assert.ok(captured, "请求体已被捕获");
+            const sent = JSON.stringify(captured.messages);
+            const cleaned = sent.replace(/\\ud[89ab][0-9a-f]{2}\\ud[c-f][0-9a-f]{2}/gi, "");
+            assert.ok(!/\\ud[89abc-f][0-9a-f]{2}/i.test(cleaned), "出站消息无孤立代理转义（净除生效）");
+            const userMsg = captured.messages.find((m: any) => m.role === "user")?.content ?? "";
+            assert.ok(userMsg.includes(emoji), "成对 emoji 原样保留（守门不误伤正常文本）");
+        } finally {
+            (client.chat.completions as any).create = origCreate;
+        }
+    });
+});

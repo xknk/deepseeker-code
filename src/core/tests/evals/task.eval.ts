@@ -51,6 +51,10 @@ const skipEngine = hasFlag('--no-engine');
 //   单跑二值不进门禁）。缺省 n=1：不作废重跑逻辑不生效、报告/基线逐字节同旧（红线）。
 const repeatArg = argv.find((a) => a?.startsWith('--repeat='));
 const REPEAT = repeatArg ? Math.max(1, Number(repeatArg.split('=')[1]) || 1) : 1;
+// ★ 实验标签（2026-11-13 反向验证遗留小项，2026-11-20 补）：--label=xxx 只写进 run json 头部与报告行，
+//   不进基线——反向验证（丢索引 3/3 vs 正常 3/3）与日常基线跑从此可辨，翻 .results/ 不再靠时间戳猜。
+const labelArg = argv.find((a) => a?.startsWith('--label='));
+const RUN_LABEL = labelArg ? labelArg.split('=').slice(1).join('=') || undefined : undefined;
 /** 作废重跑上限（终审护栏）：声明 windowTokens 的任务单跑 compactCount===0 视为「压缩未发生」作废，
  *  补跑 ≤2 次；仍压不动 → 标 invalid 单列（不计 passRate、不死循环）——同时是「窗口给太大」的信号，
  *  触发窗口重调（compact-survival 的 12K 初值校准依据，见 tasks/compact-survival.ts）。 */
@@ -512,9 +516,10 @@ try {
 // 落盘 run 记录（全字段，供事后翻查；对比表只打印摘要）——aggs + 有效跑明细 + 作废计数
 await fs.mkdir(RESULTS_DIR, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-await fs.writeFile(path.join(RESULTS_DIR, `run-${stamp}.json`), JSON.stringify({ model: modelName, rows: aggs, runs: allValidRuns, invalidRuns: invalidLog }, null, 2), 'utf-8');
+await fs.writeFile(path.join(RESULTS_DIR, `run-${stamp}.json`), JSON.stringify({ model: modelName, ...(RUN_LABEL ? { label: RUN_LABEL } : {}), rows: aggs, runs: allValidRuns, invalidRuns: invalidLog }, null, 2), 'utf-8');
 
 printReport(aggs, baseline);
+if (RUN_LABEL) console.log(`🏷️ 实验标签: ${RUN_LABEL}`);
 
 // ★ 可比性护栏：基线与本轮的模型不一致时数字不可比（不同模型水位不同，「回退/修复」失真）——显式警告。
 if (baseline && baseline.model && baseline.model !== modelName) {

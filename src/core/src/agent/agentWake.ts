@@ -21,6 +21,7 @@
  */
 import { pushSessionInbox } from "./inbox.ts";
 import { appendMessage } from "@/session/transcript.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 
 /** 唤醒哨兵：唤醒 run 的首条 user 消息（回放可读性准绳——transcript 里一眼看懂「主 agent 为何自己开始说话」）。
  *  ★ 措辞刻意避开 nudge 启发式的实现动词/对象词表（agentNudges.looksComplex）——哨兵不该诱导 PLAN_FIRST。 */
@@ -151,7 +152,8 @@ export const buildSubagentDoneReport = (
     const status = result.status ?? (result.output ? "final" : "error");
     const statusLabel = status === "final" ? "final（正常完成）" : status === "aborted" ? "aborted（被中止）" : "error（异常）";
     const over = result.output.length > SUBAGENT_REPORT_MAX_CHARS;
-    const body = over ? result.output.slice(0, SUBAGENT_REPORT_MAX_CHARS) : result.output;
+    // ★ 防劈代理对切头（2026-11-13 事故纪律：凡按长度截断进 API 消息的内容一律走这对助手，裸 slice 即事故复发点）
+    const body = over ? sliceHeadNoSplit(result.output, SUBAGENT_REPORT_MAX_CHARS) : result.output;
     return [
         `🤖 [子代理完成] 🆔 ${agentId}${taskBrief ? `（${taskBrief}）` : ""}`,
         `状态：${statusLabel}`,

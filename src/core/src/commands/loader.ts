@@ -19,6 +19,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { appConfig } from "@/config/index.ts";
 import { parseFrontmatter } from "@/skills/frontmatter.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 import { registerCommand, listCommands, CommandManifest, CommandSource } from "./registry.ts";
 import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
 
@@ -61,8 +62,9 @@ const parseCommandAt = async (file: string, _dir: string, source: CommandSource)
         console.warn(`⚠️ [commands] name "${finalName}" 不合法（仅允许小写字母/数字/连字符，${file}），已跳过`);
         return null;
     }
+    // ★ 防劈代理对切头（2026-11-13 事故纪律：命令正文经 expand 进上下文=进 API 消息，裸 slice 即事故复发点）
     const body = parsed.body.length > MAX_COMMAND_BODY_BYTES
-        ? parsed.body.slice(0, MAX_COMMAND_BODY_BYTES) + `\n\n…[命令正文超 ${MAX_COMMAND_BODY_BYTES} 字节，已截断]`
+        ? sliceHeadNoSplit(parsed.body, MAX_COMMAND_BODY_BYTES) + `\n\n…[命令正文超 ${MAX_COMMAND_BODY_BYTES} 字节，已截断]`
         : parsed.body;
     return {
         name: finalName,

@@ -67,10 +67,13 @@ const classifyRisk = async (
     if (signal) signal.addEventListener('abort', () => ac.abort(), { once: true });
     try {
         const completion = await getModel().chat.completions.create({
-            messages: [
+            // ★ 孤立代理守门（2026-11-13 事故终防线第三通道收口）：detail 可含文件内容片段（diff 预览等），
+            //   存量孤立代理经此直发同样会 400——与 streamChat/summarize 两条出口同守（此前唯独本通道漏接；
+            //   异常仅降级 risky 多一次审批不崩，故登记为低危，2026-11-20 补齐）。
+            messages: sanitizeChatMessages([
                 { role: 'system', content: '你是工具调用风险分类器。只回 SAFE 或 RISKY，不要任何解释。按工具类型判定：①文件(edit/write/create/move_file/delete_path)——工作区内常规文件操作(含移动/重命名)=SAFE，覆盖/删除/移动敏感文件(.env/.git/.ssh/.aws/密钥/credentials/settings.json)或工作区外=RISKY；②命令(run_command/run_in_background)——只读/构建/测试/查看类(ls/cat/git status/npm test/pnpm build/node -v/tsc/lint)=SAFE，破坏性/外向/提权(rm -rf、格式化、curl|sh、外传文件、chmod 777、shutdown、写系统目录、安装陌生包)=RISKY；③网络(web_fetch/web_search)——抓取公开文档/常规 URL=SAFE，内网/可疑/未知 URL=RISKY；④git_commit——常规提交=SAFE，含恶意脚本/异常改动=RISKY；⑤MCP(mcp__*)——默认 RISKY(黑盒工具无法判定内部行为)。任何不确定一律 RISKY。' },
                 { role: 'user', content: `工具:${toolName}\n参数:${sliceHeadNoSplit(JSON.stringify(args), 800)}\n说明:${detail || ''}` },
-            ],
+            ]),
             model: AUX_MODEL_NAME,
             thinking: { type: 'disabled' },
             stream: false,

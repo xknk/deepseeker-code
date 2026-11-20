@@ -24,6 +24,7 @@ import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
 import path from "path";
 import { writeSidecarArchive } from "@/session/sidecar.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 import { RunAgentEvents, PermissionMode, AuxUsageReporter } from "./type.ts";
 import { UIEvent, TraceDecisionSource } from "@/observability/type.ts";
 import { RequestApprovalFn, RequestQuestionFn, RequestIdeActionFn } from "@/host/type.ts";
@@ -602,7 +603,8 @@ const finalizeOutcome = async (ctx: ToolCallContext, toolCall: any, state: ToolC
  * 又不能让日志/事件爆字符。极小本地函数，勿引外部依赖。
  */
 const previewArgs = (raw: string | undefined, max: number): string | undefined =>
-    raw === undefined ? undefined : raw.length > max ? raw.slice(0, max) + `…（共 ${raw.length} 字符）` : raw;
+    // ★ 防劈代理对切头（低危字段仅进 trace 排查，不进 API 消息——顺手对齐截断纪律）
+    raw === undefined ? undefined : raw.length > max ? sliceHeadNoSplit(raw, max) + `…（共 ${raw.length} 字符）` : raw;
 
 /**
  * B 批（并行批异常隔离）顶层保护：processToolCallInner 的安全链各阶段大多自带 try/catch，但仍有

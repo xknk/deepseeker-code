@@ -374,6 +374,23 @@ describe("⑤ 完成汇报截断保护", () => {
         assert.match(buildSubagentDoneReport("a__sub__3", "", { status: "aborted", output: "❌ 中断" }), /状态：aborted（被中止）/);
         assert.match(buildSubagentDoneReport("a__sub__4", "", { status: "error", output: "❌ 崩溃" }), /状态：error（异常）/);
     });
+
+    it("★ 截断切点不劈代理对（2026-11-13 事故纪律，2026-11-20 收口本调用点）：emoji 落在 4096 边界整体舍去", () => {
+        const emoji = "📋";
+        // 4095 个 'x' 后跟 emoji（码元 4095=高代理、4096=低代理）——裸 slice(0,4096) 恰劈出孤立高代理
+        const long = "x".repeat(SUBAGENT_REPORT_MAX_CHARS - 1) + emoji + "y".repeat(500);
+        const r = buildSubagentDoneReport("a__sub__cut", "截断边界", { status: "final", output: long });
+        // 机器判定：汇报全文序列化后不得含孤立代理（DeepSeek 400 的直接诱因）
+        for (let i = 0; i < r.length; i++) {
+            const code = r.charCodeAt(i);
+            const isHigh = code >= 0xd800 && code <= 0xdbff;
+            const isLow = code >= 0xdc00 && code <= 0xdfff;
+            if (isHigh) assert.ok(r.charCodeAt(i + 1) >= 0xdc00 && r.charCodeAt(i + 1) <= 0xdfff, `高代理在 ${i} 无配对低代理`);
+            if (isLow) assert.ok(r.charCodeAt(i - 1) >= 0xd800 && r.charCodeAt(i - 1) <= 0xdbff, `低代理在 ${i} 无配对高代理`);
+        }
+        assert.ok(r.includes("x".repeat(SUBAGENT_REPORT_MAX_CHARS - 1)), "emoji 之前的正文完整保留");
+        assert.doesNotMatch(r, /📋/, "边界 emoji 整体舍去（不劈半）");
+    });
 });
 
 // ============ ⑥ description 更新（模型可见行为钉死） ============

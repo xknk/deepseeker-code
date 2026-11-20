@@ -100,3 +100,29 @@ describe("truncateToolResult 代理对回归（此前全 ASCII 零覆盖）", ()
         assert.ok(noLoneEscape(out), `头缘不劈：${JSON.stringify(out).slice(0, 80)}`);
     });
 });
+
+// ============ 登记级剩余调用点收口（2026-11-20，源后续路线「字符串截断劈代理对」条目①b） ============
+
+describe("commands loader body 截断（斜杠命令正文经 expand 进上下文 = 进 API 消息）", () => {
+    it("64KB 边界 emoji 不劈半：截断产物无孤立代理、截断提示在、正文前缀完整", async () => {
+        const { loadCommands } = await import("@/commands/loader.ts");
+        const { listCommands } = await import("@/commands/registry.ts");
+        const dir = path.join(SANDBOX, "commands");   // global 源 = dataDir/commands（env 已指 SANDBOX）
+        await fs.mkdir(dir, { recursive: true });
+        const MAX = 64 * 1024;
+        // 65535 个 'x' 后跟 emoji：裸 slice(0,65536) 切点落在 emoji 第二码元 → 孤立高代理
+        const body = "x".repeat(MAX - 1) + emoji + "y".repeat(500);
+        await fs.writeFile(
+            path.join(dir, "surr-cmd-fixture.md"),
+            `---\nname: surr-cmd-fixture\ndescription: 代理对边界截断夹具\n---\n${body}`,
+            "utf-8",
+        );
+        await loadCommands(false);
+        const cmd = listCommands().find((c: any) => c.name === "surr-cmd-fixture");
+        assert.ok(cmd, "夹具命令已注册（磁盘发现链路走通）");
+        assert.ok(cmd!.body.length < body.length, "确实发生了截断");
+        assert.match(cmd!.body, /已截断/, "含截断说明");
+        assert.ok(noLoneEscape(cmd!.body), "序列化无孤立代理转义");
+        assert.ok(!cmd!.body.includes(emoji), "边界 emoji 整体舍去（不劈半）");
+    });
+});
