@@ -318,6 +318,11 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
                         keepRecentUnits: Math.max(1, Math.floor((keepRecentUnits ?? 6) / 2)),
                         compactRatio,
                         modelWindow,
+                        // ★ 评审修复 B1（2026-11-23，C2）：必压——API 已实报超长，这里的兜底是最后一次机会；
+                        //   无 forceCompact 时判定用 est×1.4+T ≤ 窗口×阈值，真实窗口低于约 13 万 token 的模型
+                        //   此判定必然 noop（est 远小于 250K 级本地窗口），重试后再次 400。不补 correctionRatio
+                        //   /缓存数据（实测补传仍 noop）——「必压」语义由 forceCompact 承担，与手动压缩同义。
+                        forceCompact: true,
                         events,
                         depth,
                         signal,

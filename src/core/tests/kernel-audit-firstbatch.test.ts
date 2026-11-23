@@ -194,7 +194,8 @@ describe("内核审查报告第一批守门", () => {
             // 按本文件宿主矩阵同法用结构断言钉透传链：少任何一环，该路径 aux 花费就静默漏出 run 账本。
             const si = readRepo("src/agent/streamInference.ts");
             assert.match(si, /onAuxUsage\?:\s*AuxUsageReporter/, "StreamInferenceContext 须声明 onAuxUsage 字段");
-            assert.match(si, /await ensureFitsWindow\(\{[\s\S]{0,600}?onAuxUsage:\s*ctx\.onAuxUsage/, "降级路径 ensureFitsWindow 须透传 onAuxUsage");
+            // ★ 评审修复 B1（2026-11-23）：调用点内插入 forceCompact 注释块后放宽距离上界（600→1200）
+            assert.match(si, /await ensureFitsWindow\(\{[\s\S]{0,1200}?onAuxUsage:\s*ctx\.onAuxUsage/, "降级路径 ensureFitsWindow 须透传 onAuxUsage");
             const ra = readRepo("src/agent/runAgent.ts");
             assert.match(ra, /yield\* streamInference\(\{[\s\S]{0,400}?onAuxUsage:\s*reportAuxUsage/, "runAgent 调 streamInference 须注入 reportAuxUsage");
         });
