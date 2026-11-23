@@ -16,7 +16,13 @@ src/core/tests/evals/.results/*
 .playwright-mcp/
 
 # 挂机批处理运行时目录（done/ 报告存档 + 空态 pending/running——本地产物不入库；工单要入库可 git add -f）
+# **/ 前缀：含子目录——batch-feishu-listen 测试的后台异步写会逃逸沙盒窗口（env 已删、路径回退 cwd），
+#   2026-11-23 实测在 src/core/ 下落了 feishu-msg-map.json/sync-state.jsonl（原模式含斜杠锚定仓库根盖不住）
 .deepseeker-code/batch/
+**/.deepseeker-code/batch/
+
+# 测试输出日志（施工单 §5 的 `npm test > test-output.txt` 产物：判读后即可删，不入库）
+test-output.txt
 
 # 交互空转影子看门狗日志（本地观察数据不入库；复核 = 直接看 JSONL）
 .deepseeker-code/watchdog-shadow.jsonl
