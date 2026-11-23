@@ -134,9 +134,11 @@ export const notifySubagentDone = async (parentSessionId: string, report: string
     if (!parentSessionId || !report) return;
     const delivered = pushSessionInbox(parentSessionId, report);
     if (!delivered) {
-        try {
-            await appendMessage({ sessionId: parentSessionId, role: "user", content: report } as any);
-        } catch { /* transcript 落盘失败不击垮唤醒编排（inbox 通道在时本分支不走） */ }
+        // ★ 评审修复 B5（2026-11-23）：appendMessage 是吞错返回布尔语义（内层已 catch，永不抛）——
+        //   原写法的 try/catch 是死代码、「空 catch」注释与事实不符。落盘失败（返回 false）= 完成汇报
+        //   无痕丢失（恢复后不可见），补告警留观测；「不击垮唤醒编排」的容错语义保持。
+        const ok = await appendMessage({ sessionId: parentSessionId, role: "user", content: report } as any);
+        if (!ok) console.warn(`⚠️ [agentWake] 完成汇报直落 transcript 失败（唤醒照常，但本条汇报未落盘、恢复后不可见）：会话=${parentSessionId}`);
     }
     scheduleWake(parentSessionId);
 };

@@ -378,7 +378,10 @@ export const streamInference = async function* (ctx: StreamInferenceContext): As
             //   恢复会话后仍可见；若有半截 tool_call（不可保留半工具），整体丢弃。
             if (contentBuf && toolCallsBuf.size === 0) {
                 message.push({ role: 'assistant', content: contentBuf });
-                await appendMessage({ sessionId, role: 'assistant', content: contentBuf });
+                // ★ 评审修复 B5（2026-11-23）：中止落盘的返回值此前被丢弃——appendMessage 吞错返回布尔，
+                //   false = partial 文本只在内存 message 里、transcript 未持久化（恢复后不可见且无痕），补告警。
+                const persisted = await appendMessage({ sessionId, role: 'assistant', content: contentBuf });
+                if (!persisted) console.warn('⚠️ [streamInference] 中止落盘失败：partial 文本未写入 transcript（恢复后不可见）');
             }
             return { kind: 'aborted', partialText: contentBuf };
         }

@@ -6,7 +6,9 @@
  *
  *  从 runAgent 工具执行段抽出。yield tool.start/tool.end/plan.proposed/plan.enterRequested；
  *  return ScheduleResult（completed/aborted/terminal）——final 永远由主循环 yield，本模块绝不 yield final。
- *  消费方（主循环）须手动 .next() 迭代以获取 return value（for-await 取不到 generator return value），
+ *  消费方用 `yield*` 委托本 generator，ScheduleResult（return value）自动带出（★ 评审修复 B5：
+ *  原「须手动 .next() 迭代取 return value」的说法已过期——runAgent 主循环实为 `yield*` 委托，
+ *  for-await 取不到 return value 的坑不存在于该形态），
  *  并对 ScheduleResult.kind 做穷尽 switch（漏 kind 即行为缺失）。
  *  异常不在此处理：上抛到主循环外层 catch(toolErr) 兜底 yield final（与原内联实现一致）。
  */
