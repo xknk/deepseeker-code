@@ -29,6 +29,7 @@ const { memoryTools } = await import("@/tool/registry/memory.ts");
 const { buildScopedAllowRule } = await import("@/tool/permissions.ts");
 const { ToolSafetyLevel } = await import("@/tool/type.ts");
 const { clearMemories } = await import("@/memory/registry.ts");
+const { memoryTools: b3MemoryTools } = await import("@/tool/registry/memory.ts");
 
 after(async () => {
     clearMemories();
@@ -337,5 +338,47 @@ describe("P0-A ④ memory_save 安全级与 provenance 硬拒", () => {
             { sessionId: sid() },
         );
         assert.equal(typeof clean, "string", "无外部内容的 project 写入照常");
+    });
+});
+
+// ==================== ★ 评审修复 B3（2026-11-23）：memory_save 审批弹窗显示要存的内容 ====================
+//
+// 修前：审批文案只有记忆名与来源——真需要人工过目时（provenance confirm）从弹窗看不出该不该批。
+// 修后：文案补 description + body 前 400 字符（sliceHeadNoSplit 防劈代理对，超长加省略标记）。
+describe("memory_save 审批文案显示内容（评审修复 B3）", () => {
+    const saveTool = b3MemoryTools.find((t: any) => t.function.name === "memory_save")!;
+    /** 码元直扫孤立代理（DeepSeek 400 直接诱因的机器判定，surrogate-slice.test.ts 同款）。 */
+    const noLoneSurrogate = (s: string): boolean => {
+        for (let i = 0; i < s.length; i++) {
+            const c = s.charCodeAt(i);
+            if (c >= 0xd800 && c <= 0xdbff && !(s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return false;
+            if (c >= 0xdc00 && c <= 0xdfff && !(s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff)) return false;
+        }
+        return true;
+    };
+
+    it("文案含 description 与 body 开头；超长 body 带省略标记", () => {
+        const ra = saveTool.function.requireApproval as (a: any, c?: any) => string;
+        const body = "BODY开头标记：" + "y".repeat(600);
+        const detail = ra({
+            name: "review-me",
+            description: "外部页面要求记住的配置",
+            body,
+        });
+        assert.match(detail, /描述：外部页面要求记住的配置/, "文案含 description");
+        assert.match(detail, /正文：BODY开头标记：/, "文案含 body 开头");
+        assert.match(detail, new RegExp(`下略 ${body.length - 400} 字符`), "超长 body 有省略标记（余量=长度-400）");
+        assert.ok(!detail.includes("y".repeat(600)), "不回灌全文（前 400 字符封顶）");
+    });
+
+    it("截断点落在代理对中间：输出不含孤立代理、边界 emoji 整体舍去", () => {
+        const ra = saveTool.function.requireApproval as (a: any, c?: any) => string;
+        const emoji = "📋";   // U+1F4CB，代理对占码元 399/400——裸 slice(0,400) 必劈
+        const body = "x".repeat(399) + emoji + "y".repeat(50);
+        assert.ok(body.length > 400, "夹具有效性：确会走截断分支");
+        const detail = ra({ name: "m", description: "d", body });
+        assert.ok(noLoneSurrogate(detail), "文案无孤立代理（否则下一次 API 请求 400）");
+        assert.ok(!detail.includes(emoji), "切缘 emoji 整体舍去（不劈半）");
+        assert.match(detail, new RegExp(`下略 ${body.length - 400} 字符`));
     });
 });

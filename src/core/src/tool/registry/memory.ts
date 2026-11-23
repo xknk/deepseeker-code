@@ -35,6 +35,7 @@ import { hasExternalContent } from "@/tool/provenance.ts";
 import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
 import { registerMemory, getMemory, unregisterMemory, listMemories, getMemoryIndex, memoryIndexLine, MEMORY_LIMITS, MemoryType, MemoryManifest } from "@/memory/registry.ts";
 import { recordMemoryUse } from "@/memory/usage.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 
 // MEMORY_LIMITS 已上移至 memory/registry.ts（外部桥接 loader 加载期按同一预算拒载，索引格式+预算同源）；此处再导出保既有测试路径。
 export { MEMORY_LIMITS };
@@ -165,9 +166,19 @@ export const memoryTools: CustomTool[] = [
             requireApproval: (args: any, ctx?: ToolContext) => {
                 const name = sanitizeLine(args?.name);
                 const project = args?.project === true;
-                const base = project
+                // ★ 评审修复 B3（2026-11-23）：审批文案补记忆实质内容——description + body 前 400 字符
+                //   （sliceHeadNoSplit 防劈代理对，截断加省略标记）。真需要人工过目时（provenance confirm）
+                //   弹窗里直接能看出该不该批——正文可能源自外部文本，它就是本弹窗的审查对象本体。
+                const description = sanitizeLine(args?.description);
+                const body = typeof args?.body === "string" ? args.body : "";
+                const BODY_PREVIEW_CHARS = 400;
+                const bodyPreview = body.length > BODY_PREVIEW_CHARS
+                    ? `${sliceHeadNoSplit(body, BODY_PREVIEW_CHARS)}…（下略 ${body.length - BODY_PREVIEW_CHARS} 字符）`
+                    : body;
+                const contentBlock = `\n描述：${description || "（空）"}\n正文：${bodyPreview || "（空）"}`;
+                const base = (project
                     ? `保存持久记忆 **${name}** 到【项目源】（.deepseeker-code/memory，可提交 git——将随仓库共享给所有克隆者；跨会话注入系统提示词）`
-                    : `保存持久记忆 **${name}**（全局源，仅本机；跨会话注入系统提示词）`;
+                    : `保存持久记忆 **${name}**（全局源，仅本机；跨会话注入系统提示词）`) + contentBlock;
                 if (hasExternalContent(ctx?.sessionId)) {
                     return base + `\n⚠️ [provenance] 本回合已消费外部内容（网页/搜索/命令输出）——该记忆可能源自不可信文本（提示词注入面）。请核对内容确出自你的意图或用户原话，而非外部页面/命令输出诱导。`;
                 }
