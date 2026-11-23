@@ -78,10 +78,18 @@ describe("P0-A ① provenance 模块语义", () => {
     });
 });
 
-describe("P0-A ② externalContent 声明接线（执行层标记）", () => {
-    it("成功执行后本会话 provenance 命中；失败不标记", async () => {
+describe("P0-A ② externalContent 声明接线（执行层标记；评审修复 A6 成败都标记）", () => {
+    it("成功执行后本会话 provenance 命中；失败（toolFailure / 抛异常）也标记（S3：失败输出照样回灌模型）", async () => {
         const s = sid();
         const tools = [externalTool("prov_web", "page-text")];
+        const failTool = {
+            type: "function",
+            function: {
+                name: "prov_fail", description: "", parameters: { type: "object", properties: {} },
+                safetyLevel: "safe", isSync: true, externalContent: true,
+                execute: async () => ({ status: "failed" as const, content: "cmd not found" }),
+            },
+        };
         const boomTool = {
             type: "function",
             function: {
@@ -90,15 +98,63 @@ describe("P0-A ② externalContent 声明接线（执行层标记）", () => {
                 execute: async () => { throw new Error("boom"); },
             },
         };
-        const ctx = makeCtx([tools[0], boomTool], { sessionId: s });
+        const ctx = makeCtx([tools[0], failTool, boomTool], { sessionId: s });
         await processToolCall(tc("p1", "prov_web"), ctx);
         assert.equal(hasExternalContent(s), true, "成功外部工具 → 标记");
 
         const s2 = sid();
-        const ctx2 = makeCtx([tools[0], boomTool], { sessionId: s2 });
-        const out = await processToolCall(tc("p2", "prov_boom"), ctx2);
+        const ctx2 = makeCtx([tools[0], failTool, boomTool], { sessionId: s2 });
+        const out = await processToolCall(tc("p2", "prov_fail"), ctx2);
         assert.equal(out.ok, false);
-        assert.equal(hasExternalContent(s2), false, "失败不构成注入面，不标记");
+        assert.equal(hasExternalContent(s2), true, "failed 输出回灌模型 = 注入面 → 标记（评审修复 A6）");
+
+        const s3 = sid();
+        const ctx3 = makeCtx([tools[0], failTool, boomTool], { sessionId: s3 });
+        const out3 = await processToolCall(tc("p3", "prov_boom"), ctx3);
+        assert.equal(out3.ok, false);
+        assert.equal(hasExternalContent(s3), true, "抛异常进 catch 也标记（工具可能已产出部分输出）");
+    });
+
+    it("run_command 桩：非零退出码（verifyResult 判 failed）→ 标记；审批拒绝未执行 → 不标记", async () => {
+        const { commandTools } = await import("@/tool/registry/command.ts");
+        const { setActiveProvider, resetActiveProvider } = await import("@/llm/model.ts");
+        // 假 provider（fail-closed risky）：DANGER 命令必进分类器分支，不打真实 API；
+        // 判定确定化后经 requestApproval 通道分别放行 / 拒绝。
+        setActiveProvider({
+            id: "fake", displayName: "Fake", modelLabel: "Fake",
+            streamChat: async function* () { },
+            classifyRisk: async () => "risky",
+            buildAssistantMessage: (p: any) => ({ role: "assistant", content: p.content ?? "" }) as any,
+            isContextLengthError: () => false,
+            isTransientError: () => false,
+            isImageUnsupportedError: () => false,
+            summarize: async () => ({ choices: [{ message: { content: "Fake 摘要" } }] }),
+        } as any);
+        try {
+            const real = commandTools.find((t: any) => t.function.name === "run_command")!;
+            // 非零退出形态：execute 吐失败哨兵 → 真声明 verifyResult 判 failed
+            const nonzeroTool = {
+                ...real,
+                function: { ...real.function, execute: async () => "error: boom\n⟦DSC_EXIT:1⟧" },
+            };
+            const s = sid();
+            // 审批放行（工具真执行、哨兵被判 failed）→ 走到 executeTool（契约值 = "allow-once"，同 ③ 组惯例）
+            const out = await processToolCall(tc("p4", "run_command", { command: "definitely-failing" }),
+                makeCtx([nonzeroTool], { sessionId: s, requestApproval: async () => "allow-once" }));
+            assert.equal(out.ok, false, "非零退出 → failed");
+            assert.equal(hasExternalContent(s), true, "非零退出的 stdout/stderr 回灌模型 → 标记（评审修复 A6）");
+
+            // 审批拒绝未执行 → 不标记（DANGER 工具 + requestApproval 拒绝，走不到 executeTool）
+            const s2 = sid();
+            const refusedCtx = makeCtx([nonzeroTool], {
+                sessionId: s2,
+                requestApproval: async () => 'deny',   // 三态契约：仅 'deny' 算拒绝（guard: decision !== 'deny' 即放行）
+            });
+            const out2 = await processToolCall(tc("p5", "run_command", { command: "definitely-not-readonly" }), refusedCtx);
+            assert.equal(out2.ok, false);
+            assert.match(out2.resultForModel, /安全熔断/, "审批被拒绝");
+            assert.equal(hasExternalContent(s2), false, "未执行不标记（前提保持）");
+        } finally { resetActiveProvider(); }
     });
 });
 

@@ -25,7 +25,9 @@
  *    快路径的 undo 备份兜底在执行层 beforeMutationBackup（凡改必可回退，快路径放行同样触发）。
  */
 import path from "path";
+import os from "os";
 import { classifyToolRisk } from "@/llm/model.ts";
+import { isSensitivePath } from "./sensitivePaths.ts";
 import { ToolContext, ToolSafetyLevel } from "./type.ts";
 
 export type AutoVerdict = 'allow' | 'deny' | 'ask';
@@ -73,7 +75,12 @@ const BUILTIN_AUTO_DENY: RegExp[] = [
     /(^|[\\/])\.deepseeker-code[\\/]settings\.json$/i,     // 项目权限/hooks 配置（防自我篡改提权）
 ];
 
-const matchBuiltinDeny = (p: string): boolean => {
+/**
+ * 内置高危文件清单判定（写面）：命中 .env / .git / .ssh / .aws / credentials / 私钥等 → deny。
+ * ★ 评审修复 A3（2026-11-23）改为导出：toolExecution.runSecurityGates 的【文件类敏感清单无条件硬闸】
+ *   与本判定共用同一份清单——allow 规则命中会跳过分类器（runAutoCheck），硬闸必须在权限层之前独立执行。
+ */
+export const matchBuiltinDeny = (p: string): boolean => {
     const norm = p.replace(/\\/g, '/').toLowerCase();
     return BUILTIN_AUTO_DENY.some(re => re.test(norm));
 };
@@ -137,8 +144,10 @@ export const hasShellMetachars = (cmd: string): boolean => {
  * ★ A1（2026-11-09）后本清单的消费语境——isReadOnlyCommand 已引号感知拆段，本清单按【段】锚定
  *   「命令头 + 已知只读子命令」，其后 token 一律按该命令的参数对待；每段独立过清单 + 写选项 + 敏感文件
  *   三道闸，任一段不过则整串不免审（链中混入非只读段即转人工）。
- * ★ 刻意不放行：可读密钥的 cat/head/tail/type（应走 read_file 的敏感防护）、npm install/publish、
- *   curl/wget、git 写子命令（add/commit/push/checkout/reset/mv/rm 等）、rm/mv/cp/mkdir/touch 等任何写/外传操作。
+ * ★ cat/head/tail 已放行（2026-11-23 评审勘误：下方清单本就含三者，旧注释「刻意不放行」与实现矛盾）——
+ *   前提是过同段后续闸门：不读敏感文件（统一敏感清单逐 token 判定）、不出工作区（路径面判定
+ *   escapesWorkspaceOrSensitive）。仍刻意不放行：npm install/publish、curl/wget、
+ *   git 写子命令（add/commit/push/checkout/reset/mv/rm 等）、rm/mv/cp/mkdir/touch 等任何写/外传操作。
  *   收紧/放宽：在 settings.json 配 permissions.ask/allow（checkPermission 优先级始终高于本判定）。
  */
 const READONLY_HEADS: RegExp[] = [
@@ -155,12 +164,16 @@ const READONLY_HEADS: RegExp[] = [
     /^git branch(?:\s+(-a|-r|-v|-vv|--list|--all|--remotes|--verbose))*\s*$/, // 仅列举形态；-d/-D/-m 是写，不匹配
     // —— 纯查看 ——
     /^ls\b/, /^pwd\b/, /^echo\b/, /^whoami\b/, /^hostname\b/, /^date\b/,
-    // —— 文件查看/检索（hasShellMetachars 已确保无 ;|><` 等，单条命令；读敏感文件由 hasSensitiveFileArg 拦、
-    //    写选项由 hasWriteModifier 拦，两道闸门之后才放行，避免 grep/cat 读密钥、find -delete 销毁）——
+    // —— 文件查看/检索（hasShellMetachars 已确保无 ;|><` 等，单条命令；读敏感文件由统一敏感清单
+    //    hasSensitivePathToken 拦、写选项由 hasWriteModifier 拦、出工作区由路径面闸拦，
+    //    三道闸之后才放行，避免 grep/cat 读密钥、find -delete 销毁、cat 直读工作区外）——
     /^wc\b/,                                     // 计数（无文件内容输出，无密钥风险）
-    /^head\b/, /^tail\b/, /^cat\b/,              // 查看内容（敏感文件由 hasSensitiveFileArg 拦）
+    /^head\b/, /^tail\b/, /^cat\b/,              // 查看内容（敏感路径 token 由统一清单拦）
+    /^type\b/,                                   // ★ A1 后续（2026-11-23）：Windows 通道——cmd 的 type /
+                                                 //   PowerShell 的 Get-Content 别名（Git Bash 下是 shell builtin，
+                                                 //   只打印命令类型）。敏感/跨区仍由统一清单 + 路径面闸拦
     /^find\b/,                                   // 列路径（-delete/-exec/-ok 由 hasWriteModifier 拦）
-    /^grep\b/, /^egrep\b/, /^fgrep\b/, /^rg\b/,  // 内容检索（敏感文件由 hasSensitiveFileArg 拦）
+    /^grep\b/, /^egrep\b/, /^fgrep\b/, /^rg\b/,  // 内容检索（敏感路径 token 由统一清单拦）
     /^sed\b/,                                    // 默认/-n 打印到 stdout 即只读（-i 由 hasWriteModifier 拦）
     /^sort\b/, /^uniq\b/,                        // 纯 stdout 过滤（-o/--output 写文件由 hasWriteModifier 拦）——
                                                  // 2026-11-09 重放实测补口：`find … | sort` 链因管道尾段不在清单被漏问
@@ -260,14 +273,124 @@ export const hasWriteModifier = (cmd: string): boolean => {
 };
 
 /**
- * 命令串是否引用敏感文件（.env / 私钥 / 凭证等）：命中即不免审——
- * grep/cat/head/tail/sed 等会把文件内容回灌云端模型，读走密钥。与 BUILTIN_AUTO_DENY 的文件名模式同源。
- * 刻意宽松匹配（误命中只是多审批一次转人工，绝不静默放行）。
+ * 命令段的敏感路径判定（评审修复 A1，2026-11-23）：旧 SENSITIVE_FILE_ARG_RE 整串正则退役——
+ * 它对 .envrc（无 `.env` 词边界）/ ~/.kube/config / ~/.docker/config.json / ~/.git-credentials 等
+ * 敏感清单条目结构性漏判，且不看路径位置。改与读工具共用 sensitivePaths.ts 单一清单：
+ * 段内 token 逐个展开（~ / $HOME / %USERPROFILE%）、相对 token 解析到工作区根后查清单。
+ * 误命中只是多审批一次转人工，绝不静默放行（宁窄勿宽）。
  */
-const SENSITIVE_FILE_ARG_RE = /\.env\b|\.pem\b|\.pfx\b|\.p12\b|\.keystore\b|\.jks\b|\.key\b|id_(rsa|dsa|ecdsa|ed25519)\b|credentials?\.(json|ya?ml|toml|ini|conf)|secrets?\.(json|ya?ml|toml|ini|conf)|\.npmrc\b/i;
-export const hasSensitiveFileArg = (cmd: string): boolean => {
-    if (!cmd) return false;
-    return SENSITIVE_FILE_ARG_RE.test(cmd);
+const hasSensitivePathToken = (seg: string, rootDir: string): boolean => {
+    for (const raw of segmentTokens(seg)) {
+        const t = examineTokenValue(raw);
+        if (t === null) continue;
+        const abs = resolveTokenPath(t, rootDir);
+        if (abs && isSensitivePath(abs)) return true;
+    }
+    return false;
+};
+
+/**
+ * 引号外空白切 token（引号内空白不分隔；引号字符保留在 token 上，由 stripWrappingQuotes 统一剥）。
+ * 与 splitShellSegments（链拆段）不同粒度：本函数在【段内】切参数 token。
+ */
+const segmentTokens = (seg: string): string[] => {
+    const toks: string[] = [];
+    let cur = "";
+    let inSingle = false;
+    let inDouble = false;
+    for (let i = 0; i < seg.length; i++) {
+        const ch = seg[i];
+        if (inSingle) { if (ch === "'") inSingle = false; cur += ch; continue; }
+        if (inDouble) { if (ch === '"') inDouble = false; cur += ch; continue; }
+        if (ch === "'") { inSingle = true; cur += ch; continue; }
+        if (ch === '"') { inDouble = true; cur += ch; continue; }
+        if (/\s/.test(ch)) { if (cur) { toks.push(cur); cur = ""; } continue; }
+        cur += ch;
+    }
+    if (cur) toks.push(cur);
+    return toks;
+};
+
+/** 剥两端成对的包裹引号（不成对不剥——未闭合引号形态保守原样判定）。 */
+const stripWrappingQuotes = (t: string): string => {
+    if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) return t.slice(1, -1);
+    return t;
+};
+
+/**
+ * token 取值：`--opt=value` / `-o=value` 形态只看 value；无 `=` 的旗（含负数参数）→ null 跳过；其余原样。
+ * `-` 单字符（stdin 惯例）不按旗跳过（原样返回，非路径 token 自然无害）。
+ */
+const examineTokenValue = (raw: string): string | null => {
+    if (/^-[^=]*=/.test(raw)) return raw.slice(raw.indexOf("=") + 1);
+    if (/^-./.test(raw)) return null;
+    return raw;
+};
+
+/** 路径样 token：以 ~ / $HOME / %USERPROFILE% / 盘符 / \/ 开头，或含 \/。 */
+const isPathLikeToken = (t: string): boolean =>
+    /^(~|\$HOME|%USERPROFILE%|[A-Za-z]:[\\/]?|[\\/])/.test(t) || /[\\/]/.test(t);
+
+/** token → 绝对路径：展开 ~ / $HOME / %USERPROFILE%；相对 token 解析到工作区根。失败 → null（不表态）。 */
+const resolveTokenPath = (raw: string, rootDir: string): string | null => {
+    const home = os.homedir();
+    let p = stripWrappingQuotes(raw);
+    if (!p) return null;
+    if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) p = home + p.slice(1);
+    else if (/^\$HOME(?=$|[\\/])/i.test(p)) p = home + p.slice(5);
+    else if (/^%USERPROFILE%(?=$|[\\/])/i.test(p)) p = home + p.slice(13);
+    try {
+        return path.isAbsolute(p) ? path.resolve(p) : path.resolve(rootDir, p);
+    } catch { return null; }
+};
+
+/**
+ * 工作区外只读白名单（评审修复 A1，2026-11-23）：系统信息类只读文件，出工作区也放行。
+ * 宁窄勿宽——误拦（多问一次）无害，漏拦（免审读外部）才是事故。
+ * ★ A1 后续（2026-11-23）：原 4 条全是 POSIX 路径，在 Windows 主力平台上白名单形同虚设
+ *   （实测 `cat C:/Windows/System32/drivers/etc/hosts` 被拦、`cat /etc/hosts` 放行）。补 Windows 等价路径。
+ *   比较键 = token 原串小写化 + 反斜杠转正斜杠，故用正斜杠小写书写；`%SystemRoot%` 变量形态仍走审批。
+ */
+const READONLY_OUTSIDE_ALLOWLIST: ReadonlySet<string> = new Set([
+    // POSIX
+    "/etc/hosts",
+    "/proc/cpuinfo",
+    "/proc/meminfo",
+    "/proc/version",
+    // Windows
+    "c:/windows/system32/drivers/etc/hosts",
+]);
+
+/**
+ * ★ 评审修复 A1（2026-11-23）路径面判定：段内是否存在「落在工作区外的绝对路径」或「命中统一敏感清单的路径」。
+ *  - 按引号外空白切 token；`--opt=value` 只看 value；cd 段只查 `cd` 之后的 token；
+ *  - 仅查【路径样 token】（展开 home 后解析成绝对路径）；
+ *  - 任一绝对路径落在工作区外（白名单除外）→ true；任一绝对路径命中 sensitivePaths 清单 → true
+ *    （是否在工作区内都算——工作区内也常驻密钥）；
+ *  - 判定对象用【原始段】：normalizeGitGlobalFlags 会丢掉 `git -C <路径>` 里的路径，不能先归一化再判。
+ *  消费点：isReadOnlySegment 第四道闸——默认模式只读免审不再「不写敏感文件名即可免审读工作区外任何文件」。
+ *  误伤只允许「多问」这一个方向（跨工作区读经命令通道转人工；read_file 的 resolveReadablePath 不设围栏，
+ *  模型仍可用读工具读兄弟项目）。
+ */
+export const escapesWorkspaceOrSensitive = (segment: string, cwd?: string): boolean => {
+    const rootDir = cwd ?? (process.env.WORKSPACE_ROOT || process.cwd());
+    const seg = segment.trim();
+    if (!seg) return false;   // 空段由既有闸保守拒，本闸不重复表态
+    const toks = segmentTokens(seg);
+    const isCdSeg = /^cd(\s|$)/.test(seg);
+    for (let i = 0; i < toks.length; i++) {
+        if (isCdSeg && i === 0) continue;   // cd 段跳过命令头本体，只查其后的路径 token
+        const t = examineTokenValue(toks[i]);
+        if (t === null) continue;
+        const stripped = stripWrappingQuotes(t);
+        if (!isPathLikeToken(stripped)) continue;
+        const abs = resolveTokenPath(t, rootDir);
+        if (!abs) continue;
+        if (isSensitivePath(abs)) return true;   // 敏感命中：是否在工作区内都算
+        if (READONLY_OUTSIDE_ALLOWLIST.has(stripped.toLowerCase().replace(/\\/g, "/"))) continue;
+        if (!isWithinWorkspace(abs, rootDir)) return true;
+    }
+    return false;
 };
 
 // ============ ★ A1（2026-11-09 审批降噪）：链式只读免审——引号感知拆段 + 分段判定 ============
@@ -389,14 +512,17 @@ const normalizeGitGlobalFlags = (s: string): string => {
     return ["git", ...tokens.slice(i)].join(" ");
 };
 
-/** A1 单段只读判定：只读头（含 cd 段、git 全局旗归一化）+ 无写选项 + 无敏感文件参数，三道闸缺一不可；空段保守拒。 */
-const isReadOnlySegment = (seg: string): boolean => {
+/** A1 单段只读判定：只读头（含 cd 段、git 全局旗归一化）+ 无写选项 + 无敏感路径 token + 不出工作区/不触敏感路径面，
+ *  四道闸缺一不可；空段保守拒。（评审修复 2026-11-23：第三道闸改统一清单逐 token、新增第四道路径面闸。） */
+const isReadOnlySegment = (seg: string, rootDir?: string): boolean => {
     const s = seg.trim();
     if (!s) return false;
     const headCandidate = normalizeGitGlobalFlags(s);
     if (!CD_SEGMENT_HEAD.test(headCandidate) && !READONLY_HEADS.some(re => re.test(headCandidate))) return false;
     if (hasWriteModifier(s)) return false;      // sed -i / sort -o / find -delete/-exec/-ok（逐段复检）
-    if (hasSensitiveFileArg(s)) return false;   // grep .env / cat id_rsa（逐段复检）
+    const root = rootDir ?? (process.env.WORKSPACE_ROOT || process.cwd());
+    if (hasSensitivePathToken(s, root)) return false;         // grep .env / cat id_rsa / cat .envrc（统一清单逐 token）
+    if (escapesWorkspaceOrSensitive(s, root)) return false;   // cat ~/.aws/credentials / git -C 他仓 log（路径面）
     return true;
 };
 
@@ -411,13 +537,17 @@ const isReadOnlySegment = (seg: string): boolean => {
  * 2026-11-05 会话 trace 92 条 run_command 中 ~60 条是全只读链，整串一票否决的旧判定对真实 agent
  * 行为覆盖率 <10%（~60 次冤枉点击的来源）。接线点不变（toolExecution perm===null 时评估，
  * matchCommandDeny 硬闸在其后无条件执行，deny 优先级不受本判定影响）。
+ * ★ 评审修复 A1（2026-11-23）：新增可选 cwd（缺省 WORKSPACE_ROOT || cwd，接线点传 toolCtx.cwd）——
+ *   只读免审增加路径面判定（escapesWorkspaceOrSensitive）：段内路径 token 出工作区或命中敏感清单
+ *   即不免审，堵住「不写敏感文件名即可免审读工作区外任何文件」的口子。
  */
-export const isReadOnlyCommand = (cmd: string): boolean => {
+export const isReadOnlyCommand = (cmd: string, cwd?: string): boolean => {
     const c = (cmd || "").trim();
     if (!c) return false;
     if (c.includes("$(") || c.includes("`")) return false;  // 命令替换（任何位置）→ 一律不免审
     if (hasForbiddenRedirect(c)) return false;              // 白名单外重定向 → 不免审
-    return splitShellSegments(c).every(isReadOnlySegment);
+    const root = cwd ?? (process.env.WORKSPACE_ROOT || process.cwd());
+    return splitShellSegments(c).every(seg => isReadOnlySegment(seg, root));
 };
 
 /**
@@ -473,6 +603,38 @@ export const scriptRunnerEntryPrefix = (cmd: string): string | null => {
         }
     }
     return null;   // runner 族但无入口脚本 token（npm test 等）：回退精确串
+};
+
+/**
+ * ★ 评审修复 A2（2026-11-23，S2）：通配 allow 规则的候选链判定——「同入口 + 任意参数 + 纯过滤尾链」。
+ *  背景：allow-always 对 runner 入口生成前缀规则 `run_command(<解释器+入口脚本> *)`，旧匹配对入口后
+ *  任意续接都免审——`; cat ~/.aws/credentials`、`&& curl …`、`> out.txt` 全部 allow（静默外传面）。
+ *  permissions.ruleMatches 消费本判定：含 * 的 allow 命令规则命中前，候选命令串必须先过此闸——
+ *   - 整串含命令替换（`$(` / 反引号）→ false（执行期才展开，静态看不见）；
+ *   - 任一段含白名单外重定向（复用 hasForbiddenRedirect：写文件/追加/here-doc）→ false
+ *     （首段与尾链同闸：`| head -1 > out.txt` 的管道重定向与首段 `> out.txt` 同罪）；
+ *   - runner 段（剥前导 cd 后首段）之后的每一段：命令头 ∈ 纯过滤族（head/tail/grep/egrep/fgrep/rg/
+ *     sort/uniq/wc/sed——刻意不含 cat：cat 直接倾倒文件内容，不属「过滤已产出的流」），
+ *     且 isReadOnlySegment(段) === true（写选项/敏感路径/出工作区逐段复检）；否则 false；
+ *   - 只有一段（无尾链）→ 前两条通过即 true。
+ *  不命中 → 权限层对该候选不命中 → 落回 null（常规审批）。误伤只允许「多问」这一个方向。
+ */
+const FILTER_TAIL_HEADS: RegExp[] = [/^(head|tail|grep|egrep|fgrep|rg|sort|uniq|wc|sed)\b/];
+export const wildcardChainAllowed = (cmd: string): boolean => {
+    const c = (cmd || "").trim();
+    if (!c) return false;
+    if (c.includes("$(") || c.includes("`")) return false;
+    const segs = splitShellSegments(c).map(s => s.trim());
+    let i = 0;
+    while (i < segs.length && /^cd(\s|$)/.test(segs[i])) i++;   // 剥前导 cd（与生成侧 scriptRunnerEntryPrefix 对称）
+    if (i >= segs.length) return false;                          // 全是 cd 段（无 runner 段）
+    for (let j = i; j < segs.length; j++) {
+        if (hasForbiddenRedirect(segs[j])) return false;
+        if (j === i) continue;                                   // 首段（runner 段）：内容信任来自已确认规则前缀
+        if (!FILTER_TAIL_HEADS.some(re => re.test(segs[j]))) return false;
+        if (!isReadOnlySegment(segs[j])) return false;
+    }
+    return true;
 };
 
 // ============ ★ A3（2026-11-09 审批降噪）：http_request 字面回环目标免审 ============

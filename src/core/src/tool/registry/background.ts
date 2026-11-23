@@ -410,6 +410,9 @@ export const backgroundTools: CustomTool[] = [
             //   且 execute 内硬闸 task.sessionId !== ctx.sessionId 一票拒——只能停本会话自己起的任务，
             //   无越权面、可恢复（重启即可）。周五 trace 实证 4 次点击全是此类无信息量询问。
             safetyLevel: ToolSafetyLevel.SAFE,
+            // ★ 评审修复 A5（2026-11-23，V9）：显式排除计划期——SAFE 默认放行新默认下须显式声明 false
+            //   （杀进程树有外部副作用，非计划期只读调研动作）。
+            planAllowed: false,
             isSync: true,
             requireApproval: (args: { task_id: string }) => `申请终止后台任务 ${args.task_id}（及其子进程树）`,
             async execute(args: { task_id: string }, ctx?: ToolContext) {

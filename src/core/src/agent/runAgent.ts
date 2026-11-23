@@ -22,7 +22,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { msgText } from "@/session/contentParts.ts";
 import { getCalibration, updateCalibration } from "@/session/store.ts";
 import { ensureFitsWindow } from "./truncate.ts";
-import { AgentEvent, RunAgentOptions, WindowCheckInfo } from "./type.ts";
+import { AgentEvent, RunAgentEvents, RunAgentOptions, WindowCheckInfo } from "./type.ts";
 import { dispatch } from "@/tool/hooks.ts";
 import { resetExternalContent } from "@/tool/provenance.ts";
 import { ToolCallContext } from "./toolExecution.ts";
@@ -69,6 +69,26 @@ export const resolveFirstPrompt = (
 };
 
 /**
+ * ★ run 事件包装层（评审修复 A8，2026-11-23：抽出的纯函数，供嵌套单测）。
+ *  包装序与胜出方：外层（本 run）先执行、内层（既有包装，如父 run 经 subagent 透传的那层）后执行，
+ *  故 metadata 的最终胜出方是【内层】。据此——
+ *   - runId 由内层覆盖：子 run 发出的埋点最终带父 run 的 runId（子 run 事件归入父 run 的 trace 切片，
+ *     既有设计，勿改；逐 run 正确的 runId 记录在 transcript 的 run.start 事件行）；
+ *   - agentId 仅在 metadata 未携带时注入本 run 的值（`??` 语义：已存在——哪怕父层已注入父 agentId——
+ *     则保留不覆盖）。修前 `{ ...base.metadata, runId, agentId }` 的父包装后执行会把子 run 的 agentId
+ *     覆盖成父的（当日会话实测：转录 run.start 14 个 agentId，trace 1,368 条带 runId 事件只有 5 个
+ *     agentId、9 个子 run 的 runId 一次都没出现）。
+ *  埋点异常吞掉不冒泡（旁路埋点不拖垮主业务推理，既有铁律）。
+ */
+export const wrapRunEvents = (rawEvents: RunAgentEvents, runId: string, agentId: string): RunAgentEvents => {
+    return async (base) => {
+        try {
+            await rawEvents({ ...base, metadata: { ...base.metadata, runId, agentId: base.metadata?.agentId ?? agentId } });
+        } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
+    };
+};
+
+/**
  * 运行 Agent 主循环（流式）。
  *
  * 持续进行「模型推理 → 工具调用」的多轮循环，直到模型不再请求工具、检测到重复调用熔断、
@@ -94,11 +114,12 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
     // ★ runId 自动注入（P2）：主/子/压缩/工具各埋点统一带 metadata.runId——trace 可按 run 聚合切片
     //   （单 run token/耗时/工具序列），与 transcript 的 run.start/run.end 事件行同 ID 互查。
     //   ★ agentId 同注入（评审 #9）：并行子代理共父 runId 时的链唯一键，见上方声明处。
-    //   子 agent 传入的 ctx.events 已含父级包装，此处再包一层以本 run runId/agentId 覆盖（spread 序：内层胜出）。
+    //   子 agent 传入的 ctx.events 已含父级包装，此处再包一层——★ 评审修复 A8（2026-11-23）包装序：
+    //   外层（本 run）先执行、内层（父包装）后执行，故 metadata 的胜出方是内层——runId 由内层（父）
+    //   覆盖（子 run 事件归入父 run 的 trace 切片，既有设计）；agentId 已存在时保留（子 run 自己的
+    //   agentId 不被父的值抹掉——修前父包装后执行会覆盖，当日会话实测转录 14 个 agentId vs trace 仅 5 个）。
     const rawEvents = options.events; // 原始回调方法
-    const events: typeof rawEvents = async (base) => {
-        try { await rawEvents({ ...base, metadata: { ...base.metadata, runId, agentId } }); } catch (e) { console.warn('⚠️ 埋点失败（不影响推理）:', e instanceof Error ? e.message : e); }
-    };
+    const events: typeof rawEvents = wrapRunEvents(rawEvents, runId, agentId);
     const modelWindow = options.modelWindow; // 最大上下文token
     const signal = options.abortSignal; // 主动停止
     const depth = options.depth ?? 0;

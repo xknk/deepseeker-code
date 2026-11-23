@@ -19,7 +19,7 @@ import path from "path";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "dsc-agentid-"));
 process.env.DEEPSEEKER_CODE_DATA_DIR = SANDBOX;
 
-const { runAgent } = await import("@/agent/runAgent.ts");
+const { runAgent, wrapRunEvents } = await import("@/agent/runAgent.ts");
 const { readTranscriptLines, isEventLine } = await import("@/session/transcript.ts");
 const { getStatePath } = await import("@/session/store.ts");
 const { getUsageLogPath: usageLogPath } = await import("@/observability/usageLog.ts");
@@ -80,5 +80,42 @@ describe("agentId 埋点：并行链唯一键", () => {
         const rows = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.sessionId === sid);
         assert.equal(rows.length, 1, "本 sid 恰一行 usage 记录");
         assert.ok(typeof rows[0].agentId === "string" && rows[0].agentId.length > 0, "usageLog 行带 agentId（分账地基）");
+    });
+});
+
+// ============ ★ 评审修复 A8（2026-11-23）：wrapRunEvents 嵌套——子 run 的 agentId 不被父覆盖 ============
+//
+// 真实拓扑：子 run 拿到的 events 是父 run 已包装的那层（subagent 透传），子 run 再包一层。
+// 执行序 = 外层（子）先、内层（父）后——metadata 最终胜出方是内层：
+//   - runId 被内层（父）覆盖 → 子 run 事件归入父 run 的 trace 切片（既有设计）；
+//   - agentId 外层注入后内层不再覆盖（`??` 保留）→ 子 run 的 agentId 存活。
+// 修前 `{ ...base.metadata, runId, agentId }` 的父包装后执行会抹掉子 run 的 agentId
+// （当日会话实测：转录 run.start 14 个 agentId，trace 1,368 条带 runId 事件仅 5 个 agentId）。
+describe("wrapRunEvents 嵌套（评审修复 A8）", () => {
+    it("wrap(wrap(collect, r1, a1), r2, a2)：runId === r1（父切片）、agentId === a2（子存活）", async () => {
+        const collected: any[] = [];
+        const collect = async (e: any) => { collected.push(e); };
+        const r1 = "run-parent", a1 = "agent-parent", r2 = "run-child", a2 = "agent-child";
+        const events = wrapRunEvents(wrapRunEvents(collect, r1, a1), r2, a2);
+        await events({ sessionId: "s", eventType: "llm.request", metadata: { depth: 1 } } as any);
+        assert.equal(collected.length, 1);
+        assert.equal(collected[0].metadata.runId, r1, "runId 被内层（父）覆盖——子 run 归入父切片（既有设计）");
+        assert.equal(collected[0].metadata.agentId, a2, "agentId 保留外层（子）的值——不被父覆盖（A8 修复点）");
+    });
+
+    it("单层包装：runId/agentId 均注入；metadata 已带 agentId 时保留原值", async () => {
+        const collected: any[] = [];
+        const events = wrapRunEvents(async (e: any) => { collected.push(e); }, "run-x", "agent-x");
+        await events({ sessionId: "s", eventType: "llm.request", metadata: { depth: 0 } } as any);
+        assert.equal(collected[0].metadata.runId, "run-x");
+        assert.equal(collected[0].metadata.agentId, "agent-x");
+        await events({ sessionId: "s", eventType: "llm.request", metadata: { depth: 0, agentId: "agent-preexisting" } } as any);
+        assert.equal(collected[1].metadata.agentId, "agent-preexisting", "已存在的 agentId 保留（?? 语义）");
+    });
+
+    it("内层抛错被吞掉不冒泡（旁路埋点不拖垮主业务，既有铁律经包装层保持）", async () => {
+        const boom = async () => { throw new Error("trace disk full"); };
+        const events = wrapRunEvents(boom, "run-y", "agent-y");
+        await assert.doesNotReject(() => events({ sessionId: "s", eventType: "llm.request", metadata: { depth: 0 } } as any));
     });
 });

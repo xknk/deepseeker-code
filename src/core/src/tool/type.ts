@@ -222,8 +222,14 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
         autoApproval?: 'file' | 'command' | 'aggressive' | 'loopback';
 
         /**
-         * 计划模式白名单（替代 planMode.ts PLAN_ALLOWED_TOOLS 名单）：true = 计划期（只读调研）可用。
-         * 缺省 = 计划期拒绝（写工具 / 命令 / 后台任务等，现状语义）。
+         * 计划模式白名单（替代 planMode.ts PLAN_ALLOWED_TOOLS 名单）。
+         * ★ 评审修复 A5（2026-11-23，V9）语义：三态——
+         *  - true               ：计划期（只读调研）显式可用（含非 SAFE 工具的显式豁免）；
+         *  - 缺省（undefined）  ：按 safetyLevel 判定——SAFE 放行（只读调研是计划期的本职）、
+         *                         非 SAFE（MUTATION/DANGER）拒绝（写工具 / 命令 / 后台任务等）；
+         *  - false              ：显式排除——SAFE 但有理由不进计划期的工具（spawn_agent / run_workflow：
+         *                         花钱且子代理可能写；stop_background_task：杀进程副作用；wait_http_ready：联网）。
+         * runtime 档（toolExecution.planToolAllowed）与 schema 档（planMode.filterToolsForPlanMode）同一判定。
          */
         planAllowed?: boolean;
 

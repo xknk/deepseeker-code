@@ -185,3 +185,102 @@ describe("loadHooks 端到端：项目级规则自动打标过门", () => {
         assert.equal(listHooks().length, 0);
     });
 });
+
+// ============ ★ 评审修复 A7（2026-11-23，X2）：信任键带项目作用域 ============
+//
+// 修前口子：键 = 命令/URL/任务裸原串、信任存储是全局单文件 trusted_hooks.json——A 项目点过
+// 「始终允许」的命令串，出现在 B 项目的 settings.json 里即免审执行。修后：项目级规则读取时记下
+// 来源目录，信任键 = <来源目录>\n + 原串；全局规则键不变；审批文案与无通道告警展示实际使用的键。
+
+describe("信任键项目作用域（评审修复 A7）", () => {
+    it("同串命令两个项目目录互不影响：B 仍被拦、A 直通；落盘键 = 目录+换行+原串", async () => {
+        await fresh();
+        const dirA = path.join(TMP_ROOT, "projX", ".deepseeker-code");
+        const dirB = path.join(TMP_ROOT, "projY", ".deepseeker-code");
+        const logA: any[] = [];
+        await mkCmdRule({ projectSource: true, projectSourceDir: dirA }).run(ctxWith(host("allow-always", logA)));
+        assert.ok(logA[0].detail.includes(dirA) && logA[0].detail.includes(CMD), "审批详情展示完整信任键（来源目录 + 命令原串）");
+        const persisted = JSON.parse(await fs.readFile(TRUSTED_FILE, "utf-8"));
+        assert.deepEqual(persisted, [`${dirA}\n${CMD}`], "落盘键 = 来源目录 + 换行 + 命令原串");
+        assert.equal(await isHookCommandApproved(CMD), false, "裸原串不再是键（A7 语义）");
+
+        const logB: any[] = [];
+        await fs.rm(PROBE, { force: true });
+        await mkCmdRule({ projectSource: true, projectSourceDir: dirB }).run(ctxWith(host("deny", logB)));
+        assert.equal(await probeExists(), false, "B 项目同串命令仍被拦（A 的信任不跨项目）");
+        assert.equal(logB.length, 1, "B 首跑审批被发起");
+
+        await fs.rm(PROBE, { force: true });
+        await mkCmdRule({ projectSource: true, projectSourceDir: dirA }).run(ctxWith(host("deny", logB)));
+        assert.equal(await probeExists(), true, "A 已信任 → 直通不再问");
+        assert.equal(logB.length, 1, "A 不再弹审批");
+    });
+
+    it("全局规则（requireApproval:true 非项目源）键不变：裸原串照旧落盘/命中", async () => {
+        await fresh();
+        await mkCmdRule({ requireApproval: true }).run(ctxWith(host("allow-always")));
+        assert.equal(await isHookCommandApproved(CMD), true, "全局规则键 = 裸原串（行为不变）");
+        const persisted = JSON.parse(await fs.readFile(TRUSTED_FILE, "utf-8"));
+        assert.deepEqual(persisted, [CMD]);
+    });
+
+    it("无审批通道的告警文案展示信任键（手工录入 trusted_hooks.json 可照抄）", async () => {
+        await fresh();
+        const dirC = path.join(TMP_ROOT, "projC", ".deepseeker-code");
+        const warns: string[] = [];
+        const origWarn = console.warn;
+        console.warn = (...a: any[]) => { warns.push(a.map(String).join(" ")); };
+        try {
+            const rule = mkCmdRule({ projectSource: true, projectSourceDir: dirC });
+            await rule.run({ toolName: "edit_file", cwd: TMP_ROOT });   // 无 toolContext → 无审批通道
+        } finally { console.warn = origWarn; }
+        const joined = warns.join("\n");
+        assert.match(joined, /信任键：/, "告警含信任键标签");
+        assert.ok(joined.includes(dirC), "信任键含来源目录");
+        assert.equal(await probeExists(), false, "命令未执行");
+    });
+
+    it("端到端：同一命令串在两个项目目录互不影响（loadHooks × chdir）", async () => {
+        await fresh();
+        const projA = path.join(TMP_ROOT, "projA");
+        const projB = path.join(TMP_ROOT, "projB");
+        for (const p of [projA, projB]) {
+            await fs.mkdir(path.join(p, ".deepseeker-code"), { recursive: true });
+            await fs.writeFile(path.join(p, ".deepseeker-code", "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ command: CMD }] } }), "utf-8");
+        }
+        const cwdBefore = process.cwd();
+        try {
+            // 项目 A：首次 allow-always → 键 = dirA\nCMD 落盘
+            process.chdir(projA);
+            clearHooks();
+            await loadHooks(true);
+            const logA: any[] = [];
+            await dispatch("PreToolUse", ctxWith(host("allow-always", logA)));
+            assert.ok(logA[0].detail.includes(projA), "审批详情含来源目录");
+            assert.ok(logA[0].detail.includes(CMD), "审批详情含命令原串");
+
+            // 项目 B：同串命令仍被拦（B 未批准）
+            process.chdir(projB);
+            clearHooks();
+            await loadHooks(true);
+            const logB: any[] = [];
+            await fs.rm(PROBE, { force: true });
+            await dispatch("PreToolUse", ctxWith(host("deny", logB)));
+            assert.equal(await probeExists(), false, "B 项目同串命令仍走审批（A 的信任不跨项目）");
+            assert.equal(logB.length, 1, "B 首跑审批被发起");
+
+            // 回到 A：直通零询问
+            process.chdir(projA);
+            clearHooks();
+            await loadHooks(true);
+            const logA2: any[] = [];
+            await fs.rm(PROBE, { force: true });
+            await dispatch("PreToolUse", ctxWith(host("deny", logA2)));
+            assert.equal(await probeExists(), true, "A 已信任 → 直通");
+            assert.equal(logA2.length, 0, "A 不再弹审批");
+        } finally {
+            process.chdir(cwdBefore);
+            clearHooks();
+        }
+    });
+});

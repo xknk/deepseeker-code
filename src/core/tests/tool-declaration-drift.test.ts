@@ -92,30 +92,130 @@ describe("工具策略声明化防漂移（#8a：新增工具只声明不动名�
             "漏声明 → 恒转人工审批（原名单机制的静默放行/漏接在此变为显式 ask）");
     });
 
-    it("⑤ 计划门禁：未声明 planAllowed（false/缺省）→ 计划期执行层拒绝（原 PLAN_ALLOWED_TOOLS 名单退役）", async () => {
+    it("⑤ 计划门禁（评审修复 A5 新默认）：SAFE 缺省放行、显式 false 与非 SAFE 拒绝（原「未声明即拒绝」旧默认退役）", async () => {
         const events = (() => { }) as any;
-        const baseCtx = {
+        const mkPlanCtx = (rawTools: any[]) => ({
             sessionId: 'sess_drv', cwd: SANDBOX, depth: 0, round: 1, startTime: performance.now(),
-            llmDecisionSource: 'tool' as any, rawTools: [fakeWriteTool], events,
+            llmDecisionSource: 'tool' as any, rawTools, events,
             keepRecentUnits: 6, compactRatio: 0.7, modelWindow: 128000, parentSystemPrompt: '',
             planMode: true, // runtime 档（默认）执行层门禁
-        };
-        const outcome = await processToolCall(
-            { id: 'call_drv_3', type: 'function', function: { name: 'fake_write_tool', arguments: '{"path":"note.md"}' } },
-            baseCtx as any);
+        });
+        const call = (id: string, rawTools: any[], name: string, args: any = { path: 'note.md' }) => processToolCall(
+            { id, type: 'function', function: { name, arguments: JSON.stringify(args) } },
+            mkPlanCtx(rawTools) as any);
+        // 1) 非 SAFE（MUTATION）未声明 → 拒（写工具不进计划期，语义不变）
+        const outcome = await call('call_drv_3', [fakeWriteTool], 'fake_write_tool');
         assert.equal(outcome.ok, false, "计划期写工具应被拒");
         assert.match(outcome.resultForModel, /计划模式/, "拒绝文案引导模型转只读/提交方案");
-        // 对照：声明 planAllowed:true 的只读工具在计划期放行进入执行
-        const readOnlyTool = {
+        // 2) SAFE 未声明 → 放行（★ 新默认：只读调研是计划期的本职，V9——旧默认把 18 个 SAFE 工具全拒）
+        const safeNoDecl = {
             ...fakeWriteTool,
-            function: { ...fakeWriteTool.function, name: 'fake_read_tool', safetyLevel: ToolSafetyLevel.SAFE, planAllowed: true, triggersUndo: undefined, autoApproval: undefined, execute: async () => 'read ok' },
+            function: { ...fakeWriteTool.function, name: 'fake_safe_tool', safetyLevel: ToolSafetyLevel.SAFE, planAllowed: undefined, triggersUndo: undefined, autoApproval: undefined, execute: async () => 'safe ok' },
         };
-        const outcome2 = await processToolCall(
-            { id: 'call_drv_4', type: 'function', function: { name: 'fake_read_tool', arguments: '{"path":"note.md"}' } },
-            { ...baseCtx, rawTools: [readOnlyTool] } as any);
-                assert.equal(outcome2.ok, true, "声明 planAllowed:true 的工具计划期可用");
-                assert.equal(outcome2.resultForModel, 'read ok');
-            });
+        const outcomeSafe = await call('call_drv_4a', [safeNoDecl], 'fake_safe_tool');
+        assert.equal(outcomeSafe.ok, true, "SAFE 未声明计划期放行（新默认）");
+        assert.equal(outcomeSafe.resultForModel, 'safe ok');
+        // 3) SAFE + planAllowed:false → 显式排除，拒
+        const safeBlocked = {
+            ...safeNoDecl,
+            function: { ...safeNoDecl.function, name: 'fake_safe_blocked', planAllowed: false },
+        };
+        const outcomeBlocked = await call('call_drv_4b', [safeBlocked], 'fake_safe_blocked');
+        assert.equal(outcomeBlocked.ok, false, "SAFE + 显式 false → 拒");
+        assert.match(outcomeBlocked.resultForModel, /计划模式/);
+        // 4) 非 SAFE + planAllowed:true → 显式豁免放行
+        const writeAllowed = {
+            ...fakeWriteTool,
+            function: { ...fakeWriteTool.function, name: 'fake_write_allowed', planAllowed: true },
+        };
+        const outcomeAllowed = await call('call_drv_4c', [writeAllowed], 'fake_write_allowed');
+        assert.equal(outcomeAllowed.ok, true, "非 SAFE + planAllowed:true 显式豁免放行");
+    });
+
+    it("⑤b 显式排除面精确钉零：planAllowed:false 的集合恰为四工具（新增有副作用的 SAFE 工具须显式登记）", async () => {
+        const { agentTools } = await import("@/tool/index.ts");
+        const { skillTools } = await import("@/tool/registry/skill.ts");
+        const all = [...(agentTools as any[]), ...(skillTools as any[])];
+        assert.ok(all.length > 20, "工具表防空转假绿");
+        const excluded = all
+            .filter(t => (t?.function as any)?.planAllowed === false)
+            .map(t => t.function.name)
+            .sort();
+        assert.deepEqual(excluded,
+            ["run_workflow", "spawn_agent", "stop_background_task", "wait_http_ready"],
+            "显式排除面恰为四工具（花钱的子代理两件套 + 杀进程 + 联网等待）；新 SAFE 带副作用工具出现时须显式登记 false");
+    });
+
+    it("⑤c V9 十八样本端到端（planMode:true + execute 桩）：14 个 SAFE 执行、4 个显式排除被拒、非 SAFE 照旧被拒", async () => {
+        const { agentTools } = await import("@/tool/index.ts");
+        const { skillTools } = await import("@/tool/registry/skill.ts");
+        const ALL = [...(agentTools as any[]), ...(skillTools as any[])];
+        const EIGHTEEN = [
+            "recall", "load_skill", "memory_read", "memory_list", "read_xlsx", "read_docx", "read_pdf",
+            "get_background_output", "find_references", "inspect_dependencies", "undo_list", "worktree_status",
+            "todo_write", "ask_question", "spawn_agent", "run_workflow", "stop_background_task", "wait_http_ready",
+        ];
+        const findTool = (name: string): any => {
+            const t = ALL.find(t => t?.function?.name === name);
+            assert.ok(t, `工具 ${name} 应在注册表中`);
+            assert.equal(t.function.safetyLevel, ToolSafetyLevel.SAFE, `V9 前提：${name} 应为 SAFE`);
+            return t;
+        };
+        const PLAN_ALLOWED_FALSE = new Set(["spawn_agent", "run_workflow", "stop_background_task", "wait_http_ready"]);
+        // ★ 执行样本须过 #8c 运行时参数校验（计划门禁先于校验，故被拒的 4 个无需合法参数）：
+        //   按各工具 schema 的 required 集合给最小合法参数。
+        const ARGS: Record<string, any> = {
+            recall: { query: "q" },
+            load_skill: { name: "x" },
+            memory_read: { name: "x" },
+            memory_list: {},
+            read_xlsx: { path: "a.xlsx" },
+            read_docx: { path: "a.docx" },
+            read_pdf: { path: "a.pdf" },
+            get_background_output: { task_id: "t" },
+            find_references: { path: "a.ts", line: 1, column: 1 },
+            inspect_dependencies: {},
+            undo_list: {},
+            worktree_status: {},
+            todo_write: { todos: [{ content: "c", status: "pending" }] },
+            ask_question: { question: "q", options: [{ label: "a" }, { label: "b" }] },
+        };
+        const rawTools = EIGHTEEN.map(name => ({
+            ...findTool(name),
+            function: { ...(findTool(name).function as any), execute: async () => 'plan-ok' },   // execute 全换桩
+        }));
+        const mkCtx18 = () => ({
+            sessionId: 'sess_drv_plan18', cwd: SANDBOX, depth: 0, round: 1, startTime: performance.now(),
+            llmDecisionSource: 'tool' as any, rawTools, events: (() => { }) as any,
+            keepRecentUnits: 6, compactRatio: 0.7, modelWindow: 128000, parentSystemPrompt: '',
+            planMode: true,
+        });
+        let executed = 0;
+        let rejected = 0;
+        for (const name of EIGHTEEN) {
+            const outcome = await processToolCall(
+                { id: `call_plan18_${name}`, type: 'function', function: { name, arguments: JSON.stringify(ARGS[name] ?? {}) } },
+                mkCtx18() as any);
+            if (PLAN_ALLOWED_FALSE.has(name)) {
+                assert.equal(outcome.ok, false, `${name} 显式排除 → 计划期拒绝`);
+                assert.match(outcome.resultForModel, /计划模式/);
+                rejected++;
+            } else {
+                assert.equal(outcome.ok, true, `${name}（SAFE 未声明 false）计划期放行执行`);
+                assert.equal(outcome.resultForModel, 'plan-ok');
+                executed++;
+            }
+        }
+        assert.equal(executed, 14, "18 个 SAFE 样本中 14 个执行");
+        assert.equal(rejected, 4, "4 个显式排除被拒");
+        // 非 SAFE 照旧被拒（execute 桩不应触达）
+        const writeStub = { ...fakeWriteTool, function: { ...fakeWriteTool.function, execute: async () => 'plan-ok' } };
+        const outcomeWrite = await processToolCall(
+            { id: 'call_plan18_write', type: 'function', function: { name: 'fake_write_tool', arguments: '{"path":"note.md"}' } },
+            { ...mkCtx18(), rawTools: [writeStub] } as any);
+        assert.equal(outcomeWrite.ok, false, "非 SAFE 工具计划期照旧被拒");
+        assert.notEqual(outcomeWrite.resultForModel, 'plan-ok', "execute 未触达");
+    });
 
             it("⑥ 全表防漂移：凡声明 primaryArg / pathArgs，必须真实存在于 parameters.properties（第 17 项补丁）", async () => {
                 // 背景：allow-always 作用域、分类器围栏、保护路径检查都按【声明】取 args[主参数]。
@@ -152,5 +252,18 @@ describe("工具策略声明化防漂移（#8a：新增工具只声明不动名�
                     const listDir = (agentTools as any[]).find((t) => t?.function?.name === "list_dir");
                     assert.equal(listDir?.function?.primaryArg, undefined,
                     "list_dir 不得声明 primaryArg（2026-10-21 漂移钉零；2026-11-10 path 已成为真实参数，但 SAFE 只读工具仍不需 allow-always）");
+            });
+
+            it("⑦ 敏感清单硬闸：声明 autoApproval='file' 即获得无条件硬闸——allow 规则命中也拦（评审修复 A3，2026-11-23）", async () => {
+                await fs.writeFile(path.join(SANDBOX, ".env"), "ENV_SECRET=1", "utf-8");
+                // allow-always 真实入内存规则集（对标 Claude Code「总是允许」的持久化路径）
+                assert.equal(await addPermissionRule('global', 'allow', 'fake_write_tool(*)'), true, "通配 allow 规则已加载");
+                // 硬闸在 checkPermission 之前：规则命中与否、分类器是否运行都无关——autoApproval='file'
+                // 声明本身即触发 pathArgs（缺省 ['path']）逐串查内置清单。
+                const outcome = await processToolCall(
+                    { id: 'call_drv_5', type: 'function', function: { name: 'fake_write_tool', arguments: '{"path":".env"}' } },
+                    { sessionId: 'sess_drv', cwd: SANDBOX, depth: 0, round: 1, startTime: performance.now(), llmDecisionSource: 'tool' as any, rawTools: [fakeWriteTool], events: (() => { }) as any, keepRecentUnits: 6, compactRatio: 0.7, modelWindow: 128000, parentSystemPrompt: '', planMode: false } as any);
+                assert.equal(outcome.ok, false, "通配 allow 规则命中也拦（修前：审批未请求直接改写成功）");
+                assert.match(outcome.resultForModel, /清单拦截/, "文件类敏感清单硬闸文案");
             });
         });

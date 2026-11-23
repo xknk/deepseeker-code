@@ -108,11 +108,13 @@ describe("内核审查报告第四批守门（I-4 / I-3 / I-6 / P2-10）", () =>
 
         it("接线结构：checkPermission 调用点传 sessionId、guard 入账带 ctx.sessionId、双宿主清桶", () => {
             const tex = readRepo("src/agent/toolExecution.ts");
+            // ★ 评审修复 A3（2026-11-23）：尾参追加 cwd（路径型 allow 规则按归一化相对路径匹配的根）
             assert.match(tex,
-                /checkPermission\(resolveMcpPermissionName\(calledName, state\.calledArgs\), state\.calledArgs, matchedTool\.function\.primaryArg, sessionId\)/,
-                "执行层权限判定须传会话 id");
+                /checkPermission\(resolveMcpPermissionName\(calledName, state\.calledArgs\), state\.calledArgs, matchedTool\.function\.primaryArg, sessionId, toolCtx\.cwd\)/,
+                "执行层权限判定须传会话 id（+A3 工作区根）");
             const sched = readRepo("src/agent/toolScheduling.ts");
-            assert.match(sched, /checkPermission\([^)]*sessionId\)/, "调度层 canParallelize 同样按会话判定");
+            assert.match(sched, /checkPermission\([^)]*sessionId, getActiveWorkspaceRoot\(\)\)/,
+                "调度层 canParallelize 同样按会话判定（+A3 工作区根）");
             const guard = readRepo("src/tool/guard.ts");
             assert.match(guard, /addSessionPermissionRule\(ruleStr, 'allow', ctx\.sessionId\)/,
                 "allow-session 入账必须归属当前会话（否则跨会话放行=P3 缺陷复活）");

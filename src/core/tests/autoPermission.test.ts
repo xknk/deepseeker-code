@@ -175,7 +175,8 @@ describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
         assert.equal(isReadOnlyCommand(`git show --stat 0489589 | head -30; echo '=== versions ==='; grep -m1 '"version"' src/cli/package.json`), true);
         assert.equal(isReadOnlyCommand("git log --oneline | head; echo '---'; git diff --stat | tail -3"), true);
         assert.equal(isReadOnlyCommand("cd src && git diff"), true);                 // cd 段视为只读
-        assert.equal(isReadOnlyCommand("cd /tmp && ls -la && pwd"), true);
+        // ★ 评审修复 A1（2026-11-23）路径面闸后翻转：/tmp 出工作区 → 转人工（「多问」方向，拍板默认口径）
+        assert.equal(isReadOnlyCommand("cd /tmp && ls -la && pwd", "d:\\code\\ws"), false);
         assert.equal(isReadOnlyCommand("git show HEAD --stat 2>&1 | head -5"), true); // 白名单重定向 + 管道
     });
 
@@ -221,23 +222,28 @@ describe("isReadOnlyCommand 链式分段判定（A1，2026-11-09）", () => {
 
     it("补口：git 全局旗形态归一化（trace #93/#116：git -c k=v diff / git -C <path> diff / --no-pager）", () => {
         assert.equal(isReadOnlyCommand("git -c core.quotepath=false diff --name-status HEAD~2 HEAD | head -5"), true);
-        assert.equal(isReadOnlyCommand("cd /tmp/ns-probe && git -C /tmp/ns-probe diff --name-status HEAD~2 HEAD"), true);
-        assert.equal(isReadOnlyCommand("git -C /tmp/x -c core.quotepath=false diff --numstat HEAD~1"), true);
+        // ★ 评审修复 A1（2026-11-23）路径面闸后翻转：-C 指向工作区外的仓 → 命令通道转人工（拍板默认口径：
+        //   跨工作区读转人工，模型可用 read_file 读兄弟项目）。原断言钉的是「旗归一化后免审」的旧语义。
+        assert.equal(isReadOnlyCommand("cd /tmp/ns-probe && git -C /tmp/ns-probe diff --name-status HEAD~2 HEAD", "d:\\code\\ws"), false);
+        assert.equal(isReadOnlyCommand("git -C /tmp/x -c core.quotepath=false diff --numstat HEAD~1", "d:\\code\\ws"), false);
         assert.equal(isReadOnlyCommand("git --no-pager log --oneline | head -10"), true);
         assert.equal(isReadOnlyCommand("git --no-optional-locks status --porcelain"), true);
         assert.equal(isReadOnlyCommand("git --git-dir=.git log --oneline"), true);
     });
 
     it("补口：单 token 闭合引号值豁免（2026-11-10 直答真机实锤：教学示范的 git -C \"路径\" log 反被误杀→误升级建票）", () => {
-        assert.equal(isReadOnlyCommand('git -C "D:/code/中联/五服一管/lg-wms-admin" log -1'), true);
-        assert.equal(isReadOnlyCommand('git -C "D:/code/x" log -1 --stat --date=iso'), true);   // 旗表本就放行，此前死在引号
-        assert.equal(isReadOnlyCommand("git -C 'D:/code/x' show abc --stat"), true);            // 单引号同构
-        assert.equal(isReadOnlyCommand('git --no-pager -C "D:/x" diff HEAD~1'), true);          // 布尔旗 + 引号值混排
+        // ★ 评审修复 A1（2026-11-23）路径面闸后翻转：引号值豁免仍成立（只读头锚定不再死于引号），
+        //   但跨工作区 -C 路径本身触发转人工——引号修复保住的是「头锚定」这一层，语义由路径面闸接管。
+        assert.equal(isReadOnlyCommand('git -C "D:/code/中联/五服一管/lg-wms-admin" log -1', "d:\\code\\ws"), false);
+        assert.equal(isReadOnlyCommand('git -C "D:/code/x" log -1 --stat --date=iso', "d:\\code\\ws"), false);
+        assert.equal(isReadOnlyCommand("git -C 'D:/code/x' show abc --stat", "d:\\code\\ws"), false);
+        assert.equal(isReadOnlyCommand('git --no-pager -C "D:/x" diff HEAD~1', "d:\\code\\ws"), false);
     });
 
     it("补口：git 提交图遍历/计算型只读子命令（2026-11-10 真机实锤：rev-list --count 数条数被误判写→问句误升级建票）", () => {
         assert.equal(isReadOnlyCommand("git rev-list --count 8749ee8..bddec57"), true);
-        assert.equal(isReadOnlyCommand('cd "D:/code/x"; echo "提交数:"; git rev-list --count HEAD~5..HEAD'), true);  // 真机原命令形态（cd 引号头+链）
+        // ★ 评审修复 A1（2026-11-23）路径面闸后翻转：cd 到工作区外 → 转人工（原「真机原命令形态」断言钉旧语义）
+        assert.equal(isReadOnlyCommand('cd "D:/code/x"; echo "提交数:"; git rev-list --count HEAD~5..HEAD', "d:\\code\\ws"), false);
         assert.equal(isReadOnlyCommand("git shortlog -sn HEAD"), true);
         assert.equal(isReadOnlyCommand("git merge-base main dev"), true);
         assert.equal(isReadOnlyCommand("git reflog expire --expire=now --all"), false);         // reflog 刻意不放（expire/delete 是写）

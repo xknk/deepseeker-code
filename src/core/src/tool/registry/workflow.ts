@@ -94,6 +94,9 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                 required: ["steps"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
+            // ★ 评审修复 A5（2026-11-23，V9）：显式排除计划期——SAFE 默认放行新默认下须显式声明 false
+            //   （花钱、多子代理可能写；与 spawn_agent 同理，见 §1.2 V1 对 worktree 生命周期的裁定）。
+            planAllowed: false,
             isSync: false,
             // 聚合输出整体兜底截断（各子 agent 结果已按 workflowPerStepChars 单独截断）。
             // ★ 异步化后工具结果 = 首个 yield 的启动回执（天然短）；此上限改用于终态汇总的 inbox 报文截断。

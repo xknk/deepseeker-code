@@ -23,6 +23,7 @@ import {
     checkIsPathIgnored
 } from "../guard.ts";
 import { isVisionEnabled, MAX_IMAGE_BYTES } from "@/session/contentParts.ts";
+import { isSensitivePath } from "../sensitivePaths.ts";
 
 /** read_image 支持的扩展名 → MIME 映射（OpenAI image_url dataURL 用） */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -47,21 +48,11 @@ import { Stats } from "fs";
  *   相对活动根的 rel 对工作区外文件会带 `..` 前缀甚至跨盘符绝对路径——直接对物理路径串做正则更稳。
  *   随放行跨界新增无扩展名凭证（AWS ~/.aws/credentials）/ .netrc / .htpasswd：旧围栏在时这些在工作区外碰不到，
  *   现在能被 agent 显式读到，须补拦。
+ * ★ A1（评审修复施工单 2026-11-23）：模式数组迁往 tool/sensitivePaths.ts 单一出处（命令通道共用同一份，
+ *   并补齐 .envrc / .git-credentials / .pgpass / .docker/.kube/.config(gh|gcloud) 与敏感目录条目），
+ *   本处仅保留读保护语义的委托调用。
  */
-const isSensitiveReadTarget = (resolvedPath: string): boolean => {
-    const p = resolvedPath.toLowerCase().replace(/\\/g, "/");
-    return [
-        /\.env(\.|$|\/)/,                                   // .env / .env.local / .env.production
-        /\.npmrc$/,                                         // npm 凭证（_authToken）
-        /\.netrc$/,                                         // ~/.netrc 明文 API token（跨界读暴露面增大，补拦）
-        /(^|\/)\.htpasswd$/i,                               // HTTP 基本认证凭证文件
-        /\.pem$/, /\.key$/, /\.pfx$/, /\.p12$/, /\.keystore$/, /\.jks$/,
-        /(^|\/)id_(rsa|ecdsa|ed25519|dsa)(\.pub)?$/,        // SSH 私钥（含子目录路径，如 deploy_keys/id_rsa）
-        /(^|\/)secrets?\.(json|ya?ml|toml|ini|conf)$/i,
-        /(^|\/)credentials?\.(json|ya?ml|toml|ini|conf)$/i,
-        /(^|\/)credentials?$/i,                             // 无扩展名凭证文件（AWS ~/.aws/credentials 等）
-    ].some(re => re.test(p));
-};
+const isSensitiveReadTarget = (resolvedPath: string): boolean => isSensitivePath(resolvedPath);
 
 /**
  * 剥离 read_file 输出的「<行号>: 」前缀（如 "   123: code" → "code"）。

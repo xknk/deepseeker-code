@@ -174,6 +174,9 @@ export const httpTools: CustomTool[] = [
                 required: ["url"],
             },
             safetyLevel: ToolSafetyLevel.SAFE, // loopback-only 硬闸（见文件头安全红线）+ GET 语义探测，免审
+            // ★ 评审修复 A5（2026-11-23，V9）：显式排除计划期——SAFE 默认放行新默认下须显式声明 false
+            //   （联网轮询，外部交互面；计划期只读调研不碰网络）。
+            planAllowed: false,
             isSync: true,
             maxOutputCharacters: 2000,
             async execute(args: { url?: string; expect_status?: number; timeout_seconds?: number }, ctx?: ToolContext) {

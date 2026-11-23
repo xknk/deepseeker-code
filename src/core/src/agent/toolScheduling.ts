@@ -19,6 +19,7 @@ import { estimateTokens } from "@/session/contextCore.ts";
 import { appConfig } from "@/config/index.ts";
 import { ToolSafetyLevel } from "@/tool/index.ts";
 import { checkPermission } from "@/tool/permissions.ts";
+import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
 
 /** 调度结果（判别联合）：
  *  - completed —— 本轮工具全部执行完，主循环继续下一轮推理；
@@ -151,7 +152,9 @@ export const scheduleToolCalls = async function* (
         if (matched.function.isSync === false) return false;
         try {
             // ★ I-4 第四批：尾参传 sessionId——会话桶 ask/deny 与全局规则同口径参与并行化判定
-            const perm = checkPermission(name, args, matched.function.primaryArg, sessionId);
+            // ★ 评审修复 A3：尾参传工作区根（与 toolExecution 的 toolCtx.cwd 同源 getActiveWorkspaceRoot）
+            //   ——路径型 allow 规则按归一化相对路径匹配，deny/ask 归一化覆盖 .. 变体
+            const perm = checkPermission(name, args, matched.function.primaryArg, sessionId, getActiveWorkspaceRoot());
             if (perm === 'ask' || perm === 'deny') return false;
         } catch { return false; }
         return true;

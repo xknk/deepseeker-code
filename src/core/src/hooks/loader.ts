@@ -101,6 +101,10 @@ interface RawHookRule {
     requireApproval?: boolean;
     /** 来源打标（loader 内部字段，非用户配置）：true = 本规则来自项目级 settings.json */
     projectSource?: boolean;
+    /** ★ 评审修复 A7（2026-11-23，X2）：项目级规则的来源目录（settings.json 所在目录，加载期记录）。
+     *  firstRunGate 的信任键 = <来源目录>\n + 命令/URL/任务原串——A 项目点过「始终允许」的命令串
+     *  不再对 B 项目免审（原键是裸原串，跨项目串信任）。全局规则键不变。 */
+    projectSourceDir?: string;
 }
 
 /** 按 event 聚合的规则集合 */
@@ -129,8 +133,10 @@ const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig>
         }
         const hooksBlock = parsed?.hooks;
         if (!hooksBlock || typeof hooksBlock !== "object") continue;
-        // ★ 来源打标：项目级配置（paths[1]）的规则带 projectSource —— compileRule 据此默认开首跑审批门
-        appendValidated(merged, hooksBlock, configPath, configPath === paths[1]);
+        // ★ 来源打标：项目级配置（paths[1]）的规则带 projectSource + 来源目录（A7 信任键作用域）——
+        //   compileRule 据此默认开首跑审批门，firstRunGate 据此拼项目作用域信任键
+        appendValidated(merged, hooksBlock, configPath, configPath === paths[1],
+            configPath === paths[1] ? path.dirname(configPath) : undefined);
         // ★ 项目级 hook 信任边界告警：其 command 以 shell 执行（等同 git hooks 信任模型）。
         //   首跑审批门（下方 compileRule）会拦截项目级 command/http/agent 的首次执行；本告警仍保留——
         //   让用户在加载期就知道有项目级 hook 存在，克隆未知仓库前可核查此文件。
@@ -141,8 +147,8 @@ const readHooksConfig = async (includeProject: boolean): Promise<RawHooksConfig>
     return merged;
 };
 
-/** 校验单个 hooks 块，把合法规则追加进 merged；isProject 用于来源打标（首跑审批门默认档）。 */
-const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string, isProject: boolean): void => {
+/** 校验单个 hooks 块，把合法规则追加进 merged；isProject/projectSourceDir 用于来源打标（首跑审批门默认档 + A7 信任键作用域）。 */
+const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string, isProject: boolean, projectSourceDir?: string): void => {
     for (const [key, val] of Object.entries(hooksBlock)) {
         if (!ALL_EVENTS.includes(key as EventType)) {
             console.warn(`⚠️ [hooks] 未知事件类型 "${key}"（${src}），已跳过`);
@@ -156,7 +162,7 @@ const appendValidated = (merged: RawHooksConfig, hooksBlock: any, src: string, i
         const list = (merged[event] ??= []);
         val.forEach((item, i) => {
             const rule = validateRule(item, event, src, i);
-            if (rule) list.push(isProject ? { ...rule, projectSource: true } : rule);
+            if (rule) list.push(isProject ? { ...rule, projectSource: true, projectSourceDir } : rule);
         });
     }
 };
@@ -319,11 +325,19 @@ let gateSeq = 0;
 const firstRunGate = (raw: RawHookRule, ident: string, run: HookRule["run"]): HookRule["run"] => {
     const gated = raw.requireApproval === true || raw.projectSource === true;
     if (!gated) return run;
+    // ★ 评审修复 A7（2026-11-23，X2）：信任键带项目作用域——项目级规则的键 = <来源目录>\n + 原串，
+    //   全局规则（requireApproval:true 且非项目源）键 = 裸原串（不变）。修前口子：键是命令/URL/任务
+    //   裸原串、信任存储是全局单文件——A 项目点过「始终允许」的命令串，出现在 B 项目 settings.json
+    //   里即免审执行。trust.ts 接口未改（键仍是字符串，作用域由本处拼装）。
+    const trustKey = raw.projectSource && raw.projectSourceDir
+        ? `${raw.projectSourceDir}\n${ident}`
+        : ident;
     return async (ctx: any) => {
-        if (await isHookCommandApproved(ident)) return run(ctx);
+        if (await isHookCommandApproved(trustKey)) return run(ctx);
         const req = ctx?.toolContext?.requestApproval;
         if (typeof req !== "function") {
-            console.warn(`⏭️ [hooks] ${raw.type ?? "command"} hook 首跑待审批且当前事件无审批通道，已跳过：${ident.slice(0, 120)}（可在 CLI 工具事件触发时批准「始终允许」，或手动加入 ~/.deepseeker-code/trusted_hooks.json）`);
+            // ★ A7：告警文案展示实际使用的信任键（手工录入 trusted_hooks.json 时照抄）
+            console.warn(`⏭️ [hooks] ${raw.type ?? "command"} hook 首跑待审批且当前事件无审批通道，已跳过：${ident.slice(0, 120)}\n   信任键：${trustKey}\n   （可在 CLI 工具事件触发时批准「始终允许」，或把上面的信任键手动加入 ~/.deepseeker-code/trusted_hooks.json）`);
             return { deny: false };
         }
         const kindLabel = raw.projectSource ? "项目级" : "全局";
@@ -332,9 +346,11 @@ const firstRunGate = (raw: RawHookRule, ident: string, run: HookRule["run"]): Ho
             : raw.type === "agent"
                 ? `${kindLabel} hook 首次运行：派子 agent 评判工具调用\n任务：${ident}`
                 : `${kindLabel} hook 首次运行：执行 shell 命令\n${ident}`;
+        // ★ A7：审批文案附实际使用的信任键（allow-always 落盘 / 手工录入都以它为键）
+        const detailWithKey = `${detail}\n信任键：${trustKey}`;
         let decision: any;
         try {
-            decision = await req(detail, {
+            decision = await req(detailWithKey, {
                 toolName: `hook:${raw.type ?? "command"}`,
                 toolCallId: `hook-${++gateSeq}`,
                 sessionId: ctx?.toolContext?.sessionId ?? "",
@@ -347,7 +363,7 @@ const firstRunGate = (raw: RawHookRule, ident: string, run: HookRule["run"]): Ho
             console.warn(`⏭️ [hooks] 首跑审批被拒绝，本次跳过该 hook：${ident.slice(0, 120)}`);
             return { deny: false };
         }
-        if (decision === "allow-always") await approveHookCommand(ident);
+        if (decision === "allow-always") await approveHookCommand(trustKey);
         return run(ctx);
     };
 };

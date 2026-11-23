@@ -19,7 +19,7 @@ import fs from "fs/promises";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
 import { readJSONFile, atomicWriteJSON } from "@/common/index.ts";
-import { scriptRunnerEntryPrefix, splitShellSegments } from "./autoPermission.ts";
+import { scriptRunnerEntryPrefix, splitShellSegments, wildcardChainAllowed } from "./autoPermission.ts";
 
 export type PermissionVerdict = 'allow' | 'deny' | 'ask' | null;
 
@@ -29,6 +29,10 @@ interface CompiledRule {
     /** 主参数匹配正则；null=仅按工具名匹配（裸 ToolName） */
     argRegex: RegExp | null;
     raw: string;
+    /** ★ 评审修复 A2/A3（2026-11-23）：规则类别——ruleMatches 按类别启用不同匹配语义
+     *  （通配 allow 的纯过滤尾链闸 wildcardChainAllowed / A3 路径型 allow 的归一化匹配）。
+     *  compileRule 三个调用点都已传；缺省 'ask'（保守：不启用 allow 专属语义）。 */
+    kind: 'allow' | 'deny' | 'ask';
 }
 
 interface PermissionRules {
@@ -79,10 +83,14 @@ export const clearSessionPermissionRules = (sessionId: string): void => {
 };
 
 /**
- * glob→regex 缓存。语义对标 Claude Code 的 Bash 权限规则：
+ * glob→regex 缓存。规则参数 glob 语法：
  *  - `X:*`（前缀语法）：匹配 X，或 X 后跟「单词边界 + 任意内容」。如 `npm test:*` 命中 `npm test`、`npm test:unit`、`npm test --watch`。
  *  - `*`（其余位置）：匹配任意字符（含空）。如 `/etc/secrets/*` 命中 `/etc/secrets/key.pem`。
  *  - 无 `*`：精确匹配。
+ *  ★ 匹配语义补充（评审修复 A2，2026-11-23）：命令类【通配 allow】规则的匹配不是「glob 命中即放行任意续接」，
+ *    而是「同入口 + 任意参数 + 纯过滤尾链」——ruleMatches 会先对候选命令串过 wildcardChainAllowed
+ *    （无命令替换 / 无白名单外重定向 / runner 段之后全是纯过滤只读段），再按剥前导 cd 后的首段匹配正则。
+ *    故 `run_command(npx tsx … index.ts *)` 不会命中入口后接 `; cat ~/.aws/credentials`、`> out.txt` 的串。
  */
 const globCache = new Map<string, RegExp>();
 const globToRegex = (glob: string): RegExp => {
@@ -109,6 +117,7 @@ const DANGER_COMMAND_TOOLS = new Set(['run_command', 'run_in_background']);
 export const compileRule = (raw: string, src: string, kind?: 'allow' | 'deny' | 'ask'): CompiledRule | null => {
     const trimmed = raw.trim();
     if (!trimmed) return null;
+    const k: 'allow' | 'deny' | 'ask' = kind ?? 'ask';   // 缺省保守：不启用 allow 专属匹配语义
     const m = trimmed.match(/^([a-zA-Z0-9_]+)\((.*)\)$/);
     if (m) {
         const [, name, argGlob] = m;
@@ -116,17 +125,17 @@ export const compileRule = (raw: string, src: string, kind?: 'allow' | 'deny' | 
             console.warn(`⚠️ [permissions] 规则 "${raw}" 的参数 glob 为空（${src}），已跳过`);
             return null;
         }
-        return { toolName: name, argRegex: globToRegex(argGlob), raw };
+        return { toolName: name, argRegex: globToRegex(argGlob), raw, kind: k };
     }
     // 裸工具名：支持含 __ 的 MCP 名 + 末尾 * 通配（如 mcp__github__* 匹配该 server 所有工具）。
     //   末尾 * 作前缀通配（ruleMatches 内 toolNameMatches 处理）；含 * 但非末尾的归入括号写法 ToolName(argGlob)。
     if (/^[a-zA-Z0-9_]+\*?$/.test(trimmed)) {
         // ★ P0-2：裸名 allow 对 DANGER 命令工具过危险（恶意仓库投递即让全部命令免审）→ 强制带作用域
-        if (kind === 'allow' && DANGER_COMMAND_TOOLS.has(trimmed.replace(/\*$/, ''))) {
+        if (k === 'allow' && DANGER_COMMAND_TOOLS.has(trimmed.replace(/\*$/, ''))) {
             console.warn(`⚠️ [permissions] 拒绝裸名 allow 规则 "${raw}"（${src}）：DANGER 命令工具必须带作用域，如 run_command(npm test:*)。`);
             return null;
         }
-        return { toolName: trimmed, argRegex: null, raw };
+        return { toolName: trimmed, argRegex: null, raw, kind: k };
     }
     console.warn(`⚠️ [permissions] 规则 "${raw}" 格式非法（应为 ToolName / ToolName* / ToolName(argGlob)，${src}），已跳过`);
     return null;
@@ -196,19 +205,71 @@ const stripLeadingCdSegments = (cmd: string): string | null => {
     return rest.join(" && ");
 };
 
+// ★ 评审修复 A3（2026-11-23）：路径型 allow 规则的归一化匹配。
+//   修前口子：规则对【原始参数串】做正则匹配——edit_file(src/*) 编译成 ^src/.*$ 会命中 src/../.env
+//   （命中后分类器整段被跳过，内置敏感清单随之失效）。
+/** 非文件系统路径（scheme:// 形态 URL——web_fetch/http_request 的规则参数）：归一化不适用。 */
+const URL_LIKE_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+
+/** 路径值归一化结果：url=非 FS 路径按原始串匹配；escape=越界（出工作区/跨盘/解析失败）；rel=归一化相对路径。 */
+type NormalizedRulePath = 'url' | 'escape' | { rel: string };
+
+const normalizeRulePath = (val: string, rootDir: string): NormalizedRulePath => {
+    if (URL_LIKE_RE.test(val.trim())) return 'url';
+    try {
+        const abs = path.resolve(rootDir, val);
+        const rel = path.relative(rootDir, abs).replace(/\\/g, '/');
+        if (rel.startsWith('..') || path.isAbsolute(rel)) return 'escape';   // 越界/跨盘 → allow 不命中
+        return { rel };
+    } catch { return 'escape'; }
+};
+
 /** 判断单条编译规则是否命中当前工具调用 */
-const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg?: string): boolean => {
+const ruleMatches = (rule: CompiledRule, toolName: string, args: any, primaryArg?: string, cwd?: string): boolean => {
     if (!toolNameMatches(rule.toolName, toolName)) return false;
     if (rule.argRegex === null) return true; // 裸工具名：任意调用都命中（含末尾通配名）
     if (!primaryArg) return true; // 工具未声明主参数：带括号的规则退化为按名匹配
     const val = args?.[primaryArg];
     if (typeof val !== "string") return false;
+    // ★ 评审修复 A2（2026-11-23，S2）：通配 allow 命令规则只吞参数、不吞命令——
+    //   仅【kind=allow + 规则文本含 * + 主参数是 command】启用新语义：候选串先过 wildcardChainAllowed
+    //   （无命令替换 / 无白名单外重定向 / runner 段之后全是纯过滤只读段），再用【剥前导 cd 后的首段】
+    //   匹配正则——通配规则的语义是「同入口 + 任意参数 + 纯过滤尾链」，不是「入口后任意续接」。
+    //   入口后接 `; cat ~/.aws/credentials`、`&& curl -d "$(…)" …`、`> out.txt`、`| grep "" ~/.ssh/id_rsa`
+    //   等形态不再命中 → 本规则不匹配 → 上层落回 null（常规审批）。
+    //   精确串规则（不含 *）、deny / ask 规则、路径型规则的匹配逻辑不变。
+    if (rule.kind === 'allow' && primaryArg === 'command' && rule.raw.includes('*')) {
+        if (!wildcardChainAllowed(val)) return false;
+        const segs = splitShellSegments(val).map(s => s.trim());
+        let i = 0;
+        while (i < segs.length && /^cd(\s|$)/.test(segs[i])) i++;
+        const first = segs[i];
+        return !!first && rule.argRegex.test(first);
+    }
+    // ★ 评审修复 A3（2026-11-23）：路径型 allow 规则（kind=allow 且主参数非 command）按【归一化相对路径】
+    //   匹配——值统一成正斜杠、path.resolve(root, value) 后取相对 root 的路径再测正则；
+    //   相对路径以 .. 开头或为绝对路径（越界/跨盘）→ 不命中（落回常规审批，误伤只允许「多问」方向）。
+    //   root 取 checkPermission 尾参 cwd（toolExecution / toolScheduling 各传自己的），缺省回退
+    //   WORKSPACE_ROOT || cwd。URL 型参数（scheme://）非文件系统路径，维持原始串匹配现状。
+    if (rule.kind === 'allow' && primaryArg !== 'command') {
+        const n = normalizeRulePath(val, cwd ?? (process.env.WORKSPACE_ROOT || process.cwd()));
+        if (n === 'url') {
+            const stripped = stripLeadingCdSegments(val);
+            return rule.argRegex.test(val) || (stripped !== null && rule.argRegex.test(stripped));
+        }
+        if (n === 'escape') return false;
+        return rule.argRegex.test(n.rel);
+    }
     if (rule.argRegex.test(val)) return true;
     // ★ A2 匹配侧归一化：剥前导 cd 段后再试（与生成侧 scriptRunnerEntryPrefix 的剥前缀对称）。
     //   归一化候选对 deny / ask / allow 三类规则同样生效（同一候选集、同一短路序），
     //   deny > ask > allow 的优先级契约不变；deny/ask 因此覆盖 cd 前缀变体（收紧方向）。
     const stripped = stripLeadingCdSegments(val);
-    return stripped !== null && rule.argRegex.test(stripped);
+    if (stripped !== null && rule.argRegex.test(stripped)) return true;
+    // ★ 评审修复 A3：deny / ask 规则【同时】匹配归一化串（收紧方向）——覆盖 ./前缀 与反斜杠变体，
+    //   越界串（..）归一化后同样参与，deny 覆盖面只增不减。
+    const n = normalizeRulePath(val, cwd ?? (process.env.WORKSPACE_ROOT || process.cwd()));
+    return n !== 'url' && n !== 'escape' && rule.argRegex.test(n.rel);
 };
 
 /**
@@ -239,16 +300,19 @@ export const initPermissions = async (includeProject: boolean): Promise<void> =>
  * @param sessionId 可选尾参（★ I-4 第四批）：传入时全局规则与该会话桶合并裁决——同类规则拼接后仍按
  *   deny > ask > allow 短路，会话桶里的 ask/deny 不会被全局 allow 掩盖，反之亦然；缺省只查全局
  *   （旧行为逐字节不变）。任何异常一律返回 null（fail-safe：降级为默认审批流，绝不阻断工具执行）。
+ * @param cwd 可选尾参（★ 评审修复 A3，2026-11-23）：路径型规则的归一化根（path.resolve(root, value) 后
+ *   取相对路径再匹配）；调用方传自己的工作区根（toolExecution 的 toolCtx.cwd / toolScheduling 的
+ *   getActiveWorkspaceRoot()），缺省回退 WORKSPACE_ROOT || process.cwd()。
  */
-export const checkPermission = (toolName: string, args: any, primaryArg?: string, sessionId?: string): PermissionVerdict => {
+export const checkPermission = (toolName: string, args: any, primaryArg?: string, sessionId?: string, cwd?: string): PermissionVerdict => {
     try {
         const bucket = sessionId ? sessionBuckets.get(sessionId) : undefined;
         const deny = bucket ? [...rules.deny, ...bucket.deny] : rules.deny;
         const ask = bucket ? [...rules.ask, ...bucket.ask] : rules.ask;
         const allow = bucket ? [...rules.allow, ...bucket.allow] : rules.allow;
-        for (const r of deny) if (ruleMatches(r, toolName, args, primaryArg)) return 'deny';
-        for (const r of ask) if (ruleMatches(r, toolName, args, primaryArg)) return 'ask';
-        for (const r of allow) if (ruleMatches(r, toolName, args, primaryArg)) return 'allow';
+        for (const r of deny) if (ruleMatches(r, toolName, args, primaryArg, cwd)) return 'deny';
+        for (const r of ask) if (ruleMatches(r, toolName, args, primaryArg, cwd)) return 'ask';
+        for (const r of allow) if (ruleMatches(r, toolName, args, primaryArg, cwd)) return 'allow';
         return null;
     } catch {
         return null;
@@ -276,7 +340,10 @@ export const listPermissionRules = (): { allow: { toolName: string; raw: string 
  *          动机：同一入口形状的变体（batch status / batch sync --check / 尾随 2>&1 | head）执行的是同一份
  *          入口脚本代码，逐变体确认零安全增益、纯摩擦（2026-11-05 trace：~21 次点击全是同一入口的变体）。
  *          供应链「首次人工确认」语义保留——每个入口形状第一次仍问；SCRIPT_RUNNER_HEADS 整族拦截不拆，
- *          本函数只改「记住」的方式。匹配侧在 ruleMatches 对称剥前导 cd 段（cd 前缀变体同样命中）。
+ *          本函数只改「记住」的方式。★ 匹配侧（ruleMatches）：通配 allow 规则的命中 = 同入口 + 任意参数
+ *          + 纯过滤尾链——候选串先过 wildcardChainAllowed（无命令替换/白名单外重定向、runner 段之后
+ *          全是纯过滤只读段），再按剥前导 cd 后首段匹配正则；入口后接敏感读/写重定向/灾难段不再命中。
+ *          手写的 `:*` 规则同样受此闸约束。
  *       ② 非 runner 族 / runner 族但定位不到入口脚本 token（npm test / npm install / pnpm dlx 等）：
  *          落【精确命令串】（如 run_command(npm test)），M5 现状一个字不改——刻意不落 `npm install*`
  *          包名通配（会把 npm install <恶意包> 静默放行）。旧版教训仍有效：取首 token + `:*` 写成

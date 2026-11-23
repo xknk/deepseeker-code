@@ -44,6 +44,9 @@ export const createAgentTools = (getGlobalTools: () => CustomTool[]): CustomTool
                 required: ["task"],
             },
             safetyLevel: ToolSafetyLevel.SAFE,
+            // ★ 评审修复 A5（2026-11-23，V9）：显式排除计划期——SAFE 默认放行新默认下须显式声明 false。
+            //   花钱（子代理 aux/主模型用量）且子代理可能执行写操作，与计划期「只读调研」相悖。
+            planAllowed: false,
             isSync: false,
             async *execute(args: { task: string; name?: string; role?: string; resume_session_id?: string }, ctx?: ToolContext) {
                 if (!ctx) { yield toolFailure("[派生失败]：spawn_agent 缺少必须的智能体运行上下文。"); return; }

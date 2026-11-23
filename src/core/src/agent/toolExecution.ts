@@ -19,7 +19,7 @@ import { runPreHooks, runPostHooks } from "@/tool/hooks.ts";
 import { computeLockKey, isLockHeld } from "@/tool/lockManager.ts";
 import { runBackgroundTool } from "./backgroundTool.ts";
 import { beforeMutationBackup } from "@/tool/undo/backup.ts";
-import { runAutoCheck, matchCommandDeny, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
+import { runAutoCheck, matchCommandDeny, matchBuiltinDeny, isReadOnlyCommand, isScriptRunnerCommand } from "@/tool/autoPermission.ts";
 import { resolveMcpPermissionName } from "@/tool/mcp/loader.ts";
 import { appConfig } from "@/config/index.ts";
 import path from "path";
@@ -204,6 +204,22 @@ const emitValidationFailed = (ctx: ToolCallContext, toolCall: any, state: ToolCa
 };
 
 /**
+ * ★ 评审修复 A5（2026-11-23，V9）：计划期工具放行判定——显式声明 planAllowed:true，或
+ *  「safetyLevel === SAFE 且未显式声明 planAllowed:false」。原「未声明即拒绝」把 18 个 SAFE 工具
+ *  （recall/load_skill/memory_read/memory_list/read_xlsx/read_docx/read_pdf/get_background_output/
+ *  find_references/inspect_dependencies/undo_list/worktree_status/todo_write/ask_question/spawn_agent/
+ *  run_workflow/stop_background_task/wait_http_ready）也拒在计划期外，与「计划期只读调研」语义相悖；
+ *  新默认与 schema 档（planMode.filterToolsForPlanMode）一致。显式排除面（planAllowed:false 四个）：
+ *  spawn_agent / run_workflow（花钱、子代理可能写）、stop_background_task（副作用）、wait_http_ready（联网）。
+ */
+const planToolAllowed = (matchedTool: any | undefined): boolean => {
+    const f = matchedTool?.function;
+    if (!f) return false;   // 幻觉工具名（matchedTool 缺失）：恒拒（与旧缺省一致，fail-closed）
+    return f.planAllowed === true
+        || (f.safetyLevel === ToolSafetyLevel.SAFE && f.planAllowed !== false);
+};
+
+/**
  * 阶段一：终结/abort/计划模式门禁（P2-10 自 processToolCall 前段原样移出）。
  *   ★ P1-6 终结类声明化：流程形态（调用即终结本轮、结果不再回喂模型）随工具声明 terminal 走——
  *   原 exit/enter_plan_mode 按名特判退役为未声明者兜底（两者已带声明；兜底防第三方注册表未同步时计划流程断裂）。
@@ -238,13 +254,15 @@ const resolveEarlyOutcome = (ctx: ToolCallContext, toolCall: any, state: ToolCal
     // ★ P0-A 计划模式执行层门禁（runtime 档，默认）：工具表全会话恒定（systemInjections 两态统一
     //   appendPlanControlTools），计划期改由此处拒绝未声明 planAllowed 的工具——不发审批、不加锁、
     //   不进 hook 流水线，直接以结果文案引导模型转只读/提交方案（计划先于执行的语义不变）。
-    //   ★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单退役，白名单改读工具声明 planAllowed（缺省 = 拒绝，
-    //   fail-closed）——matchedTool 匹配相应前移至本门禁之前。计划控制终结类（含声明式 plan_enter/plan_exit）
-    //   已在上方拦截返回，此处保留显式豁免（双保险）。schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
+    //   ★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单退役，白名单改读工具声明——★ 评审修复 A5（2026-11-23，
+    //   V9）新默认：planAllowed===true，或「safetyLevel===SAFE 且未显式 planAllowed:false」（见
+    //   planToolAllowed 注释）；matchedTool 匹配相应前移至本门禁之前。计划控制终结类（含声明式
+    //   plan_enter/plan_exit）已在上方拦截返回，此处保留显式豁免（双保险）。schema 档
+    //   （DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
     if (!parseFailed && planMode && appConfig.planEnforcement === 'runtime'
         && calledName !== 'enter_plan_mode' && calledName !== 'exit_plan_mode'
         && declaredTerminal !== 'plan_enter' && declaredTerminal !== 'plan_exit'
-        && matchedTool?.function?.planAllowed !== true) {
+        && !planToolAllowed(matchedTool)) {
         // ★ P1-7 计划拒绝熔断：只计「真写工具」的拒绝——matchedTool 存在且非 SAFE（ask_question 等SAFE 交互类
         //   被拒属正常流程，不计；幻觉工具名 matchedTool 缺失，同样不计）。增量回传 runAgent 熔断。
         if (matchedTool && matchedTool.function.safetyLevel !== ToolSafetyLevel.SAFE) planWriteRejections?.(1);
@@ -327,13 +345,39 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
         state.denied = true;
         failResult(state, `❌ [保护路径] 禁止修改受保护目录（.git/.ssh/.aws/.deepseeker-code 等 VCS/凭证/配置）：${hitProtected}。`, 'permission');
     }
+    // ★ 评审修复 A3（2026-11-23）：文件类内置敏感清单【无条件硬闸】——保护路径检查之后、checkPermission
+    //   之前无条件执行，与 allow 规则是否命中、分类器是否运行都无关（对称参照：命令类 matchCommandDeny
+    //   硬闸）。修前口子：allow 规则命中后 runAutoCheck 整段被跳过，其内置敏感清单判定随之失效——
+    //   手写 move_file(*) 可把 .env 改名洗白（审批未请求直接改写成功，随后 read_file 读出内容）。
+    //   判定：工具声明 autoApproval==='file' 时，对 pathArgs 的每个路径串（原始串与归一化相对路径各查
+    //   一次）执行 matchBuiltinDeny，命中即 denied（'permission'）。runAutoCheck 里原有的清单判定保留不动。
+    if (!state.denied && matchedTool.function.autoApproval === 'file') {
+        const gatePaths = pathArgs
+            .map(k => state.calledArgs?.[k])
+            .filter((p): p is string => typeof p === 'string' && p.length > 0);
+        for (const p of gatePaths) {
+            const candidates = [p];
+            try {
+                const gateRoot = toolCtx.cwd || process.env.WORKSPACE_ROOT || process.cwd();
+                const rel = path.relative(gateRoot, path.resolve(gateRoot, p));
+                if (!path.isAbsolute(rel) && !rel.startsWith('..')) candidates.push(rel.replace(/\\/g, '/'));
+            } catch { /* 解析失败只查原始串 */ }
+            const hitSensitive = candidates.find(c => matchBuiltinDeny(c));
+            if (hitSensitive) {
+                state.denied = true;
+                failResult(state, `❌ [安全] 文件类敏感清单拦截（不可被 allow 规则绕过）：[${calledName}] ${hitSensitive}。`, 'permission');
+                break;
+            }
+        }
+    }
     // ★ G1 细粒度权限规则（deny>ask>allow）：allow 免审、deny 直拒、ask 强制审批；未匹配走默认 safetyLevel
     let perm: ReturnType<typeof checkPermission> = null;
     try {
         // ★ P1-MCP dispatcher 兼容：mcp_call 在权限层用合成名 mcp__<server>__<tool> 匹配规则
         //   （用户既有 permissions 规则含 mcp__server__* 通配，语义不变）；其余工具名原样。
         //   ★ I-4 第四批：尾参传 sessionId——allow-session 会话桶与本会话裁决挂钩（多会话进程隔离）。
-        perm = checkPermission(resolveMcpPermissionName(calledName, state.calledArgs), state.calledArgs, matchedTool.function.primaryArg, sessionId);
+        //   ★ 评审修复 A3：尾参传 toolCtx.cwd——路径型 allow 规则按归一化相对路径匹配（越界不命中）。
+        perm = checkPermission(resolveMcpPermissionName(calledName, state.calledArgs), state.calledArgs, matchedTool.function.primaryArg, sessionId, toolCtx.cwd);
         if (perm === 'deny') { state.denied = true; failResult(state, `❌ [权限规则]：[${calledName}] 被权限规则 deny 拒绝。`, 'permission'); }
         else if (perm === 'allow') { needApproval = false; }
         else if (perm === 'ask') { needApproval = true; }
@@ -395,7 +439,7 @@ const runSecurityGates = async (ctx: ToolCallContext, toolCall: any, state: Tool
     const scriptRunnerBlocked = cmdIsScriptRunner && (perm === null || scriptRunnerCwdDrift);
     if (scriptRunnerCwdDrift) needApproval = true; // perm='allow' 已置 false → 漂移时强制拉回审批
     if (perm === null && needApproval && !state.denied && !scriptRunnerBlocked && isForegroundCommand
-        && isReadOnlyCommand(typeof state.calledArgs?.command === 'string' ? state.calledArgs.command : '')) {
+        && isReadOnlyCommand(typeof state.calledArgs?.command === 'string' ? state.calledArgs.command : '', toolCtx.cwd)) {
         needApproval = false;
     }
     // ★ P0-2 灾难命令硬闸门：与 needApproval / allow 规则解耦——堵住「裸 allow 规则让
@@ -510,9 +554,6 @@ const executeTool = async (ctx: ToolCallContext, toolCall: any, state: ToolCallS
         }
         // ★ #8b：end 事件按结构化成败分流（原硬编码 ok:true——toolFailure 字符串返回时误报成功）
         if (state.resultStatus === 'success') {
-            // ★ P0-A provenance 标记（评审修复批）：externalContent 声明工具成功执行 = 外部内容已进
-            //   上下文——同回合内 provenanceGate 受门工具据此降权（仅成功标记：失败输出非注入面）。
-            if (matchedTool.function.externalContent) markExternalContent(sessionId);
             events({ sessionId, eventType: 'tool.execute.end', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: true }, payload: { output: state.result } });
         } else {
             events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round, errorCategory: state.errorCategory ?? 'unknown' }, payload: { output: state.result } });
@@ -522,6 +563,11 @@ const executeTool = async (ctx: ToolCallContext, toolCall: any, state: ToolCallS
         failResult(state, `工具执行失败: ${err instanceof Error ? err.message : String(err)}`);
         events({ sessionId, eventType: 'tool.failed', metadata: { depth, decisionSource: llmDecisionSource, durationMs: performance.now() - startTime, round, tools_id: toolCall.id, toolName: calledName, toolSource: 'builtin', ok: false, attempt: round, errorCategory: state.errorCategory ?? 'runtime' }, payload: { output: state.result } });
     }
+    // ★ P0-A provenance 标记（评审修复 A6，2026-11-23，S3）：成败都标记。原「仅成功标记：失败输出非注入面」
+    //   的注释前提不成立——run_command 非零退出即判 failed，其 stdout/stderr 照样回灌模型；抛异常路径工具
+    //   可能已产出部分输出。凡声明 externalContent 且【确实执行过】（进到本函数 = 已过全部门禁、未被审批
+    //   拒绝——拒绝路径在 runSecurityGates 内短路，不会走到这里），同回合内 provenanceGate 受门工具据此降权。
+    if (matchedTool?.function?.externalContent) markExternalContent(sessionId);
     // ★ post-hooks：执行后观察（不拦截，自身异常仅告警）+ 开关开时收集 resultOverride
     //   （改写模型视图；hook 观察到的 result 是 4K 截断视图，其自写回的 override 不受该截断）
     try {

@@ -108,7 +108,7 @@ export const resetAppendSizeWatermark = (p: string): void => {
 };
 /** @param handle P2-2 合批快路径：调用方已 open 的追加句柄（省逐条 open+close）；缺省走旧路径 fs.appendFile。
  *   重试/截断回滚/水位语义与旧路径完全一致（truncate 按 path 进行，句柄以 O_APPEND 打开互不干扰）。 */
-const appendLineWithRetry = async (p: string, payload: string, handle?: fs.FileHandle | null): Promise<void> => {
+const appendLineWithRetryInner = async (p: string, payload: string, handle?: fs.FileHandle | null): Promise<void> => {
     const MAX_ATTEMPTS = 3;
     const payloadBytes = Buffer.byteLength(payload, "utf-8");
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -130,6 +130,27 @@ const appendLineWithRetry = async (p: string, payload: string, handle?: fs.FileH
         }
     }
 }
+
+/**
+ * ★ 评审修复 A4（2026-11-23，X1）：appendLineWithRetry 按【路径】串行化。
+ *  现象：内层的字节水位是跨 await 的非原子读改写（读水位 → await appendFile → 写水位）——同一进程两个
+ *  append 重叠时，后完成者把水位写低；之后任一次落盘失败的 fs.truncate(p, beforeSize) 就会把此前已成功
+ *  写入的行截掉（评审实测：Promise.all 两个 append 后注入一次失败 → 丢 1 行已成功消息）。现实并发源：
+ *  agentWake 的转录回退分支与主 run 同时写同一会话文件。
+ *  修法：进程内 Map<path, Promise<void>> 串行链——每条 append 排在该路径上一条之后执行；链上记录
+ *  【吞错版本】（本条失败不阻断后续 append 排队），错误经本条返回的 promise 抛给调用方
+ *  （appendMessage / appendMessages 的既有容错与返回值语义不变）；链排空后删除表项防泄漏。
+ *  截断回滚与水位语义在内层实现原样保留（A4 红线：不删失败截断回滚、不改 resetAppendSizeWatermark）。
+ */
+const appendChains = new Map<string, Promise<void>>();
+const appendLineWithRetry = (p: string, payload: string, handle?: fs.FileHandle | null): Promise<void> => {
+    const gate = (appendChains.get(p) ?? Promise.resolve()).catch(() => { });   // 吞错链尾：前条失败不阻断本条排队
+    const task = gate.then(() => appendLineWithRetryInner(p, payload, handle));
+    const tail = task.catch(() => { });                                          // 链上记录的吞错版本
+    appendChains.set(p, tail);
+    tail.finally(() => { if (appendChains.get(p) === tail) appendChains.delete(p); });   // 链排空删表项，防泄漏
+    return task;
+};
 
 /**
  * 追加一条消息行。★ 返回落盘成败（D5 二轮 2026-11-03）：内层容错只 warn 不抛，调用方（inbox flush
