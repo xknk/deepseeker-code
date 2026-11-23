@@ -1022,28 +1022,34 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
             const { toCompact, keepRecent } = splitUntils(active, keep);   // ← 用共享的 splitUnits
             try {
                 if (toCompact.length > 0) {
-                    // ★ 实体索引先行落位：确定性合并（代码从被压缩原文提取、新实体优先）。索引段随槽进入辅助
-                    //   压缩请求，但合成产物重建时按旧值原样回写、不被改写——见 assembleSlot——与叙述合成解耦；
+                    // ★ 评审修复 B2（2026-11-23）：压缩成功前不改写摘要槽——全部产物走局部变量，
+                    //   合并 → 合成 → 自收敛全部成功后才一次性赋给 summaryMsg.content。
+                    //   修前：索引合并结果先写回槽（原 :1028），LLM 合成才 await——合成失败时槽已被改写
+                    //   而 messageArr 未重建，本轮请求从 message[1] 起 miss；catch 分支还会把这份半成品
+                    //   槽落成 rollingSummary（失败态固化到盘）。修后失败路径槽保持逐字节原值。
+                    // ★ 实体索引先行【计算】：确定性合并（代码从被压缩原文提取、新实体优先）。索引段随槽进入
+                    //   辅助压缩请求，但合成产物重建时按旧值原样回写、不被改写——见 assembleSlot——与叙述合成解耦；
                     //   noteLine 传空 = 仅索引合并（叙述不再逐行追加）。
-                    summaryMsg.content = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact), getArchiveIndexUsage(event.sessionId));
+                    const mergedContent = mergeSummarySlot(summaryMsg?.content || '', '', extractArchiveEntities(toCompact), getArchiveIndexUsage(event.sessionId));
                     // ★ 检查点合成（首轮生成语义、后续更新语义），整段替换叙述段。行是批量归档的交换格式、不落槽——
                     //   槽叙述段恒为检查点形态，全局状态无需续接模型自行归纳。
                     //   ★ 单批直通：常见形态（1–3 批中的单批）批次原文直接交合成，跳过行式中转——
                     //   省 1 次 LLM 调用与一轮串行延迟，少一次「原文→行」有损转手；多批保持并行行式路线。
                     const batches = splitIntoBatches(toCompact);
-                    summaryMsg.content = batches.length === 1
-                        ? await synthesizeSlotNarrativeFromBatch(summaryMsg.content, batches[0], event.signal, event.onAuxUsage)
-                        : await synthesizeSlotNarrative(summaryMsg.content, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined, event.onAuxUsage), event.signal, event.onAuxUsage);
+                    let synthesizedContent = batches.length === 1
+                        ? await synthesizeSlotNarrativeFromBatch(mergedContent, batches[0], event.signal, event.onAuxUsage)
+                        : await synthesizeSlotNarrative(mergedContent, await compactBatches(batches, event.signal, event.depth === 0 ? event.onUIEvent : undefined, event.onAuxUsage), event.signal, event.onAuxUsage);
                     // ★ P2 摘要自收敛（安全网，保留）：合成输出异常膨胀时就地再收敛——检查点路线下正常恒低于
-                    //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。
+                    //   阈值，几乎不触发。实体索引段原样保留（索引无损硬约束）。★ B2：判据与产物都读局部变量。
                     //   ★ D2 判据对齐（审查报告 2026-11-03）：自收敛动作只重写叙述段（assembleSlot 原样回写
                     //   索引段），判据也只量叙述段——索引段有 120 条硬顶自治（ARCHIVE_INDEX_MAX_ENTRIES），
                     //   接近满编时旧「整槽口径」会让每轮压缩都白付一次不可能有收益的 aux 调用（索引 ~1500
                     //   token + 极短叙述即可越过 2000 阈值）。system 角色 → estimateTokens 走 ÷4.8（散文口径）。
-                    const slotNotes = parseSummarySlot(typeof summaryMsg?.content === 'string' ? summaryMsg.content : '').notes;
+                    const slotNotes = parseSummarySlot(typeof synthesizedContent === 'string' ? synthesizedContent : '').notes;
                     if (estimateTokens([{ role: summaryMsg?.role ?? 'system', content: slotNotes } as Msg]) > SUMMARY_SELF_COMPACT_THRESHOLD) {
-                        summaryMsg.content = await compactSlotNarrative(summaryMsg.content, event.modelWindow, event.signal, event.onAuxUsage);
+                        synthesizedContent = await compactSlotNarrative(synthesizedContent, event.modelWindow, event.signal, event.onAuxUsage);
                     }
+                    summaryMsg.content = synthesizedContent;   // ← 全部成功后才改写槽（B2 原子提交点）
                     const endTime = performance.now();
 
                     event.messageArr.length = 0;
@@ -1100,7 +1106,10 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 // 3. 一脚强行回写落盘，锁死连续失败的物理记忆（刻意不走 persistCompaction：失败无压缩事实，不写事件）
                 await setRollingState(event.sessionId, {
                     archivedMessageCount: store.archivedMessageCount || 0,
-                    rollingSummary: summaryMsg?.content || "",
+                    // ★ B2 后续（2026-11-23）：summaryMsg 缺失时不能落空串——那会把盘上已有的
+                    //   滚动摘要抹成 ""（失败态固化，恢复后上下文直接失忆）。落盘旧值。
+                    //   用 ?? 而非 ||：槽存在但内容为空串是有效态（真·空摘要），不应被旧值覆盖。
+                    rollingSummary: summaryMsg?.content ?? store.rollingSummary,
                     consecutiveFailures: nextFailures // 👈 同步落盘
                 });
                 const endTime = performance.now();

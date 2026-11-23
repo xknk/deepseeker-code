@@ -301,3 +301,36 @@ describe("compact.progress 多批压缩进度（P1-3）", () => {
         assert.deepEqual(uiEvents.filter((e) => e.type === "compact.done"), [], "子 agent 不发完成行");
     });
 });
+
+// ==================== ★ 评审修复 B2（2026-11-23）：压缩失败不改写摘要槽 ====================
+//
+// 修前：实体索引合并结果先写回 messageArr[1]，LLM 合成才 await——合成失败时槽已被改写而消息数组
+// 未重建（本轮请求从 message[1] 起缓存全 miss），catch 分支还会把这份半成品槽落成 rollingSummary
+// （失败态固化到盘）。修后：合并/合成/自收敛全走局部变量，全部成功后才一次性赋给槽——失败路径槽
+// 逐字节原值、rollingSummary 落旧值、失败计数口径不变。
+
+describe("评审修复 B2：压缩失败不改写摘要槽", () => {
+    it("合成失败 → 槽逐字节原值；rollingSummary 落旧值；失败计数照常累计；消息数组未重建", async () => {
+        const { provider } = makeWindowedProvider(30_000, {
+            alwaysFail: true,
+            failError: new Error("模拟合成失败"),
+        });
+        // 体量镜像熔断测试区间（超压缩阈值 15000、低于兜底——失败后不撞窗口上限 throw）
+        const giant = "错".repeat(17_000);
+        const { messageArr } = buildHistoryWithGiantResult(giant);
+        const originalSlot = "⟦DSC:ARCHIVE-INDEX⟧\n- old/config.ts\n- old/session-store.ts\n⟦DSC:ARCHIVE-NOTES⟧\n旧叙述：此前完成过一次归档。";
+        (messageArr[1] as any).content = originalSlot;
+        const sessionId = "b2-slot-atomic";
+
+        await withProvider(provider, async () => {
+            await ensureFitsWindow(buildEvent(sessionId, messageArr));   // 失败 1（<3，不熔断）
+        });
+
+        assert.equal((messageArr[1] as any).content, originalSlot, "摘要槽逐字节保持调用前原值（修前已被索引合并结果改写）");
+        const store = await getRollingState(sessionId);
+        assert.equal(store.consecutiveFailures, 1, "失败计数口径不变（+1）");
+        assert.equal(store.rollingSummary, originalSlot, "rollingSummary 落盘旧值（修前落半成品槽）");
+        assert.equal(messageArr.length, 7, "消息数组未重建");
+        assert.ok(String(messageArr[4].content).startsWith("错"), "被压缩区原文零改写（可重试全文）");
+    });
+});
