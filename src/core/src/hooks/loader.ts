@@ -67,6 +67,7 @@ const slimHookContext = (ctx: any): any => {
 };
 import { HookRule, EventType, HookType, ALL_EVENTS, TOOL_EVENTS, INTERCEPTABLE_EVENTS, DEFAULT_TIMEOUT_BY_EVENT, HookResult } from "./types.ts";
 import { isHookCommandApproved, approveHookCommand } from "./trust.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 
 /** 单条声明式规则（校验后的中间形态）。type 判别 command/http/prompt 三种执行类型。 */
 interface RawHookRule {
@@ -489,7 +490,10 @@ export const compileRule = (event: EventType, raw: RawHookRule): HookRule => {
                     : { deny: false };
             }
             if (denyOnNonZero && res.exitCode !== 0) {
-                const detail = res.stderr ? `：${res.stderr.slice(0, 200)}` : "";
+                // ★ B4 补完（2026-11-23）：stderr → deny.reason → failResult 回灌模型（= 进 API 消息），
+                //   裸切会劈出孤立代理。注：本目录其余截断点（registry 观察视图 / shellExecutor stdout 与 stdin /
+                //   httpExecutor 响应体）按设计均不进模型，无需同步改——勿据「都截断」一并归为同类。
+                const detail = res.stderr ? `：${sliceHeadNoSplit(res.stderr, 200)}` : "";
                 return { deny: true, reason: `hook 退出码 ${res.exitCode}${detail}` };
             }
             // ★ stdout JSON 决策协议（exitCode 0）：脚本可输出 {deny,reason,argsOverride,resultOverride}

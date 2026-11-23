@@ -18,6 +18,7 @@ import type { Dirent } from "fs";
 import os from "os";
 import path from "path";
 import { appConfig } from "@/config/index.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 import { parseFrontmatter } from "@/skills/frontmatter.ts";
 import { registerMemory, listMemories, clearMemories, memoryIndexLine, MEMORY_LIMITS, MemoryManifest, MemorySource, MemoryType } from "./registry.ts";
 import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
@@ -136,10 +137,12 @@ const extractExternalTitle = (raw: string, fallbackStem: string): string => {
     return fallbackStem;
 };
 
-/** 拼 `[外部:来源名]` 前缀 + 标题，整体定长截断（勿改为按词截断等花活——确定性即缓存安全）。 */
-const buildExternalDescription = (label: string, title: string): string => {
+/** 拼 `[外部:来源名]` 前缀 + 标题，整体定长截断（勿改为按词截断等花活——确定性即缓存安全）。
+ *  ★ B4 补完（2026-11-23）：切头改 sliceHeadNoSplit——该描述进 system prompt 记忆索引（= 进 API 消息），
+ *  裸 slice 把标题末尾的 emoji 劈成孤立代理（下一次请求 400 形态）。 */
+export const buildExternalDescription = (label: string, title: string): string => {
     const full = `[外部:${label}] ${title.replace(/\s+/g, " ").trim()}`;
-    return full.length > EXTERNAL_DESC_MAX_CHARS ? full.slice(0, EXTERNAL_DESC_MAX_CHARS) : full;
+    return full.length > EXTERNAL_DESC_MAX_CHARS ? sliceHeadNoSplit(full, EXTERNAL_DESC_MAX_CHARS) : full;
 };
 
 /** 字节安全截断：末尾多字节字符被切时 toString 产 U+FFFD 替换，UTF-8 合法性与确定性均有保证。 */

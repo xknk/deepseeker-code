@@ -20,6 +20,7 @@ import { CustomTool } from "@/tool/type.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { registerSkill, listSkills, SkillManifest, SkillSource } from "./registry.ts";
 import { skillTools } from "@/tool/registry/skill.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
 
 /** 内置 skill 目录：本文件所在目录下的 builtin/ */
@@ -32,8 +33,9 @@ const SOURCES: LoadSource<SkillSource>[] = [
     { dir: path.join(process.cwd(), ".deepseeker-code", "skills"), source: "project" },
 ];
 
-/** SKILL 正文大小上限：防异常大 SKILL.md 先整文塞进 tool result 再被压缩（Q-12）。 */
-const MAX_SKILL_BODY_BYTES = 64 * 1024;
+/** SKILL 正文上限（UTF-16 码元计，非字节——与 length/sliceHeadNoSplit 同口径；评审修复 B4 正名）：
+ *  防异常大 SKILL.md 先整文塞进 tool result 再被压缩（Q-12）。 */
+const MAX_SKILL_BODY_CHARS = 64 * 1024;
 
 /** 逗号分隔字符串 → 去空数组（镜像 agents/loader.ts 的 tools 解析；复用 KISS frontmatter，不引 YAML）。 */
 const splitList = (raw: string | undefined): string[] =>
@@ -64,8 +66,11 @@ const parseSkillAt = async (skillFile: string, dir: string, source: SkillSource)
     }
     const version = Number(parsed.frontmatter.version);
     // Q-12：正文超限截断（虽有 ensureFitsWindow 兜底，但在加载期即限定，避免超大正文污染 tool result）
-    const body = parsed.body.length > MAX_SKILL_BODY_BYTES
-        ? parsed.body.slice(0, MAX_SKILL_BODY_BYTES) + `\n\n…[SKILL 正文超 ${MAX_SKILL_BODY_BYTES} 字节，已截断]`
+    // ★ 评审修复 B4（2026-11-23）：切头改 sliceHeadNoSplit（与 commands/loader.ts 同款）——SKILL 正文经
+    //   load_skill 进上下文 = 进 API 消息，裸 slice 把切缘 emoji 劈成孤立代理（400 形态）。常量按实际
+    //   计量口径改名 CHARS（length/sliceHeadNoSplit 均按 UTF-16 码元计，非字节）。
+    const body = parsed.body.length > MAX_SKILL_BODY_CHARS
+        ? sliceHeadNoSplit(parsed.body, MAX_SKILL_BODY_CHARS) + `\n\n…[SKILL 正文超 ${MAX_SKILL_BODY_CHARS} 字符，已截断]`
         : parsed.body;
     return {
         name,

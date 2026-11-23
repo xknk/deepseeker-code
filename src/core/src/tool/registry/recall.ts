@@ -17,6 +17,7 @@ import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.t
 import { getActiveWorkspaceRoot } from "../guard.ts";
 import { touchArchiveIndexOnQuery } from "@/agent/truncate.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
+import { sliceHeadNoSplit, sliceTailNoSplit } from "@/session/content.ts";
 import { getToolOutputSidecarPath, safeSidecarId, SIDECAR_ARCHIVED_MARK } from "@/session/sidecar.ts";
 import fs from "fs/promises";
 import path from "path";
@@ -65,11 +66,14 @@ const annotateStaleness = async (args: any, observedAt?: string): Promise<string
     }
 };
 
-/** 单命中片段：围绕首个匹配位开窗，头尾省略号标记裁切。 */
-const snippetAround = (text: string, re: RegExp, maxChars: number): string => {
+/** 单命中片段：围绕首个匹配位开窗，头尾省略号标记裁切。
+ *  ★ 防劈代理对（评审修复 B4，2026-11-23）：窗口两端经 sliceTailNoSplit / sliceHeadNoSplit——
+ *  切缘落在代理对中间会把 emoji 劈半，孤立代理随召回结果回灌模型（= 下一次请求 400）。
+ *  导出供单测（parseStdoutDecision 同例：纯函数边界用例不过 execute 全链）。 */
+export const snippetAround = (text: string, re: RegExp, maxChars: number): string => {
     const m = re.exec(text);
     const start = Math.max(0, (m?.index ?? 0) - 120);
-    const slice = text.slice(start, start + maxChars);
+    const slice = sliceTailNoSplit(sliceHeadNoSplit(text, start + maxChars), maxChars);
     const headMark = start > 0 ? '…' : '';
     const tailMark = start + maxChars < text.length ? '…（片段截断，完整内容可用 with_full）' : '';
     return `${headMark}${slice}${tailMark}`;
@@ -117,11 +121,16 @@ export const recallTools: CustomTool[] = [
                         catch { return toolFailure(`[recall] 未找到该 id 的存档原文（可能未曾触发截断存档、或会话已清理）：${args.with_full}`); }
                         const CHUNK = 14000;
                         const off = Math.max(0, Math.floor(args.full_offset ?? 0));
-                        const slice = full.slice(off, off + CHUNK);
-                        const more = off + CHUNK < full.length
-                            ? `\n\n[未完，共 ${full.length} 字符——继续传 full_offset=${off + CHUNK} 取下一段]`
+                        // ★ 防劈代理对 + 分页不变量（评审修复 B4，2026-11-23）：页尾切点经 sliceHeadNoSplit
+                        //   回退——切缘落在代理对中间时整体舍去尾部半个 emoji；full_offset 推进量按【实际
+                        //   取出长度】算（nextOff = off + page.length，恒为安全切点）——各页拼接恒等于原文。
+                        const safeEnd = off + CHUNK >= full.length ? full.length : sliceHeadNoSplit(full, off + CHUNK).length;
+                        const slice = full.slice(off, safeEnd);
+                        const nextOff = safeEnd;
+                        const more = nextOff < full.length
+                            ? `\n\n[未完，共 ${full.length} 字符——继续传 full_offset=${nextOff} 取下一段]`
                             : '\n\n[全文完]';
-                        return `[存档原文 ${args.with_full} · 第 ${off}-${Math.min(off + CHUNK, full.length)} / ${full.length} 字符]\n\n${slice}${more}`;
+                        return `[存档原文 ${args.with_full} · 第 ${off}-${nextOff} / ${full.length} 字符]\n\n${slice}${more}`;
                     }
 
                     // ———— 分支二：关键词检索本会话全量转录 ————

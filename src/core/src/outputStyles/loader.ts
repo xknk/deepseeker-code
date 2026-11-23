@@ -15,11 +15,13 @@ import { appConfig } from "@/config/index.ts";
 import { parseFrontmatter } from "@/skills/frontmatter.ts";
 import { registerOutputStyle, listOutputStyles, OutputStyleManifest, OutputStyleSource } from "./registry.ts";
 import { LoadSource, filterSources, scanSources } from "@/common/registry.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 
 const BUILTIN_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "builtin");
 
-/** 风格正文大小上限（镜像 skills 的 MAX_SKILL_BODY_BYTES）：防异常大正文在 /output-style 激活时整段灌入 system prompt。 */
-const MAX_STYLE_BODY_BYTES = 64 * 1024;
+/** 风格正文上限（UTF-16 码元计，非字节——与 length/sliceHeadNoSplit 同口径；镜像 skills 的
+ *  MAX_SKILL_BODY_CHARS）：防异常大正文在 /output-style 激活时整段灌入 system prompt。 */
+const MAX_STYLE_BODY_CHARS = 64 * 1024;
 
 const SOURCES: LoadSource<OutputStyleSource>[] = [
     { dir: BUILTIN_DIR, source: "builtin" },
@@ -56,9 +58,11 @@ const parseStyleAt = async (file: string, _dir: string, source: OutputStyleSourc
     }
     // 加载期即限定正文大小：风格经 /output-style 激活后 body 会整段注入 system prompt，
     //   超大正文（异常/恶意 global 风格）会无谓挤占上下文。镜像 skills 的截断策略。
+    // ★ 评审修复 B4 补完（2026-11-23）：切头改 sliceHeadNoSplit——与 skills/loader.ts 同款。
+    //   正文进 system prompt = 进 API 消息，裸 slice 把切缘 emoji 劈成孤立代理（下一次请求 400 形态）。
     const trimmedBody = parsed.body.trim();
-    const body = trimmedBody.length > MAX_STYLE_BODY_BYTES
-        ? trimmedBody.slice(0, MAX_STYLE_BODY_BYTES) + `\n\n…[输出风格正文超 ${MAX_STYLE_BODY_BYTES} 字节，已截断]`
+    const body = trimmedBody.length > MAX_STYLE_BODY_CHARS
+        ? sliceHeadNoSplit(trimmedBody, MAX_STYLE_BODY_CHARS) + `\n\n…[输出风格正文超 ${MAX_STYLE_BODY_CHARS} 字符，已截断]`
         : trimmedBody;
     return { name, description, body, source };
 };

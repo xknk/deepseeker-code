@@ -12,6 +12,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { WORKSPACE_ROOT } from "@/tool/guard.ts";
+import { sliceHeadNoSplit } from "@/session/content.ts";
 
 export interface ProjectGuide {
     /** 命中的文件名（CLAUDE.md / AGENTS.md / AGENT.md） */
@@ -22,10 +23,17 @@ export interface ProjectGuide {
 
 /** 候选顺序与 read_project_guide 工具保持一致 */
 const CANDIDATES = ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
-/** 每轮注入 system prompt 的体积上限：比 skill 正文（64K，仅按需）更紧（每轮都带）。 */
-const MAX_GUIDE_BYTES = 16 * 1024;
+/** 每轮注入 system prompt 的体积上限（UTF-16 码元计，非字节——与 length/sliceHeadNoSplit 同口径）：
+ *  比 skill 正文（64K，仅按需）更紧（每轮都带）。 */
+const MAX_GUIDE_CHARS = 16 * 1024;
 
 let cached: ProjectGuide | null = null;
+
+/** 正文截断（导出供单测）：切头走 sliceHeadNoSplit，防切缘 emoji 被劈成孤立代理。 */
+export const truncateGuideBody = (raw: string): string =>
+    raw.length > MAX_GUIDE_CHARS
+        ? sliceHeadNoSplit(raw, MAX_GUIDE_CHARS) + `\n\n…[项目指引超 ${MAX_GUIDE_CHARS} 字符已截断，完整内容可调用 read_project_guide 获取]`
+        : raw;
 
 /**
  * 启动期加载项目指引（供 serve/index.ts 调用）。
@@ -37,11 +45,11 @@ export const initProjectGuide = async (includeProject: boolean): Promise<void> =
         for (const name of CANDIDATES) {
             try {
                 const raw = await fs.readFile(path.join(WORKSPACE_ROOT, name), "utf-8");
-                const body = raw.length > MAX_GUIDE_BYTES
-                    ? raw.slice(0, MAX_GUIDE_BYTES) + `\n\n…[项目指引超 ${MAX_GUIDE_BYTES} 字节已截断，完整内容可调用 read_project_guide 获取]`
-                    : raw;
+                // ★ B4 补完（2026-11-23）：切头改 sliceHeadNoSplit（见 truncateGuideBody）——指引正文
+                //   每轮进 system prompt（= 进 API 消息），裸 slice 会劈出孤立代理（下一次请求 400 形态）。
+                const body = truncateGuideBody(raw);
                 cached = { name, body };
-                console.log(`📖 [projectGuide] 已自动加载 ${name}（${body.length} 字节）`);
+                console.log(`📖 [projectGuide] 已自动加载 ${name}（${body.length} 字符）`);
                 return;
             } catch { /* 该候选不存在，尝试下一个 */ }
         }
