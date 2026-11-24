@@ -179,17 +179,17 @@ type ToolCallState = {
     /** 视觉读取：工具结果附带的 images（read_image）——不在 result 文本里（base64 三不进），
      *  由调度层在本波工具 flush 完后组装成独立 user 附件消息（tool role 携带 image part 会被端点 400）。 */
     imageAttachments: ToolExecuteResult['images'];
-        /** isSync:false 后台工具标记 + 互斥锁 key（安全链中段判定，execute 阶段消费）。 */
-        isBgTool: boolean;
-        lockKey: string | null;
-        /** ★ P1-B（终审，2026-11-19）：本次审批的触发原因——宿主（尤其无人值守的 batch）据此裁决：
-         *  'provenance' = 内容/来源不可信（不接受"白名单自动放行"，必须人工或直接拒绝）。
-         *  缺省 undefined = 常规 safetyLevel / 权限规则触发。 */
-        approvalCause?: ApprovalCause;
-    };
+    /** isSync:false 后台工具标记 + 互斥锁 key（安全链中段判定，execute 阶段消费）。 */
+    isBgTool: boolean;
+    lockKey: string | null;
+    /** ★ P1-B（终审，2026-11-19）：本次审批的触发原因——宿主（尤其无人值守的 batch）据此裁决：
+     *  'provenance' = 内容/来源不可信（不接受"白名单自动放行"，必须人工或直接拒绝）。
+     *  缺省 undefined = 常规 safetyLevel / 权限规则触发。 */
+    approvalCause?: ApprovalCause;
+};
 
-    /** 审批触发原因（ApprovalMeta.cause 的取值源）。 */
-    export type ApprovalCause = 'provenance' | 'safety' | 'permission' | 'classifier';
+/** 审批触发原因（ApprovalMeta.cause 的取值源）。 */
+export type ApprovalCause = 'provenance' | 'safety' | 'permission' | 'classifier';
 
 /** 置失败文案 + 状态（errorCategory 缺省 runtime；syntax 收模型调用形态错）。 */
 const failResult = (state: ToolCallState, text: string, cat: ToolExecuteResult['errorCategory'] = 'runtime'): void => {

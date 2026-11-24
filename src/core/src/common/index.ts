@@ -107,7 +107,7 @@ export const readJSONFile = async <T>(file: string, fallback: T | null = null): 
 };
 
 /**
- * 原子写 JSON（tmp + rename，防写中途崩溃留截断文件）。惯法提炼自 session/store.ts:115-120，
+ * 原子写 JSON（tmp + rename，防写中途崩溃留截断文件）。惯法提炼自 session/store.ts 的 writeStore，
  * 供 prefs/trust 等用户配置持久化复用。调用方负责确保目标目录已存在（mkdir 兜底）。
  */
 export const atomicWriteJSON = async (file: string, value: unknown): Promise<void> => {

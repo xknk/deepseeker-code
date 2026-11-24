@@ -1024,7 +1024,7 @@ export const ensureFitsWindow = async (event: ensureOptions): Promise<void> => {
                 if (toCompact.length > 0) {
                     // ★ 评审修复 B2（2026-11-23）：压缩成功前不改写摘要槽——全部产物走局部变量，
                     //   合并 → 合成 → 自收敛全部成功后才一次性赋给 summaryMsg.content。
-                    //   修前：索引合并结果先写回槽（原 :1028），LLM 合成才 await——合成失败时槽已被改写
+                    //   修前：索引合并结果先写回槽（即合并产物直接赋给 summaryMsg.content 那一步），LLM 合成才 await——合成失败时槽已被改写
                     //   而 messageArr 未重建，本轮请求从 message[1] 起 miss；catch 分支还会把这份半成品
                     //   槽落成 rollingSummary（失败态固化到盘）。修后失败路径槽保持逐字节原值。
                     // ★ 实体索引先行【计算】：确定性合并（代码从被压缩原文提取、新实体优先）。索引段随槽进入

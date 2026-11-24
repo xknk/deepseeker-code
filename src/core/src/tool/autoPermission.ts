@@ -44,7 +44,7 @@ export type AutoVerdict = 'allow' | 'deny' | 'ask';
  */
 export type AutoApprovalDecl = {
     /** ★ 'loopback'（A3，2026-11-09）：http_request 字面回环免审——与 CustomTool.function.autoApproval
-     *  （tool/type.ts:222）同一联合；漏扩会让 runAutoCheck 的 loopback 分支比较被 TS2367 判死、
+     *  （tool/type.ts 的 autoApproval 声明）同一联合；漏扩会让 runAutoCheck 的 loopback 分支比较被 TS2367 判死、
      *  守门测试的显式 decl 报 TS2345（真机验收会话实锤 14 条）。 */
     autoApproval?: 'file' | 'command' | 'aggressive' | 'loopback';
     pathArgs?: string[];

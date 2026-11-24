@@ -380,7 +380,7 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
             // ★ T1 nudge 计量（2026-11-13，施工单 §2.2⑤）：本处 = 真注入的唯一记账点。pickNudge 返回非 null
             //   即本轮推理将携带该 nudge（含 4 个 interceptFinal pending 的消费 + BUDGET/PLAN_REJECT/周期
             //   NUDGE/REPEAT/PLAN_FIRST 直返），按 fence 记一条 nudge.injected(injected:true)。
-            //   injected:false 的 dry-run/解除事件在下方 :424 interceptFinal 出口发——两出口分工避免双计数。
+            //   injected:false 的 dry-run/解除事件在下方 interceptFinal 出口发——两出口分工避免双计数。
             //   fire-and-forget（旁路埋点不 await，与既有调用点同款）。
             if (nudgeMsg) {
                 events({
@@ -485,8 +485,8 @@ export async function* runAgent(message: OpenAI.Chat.ChatCompletionMessageParam[
                 // ★ 收尾拦截（TOOL_DIGEST / PHANTOM / EARLY_FINAL / TODO_INCOMPLETE / VERIFY_UNPROVEN）：
                 //   命中返回 {fence, injected, disposition}，判定/文案/预算/死循环保险全在 agentNudges.interceptFinal。
                 //   ★ T1 发射规则（施工单 §2.2⑤，防双计数）：本出口只发「没真注入」的事件（dry-run/解除，
-                //   injected:false）——injected:true 的 pending 交给下一轮 :334 pickNudge 消费时记账；
-                //   则 dry 档 VERIFY 事件只在此出现（1 条）、on 档只在 :334 出现（1 条），每 nudge 恰好一条。
+                //   injected:false）——injected:true 的 pending 交给下一轮 pickNudge 消费时记账；
+                //   则 dry 档 VERIFY 事件只在此出现（1 条）、on 档只在 pickNudge 出现（1 条），每 nudge 恰好一条。
                 const intercepted = nudges.interceptFinal(finalText, round);
                 if (intercepted) {
                     if (!intercepted.injected) {

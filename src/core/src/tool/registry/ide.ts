@@ -7,7 +7,7 @@
  *   - ide_run_task    DANGER —— 触发 VSCode 任务（tasks.json），触发即返回不等待完成
  *
  *  双层防御：① validateEnvironment 检查 ctx.ideAction——CLI/HTTP 宿主未注入钩子时三工具直接从
- *  模型工具表剔除（仿 typescript.ts 自隐藏）；② execute 内兜底降级返回引导文案（仿 ask.ts:58-61）。
+ *  模型工具表剔除（仿 typescript.ts 自隐藏）；② execute 内兜底降级返回引导文案（仿 ask_question 的「宿主不支持」降级分支）。
  *  vscode 类型不进 core：宿主在边界把 Diagnostic 映射为纯数据 IdeDiagnosticItem。
  */
 import { toolFailure, CustomTool, ToolContext, ToolSafetyLevel } from "../type.ts";

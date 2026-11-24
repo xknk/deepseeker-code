@@ -106,7 +106,7 @@ export const initSkills = async (into: CustomTool[], includeProject: boolean): P
     try {
         const n = await loadSkills(includeProject);
         if (n > 0) {
-            // 白名单校验（镜像 agents/loader.ts:87-91）：剔除 allowedTools 里 into 表不存在的工具名，catch 拼写错误。
+            // 白名单校验（镜像 agents/loader.ts 的 known 集合过滤段）：剔除 allowedTools 里 into 表不存在的工具名，catch 拼写错误。
             //   软约束下非安全关键（仅影响 body 提示文案）；load_skill 此刻尚未注入（紧随本块注入），故不在 known 中——
             //   skill 限定到 load_skill 本就无意义，剔除正确。
             const known = new Set(into.map((t: any) => t.function.name));

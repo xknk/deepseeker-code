@@ -28,9 +28,9 @@ import { appConfig } from "@/config/index.ts";
 export type NudgeMsg = { role: 'system'; content: string; disposition?: string };
 
 /** interceptFinal 命中结果（T1 返回类型改造，2026-11-13）：原来是 boolean（true=已注入应 continue），
- *  现在带 fence 名与注入事实，供 runAgent 的 :424 出口发 nudge.injected 计量事件。
- *  injected:true → runAgent continue（pending 下一轮经 pickNudge 消费、:334 记账 injected:true）；
- *  injected:false → dry-run / 武装后被解除，runAgent 放行收尾并在 :424 出口记账（不 continue）。
+ *  现在带 fence 名与注入事实，供 runAgent 的 interceptFinal 出口发 nudge.injected 计量事件。
+ *  injected:true → runAgent continue（pending 下一轮经 pickNudge 消费、pickNudge 内记账 injected:true）；
+ *  injected:false → dry-run / 武装后被解除，runAgent 放行收尾并在 interceptFinal 出口记账（不 continue）。
  *  ★ disposition 仅 VERIFY_UNPROVEN 有 verified/disclaimed 两种解除语义，其余 fence 恒 'fired'。 */
 export type NudgeFinalHit = { fence: string; injected: boolean; disposition: 'fired' | 'verified' | 'disclaimed' };
 
@@ -302,7 +302,7 @@ export const createNudgeScheduler = (opts: {
                 return usage ? { ...m, content: `${m.content}${usageNoteText(usage)}` } : m;
             }
             // VERIFY_UNPROVEN pending（T1，on 档 fired 才会设入）：语义最弱、优先级最低（施工单 §2.2②）——
-            //   排在全部 pending 之后、周期 NUDGE 之前；disposition 随 NudgeMsg 透传到 :334 记账（§2.2⑤）。
+            //   排在全部 pending 之后、周期 NUDGE 之前；disposition 随 NudgeMsg 透传到 pickNudge 记账（§2.2⑤）。
             if (verifyPending) { const m = verifyPending; verifyPending = null; return m; }
             if (round > 1 && round % NUDGE_EVERY === 1) {
                 // ★ P1-2 惰性调用点：只在真正返回周期 NUDGE 的这一轮才全量扫描估算用量（闭包缺省/返回 null → 文案不带用量，行为不变）
@@ -370,7 +370,7 @@ export const createNudgeScheduler = (opts: {
                     verifyReported = true;
                     return { fence: 'VERIFY_UNPROVEN', injected: false, disposition: 'disclaimed' };
                 }
-                // ③ fired：dry 只记账（injected:false，runAgent :424 出口发事件后放行）；on 设 pending 真推一轮
+                // ③ fired：dry 只记账（injected:false，runAgent interceptFinal 出口发事件后放行）；on 设 pending 真推一轮
                 verifyReported = true;
                 if (verifyMode === 'on') {
                     verifyPending = { role: 'system', content: `${VERIFY_FENCE}\n${VERIFY_UNPROVEN_TEXT}`, disposition: 'fired' };
