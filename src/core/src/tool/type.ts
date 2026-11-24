@@ -229,7 +229,7 @@ export type CustomTool = OpenAI.Chat.Completions.ChatCompletionTool & {
          *                         非 SAFE（MUTATION/DANGER）拒绝（写工具 / 命令 / 后台任务等）；
          *  - false              ：显式排除——SAFE 但有理由不进计划期的工具（spawn_agent / run_workflow：
          *                         花钱且子代理可能写；stop_background_task：杀进程副作用；wait_http_ready：联网）。
-         * runtime 档（toolExecution.planToolAllowed）与 schema 档（planMode.filterToolsForPlanMode）同一判定。
+         * 放行判定唯一出处：toolExecution.planToolAllowed（卡 3 后无第二路径）。
          */
         planAllowed?: boolean;
 

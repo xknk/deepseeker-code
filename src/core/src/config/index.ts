@@ -101,16 +101,8 @@ export const appConfig = {
     /** P0-3 run_workflow 单个子 agent 结果的字符预算：超出按头尾截断，避免单个巨型结果挤占聚合输出。
      *  最终聚合再受工具 maxOutputCharacters 兜底。 */
     workflowPerStepChars: 6000,
-    /** ★ P0-A 计划模式强制位置：'runtime'（默认）= 工具表全会话恒定（两态统一 appendPlanControlTools），
-     *  计划期写工具由 processToolCall 执行层按工具声明 planAllowed 拒绝——保 DeepSeek 前缀缓存
-     *  （tools 参数序列化在请求头部，计划模式裁表翻转 = 全会话历史 re-prefill 两次）；
-     *  'schema' = 旧路径（计划期裁成只读白名单子表）。env DEEP_SEEK_PLAN_ENFORCEMENT=schema 回退。 */
-    planEnforcement: (process.env.DEEP_SEEK_PLAN_ENFORCEMENT === "schema" ? "schema" : "runtime") as "runtime" | "schema",
-    /** ★ P1-MCP 工具暴露模式：'dispatcher'（默认）= 只注入恒定 schema 的 mcp_list_tools + mcp_call
-     *  （目录按需查、审批/权限用合成名 mcp__<server>__<tool> 匹配既有规则；工具表不随 MCP server
-     *  工具数增长，L1 恒定）；'schemas' = 旧路径（每个 MCP 工具独立 schema 常驻）。
-     *  env DEEP_SEEK_MCP_EXPOSE_MODE=schemas 回退。 */
-    mcpExposeMode: (process.env.DEEP_SEEK_MCP_EXPOSE_MODE === "schemas" ? "schemas" : "dispatcher") as "dispatcher" | "schemas",
+    // ★ 卡 3（评审修复 2026-11-24）：计划期强制档位与 MCP 暴露模式两个回退开关及背后的旧路径已删——
+    //   计划期强制只有执行层 gate 一条路径，MCP 只剩 dispatcher 档。
     /** ★ 事件日志化：transcript 追加 turn/step 边界事件行（run.start/round.end/run.end/compaction/
      *  run.abandoned，带 dscEvent 标记，readMessages 自动过滤）——崩溃恢复从盲扫启发式升级为事件确认，
      *  compaction 事件携带归档计数+摘要文本使 transcript 自包含（分叉/审计不再押 state.json 单点）。
@@ -174,8 +166,6 @@ export const ENV_SOURCES: Record<string, string> = {
     workflowConcurrency: "DEEP_SEEK_WORKFLOW_CONCURRENCY",
     workflowMaxSteps: "DEEP_SEEK_WORKFLOW_MAX_STEPS",
     runCommandAutoBgMs: "RUN_COMMAND_AUTO_BG_MS",
-    planEnforcement: "DEEP_SEEK_PLAN_ENFORCEMENT",
-    mcpExposeMode: "DEEP_SEEK_MCP_EXPOSE_MODE",
     transcriptEvents: "DEEP_SEEK_TRANSCRIPT_EVENTS",
     inboxSteering: "DEEP_SEEK_INBOX",
     hookRewrite: "DEEP_SEEK_HOOK_REWRITE",

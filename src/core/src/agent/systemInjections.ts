@@ -12,8 +12,7 @@
 import type OpenAI from "openai";
 import { RunAgentOptions, RunAgentEvents } from "./type.ts";
 import { ToolContext } from "@/tool/index.ts";
-import { appConfig } from "@/config/index.ts";
-import { filterToolsForPlanMode, appendPlanControlTools } from "./planMode.ts";
+import { appendPlanControlTools } from "./planMode.ts";
 import { filterByEnvironment } from "./toolFilter.ts";
 import { ensureSummarySlot } from "./truncate.ts";
 import { injectSkillCatalog } from "@/skills/inject.ts";
@@ -49,7 +48,7 @@ const cleanToolSchema = (t: any): { cleaned: any; fragment: string } => {
 /**
  * setup 期：工具表裁剪 + schema 清洗 + 摘要槽 + fence 注入。
  * @param message  会话消息数组（原地修改：ensureSummarySlot 预留 message[1]、各 inject 追加到 message[0]）
- * @param options  runAgent 运行配置（取 toolSchemas/planMode/locale/outputStyle 及 validationCtx 所需字段）
+ * @param options  runAgent 运行配置（取 toolSchemas/locale/outputStyle 及 validationCtx 所需字段）
  * @param events   安全包装后的埋点回调（主循环已 try/catch 包裹，透传给 validationCtx 供 filterByEnvironment 用）
  * @returns { rawTools, cleanedToolSchemas, toolsTokens } —— rawTools 含内部字段（safetyLevel/审批/锁等）供工具执行；
  *          cleanedToolSchemas 仅留 OpenAI 协议所需字段供模型推理；toolsTokens 为 schema 常数项 token 粗估（P2 口径）。
@@ -59,15 +58,13 @@ export const prepareToolsAndInjections = async (
     options: RunAgentOptions,
     events: RunAgentEvents,
 ): Promise<{ rawTools: any[]; cleanedToolSchemas: any[]; toolsTokens: number }> => {
-    const { toolSchemas, planMode, locale, outputStyle } = options;
-    // ★ P0-A 计划模式工具表策略：runtime 档（默认）两态统一走 appendPlanControlTools——工具表全会话
+    const { toolSchemas, locale, outputStyle } = options;
+    // ★ P0-A 计划模式工具表策略：两态统一走 appendPlanControlTools——工具表全会话
     //   恒定，保 DeepSeek 前缀缓存（tools 序列化在请求头部，裁表翻转 = 全历史 re-prefill 两次）；
     //   计划期写工具改由 processToolCall 执行层按工具声明 planAllowed 拒绝。
-    //   schema 档（DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退旧裁表路径（计划期 = 只读白名单 + exit_plan_mode）。
+    //   （★ 卡 3，2026-11-24：schema 档回退旧裁表路径已删。）
     //   非计划模式：注入 enter_plan_mode + exit_plan_mode 供模型自主进入计划/提交方案（见 agent/planMode.ts）。
-    const rawToolsPreEnv = (planMode && appConfig.planEnforcement === 'schema')
-        ? filterToolsForPlanMode(toolSchemas ?? [])
-        : appendPlanControlTools(toolSchemas ?? []);
+    const rawToolsPreEnv = appendPlanControlTools(toolSchemas ?? []);
     // ★ validateEnvironment：喂给模型前剔除环境不满足的工具（如无 API key 的 web_search 自动隐藏）
     const validationCtx: ToolContext = {
         sessionId: options.sessionId,
@@ -99,8 +96,8 @@ export const prepareToolsAndInjections = async (
     // 预留系统提示词和摘要存放区域（message[1] 槽，被 ensureFitsWindow/ensureSummarySlot 强依赖——勿改前两个下标）
     ensureSummarySlot(message);
     // ★ P0-4 前缀稳定性：计划模式约束已静态化进 SYSTEM_PROMPT，不再随 planMode 状态改写 message[0]
-    //   （改写会破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档由 processToolCall 执行层按
-    //   工具声明 planAllowed 拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
+    //   （改写会破坏 DeepSeek 隐式前缀缓存）。模式强制：由 processToolCall 执行层按
+    //   工具声明 planAllowed 拒绝写工具（工具表恒定）。
     // 回复语言：按「本轮 user 消息语言自动推断 ?? 显式 locale」注入强引导（fence 机制）。
     //   检测优先：用户切英文提问即得英文回复，无需记 /lang；/lang 降级为无信号轮（纯代码/符号输入）
     //   的兜底，并继续控制 CLI 界面文案。message[0] 每轮由 buildContextMessages 全新重建、fence 重注入，

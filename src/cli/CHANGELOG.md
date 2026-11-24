@@ -1,5 +1,9 @@
 # Changelog
 
+## 未发布
+
+- **移除两个回退开关**：`DEEP_SEEK_PLAN_ENFORCEMENT`（计划期强制回退裁表旧路径）与 `DEEP_SEEK_MCP_EXPOSE_MODE`（MCP 逐工具注入旧路径）——默认档三个月零回退，旧路径零测试已删；计划期只剩执行层 gate 一条路径，MCP 只剩 dispatcher 档。
+
 ## 1.0.76
 
 评审修复批（五轮交叉评审产出：7 修复 + 终审 4 补丁 + provenance 闩锁；全量 core 1200/1200 + cli 115/115 绿·typecheck 四包 0 错）：

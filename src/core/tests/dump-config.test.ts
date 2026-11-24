@@ -50,14 +50,14 @@ describe("dumpEffectiveConfig 结构与脱敏（in-process）", () => {
         assert.equal(dump.sources.traceRetentionDays, "default");
     });
 
-    it("envVars 表：字段 → 变量名映射完整（14 项 spot check）", () => {
+    it("envVars 表：字段 → 变量名映射完整（12 项 spot check）", () => {
         const dump = dumpEffectiveConfig();
         assert.equal(dump.envVars.hookRewrite, "DEEP_SEEK_HOOK_REWRITE");
         assert.equal(dump.envVars.inboxSteering, "DEEP_SEEK_INBOX");
         assert.equal(dump.envVars.dataDir, "DEEPSEEKER_CODE_DATA_DIR");
         assert.equal(dump.envVars.runCommandAutoBgMs, "RUN_COMMAND_AUTO_BG_MS");
         assert.equal(dump.envVars.verifyFenceMode, "DEEP_SEEK_VERIFY_FENCE", "T1 VERIFY_UNPROVEN 三档开关（2026-11-13 登记）");
-        assert.equal(Object.keys(dump.envVars).length, 14);
+        assert.equal(Object.keys(dump.envVars).length, 12, "卡 3 删两个回退开关后 14→12");
     });
 
     it("settingsFiles：全局 = dataDir/settings.json；项目 = cwd/.deepseeker-code/settings.json；存在性现查", async () => {
@@ -120,8 +120,6 @@ describe("dump-config 子进程场景（env / settings.global / settings.project
         const dump = runProbe("ENV", { DEEPSEEKER_CODE_DATA_DIR: dataDir, DEEP_SEEK_PARALLEL_SAFE_TOOLS: "0" });
         assert.equal(dump.effective.parallelSafeTools, false, "env=0 关闭");
         assert.equal(dump.sources.parallelSafeTools, "env");
-        assert.equal(dump.effective.planEnforcement, "runtime", "未设变量走默认");
-        assert.equal(dump.sources.planEnforcement, "default");
         assert.equal(dump.effective.tavilyApiKey, "", "未设 key → 空串");
         assert.equal(dump.sources.tavilyApiKey, "default");
     });

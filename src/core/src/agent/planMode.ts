@@ -7,23 +7,23 @@
  *  1) CustomTool 声明 planAllowed —— 计划模式允许的只读/研究类工具标记
  *     （★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单已退役，改读工具声明；★ 评审修复 A5，2026-11-23：
  *     缺省按「safetyLevel === SAFE 且未显式 planAllowed:false」放行，显式 false / 非 SAFE 才拒）；
- *  2) exitPlanModeToolSchema —— 暴露给模型的 exit_plan_mode 工具 schema（runAgent 特殊拦截，不走常规 execute）；
- *  3) filterToolsForPlanMode —— 过滤工具表为允许集合并注入 exit_plan_mode。
+ *  2) exitPlanModeToolSchema —— 暴露给模型的 exit_plan_mode 工具 schema（runAgent 特殊拦截，不走常规 execute）。
+ *     （★ 卡 3，2026-11-24：schema 档裁表旧路径已删——计划期裁表由
+ *     appendPlanControlTools 恒定工具表 + toolExecution 执行层按 planAllowed 拒绝全权承担。）
  *
  *  对偶入口（让模型自主进入计划模式，而非只能用户手动开启）：
  *  4) enterPlanModeToolSchema / appendPlanControlTools —— 非计划模式下暴露 enter_plan_mode（主动进入计划模式）+ exit_plan_mode（自行调研后直接提交方案）；
  *  5) PLAN_MODE_AUTO_ENTER_HINT —— 引导模型对非平凡任务优先进入计划模式的系统提示词片段（systemPrompt.ts 拼入【计划模式】段段首）。
  */
 import { CustomTool } from "@/tool/index.ts";
-// ★ ToolSafetyLevel 直接从定义模块导入，不经聚合出口 @/tool/index.ts（评审修复 A5 期间的实锤）：
-//   经聚合出口会激活 planMode → tool/index → registry/search 的模块环——本文件被 systemPrompt
-//   （fs → guard → truncate → systemPrompt → 本文件）拉起时，search.ts 会在 fs.ts 求值中途执行，
-//   撞 maskSecretsInContent TDZ。CustomTool 仅类型注解使用（esbuild 剥除），本边运行时不存在。
-import { ToolSafetyLevel } from "@/tool/type.ts";
+// ★ 本文件被 systemPrompt（fs → guard → truncate → systemPrompt → 本文件）链路拉起，
+//   刻意不 import 任何经聚合出口 @/tool/index.ts 的运行时值（历史上 ToolSafetyLevel 经聚合
+//   出口曾激活 planMode → tool/index → registry/search 模块环，撞 maskSecretsInContent TDZ；
+//   现 ToolSafetyLevel 已随卡 3 删裁表函数而不再需要）。CustomTool 仅类型注解使用（esbuild 剥除）。
 
 // P0-4：计划模式约束已静态化进 SYSTEM_PROMPT（agent/systemPrompt.ts【计划模式】段），不再随 planMode 状态
-//   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。模式强制：runtime 档（默认）由 toolExecution
-//   按工具声明 planAllowed 在执行层拒绝写工具（工具表恒定）；schema 档回退 filterToolsForPlanMode 裁表。
+//   动态改写 message[0]（避免破坏 DeepSeek 隐式前缀缓存）。模式强制：由 toolExecution
+//   按工具声明 planAllowed 在执行层拒绝写工具（工具表恒定）。
 
 /**
  * exit_plan_mode 工具 schema。
@@ -47,22 +47,6 @@ export const exitPlanModeToolSchema = {
     }
 };
 
-/**
- * 将完整工具表过滤为计划模式允许的只读/研究子集，并注入 exit_plan_mode。
- * ★ #8a：白名单改读工具声明。★ 评审修复 A5（2026-11-23，V9）：与 runtime 档
- * （toolExecution.planToolAllowed）同一判定——planAllowed === true，或「safetyLevel === SAFE
- * 且未显式声明 planAllowed:false」（原「缺省 = 计划期不可用」把 18 个 SAFE 只读工具全拒在计划期外）。
- * @param tools 完整工具表（agentTools）
- * @returns 计划模式工具表（只读工具 + exit_plan_mode）
- */
-export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
-    const allowed = tools.filter(t => {
-        const f = t.function as any;
-        return f.planAllowed === true || (f.safetyLevel === ToolSafetyLevel.SAFE && f.planAllowed !== false);
-    });
-    return [...allowed, exitPlanModeToolSchema as unknown as CustomTool];
-}
-
 // ─── 自主进入计划模式（enter_plan_mode，exit_plan_mode 的对偶入口）──────────────────────────
 //  动机：原计划模式只能由用户手动开启（--plan / 快捷键），模型在普通轮遇到非平凡实现任务时
 //  无法主动「先规划再动手」。enter_plan_mode 让模型自主发信号 → 上层（runAgent 拦截 + CLI 编排）
@@ -72,7 +56,7 @@ export function filterToolsForPlanMode(tools: CustomTool[]): CustomTool[] {
 /**
  * enter_plan_mode 工具 schema：exit_plan_mode 的对偶入口，非计划模式下暴露给模型。
  * 模型判断任务复杂、需先规划时调用 → 调度层按 terminal 声明终结本轮（P1-6 声明化）→
- * 上层据此翻转 planMode 并以只读重跑（filterToolsForPlanMode + PLAN_MODE_SYSTEM_HINT）。
+ * 上层据此翻转 planMode 并以只读重跑（工具表恒定 + PLAN_MODE_SYSTEM_HINT，写工具由执行层拒绝）。
  * 与 exit_plan_mode 同：非常规 CustomTool（无 execute/safetyLevel）。
  */
 export const enterPlanModeToolSchema = {

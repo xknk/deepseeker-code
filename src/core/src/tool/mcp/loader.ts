@@ -441,18 +441,15 @@ export async function loadMcpTools(): Promise<CustomTool[]> {
  * 供 serve 启动时调用：await initMcpTools(agentTools)。
  */
 export async function initMcpTools(into: CustomTool[]): Promise<void> {
+    // ★ P1-MCP dispatcher 档（卡 3 后唯一档）：只注入 2 个恒定 schema（mcp_list_tools + mcp_call），
+    //   目录/调用全按需——工具表不随 MCP server 工具数增长（L1 恒定，保 DeepSeek 前缀缓存），
+    //   中途新增/重连 server 无需变更工具表。
+    //   （schemas 档——每个 MCP 工具独立 schema 常驻——已随同名 env 回退开关一并删除；
+    //   loadMcpTools() 保留：dispatcher 目录建表与计数要用。）
     const mcpTools = await loadMcpTools();
-    // ★ P1-MCP dispatcher 档（默认）：只注入 2 个恒定 schema（mcp_list_tools + mcp_call），目录/调用全按需——
-    //   工具表不随 MCP server 工具数增长（L1 恒定，保 DeepSeek 前缀缓存），中途新增/重连 server 无需变更工具表。
-    //   schemas 档（DEEP_SEEK_MCP_EXPOSE_MODE=schemas）回退旧路径：每个 MCP 工具独立 schema 常驻。
-    if (appConfig.mcpExposeMode === 'dispatcher') {
-        if (clients.length > 0) {
-            into.push(...mcpDispatcherTools);
-            console.log(`🔌 [MCP] dispatcher 模式：注入 mcp_list_tools + mcp_call（覆盖 ${clients.length} 个 server / ${mcpTools.length} 个工具）`);
-        }
-    } else if (mcpTools.length > 0) {
-        into.push(...mcpTools);
-        console.log(`🔌 [MCP] 共注入 ${mcpTools.length} 个 MCP 工具 schema（schemas 模式）`);
+    if (clients.length > 0) {
+        into.push(...mcpDispatcherTools);
+        console.log(`🔌 [MCP] dispatcher 模式：注入 mcp_list_tools + mcp_call（覆盖 ${clients.length} 个 server / ${mcpTools.length} 个工具）`);
     }
     // ★ resources/prompts 聚合工具：仅当某 server 声明对应能力时注入（无则不占工具位，保持零污染）。
     //   镜像 initSkills「有才注入」；clients 已在 loadMcpTools 内填充、能力已在各 start() 捕获。

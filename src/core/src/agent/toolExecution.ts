@@ -209,7 +209,7 @@ const emitValidationFailed = (ctx: ToolCallContext, toolCall: any, state: ToolCa
  *  （recall/load_skill/memory_read/memory_list/read_xlsx/read_docx/read_pdf/get_background_output/
  *  find_references/inspect_dependencies/undo_list/worktree_status/todo_write/ask_question/spawn_agent/
  *  run_workflow/stop_background_task/wait_http_ready）也拒在计划期外，与「计划期只读调研」语义相悖；
- *  新默认与 schema 档（planMode.filterToolsForPlanMode）一致。显式排除面（planAllowed:false 四个）：
+ *  新判定即计划期唯一放行口径。显式排除面（planAllowed:false 四个）：
  *  spawn_agent / run_workflow（花钱、子代理可能写）、stop_background_task（副作用）、wait_http_ready（联网）。
  */
 const planToolAllowed = (matchedTool: any | undefined): boolean => {
@@ -251,15 +251,15 @@ const resolveEarlyOutcome = (ctx: ToolCallContext, toolCall: any, state: ToolCal
         const placeholder = "（已中止，未执行）";
         return { toolCallId: toolCall.id, calledName, calledArgs, resultForModel: placeholder, resultForUser: placeholder, ok: false, aborted: true };
     }
-    // ★ P0-A 计划模式执行层门禁（runtime 档，默认）：工具表全会话恒定（systemInjections 两态统一
+    // ★ P0-A 计划模式执行层门禁：工具表全会话恒定（systemInjections 统一
     //   appendPlanControlTools），计划期改由此处拒绝未声明 planAllowed 的工具——不发审批、不加锁、
     //   不进 hook 流水线，直接以结果文案引导模型转只读/提交方案（计划先于执行的语义不变）。
     //   ★ #8a：原 PLAN_ALLOWED_TOOLS 工具名名单退役，白名单改读工具声明——★ 评审修复 A5（2026-11-23，
     //   V9）新默认：planAllowed===true，或「safetyLevel===SAFE 且未显式 planAllowed:false」（见
     //   planToolAllowed 注释）；matchedTool 匹配相应前移至本门禁之前。计划控制终结类（含声明式
-    //   plan_enter/plan_exit）已在上方拦截返回，此处保留显式豁免（双保险）。schema 档
-    //   （DEEP_SEEK_PLAN_ENFORCEMENT=schema）回退裁表路径时本 gate 不生效。
-    if (!parseFailed && planMode && appConfig.planEnforcement === 'runtime'
+    //   plan_enter/plan_exit）已在上方拦截返回，此处保留显式豁免（双保险）。
+    //   （★ 卡 3，2026-11-24：schema 档回退路径已删，本 gate 为唯一计划期判定。）
+    if (!parseFailed && planMode
         && calledName !== 'enter_plan_mode' && calledName !== 'exit_plan_mode'
         && declaredTerminal !== 'plan_enter' && declaredTerminal !== 'plan_exit'
         && !planToolAllowed(matchedTool)) {
