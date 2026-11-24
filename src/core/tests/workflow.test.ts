@@ -176,7 +176,7 @@ describe("workflow/formatWorkflowResult（聚合格式化）", () => {
         ]);
         assert.match(out, /worktree 隔离/);
         assert.match(out, /diff content A/);
-        assert.match(out, /📦 worktree 改动 diff（A）/);
-        assert.doesNotMatch(out, /📦 worktree 改动 diff（B）/, "无改动的 diff 段不应展示");
+        assert.match(out, /📦 worktree 改动 diff 摘要（A）/);
+        assert.doesNotMatch(out, /📦 worktree 改动 diff 摘要（B）/, "无改动的 diff 段不应展示");
     });
 });

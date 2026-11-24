@@ -26,7 +26,7 @@ import { createSemaphore } from "@/common/index.ts";
 import { truncateToolResult } from "@/agent/truncate.ts";
 import { appConfig } from "@/config/index.ts";
 import { runWithWorkspaceRoot } from "../guard.ts";
-import { createWorktree, harvestDiff, removeWorktree, type WorktreeHandle } from "../worktree/manager.ts";
+import { createWorktree, harvestDiff, removeWorktree, exportPatchArtifact, commitWorktreeChanges, type WorktreeHandle } from "../worktree/manager.ts";
 import type { RequestApprovalFn } from "@/host/type.ts";
 import { notifySubagentDone } from "@/agent/agentWake.ts";
 // 纯逻辑层（校验 / 标签 / 流水线拼接 / 聚合）独立成模块：零 agent 依赖，不进 tool/index 循环，可被单测直接 import。
@@ -35,12 +35,13 @@ import {
     stepLabel,
     buildPipelineTask,
     formatWorkflowResult,
+    formatArtifactManifest,
     type WorkflowStep,
     type StepOutcome,
 } from "./workflowHelpers.ts";
 
 // 透传纯逻辑层的导出，便于上层 / 单测从 workflow.ts 统一入口取用。
-export { validateWorkflowArgs, stepLabel, buildPipelineTask, formatWorkflowResult };
+export { validateWorkflowArgs, stepLabel, buildPipelineTask, formatWorkflowResult, formatArtifactManifest };
 export type { WorkflowStep, StepOutcome };
 
 /**
@@ -55,7 +56,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
             description: [
                 "异步多子 agent 编排：把可分解的大任务派给多个独立子 agent，调用立即返回（不等待完成），全部步骤结束后一条终态汇总自动注入本会话并唤醒你继续推进（中间态不回流，防事件洪峰）。parallel（默认）=各步骤并发执行、结果按序聚合，适合互相独立的只读/分析任务；pipeline=步骤串行，前阶段产出自动作为后阶段输入，适合分阶段加工（抽取→归类→汇总）。",
                 "派出后你可立即继续派活 / 处理其他事务 / 回复用户；当前无其他事务时可简短告知已编排并结束本轮——汇总送达时你会被自动唤醒。",
-                "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；isolation=\"worktree\"（每步独立 git worktree）同样只适合只读/分析——隔离步骤里的改动不会合回主工作区、也不会保留，结束后只回传 diff 首尾各 60 行的摘要。",
+                "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；isolation=\"worktree\"（每步独立 git worktree）适合并行写/迁移：步骤结束后改动自动保全为补丁文件（落在数据目录，含新文件与二进制改动）并保留 git 分支（dsc-keep-* 前缀，7 天后启动期回收），终态汇总外的【产物清单】逐行列出每步的补丁路径与分支名（该清单不受汇总截断）。diff 正文仍只回传首尾各 60 行摘要。应用补丁：对主工作区 git apply --3way <补丁路径>——基座漂移遇冲突时退出码 1、工作区留冲突标记，需人工处理；应用前相应文件不应有未提交改动。",
                 "与 spawn_agent 的分工：单任务串行委派用 spawn_agent；任务可分解、多分支或流水线式时用本工具。",
             ].join("\n"),
             parameters: {
@@ -88,7 +89,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     isolation: {
                         type: "string",
                         enum: ["none", "worktree"],
-                        description: "none=共享工作区（默认，只读/分析）；worktree=每步独立 git worktree，改动不合回主工作区也不保留，仅回传 diff 首尾摘要（同样只适合只读/分析）。仅 parallel 支持。",
+                        description: "none=共享工作区（默认，只读/分析）；worktree=每步独立 git worktree（并行写/迁移）——步骤改动以补丁文件+保留分支（dsc-keep-*，7 天回收）保全，路径见终态消息的产物清单。仅 parallel 支持。",
                     },
                 },
                 required: ["steps"],
@@ -173,8 +174,11 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                 };
                 /**
                  * worktree 隔离版 runStep：创建独立 worktree → runWithWorkspaceRoot 包住子 agent
-                 * （cwd 也设到 worktree，hooks/isProtectedWrite 一致）→ 收割 diff → finally 回收。
+                 * （cwd 也设到 worktree，hooks/isProtectedWrite 一致）→ 收割 diff → 产物保全（卡 2：
+                 * 补丁落盘 + 快照提交 + 分支保留改名）→ 回收。
                  * worktree 创建失败则该步标失败（不击垮整条工作流）。
+                 * 产物保全三连各自降级：补丁失败只剩分支保底、提交失败改动仍在补丁里、两者都失败至少
+                 * 保留分支名（其 tip 可能仍是基座——此时改动确实无处可寻，只留告警）。
                  */
                 const runStepIsolated = async (step: WorkflowStep, index: number): Promise<StepOutcome> => {
                     let wt: WorktreeHandle;
@@ -187,14 +191,37 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                         ctx.emitProgress?.(`并行编排：${done}/${total} worktree 创建失败（${stepLabel(step, index)}）`);
                         return { ok: false, output: msg, label: stepLabel(step, index) };
                     }
+                    let cleanedUp = false;
+                    let keepBranch = false; // 中途异常走 finally 时也按「有改动则保留」兜底（产物保全优先）
                     try {
                         // ★ cwd + ALS 双设：ctx.cwd 供 hooks/isProtectedWrite，ALS 供 resolveSafePath/ignore
                         const subCtx: ToolContext = { ...ctx, cwd: wt.path, requestApproval: serializedApproval ?? ctx.requestApproval };
                         const outcome = await runWithWorkspaceRoot(wt.path, () => runStep(step, index, subCtx));
                         outcome.diff = await harvestDiff(wt);
+                        const hasChanges = !outcome.diff.includes("无改动");
+                        keepBranch = hasChanges;
+                        if (hasChanges) {
+                            // ★ 卡 2 产物保全：补丁（绝对路径，含新文件/二进制）→ 快照提交（分支保底）→ 保留分支改名
+                            let patchPath: string | undefined;
+                            try {
+                                patchPath = await exportPatchArtifact(wt, ctx.sessionId, String(index));
+                            } catch (e: any) {
+                                console.warn(`⚠️ [worktree] 步骤补丁导出失败（${stepLabel(step, index)}，产物只剩分支保底）: ${e?.message ?? e}`);
+                            }
+                            await commitWorktreeChanges(wt, `workflow 步骤产物快照（${stepLabel(step, index)}）`);
+                            const keep = await removeWorktree(wt, { keepBranch: true });
+                            cleanedUp = true;
+                            if (patchPath && keep) outcome.artifact = { patchPath, branch: keep };
+                            else if (keep) outcome.output += `\n（⚠️ 补丁导出失败，该步改动只经保留分支 ${keep} 保全，可 checkout 取回）`;
+                        } else {
+                            await removeWorktree(wt);
+                            cleanedUp = true;
+                        }
                         return outcome;
                     } finally {
-                        await removeWorktree(wt).catch((e: any) => console.warn(`⚠️ [worktree] 清理失败: ${e?.message ?? e}`));
+                        if (!cleanedUp) {
+                            await removeWorktree(wt, { keepBranch }).catch((e: any) => console.warn(`⚠️ [worktree] 清理失败: ${e?.message ?? e}`));
+                        }
                     }
                 };
 
@@ -260,12 +287,15 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     status === "final" ? "final（全部步骤正常完成）"
                         : status === "aborted" ? "aborted（全部步骤被中止）"
                             : "error（部分步骤失败/中止）";
+                // ★ 卡 2：产物清单拼在汇总之后——汇总受 18000 截断，清单必须单列在外，每条补丁路径/分支名完整可读
+                const artifactManifest = formatArtifactManifest(outcomes);
                 await notifySubagentDone(ctx.sessionId, [
                     `🤖 [工作流完成]（mode=${mode}，共 ${steps.length} 步）`,
                     `状态：${statusLabel}`,
                     `汇总：`,
                     // 截断口径与原同步返回一致（maxOutputCharacters 18000）
                     truncateToolResult(formatWorkflowResult(mode, outcomes), 18000),
+                    ...(artifactManifest ? ["", artifactManifest] : []),
                 ].join("\n"));
             },
         },

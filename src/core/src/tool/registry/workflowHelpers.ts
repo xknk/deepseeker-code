@@ -20,13 +20,23 @@ export type WorkflowStep = {
     key?: string;
 };
 
+/** 单步产物（worktree 隔离模式，卡 2）：补丁绝对路径 + 保留分支名。 */
+export type StepArtifact = {
+    /** 补丁文件绝对路径（dataDir/worktree-artifacts/<项目桶>/<会话>/ 下，含新文件与二进制改动）。 */
+    patchPath: string;
+    /** 保留分支名（dsc-keep-* 前缀，7 天后启动期回收）。 */
+    branch: string;
+};
+
 /** 内部归一化后的单步结果（已截断 + 带标签，供聚合格式化）。 */
 export type StepOutcome = {
     ok: boolean;
     output: string;
     label: string;
-    /** worktree 隔离模式下，该子 agent 在其独立 worktree 的改动 diff（供父 agent/用户 apply patch）。 */
+    /** worktree 隔离模式下，该子 agent 在其独立 worktree 的改动 diff 首尾摘要（供父 agent/用户速览）。 */
     diff?: string;
+    /** 卡 2：worktree 隔离模式下保全下来的产物（改动非空时才有）。 */
+    artifact?: StepArtifact;
 };
 
 /** 参数校验：非法返回结构化失败（#8b：经 run_workflow execute 直返执行层），合法返回 null（纯函数，可单测）。 */
@@ -72,9 +82,9 @@ export const formatWorkflowResult = (mode: "parallel" | "pipeline", results: Ste
     const hasAnyDiff = results.some(r => r.diff && r.diff.trim() && !r.diff.includes("无改动"));
     const renderStep = (r: StepOutcome, i: number, prefix: string): string => {
         const head = `${prefix} ${r.label}${r.ok ? "" : " ❌"}\n${r.output}`;
-        // worktree 模式：附该子 agent 的独立改动 diff（无改动则略）
+        // worktree 模式：附该子 agent 的独立改动 diff 首尾摘要（无改动则略；完整产物见产物清单）
         if (r.diff && r.diff.trim() && !r.diff.includes("无改动")) {
-            return `${head}\n\n📦 worktree 改动 diff（${r.label}）：\n----- diff -----\n${r.diff}\n----- end diff -----`;
+            return `${head}\n\n📦 worktree 改动 diff 摘要（${r.label}）：\n----- diff -----\n${r.diff}\n----- end diff -----`;
         }
         return head;
     };
@@ -89,4 +99,21 @@ export const formatWorkflowResult = (mode: "parallel" | "pipeline", results: Ste
     const summary = failed === 0 ? "全部成功" : `${failed} 个失败`;
     const iso = hasAnyDiff ? "·worktree 隔离" : "";
     return [`## 🌐 工作流·并行结果（${results.length} 个子 agent，${summary}${iso}）`, ...parts].join("\n\n");
+};
+
+/**
+ * 产物清单（卡 2，纯函数，可单测）：每步一行「标签 → 补丁路径、分支名」。
+ * 拼进终态消息时置于会被 18000 字符截断的汇总【之外】——单列清单不受截断，保证每条路径完整可读。
+ */
+export const formatArtifactManifest = (results: StepOutcome[]): string => {
+    const lines = results
+        .map((r, i) => r.artifact ? `[${i + 1}] ${r.label} → 补丁: ${r.artifact.patchPath}｜分支: ${r.artifact.branch}` : null)
+        .filter((l): l is string => l !== null);
+    if (lines.length === 0) return "";
+    return [
+        "📦 产物清单（本清单不受汇总截断，逐条完整可读）：",
+        ...lines,
+        "应用补丁：git apply --3way <补丁路径>——基座漂移遇冲突时退出码 1、工作区留冲突标记，需人工处理；应用前相应文件不应有未提交改动。",
+        "保留分支 7 天后启动期回收，期间可 checkout 对照。",
+    ].join("\n");
 };

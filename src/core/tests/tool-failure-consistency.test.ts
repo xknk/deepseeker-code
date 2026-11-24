@@ -68,8 +68,9 @@ const ALLOWLIST = new Set([
     "web.ts:725",
     // 工作流聚合报告内的步骤级中止标注（该步未执行，非工具调用失败）
     //（192/209 → 206/223：2026-11 子代理异步化重写编排段（isSync:false + 完成回调）把两处中止分支顶下移；
-    //  206/223 → 209/226：评审修复 A5 给 run_workflow 加 planAllowed:false 声明 + 注释（+3 行）——2026-11-23）
-    "workflow.ts:209", "workflow.ts:226",
+    //  206/223 → 209/226：评审修复 A5 给 run_workflow 加 planAllowed:false 声明 + 注释（+3 行）——2026-11-23；
+    //  209/226 → 236/253：评审修复卡 2 runStepIsolated 产物保全块（补丁/提交/保留分支，+27 行）——2026-11-24）
+    "workflow.ts:236", "workflow.ts:253",
 ]);
 
 /** 取表达式的静态文本前缀（模板取 head；toolFailure/asToolFailure 及其 .content 取值视作已带 ❌ 前缀；动态返回 null） */

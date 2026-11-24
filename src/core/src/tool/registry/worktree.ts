@@ -54,7 +54,7 @@ export const worktreeTools: CustomTool[] = [
                     `✅ 已进入 worktree。`,
                     `路径：${wt.path}`,
                     `分支：${wt.branch}（基座 HEAD ${wt.baseSha.slice(0, 8)}）`,
-                    `本会话后续的文件操作 / run_command 已自动落到此 worktree。完成后用 exit_worktree 退出（或先 commit 再退出以保留改动）。`,
+                    `本会话后续的文件操作 / run_command 已自动落到此 worktree。若改动需要保留：先把分支合并回主仓（或打补丁带走），再 exit_worktree 退出——直接退出会连同分支一起删除，未合并的提交会变成不可达对象。`,
                 ].join("\n");
             },
         },
@@ -63,17 +63,17 @@ export const worktreeTools: CustomTool[] = [
         type: "function",
         function: {
             name: "exit_worktree",
-            description: "退出当前会话的 worktree 并删除它（临时分支一并删除）。退出后会话工作区回到主仓。⚠️ 未提交的改动会随删除丢失——如需保留，先在 worktree 内 commit（或用 get_git_diff 查看改动）再退出。",
+            description: "退出当前会话的 worktree 并删除它（临时分支一并删除）。退出后会话工作区回到主仓。⚠️ 未提交的改动会随删除丢失；已提交但未合并回主仓的改动也会变成不可达对象——如需保留，先合并回主仓再退出。",
             parameters: {
                 type: "object",
                 properties: {
-                    keep_changes: { type: "boolean", description: "已无用：本工具总是删除 worktree。如需保留改动，请先 commit。" },
+                    keep_changes: { type: "boolean", description: "已无用：本工具总是删除 worktree。如需保留改动，请先合并回主仓。" },
                 },
             },
             safetyLevel: ToolSafetyLevel.DANGER,
             isSync: true,
             requireApproval: (args: any) =>
-                `⚠️【退出 worktree 审批】\n（将删除当前 worktree 及其临时分支；未提交改动会丢失。如需保留请先 commit。）`,
+                `⚠️【退出 worktree 审批】\n（将删除当前 worktree 及其临时分支；未提交改动会丢失，未合并的提交会变成不可达对象。如需保留请先合并回主仓。）`,
             async execute(_args: any, ctx?: ToolContext) {
                 const sessionId = ctx?.sessionId;
                 if (!sessionId) return toolFailure("[exit_worktree] 缺少会话上下文（sessionId）。");

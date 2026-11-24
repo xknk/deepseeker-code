@@ -222,13 +222,123 @@ export const commitWorktreeChanges = async (wt: WorktreeHandle, message: string,
 };
 
 /**
+ * 产物补丁导出（卡 2）：把 worktree 相对 baseSha 的全部改动写成 git patch 文件。
+ * 两个硬前提（实测见评审文档 §11.3）：
+ *  - 必须先 add -A：--cached 只看 index，不做则未暂存/未跟踪文件进不了补丁；
+ *  - --output 路径必须是绝对路径：相对路径相对 git 进程 cwd（即 worktree 本身），
+ *    补丁会落进 worktree、随 removeWorktree 被删且不报错。
+ */
+export const exportPatch = async (wt: WorktreeHandle, patchAbsPath: string): Promise<void> => {
+    await runInWorktree(wt.path, ["add", "-A"]);
+    await runInWorktree(wt.path, ["diff", "--cached", "--binary", "--no-color", `--output=${patchAbsPath}`, wt.baseSha]);
+};
+
+/** 产物补丁目录（按项目桶分目录）：<dataDir>/worktree-artifacts/<userWorkspaceDir>/<sessionId>/。 */
+const patchDirFor = (sessionId: string): string =>
+    path.join(appConfig.dataDir, "worktree-artifacts", appConfig.userWorkspaceDir, sessionId);
+
+/** 补丁桶总量闸（字节，单项目桶）：参照 session/sidecar 同款闸——只防无界增长，不做精确配额。 */
+const PATCH_BUCKET_CAP_BYTES = 128 * 1024 * 1024;
+
+const prunePatchBucket = async (dir: string, incomingBytes: number, capBytes = PATCH_BUCKET_CAP_BYTES): Promise<void> => {
+    let names: string[];
+    try { names = await fs.promises.readdir(dir); } catch { return; }
+    const files: Array<{ name: string; size: number; mtimeMs: number }> = [];
+    let total = 0;
+    for (const name of names) {
+        try {
+            const st = await fs.promises.stat(path.join(dir, name));
+            if (st.isFile()) { files.push({ name, size: st.size, mtimeMs: st.mtimeMs }); total += st.size; }
+        } catch { /* 并发删除窗口，跳过 */ }
+    }
+    if (total + incomingBytes <= capBytes) return;
+    const byOldest = [...files].sort((a, b) => a.mtimeMs - b.mtimeMs);
+    let freed = 0;
+    for (const f of byOldest) {
+        if (total - freed + incomingBytes <= capBytes) break;
+        try { await fs.promises.unlink(path.join(dir, f.name)); freed += f.size; } catch { /* 已被并发删除 */ }
+    }
+    if (freed > 0) console.log(`♻️ [worktree] 补丁桶超限，淘汰最旧产物 ${(freed / 1024 / 1024).toFixed(1)}MB`);
+};
+
+/**
+ * 产物补丁落盘单点（路径拼装 + 总量闸 + 导出）：返回补丁绝对路径。
+ * 文件名 dsc-wt-<yyyyMMdd-HHmmss>-<stepId>.patch（时间戳防同会话重跑覆盖）。
+ */
+export const exportPatchArtifact = async (wt: WorktreeHandle, sessionId: string, stepId: string): Promise<string> => {
+    const dir = patchDirFor(sessionId);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const patchPath = path.join(dir, `dsc-wt-${keepBranchStamp()}-${stepId}.patch`);
+    await exportPatch(wt, patchPath);
+    try {
+        const st = await fs.promises.stat(patchPath);
+        await prunePatchBucket(dir, st.size);
+    } catch { /* stat 失败不阻断（闸是增益不是闸门） */ }
+    return patchPath;
+};
+
+/**
+ * 过期保留分支回收（卡 2 第 4 点）：只认 dsc-keep- 前缀，按提交时间留 7 天。
+ * 与 dsc-wt-* 命名空间互不干涉（批量线的分支不受影响）。@param repoRoot 缺省主仓（测试注临时仓）。
+ */
+const KEEP_BRANCH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const sweepExpiredKeepBranches = async (repoRoot?: string): Promise<string[]> => {
+    const runGit = (args: string[]): ReturnType<typeof runMainGit> =>
+        gitWithLongpaths(args, { cwd: repoRoot ?? WORKSPACE_ROOT, maxBuffer: 1024 * 1024 * 5 });
+    try {
+        const { stdout } = await runGit(["for-each-ref", `refs/heads/${KEEP_BRANCH_PREFIX}*`, "--format=%(refname:short) %(committerdate:unix)"]);
+        const now = Date.now();
+        const expired = stdout.trim().split("\n").filter(Boolean).map((line) => {
+            const [name, ts] = line.split(" ");
+            return { name, ageMs: now - Number(ts) * 1000 };
+        }).filter((e) => Number.isFinite(e.ageMs) && e.ageMs > KEEP_BRANCH_RETENTION_MS);
+        for (const e of expired) {
+            try { await runGit(["branch", "-D", e.name]); } catch (err: any) { console.warn(`⚠️ [worktree] 保留分支回收失败 ${e.name}: ${err?.message ?? err}`); }
+        }
+        if (expired.length > 0) {
+            console.log(`♻️ [worktree] 回收过期保留分支 ${expired.length} 条（>${KEEP_BRANCH_RETENTION_MS / 86400000} 天）：${expired.map((e) => e.name).join("、")}`);
+        }
+        return expired.map((e) => e.name);
+    } catch {
+        return []; // 非 git 仓库（主工作区未初始化等）：静默跳过
+    }
+};
+
+/**
+ * 保留分支命名（卡 2）：dsc-keep-<yyyyMMdd-HHmmss>-<原分支去掉 dsc-wt- 前缀>。
+ * 独立前缀是撞名自愈的安全前提——createWorktree 的同名自愈只碰 dsc-wt-*（它注释的前提
+ * 「同名分支只可能是上一次尝试的尸体」对 dsc-keep-* 不成立），保留产物不会被自愈误删。
+ */
+const KEEP_BRANCH_PREFIX = "dsc-keep-";
+const keepBranchStamp = (d = new Date()): string => {
+    const p = (n: number): string => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+};
+const keepBranchNameFor = (branch: string): string =>
+    `${KEEP_BRANCH_PREFIX}${keepBranchStamp()}-${branch.replace(/^dsc-wt-/, "")}`;
+
+/**
  * 移除 worktree：先杀其下常驻后台进程，再 git worktree remove + prune + 删临时分支。
  * 全程 best-effort（每步 catch），不抛错——清理失败不能击垮主流程，残留由下次启动期 sweep 兜底。
+ *
+ * ★ 卡 2（评审修复 2026-11-24）keepBranch 选项：保留分支并在保留时改名到 dsc-keep-* 前缀——
+ *   不保留的话 branch -D 会把上一步的产物提交立刻变成不可达对象。改名必须发生在 worktree 移除
+ *   之后（分支被 worktree 检出时 git 拒绝改名）。
+ *
+ * @param opts.keepBranch  true=不删分支、改名保留（返回保留后的分支名；改名失败降级为保留原名的决定留痕——
+ *                 产物保全优先于命名整洁，7 天回收机制会兜底）
+ * @param opts.repoRoot  worktree 所属仓库根（branch/prune 操作的锚点；缺省主仓。测试注临时仓用）
+ * @returns keepBranch 时返回保留后的分支名（含改名失败时保留的原名）；删除路径返回 undefined
  */
-export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
+export const removeWorktree = async (
+    wt: WorktreeHandle,
+    opts?: { keepBranch?: boolean; repoRoot?: string },
+): Promise<string | undefined> => {
+    const runGit = (args: string[]): ReturnType<typeof runMainGit> =>
+        gitWithLongpaths(args, { cwd: opts?.repoRoot ?? WORKSPACE_ROOT, maxBuffer: 1024 * 1024 * 5 });
     try { await killBackgroundTasksUnder(wt.path); } catch (e: any) { console.warn(`⚠️ [worktree] kill 后台任务失败: ${e?.message || e}`); }
     try {
-        await runMainGit(["worktree", "remove", "--force", wt.path]);
+        await runGit(["worktree", "remove", "--force", wt.path]);
     } catch (e: any) {
         // remove 失败（目录已被外部动过等）：直接 fs.rm 兜底 + prune。
         // 兜底本身也会撞瞬时锁（Defender 对刚关闭的文件树短暂持锁）→ withLockRetry 自愈；
@@ -236,9 +346,22 @@ export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
         await withLockRetry(() => fs.promises.rm(wt.path, { recursive: true, force: true }))
             .catch((e2: any) => console.warn(`⚠️ [worktree] 兜底删除目录失败（残留待启动期清扫）: ${e2?.message ?? e2}`));
     }
-    try { await runMainGit(["worktree", "prune"]); } catch { /* ignore */ }
-    try { await runMainGit(["branch", "-D", wt.branch]); } catch { /* 分支可能已被删或被占用，忽略 */ }
+    try { await runGit(["worktree", "prune"]); } catch { /* ignore */ }
+    if (opts?.keepBranch) {
+        const keep = keepBranchNameFor(wt.branch);
+        try {
+            // 此刻分支已不被任何 worktree 检出（上方 remove 完成），改名放行
+            await runGit(["branch", "-m", wt.branch, keep]);
+            console.log(`🌿 [worktree] 保留分支 ${wt.branch} → ${keep}（7 天后启动期回收）`);
+            return keep;
+        } catch (e: any) {
+            console.warn(`⚠️ [worktree] 保留分支改名失败（保留原名 ${wt.branch}，不删产物）: ${e?.message ?? e}`);
+            return wt.branch;
+        }
+    }
+    try { await runGit(["branch", "-D", wt.branch]); } catch { /* 分支可能已被删或被占用，忽略 */ }
     console.log(`🧹 [worktree] 移除 ${wt.branch} (${wt.path})`);
+    return undefined;
 };
 
 /**
@@ -252,6 +375,9 @@ export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
  */
 const SWEEP_MIN_AGE_MS = 60 * 60 * 1000;
 export const sweepOrphanedWorktrees = async (rootOverride?: string): Promise<void> => {
+    // 过期保留分支回收并入启动期清扫（卡 2 第 4 点）。仅生产路径执行——测试以 rootOverride 注入
+    // 临时根时跳过（branch 回收锚定真实主仓，测试不得触碰）。
+    if (!rootOverride) await sweepExpiredKeepBranches();
     const root = rootOverride ?? worktreeRootDir();
     let entries: string[];
     try { entries = await fs.promises.readdir(root); } catch { return; /* 目录不存在，无事可扫 */ }
