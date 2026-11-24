@@ -9,7 +9,7 @@
  */
 import { exec } from "node:child_process";
 import { appendMessage } from "@/session/transcript.ts";
-import { scrubCommandEnv } from "@/tool/guard.ts";
+import { scrubCommandEnvEx, envDropHint } from "@/tool/guard.ts";
 import { sliceHeadNoSplit, sliceTailNoSplit } from "@/session/content.ts";   // 截断防劈代理对（2026-11-13 事故同款）
 
 /** 回显/落盘共用的输出截断上限（超出省略中段；防超大日志灌爆上下文与终端）。 */
@@ -27,6 +27,9 @@ export interface BashDirectResult {
     exitCode: number | null;
     timedOut: boolean;
     durationMs: number;
+    /** 卡 4：被新两层规则（词元口令名/连接串值）剔除的凭证变量名（只露名不露值；空数组=无）。
+     *  既有名模式/denylist 的剔除不在此列（静默剔除，不刷屏）。 */
+    droppedEnv?: string[];
 }
 
 /** 输出截断：保头保尾，中段以省略标注替代（头尾通常各含命令回显与最终结果/报错）。
@@ -59,8 +62,10 @@ export const runBashDirect = (cmd: string, cwd: string, signal?: AbortSignal): P
         let settled = false;
         const finish = (r: BashDirectResult): void => { if (!settled) { settled = true; resolve(r); } };
         const start = Date.now();
+        // ★ 卡 4：三层凭证剔除（与 run_command 同源）——剔了谁随结果带回，formatBashEntry 出提示行
+        const scrubbed = scrubCommandEnvEx();
         // encoding:"buffer"：拿原始字节自行解码（默认 utf-8 字符串解码会丢 GBK，见 decodeBuffer）
-        const child = exec(cmd, { cwd, timeout: timeoutMs(), maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: scrubCommandEnv(), encoding: "buffer" }, (err, stdout, stderr) => {
+        const child = exec(cmd, { cwd, timeout: timeoutMs(), maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: scrubbed.env, encoding: "buffer" }, (err, stdout, stderr) => {
             const durationMs = Date.now() - start;
             const out = stdout as unknown as Buffer;
             const errBuf = stderr as unknown as Buffer;
@@ -68,7 +73,7 @@ export const runBashDirect = (cmd: string, cwd: string, signal?: AbortSignal): P
             const timedOut = err != null && err.killed === true && signal?.aborted !== true;
             const combined = errBuf.length ? (out.length ? `${decodeBuffer(out)}\n` : "") + decodeBuffer(errBuf) : decodeBuffer(out);
             const exitCode = err == null ? 0 : typeof err.code === "number" ? err.code : null;
-            finish({ ok: err == null, output: truncateOutput(combined ?? ""), exitCode, timedOut, durationMs });
+            finish({ ok: err == null, output: truncateOutput(combined ?? ""), exitCode, timedOut, durationMs, droppedEnv: scrubbed.dropped });
         });
         if (signal) {
             const onAbort = (): void => { try { child.kill(); } catch { /* 已退出 */ } };
@@ -77,12 +82,14 @@ export const runBashDirect = (cmd: string, cwd: string, signal?: AbortSignal): P
         }
     });
 
-/** 组装落盘/回显文本：`!bash $` 前缀保留（模型可识别该输出源于用户直跑的命令，非其自身动作）。 */
+/** 组装落盘/回显文本：`!bash $` 前缀保留（模型可识别该输出源于用户直跑的命令，非其自身动作）。
+ *  卡 4：有凭证变量被新两层规则剔除时追加提示行（只露名不露值；经 transcript 回灌模型 = 模型也可见）。 */
 export const formatBashEntry = (cmd: string, r: BashDirectResult): string =>
     `!bash $ ${cmd}\n` +
     (r.timedOut ? `[超时中止（>${Math.round(r.durationMs / 1000)}s）]\n` : "") +
     (r.exitCode != null && r.exitCode !== 0 ? `[退出码 ${r.exitCode}]\n` : "") +
-    (r.output.trim() || "(无输出)");
+    (r.output.trim() || "(无输出)") +
+    (r.droppedEnv?.length ? `\n${envDropHint(r.droppedEnv)}` : "");
 
 /** 以 user 消息落 transcript：下轮对话模型自动看到（零 contextCore 改动）。 */
 export const recordBashEntry = async (sessionId: string, text: string): Promise<void> => {

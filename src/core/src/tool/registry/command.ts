@@ -6,7 +6,8 @@
  */
 import { spawn } from "child_process";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolExecutionResultStatus, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnvEx, envDropHint } from "../guard.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 import { adoptRunningProcess, killTree, resolveWinShell, makeTaskExitNotifier, StreamCodec } from "./background.ts";
 import { appConfig } from "@/config/index.ts";
 
@@ -65,6 +66,9 @@ export const commandTools: CustomTool[] = [
             requireApproval: (args: { command: string; cwd?: string }) =>
                 `⚠️【命令执行审批】\n目录: ${args.cwd || "（工作区根）"}\n命令: ${args.command}`,
             maxOutputCharacters: RUN_COMMAND_MAX_CHARS, // 💡 我们将在 execute 内部真正落地这个长度限制
+            // ★ 卡 4（评审修复 2026-11-24）：命令输出常带凭证（git remote -v / 连接串 / echo 误用）——
+            //   与读类工具同一脱敏管线：finalizeOutcome 先脱敏后截断，模型视图/用户视图/transcript 三处同时打码。
+            privacyMaskingRules: maskSecretsInContent,
             verifyResult: (rawOutput: string) => {
                 // ★ 防伪造：取最后一个哨兵匹配（真正的退出码由 execute 在末尾追加）。
                 //   旧的 [exit: N] 嗅探会被 stdout 里的字面量骗过，已废弃。
@@ -131,11 +135,16 @@ export const commandTools: CustomTool[] = [
                 }
                 let proc: any;
                 try {
+                    // ★ 卡 4（评审修复 2026-11-24）：三层凭证剔除 + 提示行——剔除结果以输出首行告知模型/用户
+                    //   （只露变量名不露值；确需传入走 DEEPSEEKER_COMMAND_ENV_PASSTHRU 全局名单）。
+                    const scrubbed = scrubCommandEnvEx();
+                    const envHint = envDropHint(scrubbed.dropped);
+                    if (envHint) yield `${envHint}\n`;
                     proc = spawn(args.command, {
                         shell: isWin ? (resolveWinShell() ?? true) : true, // ★ Win 优先 Git Bash（POSIX）：cmd.exe 缺 head/tail 等，管道缺失命令会退 255
                         cwd,
                         detached: !isWin, // 非 Win 下支持整个进程组独立
-                        env: scrubCommandEnv(), // ★ 剔除 agent 自身凭证（LLM key / 服务端 token / 搜索 key），防 LLM 经 env/printenv 读取外泄
+                        env: scrubbed.env, // ★ 剔除 agent 自身凭证（LLM key / 服务端 token / 搜索 key），防 LLM 经 env/printenv 读取外泄
                         // ★ 中止唯一出口 = 下方 onAbort→killTree（2026-10-27 修「■ 终止无效」）：
                         //   勿把 signal 交给 spawn——Node 内部 abort 监听先于 onAbort 触发，TerminateProcess
                         //   只杀最外层进程；随后 killTree 的 taskkill /T 对已死根「找不到进程」直接失败，

@@ -7,7 +7,8 @@
  */
 import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveReadablePath } from "../guard.ts";
-import { assertReadable, maskSecretsInContent } from "./fs.ts";
+import { assertReadable } from "./fs.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 
 // exceljs 体积可观且仅本工具用到——惰性动态加载，不影响其它工具与所有进程的启动开销。
 const getExcelJs = async (): Promise<any> => {

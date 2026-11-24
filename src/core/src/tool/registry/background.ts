@@ -20,7 +20,8 @@ import { spawn, execFileSync } from "child_process";
 import fsSync from "fs";
 import path from "path";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
-import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnv } from "../guard.ts";
+import { getActiveWorkspaceRoot, resolveSafePath, scrubCommandEnvEx, envDropHint } from "../guard.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 import { createUUID, execFileSmart } from "@/common/index.ts";
 import { pushSessionInbox } from "../../agent/inbox.ts";
 
@@ -313,8 +314,13 @@ export const backgroundTools: CustomTool[] = [
                 };
 
                 let proc: any;
+                // ★ 卡 4（评审修复 2026-11-24）：三层凭证剔除——提示行并入首个 yield（runBackgroundTool
+                //   只取首个 yield 作工具结果，不能单独提前 yield，否则 task_id 提取被顶掉）。
+                const scrubbed = scrubCommandEnvEx();
+                const envHint = envDropHint(scrubbed.dropped);
+                const envHintHead = envHint ? `${envHint}\n` : "";
                 try {
-                    proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin, env: scrubCommandEnv() });
+                    proc = spawn(args.command, { shell: isWin ? (resolveWinShell() ?? true) : true, cwd, detached: !isWin, env: scrubbed.env });
                     proc.unref?.(); // 父进程（agent）不必等待它退出
                 } catch (e: any) {
                     // ★ #8b：首个 yield 经 runBackgroundTool normalizeYield 结构化透传（对象形态保留 status:'failed'）
@@ -340,7 +346,7 @@ export const backgroundTools: CustomTool[] = [
                 // ★ spawn error 由 attachTaskLifecycle 内监听统一处理（删除此处重复监听，防日志双写）
 
                 // ★ 首个 yield：即时返回 task_id（runBackgroundTool 取此为结果，agent 不阻塞、继续下一轮）
-                yield `✅ [后台任务已启动]\ntask_id: ${taskId}\n命令: ${args.command}\n用 get_background_output(task_id="${taskId}") 查日志，stop_background_task(task_id="${taskId}") 终止。`;
+                yield `${envHintHead}✅ [后台任务已启动]\ntask_id: ${taskId}\n命令: ${args.command}\n用 get_background_output(task_id="${taskId}") 查日志，stop_background_task(task_id="${taskId}") 终止。`;
 
                 // ★ 后台挂起：等任务生命周期结束（proc 退出 / 被 stop_background_task 杀掉 / 用户 abort）。
                 //   generator 挂起期间 = 后台任务存活；attachTaskLifecycle resolve → generator 完成 → 自动释放 exclusiveLock
@@ -364,6 +370,9 @@ export const backgroundTools: CustomTool[] = [
             },
             safetyLevel: ToolSafetyLevel.SAFE,
             isSync: true,
+            // ★ 卡 4（评审修复 2026-11-24）：后台日志与命令输出同属凭证泄漏面（连接串/remote -v 落在环形缓冲）——
+            //   与 run_command 同款脱敏管线（finalizeOutcome 先脱敏后截断，三视图同时打码）。
+            privacyMaskingRules: maskSecretsInContent,
             async execute(args: { task_id: string; tail_lines?: number; wait_seconds?: number }, ctx?: ToolContext) {
                 const task = registry.get(args.task_id);
                 if (!task || task.sessionId !== ctx?.sessionId) {

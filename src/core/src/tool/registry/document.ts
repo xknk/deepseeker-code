@@ -8,7 +8,8 @@
 import fs from "fs/promises";
 import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveReadablePath } from "../guard.ts";
-import { assertReadable, maskSecretsInContent } from "./fs.ts";
+import { assertReadable } from "./fs.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 
 /** 动态加载 mammoth（CJS interop 兼容 default / namespace 两种导出形态）。 */
 const getMammoth = async (): Promise<any> => {

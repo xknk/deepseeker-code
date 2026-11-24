@@ -313,9 +313,54 @@ export const PROTECTED_WRITE_DIRS = ['.git', '.hg', '.svn', '.ssh', '.aws', '.de
 const COMMAND_ENV_DENYLIST = ["DEEP_SEEK_API_KEY", "DEEPSEEKER_CODE_TOKEN", "TAVILY_API_KEY"];
 const SENSITIVE_ENV_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL|PRIVATE|AUTH)/i;
 
-/** 复制 env 并剔除敏感凭证；默认基于 process.env。供 run_command / run_in_background 共用。 */
-export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+// ★ 卡 4 第 2 层（评审修复施工单 2026-11-24）：词元级口令变量名——DB_PASS / db_pass / MYSQL_PWD。
+//   旧敏感名模式不含裸 PASS/PWD 词元，这类名字此前全量透传。两个设计约束：
+//   必须带前缀词元（(^|_)(PASS|PWD)($|_) 会把 shell 自带的 PWD 也剔掉）；必须带 i 标志
+//   （POSIX 上常见的 db_pass 小写名，不带 i 会漏剔）。
+const PASS_PWD_NAME_RE = /^(?:[A-Z0-9]+_)+(PASS|PWD)(?:_|$)/i;
+// ★ 卡 4 第 3 层：连接串【值】整体匹配才剔——postgres://user:pass@host/db、redis://:pass@host:6379。
+//   ssh://git@host（无密码）、postgres://user:@host（空密码）、http://127.0.0.1:7897（host:port）都不碰。
+const CONN_STRING_VALUE_RE = /^[a-z][a-z0-9+.-]*:\/\/[^\s\/@?#]*:(?:[^\s\/@?#]+@)*[^\s\/@?#]+@(?=[^\s\/@:?#])(?:[^\s]*)$/i;
+
+/**
+ * 全局放行名单（卡 4 决策点，2026-11-24 定稿）：DEEPSEEKER_COMMAND_ENV_PASSTHRU=DATABASE_URL,REDIS_URL
+ * （逗号分隔）。名单内的变量跳过全部启发式剔除（既有敏感名模式 + 新两层），但硬 denylist
+ * （agent 自身基础设施密钥）不解放。★ 只认全局进程 env，调用时读取——刻意不进
+ * ENGINE_OVERRIDE_VALIDATORS：项目级 engine 段不受信任闸门管，恶意仓库一行配置就能关掉全部凭证剔除。
+ */
+const envPassthruSet = (): Set<string> =>
+    new Set((process.env.DEEPSEEKER_COMMAND_ENV_PASSTHRU ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean));
+
+/** 工具结果提示行（卡 4）：只露变量名、不露值。dropped 为空返回空串（调用方按真值拼接）。
+ *  落在 run_command / run_in_background / `!` 直跑三个入口；状态栏与挂机验收命令静默。
+ *  不能只 console.warn——VSCode 宿主里用户看不到 console。 */
+export const envDropHint = (dropped: string[]): string =>
+    dropped.length === 0
+        ? ""
+        : `ℹ️ 已从子进程环境剔除含凭证的变量：${dropped.join("、")}（如确需传入，设 DEEPSEEKER_COMMAND_ENV_PASSTHRU）`;
+
+/** scrubCommandEnvEx 的返回契约：剔除后的 env + 新两层规则（词元口令名 / 连接串值）剔除的变量名。 */
+export interface ScrubbedCommandEnv {
+    env: NodeJS.ProcessEnv;
+    /** 被新两层规则剔除的变量名（既有名模式/denylist 的剔除刻意不入列——每条命令都提示会刷屏）。 */
+    dropped: string[];
+}
+
+/**
+ * 复制 env 并剔除敏感凭证（可观测版）：默认基于 process.env，供 run_command / run_in_background /
+ * `!` 直跑共用——调用方消费 dropped 拼提示行。三层防线：
+ *  1) 硬编码 denylist：agent 自身基础设施密钥（必剔，放行名单不解放）。
+ *  2) 敏感模式匹配：key 名含 KEY/TOKEN/SECRET/PASSWORD/PASSPHRASE/CREDENTIAL/PRIVATE/AUTH（既有，静默剔除）
+ *     + 词元级口令名 PASS_PWD_NAME_RE 与连接串值 CONN_STRING_VALUE_RE（新两层，剔除记入 dropped）。
+ *  3) 全局放行名单 DEEPSEEKER_COMMAND_ENV_PASSTHRU：名单内变量跳过全部启发式剔除。
+ * 保留 PATH/HOME/USER/SHELL/LANG/TERM 等基础变量——部署/构建命令仍可用其自有 PATH。
+ */
+export const scrubCommandEnvEx = (env: NodeJS.ProcessEnv = process.env): ScrubbedCommandEnv => {
     const next: NodeJS.ProcessEnv = {};
+    const dropped: string[] = [];
     // GIT_CONFIG_COUNT/KEY_n/VALUE_n 是 git 的「环境变量注入配置」一族，git 要求成套（COUNT≥1 则必须存在
     // 每个 KEY_n/VALUE_n）。KEY_n 名字含 "KEY" 会被敏感模式剔除而 COUNT 残留时，git 会直接报
     // "missing config key GIT_CONFIG_KEY_0"（宿主常注入 safe.bareRepository 等即踩中）→ 任一成员命中
@@ -324,14 +369,28 @@ export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.Pr
     const gitConfigFamilyHit = Object.keys(env).some(
         k => GIT_CONFIG_MEMBER.test(k) && (COMMAND_ENV_DENYLIST.includes(k) || SENSITIVE_ENV_PATTERN.test(k)),
     );
+    const passthru = envPassthruSet();
     for (const [k, v] of Object.entries(env)) {
-        if (COMMAND_ENV_DENYLIST.includes(k)) continue;     // 显式 denylist
-        if (SENSITIVE_ENV_PATTERN.test(k)) continue;        // 敏感模式匹配（第三方凭证）
+        if (COMMAND_ENV_DENYLIST.includes(k)) continue;     // 显式 denylist（放行名单不解放）
+        if (passthru.has(k)) {                              // 全局放行名单：显式用户决定，跳过全部启发式
+            next[k] = v;
+            continue;
+        }
+        if (SENSITIVE_ENV_PATTERN.test(k)) continue;        // 敏感模式匹配（第三方凭证；既有行为，静默不入提示）
+        if (PASS_PWD_NAME_RE.test(k) || (typeof v === "string" && CONN_STRING_VALUE_RE.test(v))) {
+            dropped.push(k);                                // 新两层：剔除并记入提示（提示只露名不露值）
+            continue;
+        }
         if (gitConfigFamilyHit && (k === "GIT_CONFIG_COUNT" || GIT_CONFIG_MEMBER.test(k))) continue;
         next[k] = v;
     }
-    return next;
+    return { env: next, dropped };
 };
+
+/** 复制 env 并剔除敏感凭证；默认基于 process.env。供 statusLine / 挂机验收命令等静默入口共用
+ *  （需要「剔了谁」的三个命令入口请改用 scrubCommandEnvEx）。 */
+export const scrubCommandEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv =>
+    scrubCommandEnvEx(env).env;
 
 /**
  * 路径是否落入受保护目录（含其子路径）。解析为绝对路径后按路径段匹配（小写归一），避免误判文件名巧合。

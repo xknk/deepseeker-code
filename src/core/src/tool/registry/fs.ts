@@ -25,6 +25,7 @@ import {
 import { isVisionEnabled, MAX_IMAGE_BYTES } from "@/session/contentParts.ts";
 import { isSensitivePath } from "../sensitivePaths.ts";
 import { renameWithRetry } from "@/common/fsRetry.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 
 /** read_image 支持的扩展名 → MIME 映射（OpenAI image_url dataURL 用） */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -70,24 +71,7 @@ const stripReadFileLineNumbers = (s: string): string => {
     return lines.map(l => (l.length === 0 ? l : l.replace(re, ""))).join("\n");
 };
 
-/**
- * 内容级脱敏（defense-in-depth）：黑名单外的代码文件也可能内联硬编码密钥（如 config.js 里 apiKey: "sk-..."）。
- * 仅替换凭证值，保留键名与行号结构，便于模型理解上下文又不外泄机密。
- * 由 runAgent 的 applyPrivacyMasking 在 verifyResult 之后调用，仅影响"发给云端模型的视图"。
- *
- * ★ 只打码【引号包裹的字面量】与 Bearer 惯例形态；不带引号的值（process.env.X、config.secretKey、
- *   裸标识符）是变量引用而非密钥值——打码它们安全上零收益，却毁掉 agent 读代码的理解力
- *   （曾把 client.ts 的 apiKey 来源打成 [MASKED_SECRET]，读自己项目只见掩码，2026-09-14 收紧）。
- */
-export const maskSecretsInContent = (_args: any, output: string): string => {
-    return output
-        // 形如 apiKey: "sk-xxxx" / token='xxxx'——引号经捕获组回溯配对（\2），仅引号字面量命中
-        .replace(/((?:api[_-]?key|secret|password|passwd|token|authorization|auth[_-]?token|access[_-]?key|secret[_-]?key|private[_-]?key)\s*[:=]\s*)(['"])[A-Za-z0-9_\-+/=.]{8,}\2/gi, '$1$2[MASKED_SECRET]$2')
-        // 无引号但惯例强约定：Authorization: Bearer xxxx（HTTP 头/连接串，值本身即凭证）
-        .replace(/((?:authorization|auth[_-]?token)\s*[:=]\s*Bearer\s+)[A-Za-z0-9_\-+/=.]{8,}/gi, '$1[MASKED_SECRET]')
-        // 整段 PEM 私钥块
-        .replace(/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[MASKED_SECRET (private key block)]');
-};
+// 内容级脱敏已迁至 tool/privacyMask.ts（零依赖独立模块，命令类工具同用）；本文件自用走 import。
 
 /** 原子写临时路径：absPath + 时间戳 + 随机段（防同目录同毫秒并发碰撞）。create_file / write_file / notebook_edit 共用。 */
 export const makeTmpPath = (absPath: string): string =>

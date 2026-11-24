@@ -43,8 +43,9 @@ const FAILURE_RE = /失败|无法|不存在|不支持|拒绝|越界|非法|缺�
 const ALLOWLIST = new Set([
     // verifyResult.summary：执行层按结构化 status 判失败并注入「【系统判定」前缀（#8b），此处非裸文案
     //（行号含 #8a 声明插入的偏移；75→80 为 P1-6 argKind/subagentAllowed/batchAllowed 三声明插入的偏移；
-    //  80→82：P0-A externalContent 声明 + 注释（+2 行）——2026-11-19）
-    "command.ts:82",
+    //  80→82：P0-A externalContent 声明 + 注释（+2 行）——2026-11-19；
+    //  82→86：评审修复卡 4 scrubCommandEnvEx 提示行块（+4 行）——2026-11-24）
+    "command.ts:86",
     // 用户主动中止 ≠ 工具失败（⏹️ 通知；ok 语义刻意维持现状，勿顺手改成 ❌）
     //（http.ts:123→142→149→150：wait_http_ready 入列与注释扩写顶到 142；196 为同语义新增中止分支；
     //  A3 审批降噪给 http_request 加 primaryArg/autoApproval 声明（+7 行）后顶到 149/203——2026-11-09；
@@ -60,7 +61,8 @@ const ALLOWLIST = new Set([
     //  64→65：评审修复 B4 防劈代理对导入行（+1 行）——2026-11-23）
     "recall.ts:65",
     // rg 退出码 1 = 检索成功但无匹配：正常空结果（带 ❌ 会诱导模型当成错误重试）
-    "search.ts:114", "search.ts:124",
+    //（114/124→115/125：评审修复卡 4 maskSecretsInContent 迁 privacyMask + 注释扩行（+1 行）——2026-11-24）
+    "search.ts:115", "search.ts:125",
     // 非文本内容类型按设计确定性跳过并引导换路（重试无益，非失败）
     //（723→724：防劈代理对导入行（+1 行）——2026-11-13；724→725：P0-A externalContent（+1 行）——2026-11-19）
     "web.ts:725",

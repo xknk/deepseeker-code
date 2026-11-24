@@ -7,7 +7,7 @@ import { rgPath } from "vscode-ripgrep"; // 需要安装: npm install vscode-rip
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "../type.ts";
 import { getActiveWorkspaceRoot, resolveReadablePath, getAllowedWorkspaceRoots } from "../guard.ts";
 import { execFileSmart } from "@/common/index.ts";
-import { maskSecretsInContent } from "./fs.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 import path from "path";
 import fs from "fs/promises";
 
@@ -93,7 +93,8 @@ export const searchTools: CustomTool[] = [
                         "--glob", "!.next/**",
                         "--glob", "!build/**",
                         // S-5：与 read_file 的 isSensitiveReadTarget 对齐——即便未被 .gitignore 收录，
-                        //   也排除凭证/私钥类文件，防 grep 把密钥回灌模型上下文（maskSecretsInContent 不覆盖连接串）。
+                        //   也排除凭证/私钥类文件，防 grep 把密钥回灌模型上下文（maskSecretsInContent
+                        //   的连接串打码是第二道，文件级排除仍保留——两道防线互不替代）。
                         "--glob", "!.env*",
                         "--glob", "!*.pem",
                         "--glob", "!*.key",

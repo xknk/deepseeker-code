@@ -17,7 +17,8 @@ import path from "path";
 import { toolFailure, asToolFailure, CustomTool, ToolSafetyLevel, ToolContext, ToolExecuteResult } from "../type.ts";
 import { getTs, getLanguageService, posToLineCol, lineColToPos, realpathNative, checkSupportedSourceExt } from "../tsHost.ts";
 import { resolveReadablePath, getContainingRoot } from "../guard.ts";
-import { assertReadable, maskSecretsInContent } from "./fs.ts";
+import { assertReadable } from "./fs.ts";
+import { maskSecretsInContent } from "../privacyMask.ts";
 
 /** 单文件体积上限（防 minified 巨型文件 AST/type-check 吃内存）——同 view_symbol_outline。 */
 const MAX_FILE_BYTES = 1024 * 1024;
