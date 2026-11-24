@@ -55,7 +55,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
             description: [
                 "异步多子 agent 编排：把可分解的大任务派给多个独立子 agent，调用立即返回（不等待完成），全部步骤结束后一条终态汇总自动注入本会话并唤醒你继续推进（中间态不回流，防事件洪峰）。parallel（默认）=各步骤并发执行、结果按序聚合，适合互相独立的只读/分析任务；pipeline=步骤串行，前阶段产出自动作为后阶段输入，适合分阶段加工（抽取→归类→汇总）。",
                 "派出后你可立即继续派活 / 处理其他事务 / 回复用户；当前无其他事务时可简短告知已编排并结束本轮——汇总送达时你会被自动唤醒。",
-                "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；并行写/迁移用 isolation=\"worktree\"（每步独立 git worktree，结束后收割各步 diff）。",
+                "步骤可用 name 套用声明式子 Agent（见【可用子 Agent 目录】）、key 作结果标签。parallel 默认共享工作区，仅适合并行读/分析；isolation=\"worktree\"（每步独立 git worktree）同样只适合只读/分析——隔离步骤里的改动不会合回主工作区、也不会保留，结束后只回传 diff 首尾各 60 行的摘要。",
                 "与 spawn_agent 的分工：单任务串行委派用 spawn_agent；任务可分解、多分支或流水线式时用本工具。",
             ].join("\n"),
             parameters: {
@@ -88,7 +88,7 @@ export const createWorkflowTools = (getGlobalTools: () => CustomTool[]): CustomT
                     isolation: {
                         type: "string",
                         enum: ["none", "worktree"],
-                        description: "none=共享工作区（默认，只读/分析）；worktree=每步独立 git worktree（并行写/迁移）。仅 parallel 支持。",
+                        description: "none=共享工作区（默认，只读/分析）；worktree=每步独立 git worktree，改动不合回主工作区也不保留，仅回传 diff 首尾摘要（同样只适合只读/分析）。仅 parallel 支持。",
                     },
                 },
                 required: ["steps"],
