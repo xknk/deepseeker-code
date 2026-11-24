@@ -21,7 +21,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { SyncLocale } from "../sync/config.ts";
-import { renameWithRetry } from "./fsRetry.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 /** 队列根（与 queue.ts 同源逻辑但零 import——queue 会 import 本模块做收尾钩子，反向依赖成环）。 */
 const batchRoot = (): string =>

@@ -24,6 +24,7 @@ import {
 } from "../guard.ts";
 import { isVisionEnabled, MAX_IMAGE_BYTES } from "@/session/contentParts.ts";
 import { isSensitivePath } from "../sensitivePaths.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 /** read_image 支持的扩展名 → MIME 映射（OpenAI image_url dataURL 用） */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
@@ -708,7 +709,7 @@ export const fsTools: CustomTool[] = [
                     await fs.mkdir(path.dirname(absPath), { recursive: true });
                     tmpPath = makeTmpPath(absPath);
                     await fs.writeFile(tmpPath, content, "utf-8");
-                    await fs.rename(tmpPath, absPath); // 操作系统层面的原子覆盖
+                    await renameWithRetry(tmpPath, absPath); // 操作系统层面的原子覆盖（EPERM 瞬时锁重试）
 
                     return `✅ [创建成功]：新文件 [${args.path}] 已创建，写入 ${content.length} 字符。`;
                 } catch (error: any) {
@@ -847,7 +848,7 @@ export const fsTools: CustomTool[] = [
 
                     // 💡 优化 3：【核心原子替换】写入成功后，瞬间重命名覆盖原文件
                     // 这一步在绝大多数现代操作系统中都是原子操作（Atomic Operation）
-                    await fs.rename(tmpPath, absPath);
+                    await renameWithRetry(tmpPath, absPath); // EPERM 瞬时锁重试
 
                     return `✅ [文件写入成功]：已全量写入 [${args.path}]（${args.content.length} 字符）。`;
                 } catch (error: any) {
@@ -1015,7 +1016,7 @@ export const fsTools: CustomTool[] = [
                     assertWithinWorkspace(srcAbs);
                     assertWithinWorkspace(dstAbs);
                     await fs.mkdir(path.dirname(dstAbs), { recursive: true });
-                    await fs.rename(srcAbs, dstAbs);
+                    await renameWithRetry(srcAbs, dstAbs); // EPERM 瞬时锁重试
                     return `✅ [移动成功]：[${args.source}] → [${args.destination}]。`;
                 } catch (error: any) {
                     return toolFailure(`操作失败: ${error.message}`);

@@ -26,7 +26,7 @@ import { batchQueueRoot, enqueueTicketFile, readReport, acquireRunLock, releaseR
 import { generateBatchId, parseBatchTicket, type BatchTicket } from "../ticket.ts";
 import { doneTicketPath, extractPrevReportSummary } from "../continuation.ts";
 import { recordMsgMap } from "./notify.ts";
-import { renameWithRetry } from "./fsRetry.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 import { loadSyncConfig, type SyncConfig, type SyncLocale } from "../sync/config.ts";
 import { acquireSyncLock, releaseSyncLock } from "../sync/lock.ts";
 import { loadSyncState, appendSyncState, syncFingerprint, todayTicketCount, type SyncStateEntry } from "../sync/state.ts";

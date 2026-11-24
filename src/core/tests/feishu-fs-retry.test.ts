@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-const { renameWithRetry } = await import("@/batch/feishu/fsRetry.ts");
+const { renameWithRetry } = await import("@/common/fsRetry.ts");
 
 const instantSleep = async (): Promise<void> => { };
 

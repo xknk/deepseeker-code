@@ -20,6 +20,7 @@ import os from "os";
 import fs from "fs";
 import { appConfig } from "@/config/index.ts";
 import { execFileSmart } from "@/common/index.ts";
+import { withLockRetry } from "@/common/fsRetry.ts";
 import { WORKSPACE_ROOT } from "../guard.ts";
 import { killBackgroundTasksUnder } from "../registry/background.ts";
 import { drainAllSessionWorktrees } from "./sessionRegistry.ts";
@@ -229,8 +230,11 @@ export const removeWorktree = async (wt: WorktreeHandle): Promise<void> => {
     try {
         await runMainGit(["worktree", "remove", "--force", wt.path]);
     } catch (e: any) {
-        // remove 失败（目录已被外部动过等）：直接 fs.rm 兜底 + prune
-        await fs.promises.rm(wt.path, { recursive: true, force: true }).catch(() => { });
+        // remove 失败（目录已被外部动过等）：直接 fs.rm 兜底 + prune。
+        // 兜底本身也会撞瞬时锁（Defender 对刚关闭的文件树短暂持锁）→ withLockRetry 自愈；
+        // 重试耗尽不再静默吞掉——console.warn 留痕，残留交由下次启动期 sweep 兜底。
+        await withLockRetry(() => fs.promises.rm(wt.path, { recursive: true, force: true }))
+            .catch((e2: any) => console.warn(`⚠️ [worktree] 兜底删除目录失败（残留待启动期清扫）: ${e2?.message ?? e2}`));
     }
     try { await runMainGit(["worktree", "prune"]); } catch { /* ignore */ }
     try { await runMainGit(["branch", "-D", wt.branch]); } catch { /* 分支可能已被删或被占用，忽略 */ }

@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import { toolFailure, CustomTool, ToolSafetyLevel } from "../type.ts";
 import { resolveSafePath, assertWithinWorkspace } from "../guard.ts";
 import { makeTmpPath } from "./fs.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 export type NotebookEditMode = "replace" | "insert" | "delete";
 export type NotebookCellType = "code" | "markdown" | "raw";
@@ -155,11 +156,11 @@ export const notebookTools: CustomTool[] = [
                 try { assertWithinWorkspace(absPath); }
                 catch (e: any) { return toolFailure(`[notebook_edit] 二次围栏复检失败：${e?.message ?? e}`); }
 
-                // 原子写（tmp + rename，与 write_file 同款）
+                // 原子写（tmp + rename，与 write_file 同款；EPERM 瞬时锁重试）
                 const tmpPath = makeTmpPath(absPath);
                 try {
                     await fs.writeFile(tmpPath, JSON.stringify(nb, null, 2), "utf-8");
-                    await fs.rename(tmpPath, absPath);
+                    await renameWithRetry(tmpPath, absPath);
                 } catch (e: any) {
                     await fs.unlink(tmpPath).catch(() => { /* ignore */ });
                     return toolFailure(`[notebook_edit] 写入失败：${e?.message ?? e}`);

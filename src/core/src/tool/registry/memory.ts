@@ -31,6 +31,7 @@ import fs from "fs/promises";
 import path from "path";
 import { toolFailure, CustomTool, ToolSafetyLevel, ToolContext } from "@/tool/type.ts";
 import { makeTmpPath } from "./fs.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 import { hasExternalContent } from "@/tool/provenance.ts";
 import { GLOBAL_MEMORY_DIR } from "@/memory/loader.ts";
 import { registerMemory, getMemory, unregisterMemory, listMemories, getMemoryIndex, memoryIndexLine, MEMORY_LIMITS, MemoryType, MemoryManifest } from "@/memory/registry.ts";
@@ -99,7 +100,13 @@ const writeAndRegister = async (
     await fs.mkdir(path.dirname(file), { recursive: true });
     const tmp = makeTmpPath(file);
     await fs.writeFile(tmp, buildMemoryMd(name, description, type, body), "utf-8");
-    await fs.rename(tmp, file);
+    try {
+        await renameWithRetry(tmp, file);
+    } catch (e) {
+        // rename 失败（含瞬时锁重试耗尽）：tmp 留在记忆目录会永久泄漏——清掉再上抛
+        await fs.unlink(tmp).catch(() => { /* tmp 已不在，忽略 */ });
+        throw e;
+    }
     registerMemory({ name, description, type, body: body.trim(), source: project ? "project" : "global", file });
     return file;
 };

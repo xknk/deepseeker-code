@@ -10,6 +10,7 @@ import { appConfig } from "@/config/index.ts";
 import fs from "fs/promises";
 import path from "path";
 import { createUUID, getFileName, assertSafeSessionId, isSafeSessionId, readJSONFile } from "@/common/index.ts"
+import { renameWithRetry } from "@/common/fsRetry.ts";
 import { msgText } from "@/session/contentParts.ts";
 import type { Todo } from "@/observability/type.ts";
 
@@ -91,21 +92,21 @@ const migrateLegacyFiles = async (sessionId: string): Promise<void> => {
 
     const raw = legacyText.trim();
     if (raw.length === 0) {
-        await fs.rename(legacy, transcriptPath); // 空旧文件：当作空转录归位
+        await renameWithRetry(legacy, transcriptPath); // 空旧文件：当作空转录归位
         return;
     }
     // 判定一：逐行均可解析 → JSONL 转录（迁移后 appendMessage 继续追加）
     const lines = raw.split("\n");
     const isJsonl = lines.every((s) => { try { JSON.parse(s); return true; } catch { return false; } });
     if (isJsonl) {
-        await fs.rename(legacy, transcriptPath);
+        await renameWithRetry(legacy, transcriptPath);
         return;
     }
     // 判定二：整体是单个 JSON 对象 → 状态快照
     try {
         const v = JSON.parse(raw);
         if (typeof v === "object" && v !== null) {
-            await fs.rename(legacy, statePath);
+            await renameWithRetry(legacy, statePath);
             return;
         }
     } catch { /* 非 JSON，落入下方告警 */ }
@@ -121,7 +122,13 @@ export const writeStore = async (sessionId: string, store: any) => {
     const finalPath = getStatePath(sessionId);
     const tmpPath = `${finalPath}.${Date.now()}.tmp`;
     await fs.writeFile(tmpPath, JSON.stringify(store, null, 2), "utf-8");
-    await fs.rename(tmpPath, finalPath);
+    try {
+        await renameWithRetry(tmpPath, finalPath);
+    } catch (e) {
+        // rename 失败（含瞬时锁重试耗尽）：tmp 留在会话目录会永久泄漏——清掉再上抛
+        await fs.unlink(tmpPath).catch(() => { /* tmp 已不在，忽略 */ });
+        throw e;
+    }
 }
 
 // ★ 会话级写锁：state.json 的 read-modify-write 在 await 间可能交错（压缩写摘要 vs SessionEnd hook / todo 写 store），

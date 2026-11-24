@@ -20,6 +20,7 @@ import { spawn } from "child_process";
 import { attachmentsRoot } from "../queue.ts";
 import { quoteLines } from "./boundary.ts";
 import type { SyncLocale } from "./config.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 // ============ 注入面 ============
 
@@ -274,7 +275,7 @@ export const processAttachmentList = async (args: { items: AttachmentItem[]; tic
         const stem = baseName.includes(".") ? baseName : `${baseName}.${extForKind}`;
         const finalName = fsSync.existsSync(path.join(dir, stem)) ? `${n}-${stem}` : stem;
         const finalPath = path.join(dir, finalName);
-        await fs.rename(staged, finalPath).catch(async () => fs.copyFile(staged, finalPath).then(() => fs.rm(staged, { force: true })));
+        await renameWithRetry(staged, finalPath).catch(async () => fs.copyFile(staged, finalPath).then(() => fs.rm(staged, { force: true })));
         ticketBytes += dl.sizeBytes;
         savedAny = true;
 

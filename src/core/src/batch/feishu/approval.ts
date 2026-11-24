@@ -26,7 +26,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { batchQueueRoot } from "../queue.ts";
 import type { SyncLocale } from "../sync/config.ts";
-import { renameWithRetry } from "./fsRetry.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 /** 审批等待超时（分钟，方案 §5：缺省 30 = deny fail-closed）。 */
 export const APPROVAL_TIMEOUT_MIN = 30;

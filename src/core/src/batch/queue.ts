@@ -14,6 +14,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { generateBatchId, readBatchTicket, parseBatchTicket, type BatchLocale } from "./ticket.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 import { writeFinishNotification } from "./feishu/notify.ts";
 
 /** 锁错误文案（直接进 runner 控制台；缺省 zh 向后兼容）。 */
@@ -94,7 +95,7 @@ export const takeNextTicket = async (): Promise<{ id: string; path: string } | n
     const from = path.join(stateDir("pending"), first.file);
     const to = path.join(stateDir("running"), first.file);
     await fs.mkdir(stateDir("running"), { recursive: true });
-    await fs.rename(from, to); // 原子搬家：崩溃后 either 端可见，幂等
+    await renameWithRetry(from, to); // 原子搬家：崩溃后 either 端可见，幂等（EPERM 瞬时锁重试）
     return { id: first.file.replace(/\.md$/, ""), path: to };
 };
 
@@ -230,7 +231,7 @@ export const requeueStaleRunning = async (): Promise<number> => {
     if (stale.length === 0) return 0;
     await fs.mkdir(stateDir("pending"), { recursive: true });
     for (const f of stale) {
-        await fs.rename(path.join(stateDir("running"), f), path.join(stateDir("pending"), f)).catch(() => { });
+        await renameWithRetry(path.join(stateDir("running"), f), path.join(stateDir("pending"), f)).catch(() => { });
     }
     return stale.length;
 };
@@ -244,7 +245,7 @@ export const finishTicket = async (id: string, reportMd: string): Promise<void> 
     try {
         await fs.mkdir(stateDir("done"), { recursive: true });
         await fs.writeFile(reportPath(id), reportMd, "utf-8");
-        await fs.rename(path.join(stateDir("running"), `${id}.md`), path.join(stateDir("done"), `${id}.md`)).catch(() => { });
+        await renameWithRetry(path.join(stateDir("running"), `${id}.md`), path.join(stateDir("done"), `${id}.md`)).catch(() => { });
         // C2/C4 协议文件随票收尾清走（stop 残留会误导同 id 复跑判定；progress 残留会被「进度」读到死票）
         await fs.rm(stopRequestPath(id), { force: true }).catch(() => { });
         await fs.rm(progressPath(id), { force: true }).catch(() => { });

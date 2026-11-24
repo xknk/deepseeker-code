@@ -18,7 +18,7 @@ import path from "path";
 import { batchQueueRoot } from "../queue.ts";
 import type { SyncLocale } from "../sync/config.ts";
 import type { FeishuMessageCandidate, FeishuTicketResult } from "./message.ts";
-import { renameWithRetry } from "./fsRetry.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 import { serializedMapWrite } from "./notify.ts";
 
 /** 对账拉取注入面：按 [startMs, endMs) 时间窗拉候选（升序）。 */

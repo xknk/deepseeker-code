@@ -9,6 +9,7 @@ import { UndoRecord } from "./type.ts";
 import { getUndoDirPath, getUndoIndexPath } from "./store.ts";
 import { getTodayDateString } from "@/observability/traceCalculate.ts";
 import { getFileName } from "@/common/index.ts";
+import { renameWithRetry } from "@/common/fsRetry.ts";
 
 /**
  * 进程内互斥锁（按 rootId 串行）：主 agent 与子 agent 共享同一 rootId 的 jsonl，
@@ -108,7 +109,13 @@ export const markRestored = async (sessionId: string, undoId: string, reverseUnd
                 const content = lines.join("\n").replace(/\n*$/, "\n"); // 显式补末尾换行，避免首条追加与原末行粘连
                 const tmp = fp + ".tmp";
                 await fs.writeFile(tmp, content, { encoding: "utf-8", mode: 0o600 }); // ★ S-4：undo 索引限 0600
-                await fs.rename(tmp, fp);
+                try {
+                    await renameWithRetry(tmp, fp);
+                } catch (e) {
+                    // rename 失败（含瞬时锁重试耗尽）：tmp 留在索引目录会永久泄漏——清掉再上抛
+                    await fs.unlink(tmp).catch(() => { /* tmp 已不在，忽略 */ });
+                    throw e;
+                }
             }
         }
     });

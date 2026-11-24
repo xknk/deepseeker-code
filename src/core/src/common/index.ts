@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import fs from "fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { renameWithRetry } from "./fsRetry.ts";
 /**
  * 将（含后缀的）会话 ID 映射到它所属的主会话文件夹名：
  * - 子 agent ID（含 __sub__）→ 取其父主 ID；
@@ -113,7 +114,7 @@ export const atomicWriteJSON = async (file: string, value: unknown): Promise<voi
     const tmpPath = `${file}.${Date.now()}.tmp`;
     try {
         await fs.writeFile(tmpPath, JSON.stringify(value, null, 2), "utf-8");
-        await fs.rename(tmpPath, file);
+        await renameWithRetry(tmpPath, file);
     } catch (e) {
         try { await fs.unlink(tmpPath); } catch { /* tmp 已不在，忽略 */ }
         throw e;
