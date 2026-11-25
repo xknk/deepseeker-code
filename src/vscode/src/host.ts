@@ -17,7 +17,7 @@ import { registerWakeDriver, AGENT_DONE_SENTINEL } from "@/agent/agentWake.ts";
 import { ShadowWatchdog, shadowEnabled } from "@/agent/shadowWatchdog.ts";
 import { runBashDirect, formatBashEntry, recordBashEntry } from "@/commands/bashDirect.ts";
 import { getActiveWorkspaceRoot } from "@/tool/guard.ts";
-import { getOrCreateSessionId, listSessions, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, type SessionSummary } from "@/session/store.ts";
+import { getOrCreateSessionId, readStore, renameSession as persistRenameSession, deleteSession as persistDeleteSession, setSessionArchived as persistSetSessionArchived, listSessionIndex, countSessionMessages, sessionExists, getTranscriptPath, type SessionIndexItem } from "@/session/store.ts";
 import { clearSessionPermissionRules } from "@/tool/permissions.ts";
 import { readTranscriptLines, isEventLine } from "@/session/transcript.ts";
 import { conversationToMarkdown, suggestExportFileName } from "@/session/exportMarkdown.ts";
@@ -73,6 +73,23 @@ const tryParseArgs = (raw: unknown): unknown => {
     return JSON.parse(raw);
   } catch {
     return raw;
+  }
+};
+
+// —— 会话消息数缓存（历史列表懒加载明细）：key=sessionId，stamp=transcript 的 size + mtime ——
+//   消息数必须读完整 transcript 逐行数；列表每次打开都会为可见行重新请求，有缓存时「反复开列表」
+//   只在会话真有新消息（文件变化）时才重读全文。
+const messageCountCache = new Map<string, { stamp: string; messageCount: number }>();
+/** 缓存条数上限：会话数天然有界，上限只防长驻进程异常增长，超出整体清空（下次打开列表重数）。 */
+const MESSAGE_COUNT_CACHE_MAX = 5000;
+/** 消息数批量读取的并发度（与 listSessionIndex 的 16 路同量级：磁盘并发读、不抢主线程）。 */
+const MESSAGE_COUNT_CONCURRENCY = 8;
+const transcriptStamp = async (sessionId: string): Promise<string> => {
+  try {
+    const st = await fs.promises.stat(getTranscriptPath(sessionId));
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return ""; // 无 transcript（空会话 / 非法 id）：计数恒 0，照常走一次读取后缓存
   }
 };
 
@@ -153,6 +170,11 @@ function emitReplay(msgs: Array<Record<string, unknown>>, sink: (evt: Record<str
 /** VS Code 插件宿主：一次会话（可续接/切换历史），复用 core 引擎。 */
 export class ChatHost {
   sessionId: string | null = null;
+
+  /** 回放代次：每次 loadSession / newSession 自增。读盘 await 期间若被新会话接手，本次回放结果
+   *  整个作废（不发 replayStart / 行 / replayDone）——否则两条回放的缓冲会交叉，A 的 replayDone
+   *  还会去 finish B 的半截缓冲（快连点两个会话 / 回放中途按新会话可复现）。 */
+  private replaySeq = 0;
 
   private planMode = false;
   private autoMode = false;
@@ -528,27 +550,36 @@ export class ChatHost {
    *    abort 触发 runAgent 走 aborted 出口收尾；final 事件仅 closeStreaming 不 appendRow，不污染新屏。 */
   async newSession(): Promise<void> {
     if (this.busy) this.abort();
+    this.replaySeq += 1; // 作废在途回放（见 loadSession 的代次检查）
     this.setSessionId(null);
     this.callbacks.onSessionReset();
   }
 
-  /** 载入历史会话续接：切换 id + 回放 transcript（user 行贴检查点 id，逐消息 ↺ 撤回用）。 */
+  /** 载入历史会话续接：切换 id + 回放 transcript（user 行贴检查点 id，逐消息 ↺ 撤回用）。
+   *  ★ 代次保护：读盘是异步窗口，期间可被另一次 loadSession / newSession 接手——届时本次结果
+   *    整体丢弃（不 emit 任何回放事件），否则两路缓冲交叉成「A 的内容 + B 的内容」叠加。 */
   async loadSession(id: string): Promise<void> {
+    const seq = ++this.replaySeq;
     this.setSessionId(id);
     this.callbacks.onSessionReset();
     try {
       // 单次读盘同时喂回放与检查点配对（checkpointIdByUserLine 纯函数；同一 transcript 不读两遍）
       const lines = await readTranscriptLines(id);
       const cps = await listCheckpointsCore(id);
+      if (seq !== this.replaySeq) return; // 已被新一次载入/新会话接手：丢弃本次回放
       const cpByLine = checkpointIdByUserLine(lines, cps);
       const msgs = lines.filter((l) => !isEventLine(l)) as unknown as Array<Record<string, unknown>>;
+      // ★ 回放开始信号：前端进回放态并建缓冲——回放行不逐条入 DOM，replayDone 时一次成型（只挂尾段并落底）。
+      //   与 replayDone 成对经 sink 发出（handler 在 webview handleEvent）：四条回放路（窗口重载/复活、
+      //   历史面板切会话、分叉、回滚）都由本函数驱动，回放态的起止就此收口在 host 一处。
+      this.callbacks.sink({ type: "replayStart" });
       emitReplay(msgs, this.callbacks.sink, this.t, cpByLine);
     } catch {
       /* 无历史或读取失败 → 空回放，不阻塞 */
     }
+    if (seq !== this.replaySeq) return;
     this.sink({ type: "info", text: this.t("sessionLoaded") });
-    // ★ 回放结束信号：所有 row 已送出，通知前端强制滚到底（展示最新对话，而非回放起点的顶部）。
-    //   回放行经 appendRow 追加、滚动受 nearBottom() 门控——长会话下永远停在顶部；此信号绕开门控强制落底。
+    // ★ 回放结束信号：缓冲行一次成型——尾段落底展示最新对话，更早的行留 backlog 往上滚再补。
     this.callbacks.sink({ type: "replayDone" });
   }
 
@@ -578,9 +609,41 @@ export class ChatHost {
     return out;
   }
 
-  /** 枚举本工作区历史会话（供 UI 会话选择器）。 */
-  async listSessions(): Promise<SessionSummary[]> {
-    return listSessions();
+  /** 枚举本工作区历史会话索引（供 UI 历史抽屉）：标题/预览/时间，不含消息数——消息数见 countMessages。 */
+  async listSessionIndex(): Promise<SessionIndexItem[]> {
+    return listSessionIndex();
+  }
+
+  /** 批量取会话消息数（历史列表懒加载明细）：读完整 transcript，按文件 size + mtime 缓存。
+   *  ★ 并发池（8 路）：首屏 50 个 / 上限 200 个会话逐个串行 await 时，单个十几 MB 的 transcript
+   *    会把这一批拖到秒级；池化后与 listSessionIndex 的 16 路并发同一量级，顺序按入参回填。 */
+  async countMessages(ids: string[]): Promise<Array<{ sessionId: string; messageCount: number }>> {
+    const results: Array<{ sessionId: string; messageCount: number }> = new Array(ids.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < ids.length) {
+        const i = next++;
+        const sessionId = ids[i];
+        const stamp = await transcriptStamp(sessionId);
+        const hit = messageCountCache.get(sessionId);
+        if (hit && hit.stamp === stamp) {
+          results[i] = { sessionId, messageCount: hit.messageCount };
+          continue;
+        }
+        const messageCount = await countSessionMessages(sessionId);
+        if (messageCountCache.size >= MESSAGE_COUNT_CACHE_MAX) messageCountCache.clear();
+        messageCountCache.set(sessionId, { stamp, messageCount });
+        results[i] = { sessionId, messageCount };
+      }
+    };
+    const width = Math.min(MESSAGE_COUNT_CONCURRENCY, ids.length);
+    await Promise.all(Array.from({ length: width }, () => worker()));
+    return results.filter(Boolean);
+  }
+
+  /** 会话是否仍在盘上（页签复活前校验序列化态里的会话 id：已删除的会话不复活成幽灵续接）。 */
+  async hasSession(sessionId: string): Promise<boolean> {
+    return sessionExists(sessionId);
   }
 
   /** 枚举当前会话可分叉锚点（各轮 assistant 检查点；无活动会话/读失败 → 空表）。 */
@@ -662,6 +725,12 @@ export class ChatHost {
   /** 重命名会话：写 state.title（不动 sessionId/文件夹，transcript 路径稳定）。 */
   async renameSession(id: string, title: string): Promise<void> {
     await persistRenameSession(id, title);
+  }
+
+  /** 归档 / 取消归档会话：标记写 state.archived（历史抽屉折叠段分组用）。
+   *  归档当前活动会话不清屏不清 id——会话照常可续聊，只是列表里收进折叠段；刷新由调用方 sendSessions 推送。 */
+  async archiveSession(id: string, archived: boolean): Promise<void> {
+    await persistSetSessionArchived(id, archived);
   }
 
   /** 删除会话：递归删文件夹；若删的正是当前活动会话则置空 + 清屏，避免下次 submit 复活同 id 空会话。

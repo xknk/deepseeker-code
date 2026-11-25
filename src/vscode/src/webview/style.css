@@ -368,6 +368,21 @@ body {
   padding: 0 14px 14px;
 }
 
+/* ———————— 回放 backlog 提示行（上方还有更早的消息；点击/滚到顶部补挂一批） ———————— */
+.history-more {
+  margin: 6px 0 2px;
+  padding: 3px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+
+.history-more:hover {
+  color: var(--fg);
+}
+
 /* ———————— 空状态页（消息流为空时居中引导） ———————— */
 .empty-state {
   position: absolute;
@@ -1341,12 +1356,12 @@ body {
   word-break: break-word;
 }
 
-/* ———————— 浮层（审批/提问/计划/模型选择/会话/分叉）：统一悬浮 ————————
+/* ———————— 浮层（审批/提问/计划/模型选择/分叉）：统一悬浮 ————————
    全部钉在输入框正上方（相对 #composer bottom:100%）、覆盖消息区——出现/消失零布局影响
-   （修「弹窗出现时消息区/logo 被顶上去」）。空锚点零尺寸，不挡点击。 */
+   （修「弹窗出现时消息区/logo 被顶上去」）。空锚点零尺寸，不挡点击。
+   （历史会话下拉不在此列：锚定头部按钮的 body 级浮层，见下方 .sessions-pop。） */
 #approval-anchor,
 #model-picker-anchor,
-#sessions-panel,
 #fork-panel {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -1657,7 +1672,7 @@ body {
 }
 
 /* 历史会话 */
-/* ———————— 历史会话面板（终端风格：搜索 + 单行列表） ———————— */
+/* ———————— 浮层面板（分叉 / 回滚共用：输入框上方的小浮层） ———————— */
 .sessions-panel {
   display: flex;
   flex-direction: column;
@@ -1669,6 +1684,50 @@ body {
   overflow: hidden; /* 圆角裁切内部列表 */
 }
 
+/* ———————— 历史会话下拉浮层（CC 同款：锚定头部历史按钮正下方，紧凑、无遮罩） ————————
+   top/right 由 panels.js 打开时按 #btn-sessions 的位置现算（webview 宽度变化后仍准）。
+   z-index 压过输入区各浮层（30~46）与水位悬浮卡（40）；让位于全屏对比浮层（400）。 */
+.sessions-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 16px));
+  max-height: min(560px, calc(100vh - 48px));
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+  box-shadow: var(--vscode-widget-shadow, 0 8px 24px rgba(0, 0, 0, 0.5));
+  overflow: hidden; /* 圆角裁切内部列表 */
+  animation: sessions-pop-in 0.14s ease-out;
+}
+
+@keyframes sessions-pop-in {
+  from {
+    transform: translateY(-6px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessions-pop {
+    animation: none;
+  }
+}
+
+/* 列表尾部状态行（还有没渲染的行：滚动加载更多） */
+.sessions-more {
+  padding: 10px 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
 /* 搜索框：无边框，仅底部淡线，透明背景 */
 .sessions-search {
   display: flex;
@@ -1676,6 +1735,12 @@ body {
   gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.sessions-search .codicon {
+  color: var(--vscode-descriptionForeground);
+  font-size: 13px;
+  flex-shrink: 0;
 }
 
 .sessions-search svg {
@@ -1698,26 +1763,24 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
-.sessions-close {
-  background: transparent;
-  border: none;
-  color: var(--fg-dim);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: inherit;
-}
-
-.sessions-close:hover {
-  background: var(--hover);
-  color: var(--fg);
-}
-
 .sessions-list {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
+}
+
+/* 列表滚动条与消息流同款（细、同色），长列表懒加载全靠它导航 */
+.sessions-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sessions-list::-webkit-scrollbar-thumb {
+  background: var(--border-soft);
+  border-radius: 4px;
+}
+
+.sessions-list::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-dim);
 }
 
 /* 单行等宽列表项：flex 两端弹性对齐，标题省略号，hover 浮现工具图标 */
@@ -1756,6 +1819,79 @@ body {
   background: var(--vscode-list-hoverBackground, var(--hover));
 }
 
+/* CC 同款单槽切换：悬停行时右侧信息（时间/消息数）让位给工具图标（不并排，保持行右侧单元素） */
+.session-row:hover .session-meta {
+  display: none;
+}
+
+/* 归档折叠头（CC Archived sessions 同款）：chevron + 标签 + 右侧数量徽章 */
+.sessions-archived-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  margin-top: 2px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--vscode-descriptionForeground);
+  user-select: none;
+}
+
+.sessions-archived-head:hover {
+  background: var(--vscode-list-hoverBackground, var(--hover));
+  color: var(--vscode-foreground);
+}
+
+.sessions-archived-head .codicon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.sessions-archived-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数量徽章：胶囊形、主题色底白字（与 CC 的蓝色计数徽章同构，色取 VSCode 主题 focus/badge 色） */
+.sessions-archived-badge {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-activityBar-inactiveForeground, #fff);
+  background: var(--vscode-focusBorder, var(--vscode-button-background, #0078d4));
+}
+
+/* 归档行：比活跃行更深一级缩进（视觉上「收在折叠段里」）；悬停工具组由 renderSessionRow 换成重命名+恢复 */
+.session-row.archived {
+  padding-left: 26px;
+}
+
+.session-row.archived .session-title {
+  color: var(--fg-dim);
+}
+
+.session-row.archived:hover .session-title {
+  color: var(--vscode-foreground);
+}
+
+/* 行操作图标（✏️ 重命名 / 📥 归档 / ↩ 取消归档 / 🗑️ 删除）：随 .session-tools 在行 hover 时浮现 */
+.session-rename, .session-delete, .session-archive, .session-unarchive {
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+.session-rename:hover { color: var(--fg); background: var(--hover); }
+.session-archive:hover { color: var(--fg); background: var(--hover); }
+.session-unarchive:hover { color: var(--fg); background: var(--hover); }
+.session-delete:hover { color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); }
+
 .session-row.active {
   background: var(--vscode-list-activeSelectionBackground);
 }
@@ -1791,16 +1927,6 @@ body {
   color: var(--vscode-descriptionForeground);
   font-size: 11px;
 }
-
-/* 会话行操作图标（✏️ 重命名 / 🗑️ 删除）：随 .session-tools 在行 hover 时浮现 */
-.session-rename, .session-delete {
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 3px;
-  font-size: 14px;
-}
-.session-rename:hover { color: var(--fg); background: var(--hover); }
-.session-delete:hover { color: var(--error); background: color-mix(in srgb, var(--error) 12%, transparent); }
 
 /* 重命名编辑态：input 撑满标题区 */
 .session-row.editing {

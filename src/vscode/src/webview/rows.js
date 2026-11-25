@@ -4,11 +4,14 @@
  *  行构建/追加/更新（user·assistant·thinking·tool·turnHeader·meta·info·system）、流式缓冲与 rAF 节流
  *  flush、轮次折叠头、任务清单面板、空态、初始化错误横幅、贴图 chip。
  *  流式缓冲（textBuf/thinkBuf/progressBuf）与消费它们的 flush 同模块——缓冲生命周期不跨模块泄漏。
+ *  历史回放「尾段先渲染」：回放行先进缓冲（events.js 的 replayStart/replayDone 之间），replayDone 时经
+ *  replayPlan 规划一次成型——尾段直接落底显示最新内容，更早的行留 backlog，往上滚才分批补挂。
  */
 import { vscode, $, state, nextKey, copyText, flashCopied } from "./state.js";
 import { S } from "./strings.js";
 import { escapeHtml, mdToHtml, truncate, argHint } from "./markdown.js";
 import { EDIT_TOOL_NAMES, buildDiffHtml, openDiffOverlay } from "./diff.js";
+import { planReplay } from "./replayPlan.js";
 
 // ———————— 消息流渲染 ————————
 const messagesEl = () => $("#messages");
@@ -53,7 +56,11 @@ const syncStuckRows = () => {
     h.classList.toggle("stuck", pinned);
   }
 };
-messagesEl().addEventListener("scroll", () => requestAnimationFrame(syncStuckRows), { passive: true });
+messagesEl().addEventListener("scroll", () => {
+  // ★ backlog 懒补挂：接近顶部即补一批（同步执行——补挂自身平移 scrollTop，用户继续上滚无缝衔接）
+  if (state.backlog.length && messagesEl().scrollTop < BACKLOG_TRIGGER_PX) prependBacklogChunk();
+  requestAnimationFrame(syncStuckRows);
+}, { passive: true });
 // ★ 兜底重刷：rebuildRow（整行 replaceWith）/turn 折叠/回放重建都会变更行几何但不触发 scroll
 //   事件——只靠滚动打标的话，钉住态滞留/缺失直到下次滚动。监听 childList 兜底（本函数只切
 //   class，不产生 childList 变更，无回环），rAF 合并同帧成批变更，一帧至多一次布局读。
@@ -379,6 +386,100 @@ function toggleTurn(seq) {
   if (!hide) stickTo(stick);
 }
 
+// ———————— 历史回放：尾段先渲染 + backlog 懒补挂（规划逻辑见 replayPlan.js） ————————
+// 对标 CC「进面板就是最新内容」：回放行先缓冲（events.js 的 replayStart/replayDone 之间），replayDone 一次
+//   成型——只挂尾段并落底，更早的行留在 state.backlog，滚到顶部再分批往前补挂。
+const REPLAY_TAIL_ROWS = 120; // 尾段行数目标（软）
+const REPLAY_TAIL_MAX_ROWS = 400; // 最后一轮单独超目标时的硬顶
+const BACKLOG_CHUNK_ROWS = 80; // 往上滚时每批补挂的行数
+const BACKLOG_TRIGGER_PX = 240; // 距顶多少像素内触发补挂
+
+/** replayDone：缓冲的回放行一次成型（尾段入 DOM）→ 退出回放态 → 等一帧布局落底。
+ *  尾段不足两屏时继续从 backlog 补挂再落底（短屏会话不至于顶着一截空白；补挂会平移 scrollTop，故末尾重新落底）。 */
+function finishReplay(rows) {
+  appendReplay(rows);
+  state.replaying = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const el = messagesEl();
+    for (let guard = 0; state.backlog.length && el.scrollHeight < el.clientHeight * 2 && guard < 50; guard++) {
+      prependBacklogChunk();
+    }
+    scrollToBottom(true);
+  }));
+}
+
+/** 回放行规划：离线编轮（轮头入 state.turnHeaderBySeq，含 backlog 里的——补挂时才查得到折叠态）→ 尾段上栈。 */
+function appendReplay(rows) {
+  const plan = planReplay(rows, { nextKey, summarize: truncate, target: REPLAY_TAIL_ROWS, max: REPLAY_TAIL_MAX_ROWS });
+  state.roundSeq = plan.turns;
+  state.currentTurn = plan.turns;
+  for (const r of plan.ordered) if (r.kind === "turnHeader") state.turnHeaderBySeq.set(r.seq, r);
+  state.backlog = plan.ordered.slice(0, plan.start);
+  for (const row of plan.ordered.slice(plan.start)) appendRow(row);
+  updateHistoryMore();
+}
+
+/** 消息流里首个已渲染行的最前元素（user 行则是其钉卡占位）——backlog 补挂一律插在它前面。 */
+function topAnchor() {
+  const first = state.order.length ? state.rowMap.get(state.order[0]) : null;
+  const rowEl = first ? messagesEl().querySelector(`[data-key="${CSS.escape(String(first.key))}"]`) : null;
+  if (!rowEl) return null;
+  const prev = rowEl.previousElementSibling;
+  return prev && prev.classList.contains("pin-holder") ? prev : rowEl;
+}
+
+/** 从 backlog 末尾取一批（离已渲染顶部最近的行）插到消息流最前，滚动位置同步平移（视口里的内容不动）。 */
+function prependBacklogChunk() {
+  const el = messagesEl();
+  if (!state.backlog.length || !el) return;
+  let anchor = topAnchor();
+  if (!anchor) {
+    // 无已渲染行（短屏会话 / 清理竞态）：退到「上方还有更早消息」提示行作锚——backlog 非空时必有它
+    updateHistoryMore();
+    anchor = messagesEl().querySelector(".history-more");
+  }
+  // 仍无锚（消息区被清空的竞态）就放弃本次补挂：backlog 原样留着，下次滚动再来。
+  //   绝不能像旧实现那样 forEach(appendRow) 兜底——appendRow 追加到末尾，会把时间线整段写倒。
+  if (!anchor) return;
+  const from = Math.max(0, state.backlog.length - BACKLOG_CHUNK_ROWS);
+  const chunk = state.backlog.slice(from);
+  state.backlog = state.backlog.slice(0, from);
+  // ★ 关浏览器滚动锚定 + 手动平移：锚定调整在「同帧有程序化滚动」等情形被抑制，是否生效取决于帧内时序，
+  //   不可依赖；关掉后高度差全归我们补，视口内容恒不动。
+  const prevAnchorStyle = el.style.overflowAnchor;
+  el.style.overflowAnchor = "none";
+  const prevHeight = el.scrollHeight;
+  const keys = [];
+  for (const row of chunk) {
+    state.rowMap.set(row.key, row);
+    keys.push(row.key);
+    const wrap = buildRowEl(row);
+    // 归属轮已折叠 → 补挂的行同样隐藏（与 appendRow 的折叠续写一致）
+    if (state.turnHeaderBySeq.get(row.turn)?.collapsed) wrap.style.display = "none";
+    el.insertBefore(wrap, anchor); // 逐行插在锚前保持顺序；ensurePinHolder 把钉卡占位紧贴到行前
+    ensurePinHolder(row);
+  }
+  state.order = [...keys, ...state.order];
+  el.scrollTop += el.scrollHeight - prevHeight;
+  el.style.overflowAnchor = prevAnchorStyle;
+  updateHistoryMore();
+}
+
+/** 「上方还有更早的消息」提示行：backlog 非空时常驻消息流最前（点击=立即补挂；滚到顶部也自动补挂）。
+ *  没有它，尾段顶部看着就像对话开头——用户无从知道上面还有历史。 */
+function updateHistoryMore() {
+  const host = messagesEl();
+  let el = host.querySelector(".history-more");
+  if (!state.backlog.length) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "history-more";
+    el.addEventListener("click", () => prependBacklogChunk());
+    host.prepend(el);
+  }
+  el.textContent = S.rwHistoryMore(state.backlog.length);
+}
+
 // ———————— CC 风格思考动画行（对标「✳ Creating...」）————————
 // 常驻消息流末尾的动画行：busy 期间显示在最后一条消息下方（内容区里，非输入框上方），
 // 工具执行 / API 等待等「无动静」间隙也有可见生命感。appendRow 一律插到它之前，保证它恒为末行。
@@ -408,8 +509,9 @@ function appendRow(row) {
   //   「正在跟随」误判成「已离开」而自锁，流式期间永不自愈只能手动滚）。
   //   user 行 = 用户主动发言：发送即视为「要跟随最新内容」（对标 CC 发送即落底），不受视口位置影响。
   const stick = row.kind === "user" ? !state.replaying : stickNow();
-  // user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口
-  if (row.kind === "user") beginUserTurn(row.text);
+  // user 行 = turn 边界：先开新 turn（插折叠头），统一覆盖所有 row 入口。
+  //   例外：回放尾段行已由 planReplay 离线编好轮（折叠头自带上栈）——带 turn 入栈的 user 行不再开新轮。
+  if (row.kind === "user" && row.turn == null) beginUserTurn(row.text);
   if (row.turn == null) row.turn = state.currentTurn;
   state.order.push(row.key);
   state.rowMap.set(row.key, row);
@@ -552,7 +654,14 @@ function flush() {
 }
 
 function addInfo(text) {
-  appendRow({ key: nextKey(), kind: "info", text });
+  const row = { key: nextKey(), kind: "info", text };
+  // 回放进行中（如 host 回放收尾的「已载入会话」提示）：进缓冲跟随回放顺序，别抢在缓冲行前面上屏
+  if (state.replayBuf) {
+    state.replayBuf.rows.push(row);
+    state.replayBuf.byKey.set(row.key, row);
+    return;
+  }
+  appendRow(row);
 }
 
 // ★ 图片预览 chip：上传后在 composer 上方显示缩略图 + 文件名 + 可见 × 删除钮（data URL，CSP img-src data: 已放行）
@@ -692,6 +801,10 @@ function clearMessages() {
   state.roundSeq = 0;
   state.currentTurn = 0;
   state.turnHeaderBySeq = new Map();
+  // ★ 未挂载的更早历史与在途回放缓冲同属会话：一并作废（残留会让下个会话回放后「往上滚」冒出旧会话的行）
+  state.backlog = [];
+  state.replayBuf = null;
+  state.replaying = false;
   messagesEl().innerHTML = "";
   buildEmptyState();
   renderTodos();
@@ -767,6 +880,7 @@ el.style.display = state.order.length > 0 ? "none" : "";
 export {
   messagesEl, nearBottom, scrollToBottom,
   appendRow, updateRow, rebuildRow, removeRow,
+  finishReplay, updateHistoryMore,
   closeStreaming, ensureAssistantRow, closeThinking, ensureThinkingRow,
   scheduleFlush, flush, addInfo,
   appendImagePreview, clearPendingImages, appendRefChip, clearPendingRefs, clearMessages,

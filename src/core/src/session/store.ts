@@ -363,6 +363,31 @@ export type SessionSummary = {
     preview: string;
     /** 创建时的项目根绝对路径（getOrCreateSessionId 建档盖章；旧会话无此字段 → undefined）。 */
     projectRoot?: string;
+    /** 归档标记（state.archived === true；缺省/undefined = 未归档）。归档会话在历史抽屉收进折叠段，不改时间序。 */
+    archived?: boolean;
+};
+
+/**
+ * 历史会话索引项（列表首屏所需的轻量字段）：与 SessionSummary 的差别只是不带 messageCount——
+ * 消息数必须读完整 transcript 逐行数，是列表加载里唯一的「全量 IO」项，故拆出去按需取（countSessionMessages）。
+ */
+export type SessionIndexItem = Omit<SessionSummary, "messageCount">;
+
+/** user 消息 → 列表预览文本（多模态 parts 取纯文本视图；乱码过滤与标记）。 */
+const previewOfUserMsg = (msg: any): string => {
+    // ★ 多模态：content 可能是 parts 数组（贴图轮），取纯文本视图做预览
+    const t = (msgText(msg.content) || "（该条消息带图片附件）").replace(/\s+/g, " ").trim();
+    // ★ 乱码预览过滤：被错误解码的输入/输出会产生 U+FFFD 替换符（乱码不可恢复），
+    // 从 preview 中剥离并打标记，避免历史列表整片「�」影响可读性。
+    if (t.includes("\uFFFD")) {
+        const stripped = t.replace(/\uFFFD+/g, "");
+        const cleaned = stripped.trim();
+        // ★ 替换符占比过半 = 整条已不可读（实测旧测试会话：29 字符里 20 个替换符，残留是希腊/拉丁扩展
+        //   杂烩的字形汤）——如实标注无法显示，不再把残留拼出来恶心列表；少量乱码的正常消息仍保留可读部分。
+        const mostlyGarbage = t.length === 0 || (t.length - stripped.length) * 2 >= t.length;
+        return !cleaned || mostlyGarbage ? "（该条消息内容为乱码，无法正常显示）" : `（含乱码片段）${cleaned}`;
+    }
+    return t;
 };
 
 /**
@@ -389,7 +414,7 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
         // 元信息来自 <id>.state.json（缺失/损坏 → undefined，不阻断）
         const state: any = await readJSONFile<any>(getStatePath(sessionId));
 
-        // 消息数与首条 user 预览来自 <id>.jsonl
+        // 消息数与首条 user 预览来自 <id>.jsonl（读全文逐行数消息——VSCode 面板列表不走这里，见 listSessionIndex）
         let messageCount = 0;
         let preview = "";
         try {
@@ -401,39 +426,155 @@ export const listSessions = async (): Promise<SessionSummary[]> => {
                 try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
                 if (typeof msg?.dscEvent === 'string') continue; // ★ 事件行（事件日志化）不计入消息数
                 messageCount++;
-                if (!preview && msg?.role === "user" && msg.content != null) {
-                    // ★ 多模态：content 可能是 parts 数组（贴图轮），取纯文本视图做预览
-                    const t = (msgText(msg.content) || "（该条消息带图片附件）").replace(/\s+/g, " ").trim();
-                    // ★ 乱码预览过滤：被错误解码的输入/输出会产生 U+FFFD 替换符（乱码不可恢复），
-                    // 从 preview 中剥离并打标记，避免历史列表整片「�」影响可读性。
-                    if (t.includes("\uFFFD")) {
-                        const cleaned = t.replace(/\uFFFD+/g, "").trim();
-                        preview = cleaned ? `（含乱码片段）${cleaned}` : "（该条消息内容为乱码，无法正常显示）";
-                    } else {
-                        preview = t;
-                    }
-                }
+                if (!preview && msg?.role === "user" && msg.content != null) preview = previewOfUserMsg(msg);
             }
         } catch { /* 无 jsonl（空会话）→ 0 条 */ }
 
         // updatedAt：优先 state.updatedAt，回退目录 mtime
-        let updatedAt: string | undefined = state?.updatedAt;
-        if (!updatedAt) {
-            try { updatedAt = (await fs.stat(dirPath)).mtime.toISOString(); } catch { /* 忽略 */ }
-        }
         summaries.push({
             sessionId,
             title: typeof state?.title === "string" ? state.title : undefined,
             createAt: state?.createAt,
-            updatedAt,
+            updatedAt: state?.updatedAt ?? (await dirMtime(dirPath)),
             messageCount,
-            preview: preview.slice(0, 80),
+            preview: clipPreview(preview),
             projectRoot: typeof state?.projectRoot === "string" ? state.projectRoot : undefined,
+            archived: state?.archived === true,
         });
     }
     // 按 updatedAt 降序（最新在前）；无时间者沉底
     summaries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     return summaries;
+};
+
+// ============ 历史会话索引（VSCode 面板列表懒加载） ============
+
+/** 列表预览截断长度。 */
+const PREVIEW_MAX_CHARS = 80;
+/** 预览截断：与 @/session/content.ts 的 sliceHeadNoSplit 同口径（切点前一位是高代理则退一位）。
+ *  此处不直接 import 那个助手——content.ts 反向依赖本模块（getRollingState），会形成环依赖；
+ *  本函数只服务列表预览（不进 API 消息），三行内联比造环更稳。 */
+const clipPreview = (t: string): string => {
+    if (t.length <= PREVIEW_MAX_CHARS) return t;
+    const prev = t.charCodeAt(PREVIEW_MAX_CHARS - 1);
+    return t.slice(0, prev >= 0xd800 && prev <= 0xdbff ? PREVIEW_MAX_CHARS - 1 : PREVIEW_MAX_CHARS);
+};
+/** 索引取预览只读 transcript 头部：首条 user 消息通常就在文件头，不必把整个会话读进内存。 */
+const PREVIEW_HEAD_BYTES = 64 * 1024;
+/** 头部没找到首条 user（首条消息带大图/超长粘贴，单行就超头部）时的放宽上限；仍没有则无预览。 */
+const PREVIEW_WIDE_BYTES = 1024 * 1024;
+/** 索引并发度：每会话两个小文件读（state.json + transcript 头），串行在会话多时拖慢面板首开。 */
+const INDEX_CONCURRENCY = 16;
+
+/** 目录 mtime 的 ISO 串（目录不可 stat → undefined）：state.updatedAt 缺失时的排序兜底。 */
+const dirMtime = async (dir: string): Promise<string | undefined> => {
+    try { return (await fs.stat(dir)).mtime.toISOString(); } catch { return undefined; /* 目录也不可 stat */ }
+};
+
+/** 读文件头 bytes 字节并按完整行切分：末尾半行丢弃——切点可能落在多字节字符或 JSON 中间。 */
+const readHeadLines = async (file: string, bytes: number): Promise<string[]> => {
+    const fh = await fs.open(file, "r");
+    try {
+        const buf = Buffer.alloc(bytes);
+        const { bytesRead } = await fh.read(buf, 0, bytes, 0);
+        const text = buf.subarray(0, bytesRead).toString("utf-8");
+        const cut = bytesRead < bytes ? -1 : text.lastIndexOf("\n");
+        return (cut >= 0 ? text.slice(0, cut) : text).split("\n");
+    } finally {
+        await fh.close();
+    }
+};
+
+/** 首条 user 消息预览：只读 transcript 头部（先头部上限，没找到再放宽一档）。无 transcript → 空串。 */
+const readPreview = async (sessionId: string): Promise<string> => {
+    const file = getTranscriptPath(sessionId);
+    try {
+        for (const bytes of [PREVIEW_HEAD_BYTES, PREVIEW_WIDE_BYTES]) {
+            for (const line of await readHeadLines(file, bytes)) {
+                if (!line.trim()) continue;
+                let msg: any;
+                try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
+                if (typeof msg?.dscEvent === 'string') continue; // 事件行不是消息
+                if (msg?.role === "user" && msg.content != null) return clipPreview(previewOfUserMsg(msg));
+            }
+        }
+    } catch { /* 无 jsonl（空会话）→ 无预览 */ }
+    return "";
+};
+
+/**
+ * 枚举本工作区的会话索引（VSCode 面板历史列表用）：排序与字段语义同 listSessions，只是不含 messageCount。
+ * ★ 轻量：元信息读 state.json（小文件）、预览只读 transcript 头部——不读任何会话全文。listSessions 会把每个
+ *   会话的完整 transcript 读进内存数行数，会话越多列表越慢（实测 95 个会话要全量读 14MB）；列表打开只需要
+ *   「标题 + 时间」认出会话，消息数属明细，由 countSessionMessages 按可见行另取。
+ * 单个会话解析失败静默跳过，绝不抛错。
+ */
+export const listSessionIndex = async (): Promise<SessionIndexItem[]> => {
+    const root = getWorkspaceSessionsDir();
+    let entries: any[];
+    try {
+        entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+        return []; // 目录不存在（从未建过会话）→ 空
+    }
+    // 纵深防御：跳过非法文件夹名（合法 sessionId 仅 [A-Za-z0-9_-]）
+    const ids = entries.filter((e) => e.isDirectory() && isSafeSessionId(e.name)).map((e) => e.name);
+    const items: SessionIndexItem[] = [];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+        for (;;) {
+            const i = next++;
+            if (i >= ids.length) return;
+            const sessionId = ids[i];
+            try {
+                const [state, preview] = await Promise.all([
+                    readJSONFile<any>(getStatePath(sessionId)),
+                    readPreview(sessionId),
+                ]);
+                items.push({
+                    sessionId,
+                    title: typeof state?.title === "string" ? state.title : undefined,
+                    createAt: state?.createAt,
+                    updatedAt: state?.updatedAt ?? (await dirMtime(path.join(root, sessionId))),
+                    preview,
+                    projectRoot: typeof state?.projectRoot === "string" ? state.projectRoot : undefined,
+                    archived: state?.archived === true,
+                });
+            } catch { /* 单个会话解析失败 → 跳过，不阻断其余 */ }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(INDEX_CONCURRENCY, ids.length) }, worker));
+    // 按 updatedAt 降序（最新在前）；无时间者沉底
+    items.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return items;
+};
+
+/** 会话消息数（列表懒加载明细）：读完整 transcript 数消息行，事件行不计；无 transcript / 非法 id → 0。 */
+export const countSessionMessages = async (sessionId: string): Promise<number> => {
+    if (!isSafeSessionId(sessionId)) return 0; // 路径穿越硬守（getTranscriptPath 亦会 assert，这里先判免抛）
+    try {
+        const raw = await fs.readFile(getTranscriptPath(sessionId), "utf-8");
+        let count = 0;
+        for (const s of raw.split("\n")) {
+            const line = s.trim();
+            if (!line) continue;
+            let msg: any;
+            try { msg = JSON.parse(line); } catch { continue; } // 跳过损坏行
+            if (typeof msg?.dscEvent === 'string') continue;
+            count++;
+        }
+        return count;
+    } catch {
+        return 0; // 无 jsonl（空会话）
+    }
+};
+
+/** 会话是否仍在盘上（state.json 或 transcript 任一存在）：续接/复活前的廉价存在性检查，无建目录等副作用。 */
+export const sessionExists = async (sessionId: string): Promise<boolean> => {
+    if (!isSafeSessionId(sessionId)) return false;
+    const exists = (p: string): Promise<boolean> => fs.access(p).then(() => true, () => false);
+    const [state, transcript] = await Promise.all([exists(getStatePath(sessionId)), exists(getTranscriptPath(sessionId))]);
+    return state || transcript;
 };
 
 /**
@@ -485,6 +626,31 @@ export const renameSession = async (sessionId: string, title: string): Promise<v
         const store = await readStore(sessionId);
         store.title = clean;
         store.updatedAt = new Date().toISOString();
+        await writeStore(sessionId, store);
+    });
+};
+
+/**
+ * 归档 / 取消归档会话：标记写入 <id>.state.json 的 archived 字段。与重命名同款写路径
+ * （会话写锁串行化），但刻意【不动 updatedAt】——归档只改列表分组（活跃段 → 折叠段），
+ * 不改会话自身的时间序，两段内部仍按原 updatedAt 降序。
+ * 取消归档时 delete 掉字段而非写 false：state.json 保持最小，缺省即未归档。
+ * ★ 只有 transcript、没有 state.json 的旧会话：readStore 返回 {}，直接写出会丢 updatedAt/createAt
+ *   元信息（列表时间回退到目录 mtime，且该 mtime 已被本次写刷新）——写前从目录 mtime 补齐，
+ *   兑现「归档动作本身不改变时间序」。
+ */
+export const setSessionArchived = async (sessionId: string, archived: boolean): Promise<void> => {
+    assertSafeSessionId(sessionId); // 路径穿越硬守
+    return withStoreLock(sessionId, async () => {
+        const store = await readStore(sessionId);
+        if (typeof store.updatedAt !== "string" || typeof store.createAt !== "string") {
+            let dirIso = "";
+            try { dirIso = (await fs.stat(getSessionsDirPath(sessionId))).mtime.toISOString(); } catch { /* 目录缺失则用当下 */ }
+            if (typeof store.updatedAt !== "string") store.updatedAt = dirIso || new Date().toISOString();
+            if (typeof store.createAt !== "string") store.createAt = dirIso || store.updatedAt;
+        }
+        if (archived) store.archived = true;
+        else delete store.archived;
         await writeStore(sessionId, store);
     });
 };

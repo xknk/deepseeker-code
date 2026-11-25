@@ -130,6 +130,9 @@ const ZH = {
   mdPlanOverlay: "📋 实施方案",
 
   // ———————— panels（pn*） ————————
+  pnTitle: "历史会话",
+  pnSearch: "搜索历史会话…",
+  pnMore: (shown, total) => `已显示 ${shown} / ${total} · 滚动加载更多`,
   pnClose: "关闭",
   pnForkHint: "选择分叉点：保留该轮及之前的历史，之后重新走向",
   pnForkEmpty: "当前会话暂无可分叉的检查点",
@@ -144,6 +147,9 @@ const ZH = {
   pnCancel: "取消",
   pnRename: "重命名",
   pnDelete: "删除",
+  pnArchive: "归档（收进列表底部折叠段）",
+  pnArchived: "归档会话",
+  pnUnarchive: "取消归档（恢复到列表）",
   pnMsgCount: (n) => `${n} 条`,
   relNow: "刚刚",
   relMin: (m) => `${m} 分钟前`,
@@ -176,6 +182,7 @@ const ZH = {
   cpSelTitle: "编辑器选中的代码将随下一条消息发给模型（× 可忽略）",
   rwCopyMsg: "复制回复原文（Markdown）",
   rwCopyCode: "复制代码",
+  rwHistoryMore: (n) => `⋯ 上方还有 ${n} 行更早的消息 · 滚到顶部自动加载`,
 
   // ———————— events（ev*） ————————
   evPlanEnter: (reason) => `📋 模型请求进入计划模式${reason ? `：${reason}` : ""}`,
@@ -351,6 +358,9 @@ const EN = {
   mdPlanOverlay: "📋 Implementation plan",
 
   // ———————— panels ————————
+  pnTitle: "Chat history",
+  pnSearch: "Search sessions...",
+  pnMore: (shown, total) => `${shown} of ${total} shown · scroll to load more`,
   pnClose: "Close",
   pnForkHint: "Pick a fork point: history up to that turn is kept, everything after diverges",
   pnForkEmpty: "No checkpoints to fork from in this conversation",
@@ -365,6 +375,9 @@ const EN = {
   pnCancel: "Cancel",
   pnRename: "Rename",
   pnDelete: "Delete",
+  pnArchive: "Archive (collapse into the bottom section)",
+  pnArchived: "Archived sessions",
+  pnUnarchive: "Restore to list",
   pnMsgCount: (n) => `${n} msg`,
   relNow: "just now",
   relMin: (m) => `${m} min ago`,
@@ -397,6 +410,7 @@ const EN = {
   cpSelTitle: "Selected code in the editor will be attached to your next message (× to dismiss)",
   rwCopyMsg: "Copy message as markdown",
   rwCopyCode: "Copy code",
+  rwHistoryMore: (n) => `⋯ ${n} earlier message rows above · scroll to the top to load`,
 
   // ———————— events ————————
   evPlanEnter: (reason) => `📋 Model requested plan mode${reason ? `: ${reason}` : ""}`,

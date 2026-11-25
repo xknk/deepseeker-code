@@ -7,6 +7,8 @@
  *  4) ★ 一个聊天 Tab = 一个 WebviewPanel + 一个独立 ChatHost（会话宿主）：
  *     「新会话」在已有对话的 Tab 里触发时**开新页签**，旧对话原样保留、仍可切回续聊
  *     （与 Claude Code 的多会话页签形态一致）；空白 Tab 原地复用，不堆积空页。
+ *  5) ★ 页签复活（WebviewPanelSerializer）：聊天页签随编辑器布局保存，窗口重载/重启后由 VS Code 经
+ *     onWebviewPanel 激活事件唤醒扩展、原位复活页签并各回各的会话（见 doActivate 开头的注册处）。
  */
 import * as vscode from "vscode";
 import * as fs from "fs";
@@ -38,6 +40,8 @@ let listCommandsForWebview: () => Array<{ name: string; description: string }> =
 let listOutputStylesForWebview: () => Array<{ name: string; description: string }> = () => [];
 let readTrustedDirsFn: () => Promise<string[]> = async () => [];
 let untrustDirFn: (dir: string) => Promise<boolean> = async () => false;
+/** 会话存在性检查（页签复活时校验序列化态里的会话 id；activate 第 4 步动态 import 后赋值）。 */
+let sessionExistsFn: (id: string) => Promise<boolean> = async () => false;
 /** /model 选择器的内置候选清单（activate 第 4 步动态 import 后赋值）。 */
 let selectableModels: string[] = ["deepseek-flash", "deepseek-v4-pro", "deepseek-flash-vision-exp"];
 /** 全局默认模型名（core MODEL_NAME 的回退快照：env 未配时为 deepseek-flash）。状态快照下发「生效模型」用。 */
@@ -69,8 +73,25 @@ const syncBusyStatusBar = (): void => {
 let waitEngine: () => Promise<void> = async () => {};
 let engineSettled = false;
 
+// —— 激活结局闸门（页签复活用，见 WebviewPanelSerializer 注册处）——
+/** pending=激活进行中；ready=host 构造器与 workspaceState 已就绪；aborted=无工作区/切根失败，扩展不可用。 */
+let activationOutcome: "pending" | "ready" | "aborted" = "pending";
+const activationWaiters: Array<(outcome: "ready" | "aborted") => void> = [];
+const settleActivation = (outcome: "ready" | "aborted"): void => {
+  if (activationOutcome !== "pending") return;
+  activationOutcome = outcome;
+  for (const w of activationWaiters.splice(0)) w(outcome);
+};
+const activationSettled = (): Promise<"ready" | "aborted"> =>
+  activationOutcome === "pending"
+    ? new Promise((resolve) => activationWaiters.push(resolve))
+    : Promise.resolve(activationOutcome);
+
 /** ChatHost 构造器（activate 第 5 步动态 import 后赋值：host 及其 core 依赖必须在 chdir 之后加载）。 */
 let newChatHost: ((callbacks: ChatHostCallbacks) => ChatHost) | null = null;
+
+/** 页签序列化态（随编辑器布局保存，窗口重载/重启后经 WebviewPanelSerializer 原样交回）：只存会话 id。 */
+type ChatTabState = { sessionId?: string };
 
 /**
  * 聊天页签（多开）：一个 Tab = 一个面板 + 一个会话宿主，各自独立会话/模式/模型。
@@ -81,6 +102,9 @@ interface ChatTab {
   host: ChatHost;
   /** panel 已销毁（关 Tab）：之后的 in-flight 事件直接丢弃（host 已 abort，防投递报错）。 */
   disposed: boolean;
+  /** webview 已发过 ready（此后直发消息必有监听者）；ready 前的开窗类请求记在 pendingShowSessions。 */
+  webviewReady?: boolean;
+  pendingShowSessions?: boolean;
 }
 
 /** 全部存活的聊天页签（尾部 = 最近创建）。 */
@@ -332,8 +356,12 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri, locale: "
 
 // —— 面板创建（主编辑器区多 Tab） ——
 
-/** ChatHost 事件回调（per-Tab 定向投递 + 会话 id 持久化按活动页签收口）。 */
-const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
+/**
+ * ChatHost 事件回调（per-Tab 定向投递 + 会话 id 持久化按活动页签收口）。
+ * revived：窗口重载/重启后复活的页签——只回序列化态里自己的会话，不回落 workspaceState 的活动会话
+ * （活动会话可能正属于另一个复活页签，回落会让两个页签续接同一会话）。新建页签才享受「首个页签恢复活动会话」。
+ */
+const makeCallbacks = (tab: ChatTab, revived?: ChatTabState): ChatHostCallbacks => ({
   sink: (evt) => deliverTo(tab, { type: "evt", evt }),
   onBusy: () => postState(tab),
   onQuestion: (req) => deliverTo(tab, { type: "question", req }),
@@ -343,11 +371,17 @@ const makeCallbacks = (tab: ChatTab): ChatHostCallbacks => ({
   onPlan: (plan) => deliverTo(tab, { type: "plan", plan }),
   onSessionReset: () => deliverTo(tab, { type: "sessionReset" }),
   // ★ 活动会话 id 持久化（workspaceState，per-workspace 跨重载）：仅活动页签写——多 Tab 各自续接
-  //   自己的会话；重载后只恢复最近活动的那个（其余会话经 /sessions 续接）。
+  //   自己的会话；没有页签被复活的窗口重载/重启，首个新建页签恢复最近活动的那个（其余经 /sessions 续接）。
   getPersistedSessionId: () =>
-    !persistedRestored ? workspaceState?.get<string | undefined>("deepseekerCode.activeSessionId") : undefined,
+    revived
+      ? revived.sessionId
+      : !persistedRestored
+        ? workspaceState?.get<string | undefined>("deepseekerCode.activeSessionId")
+        : undefined,
   setPersistedSessionId: (id) => {
     if (activeTab === tab) void workspaceState?.update("deepseekerCode.activeSessionId", id ?? undefined);
+    // ★ 页签复活用的序列化态只能由 webview 自己存（vscode.setState，随编辑器布局保存）：会话一变就推给它
+    deliverTo(tab, { type: "sessionState", sessionId: id ?? null });
   },
   // ★ 引擎就绪闸门：后台 initEngine 未完成时提示一句再等（MCP 工具/自定义命令注入后才跑 agent）。
   waitEngineReady: async () => {
@@ -367,31 +401,21 @@ const resolveDefaultLocale = (): "zh" | "en" => {
 };
 
 /**
- * 新建聊天页签（独立 ChatHost，空白会话）。
- * 落点：显式 col > 首个聊天页签所在列（同组新页签，聊天堆在一起）> openBeside 配置。
+ * 把一个 webview 面板收编为聊天页签（新建与复活共用）：会话宿主、事件回调、消息路由、视图状态与销毁清理、
+ * 页签默认值。窗口重载/重启后复活的面板走同一套接线——复活面板的 webview 内容不随布局保存（序列化的只有
+ * viewType/标题/扩展自定义状态），必须在这里重设 html，之后 webview 发 ready → 回放会话，与新建无异。
+ * revived：复活页签的序列化态（该页签自己的会话 id；没有=空白会话）。缺省=新建页签。
  */
-const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): ChatTab => {
-  const openBeside = vscode.workspace
-    .getConfiguration("deepseekerCode")
-    .get<boolean>("openBeside", true);
-  const defaultLocale = resolveDefaultLocale(); // renderHtml 的 <html lang> 与 host 初始语言同源
-  const target =
-    col ??
-    tabs[0]?.panel.viewColumn ??
-    (openBeside ? vscode.ViewColumn.Beside : vscode.ViewColumn.One);
-  const panel = vscode.window.createWebviewPanel(
-    "deepseekerCode.chat",
-    "DeepSeeker-Code",
-    target,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist")],
-    },
-  );
+const adoptPanel = (
+  context: vscode.ExtensionContext,
+  panel: vscode.WebviewPanel,
+  revived?: ChatTabState,
+): ChatTab => {
   const tab: ChatTab = { panel, host: null as unknown as ChatHost, disposed: false };
   if (!newChatHost) throw new Error(envT("hostNotLoaded"));
-  tab.host = newChatHost(makeCallbacks(tab));
+  // ★ host 先于 html 与消息监听就位：webview 一加载就会发 ready，晚注册会丢掉首包（回放/状态快照全失）
+  tab.host = newChatHost(makeCallbacks(tab, revived));
+  const defaultLocale = resolveDefaultLocale(); // renderHtml 的 <html lang> 与 host 初始语言同源
   // ★ 顶部页卡图标（dist/icon.svg）：与工具栏品牌一致的 sparkle
   panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "dist", "icon.svg");
   panel.webview.html = renderHtml(panel.webview, context.extensionUri, defaultLocale);
@@ -415,22 +439,64 @@ const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): C
   if (tabs.length > 1) panel.title = `DeepSeeker-Code ${tabs.length}`;
   // ★ 仅首个页签消费 workspaceState 里的活动会话 id（后续页签一律空白会话，避免多 host 写同一会话）
   persistedRestored = true;
-  // ★ 锁定聊天所在编辑器组：避免「再打开一个文件」时文件落到对话侧遮挡会话。
-  //   组一旦上锁，新文件改投到未锁的编辑器组（文件侧），聊天 tab 始终留在原位不被覆盖。
-  //   仅在 openBeside（聊天独占侧栏列）时锁定——若聊天与文件同列（openBeside=false），
-  //   锁定会迫使所有文件开到新组，反而干扰正常编辑。createWebviewPanel 已聚焦聊天组，
-  //   故 lockEditorGroup 命中正确组；仅在创建时锁（reveal 走 preserveFocus，活动组非聊天组）。
-  if (openBeside) {
-    void vscode.commands
-      .executeCommand("workbench.action.lockEditorGroup")
-      .then(undefined, () => {
-        /* 命令不可用时静默（极旧版本/被禁用） */
-      });
-  }
   // 页签默认值：语言/模型（每个 Tab 的 host 各自应用同一份持久化偏好）
   tab.host.setLocale(defaultLocale);
   const savedModel = workspaceState?.get<string>("deepseekerCode.model");
   if (savedModel) tab.host.setModel(savedModel);
+  return tab;
+};
+
+/**
+ * 锁定聊天所在编辑器组：避免「再打开一个文件」时文件落到对话侧遮挡会话。
+ *   组一旦上锁，新文件改投到未锁的编辑器组（文件侧），聊天 tab 始终留在原位不被覆盖。
+ *   仅在 openBeside（聊天独占侧栏列）时锁定——若聊天与文件同列（openBeside=false），
+ *   锁定会迫使所有文件开到新组，反而干扰正常编辑。createWebviewPanel 已聚焦聊天组，
+ *   故 lockEditorGroup 命中正确组；仅在创建时锁（reveal 走 preserveFocus，活动组非聊天组）。
+ * ★ 复活的页签不重锁：它落回的编辑器组带着布局里保存的锁状态原样恢复。
+ */
+const lockEditorGroup = (): void => {
+  void vscode.commands
+    .executeCommand("workbench.action.lockEditorGroup")
+    .then(undefined, () => {
+      /* 命令不可用时静默（极旧版本/被禁用） */
+    });
+};
+
+/**
+ * 已有的空白分栏（新建聊天页签时优先落进去，不再另切一列）。
+ * ★ 旧版页签不随布局保存：重开窗口后它独占的那一列被原样恢复成「空白且上锁」的编辑器组，看着就是一块
+ *   黑屏——聊天下次打开落回这一列，那块空白就地治好。用户自己留的空分栏同理复用。
+ */
+const pickBlankColumn = (): vscode.ViewColumn | undefined => {
+  const groups = vscode.window.tabGroups.all;
+  if (groups.length < 2) return undefined; // 只有一个组：交给 VS Code 默认落点
+  return groups.find((g) => g.tabs.length === 0)?.viewColumn;
+};
+
+/**
+ * 新建聊天页签（独立 ChatHost，空白会话）。
+ * 落点：显式 col > 首个聊天页签所在列（同组新页签，聊天堆在一起）> 已有空白分栏 > openBeside 配置。
+ */
+const createTab = (context: vscode.ExtensionContext, col?: vscode.ViewColumn): ChatTab => {
+  const openBeside = vscode.workspace
+    .getConfiguration("deepseekerCode")
+    .get<boolean>("openBeside", true);
+  const target =
+    col ??
+    tabs[0]?.panel.viewColumn ??
+    (openBeside ? pickBlankColumn() ?? vscode.ViewColumn.Beside : vscode.ViewColumn.One);
+  const panel = vscode.window.createWebviewPanel(
+    "deepseekerCode.chat",
+    "DeepSeeker-Code",
+    target,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist")],
+    },
+  );
+  const tab = adoptPanel(context, panel);
+  if (openBeside) lockEditorGroup();
   return tab;
 };
 
@@ -466,11 +532,11 @@ const startNewSession = async (context: vscode.ExtensionContext, tab: ChatTab): 
 
 // —— webview → host ——
 
+/** 推送历史会话索引（轻量：标题/预览/时间；消息数由 webview 按可见行另经 countSessionMessages 懒取）。 */
 const sendSessions = (tab: ChatTab): void => {
   void (async () => {
     try {
-      const sessions = (await tab.host.listSessions()) ?? [];
-      deliverTo(tab, { type: "sessions", sessions });
+      deliverTo(tab, { type: "sessions", sessions: (await tab.host.listSessionIndex()) ?? [] });
     } catch {
       deliverTo(tab, { type: "sessions", sessions: [] });
     }
@@ -524,16 +590,25 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
   const t = makeT(() => h.currentLocale);
   switch (type) {
     case "ready":
-      // 前端就绪（panel 首次加载/webview 重载）：状态快照 → 重放活动会话历史 → 重广播挂起交互。
+      // 前端就绪（panel 首次加载/webview 重载/页签复活）：状态快照 → 重放活动会话历史 → 重广播挂起交互。
       //  串行顺序：先重放（含清屏）后重广播，避免增量/交互被 replayCurrentSession 的清屏擦掉。
       void (async () => {
+        tab.webviewReady = true;
         postState(tab);
+        // 复活/重载的页签在 webview 加载前就已带着会话 id（host 构造时取回），setPersistedSessionId 那条推送
+        // 早于 webview 就绪会丢——这里补推一次，让 webview 把当前会话 id 存进自己的序列化态
+        deliverTo(tab, { type: "sessionState", sessionId: h.activeSessionId });
         await h.replayCurrentSession();
         for (const m of h.collectPendingUI()) deliverTo(tab, m);
         // 自定义斜杠命令目录（引擎后台加载晚于面板打开时由此补推；engineSettled 后 listCommands 已就绪）
         deliverTo(tab, { type: "commands", commands: listCommandsForWebview().map((c) => ({ name: c.name, description: c.description })) });
         // B3 书签清单（globalState 同步读，无延迟）
         pushBookmarks(tab);
+        // 历史抽屉的开窗请求早于 webview 就绪（命令面板刚建页签就点）：等回放完再开，免得消息落在加载前丢掉
+        if (tab.pendingShowSessions) {
+          tab.pendingShowSessions = false;
+          deliverTo(tab, { type: "showSessions" });
+        }
       })();
       break;
     case "localObs": {
@@ -646,6 +721,22 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
     case "listSessions":
       sendSessions(tab);
       break;
+    case "countSessionMessages": {
+      // ★ 历史抽屉懒加载明细：webview 把「已渲染但还没有消息数」的会话 id 批量发来。消息数须读完整
+      //   transcript，只对可见行取；host 侧按文件 size+mtime 缓存，反复开列表不重读全文。
+      const ids = (Array.isArray(msg.ids) ? (msg.ids as unknown[]) : [])
+        .filter((x): x is string => typeof x === "string")
+        .slice(0, 200);
+      if (ids.length) {
+        void h.countMessages(ids).then(
+          (counts) => deliverTo(tab, { type: "sessionCounts", counts }),
+          () => {
+            /* 计数失败不提示：行尾只是少一个数字 */
+          },
+        );
+      }
+      break;
+    }
     case "listForkAnchors":
       void (async () => {
         const anchors = (await h.listForkAnchors()) ?? [];
@@ -814,6 +905,14 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
         finally { sendSessions(tab); }
       })();
       break;
+    case "archiveSession":
+      // ★ 历史抽屉折叠段：归档/取消归档只改 state.archived 标记，列表刷新由 sendSessions 推送
+      void (async () => {
+        try { await h.archiveSession(String(msg.id ?? ""), msg.archived === true); }
+        catch (e) { void vscode.window.showErrorMessage(t("renameFail")(e instanceof Error ? e.message : String(e))); }
+        finally { sendSessions(tab); }
+      })();
+      break;
     case "deleteSession":
       void (async () => {
         try { await h.deleteSession(String(msg.id ?? "")); }
@@ -888,9 +987,51 @@ const handleMessage = (tab: ChatTab, msg: Record<string, unknown>): void => {
 
 // —— 激活 ——
 
+/**
+ * 激活入口：真正流程在 doActivate。这里只兜一件事——激活中途抛错时放行等待中的页签复活请求
+ * （否则那个页签永远停在空白，见 doActivate 开头注册的 WebviewPanelSerializer）。
+ */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    await doActivate(context);
+  } catch (e) {
+    settleActivation("aborted");
+    throw e;
+  }
+}
+
+async function doActivate(context: vscode.ExtensionContext): Promise<void> {
   context0 = context;
   setVscodeLanguage(vscode.env.language); // 宿主侧文案（命令面板/通知）按 VS Code 显示语言
+  activationOutcome = "pending"; // 同一宿主进程内被停用后再次激活：结局闸门重新计票
+
+  // ★ 页签复活（窗口重载 / 关掉 VS Code 再开）：编辑区 webview 页签默认随布局保存，但能否复活取决于扩展
+  //   有没有注册序列化器——没注册时页签在恢复时被丢弃，它独占的（已上锁的）编辑器组却被原样恢复成一个
+  //   空白组，看上去就是「重开后 agent 界面黑屏」。注册后页签原位复活：重设 webview 内容 → ready →
+  //   回放该页签自己的会话。配套的激活事件 onWebviewPanel:deepseekerCode.chat 在 package.json 显式声明
+  //   （命令的隐式激活不覆盖它；不声明 VS Code 不会为复活唤醒扩展，页签永远等不到序列化器）。
+  //   先于工作区校验注册：复活请求可能在 activate 进行中就到达，deserializeWebviewPanel 里等激活结局再定夺。
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer("deepseekerCode.chat", {
+      deserializeWebviewPanel: async (panel, state) => {
+        // VS Code 在被序列化的页签首次可见时才调用本回调（隐藏在别的页签后面的先不复活）
+        const outcome = await activationSettled();
+        // 激活中止（无工作区 / 切根失败 / 中途抛错）：扩展在这个窗口里不可用，复活出来的页签无处可挂——
+        // 关掉它，别留一块空白（错误原因已由激活流程弹过通知）
+        if (outcome !== "ready" || !newChatHost) {
+          panel.dispose();
+          return;
+        }
+        // state=该页签 webview 自己经 vscode.setState 存下的会话 id（host 每次切会话都推给 webview，见
+        // makeCallbacks.setPersistedSessionId）：每个页签各回各的会话。
+        const saved = (state ?? {}) as Partial<ChatTabState>;
+        const sid = typeof saved.sessionId === "string" ? saved.sessionId : "";
+        // 会话已被删除（比如在别的页签里删过）：按空白会话复活，不续接一个不存在的 id
+        adoptPanel(context, panel, sid && (await sessionExistsFn(sid)) ? { sessionId: sid } : {});
+      },
+    }),
+  );
+
   // —— 1. 工作区校验 + 主根解析（持久化优先，否则按活动编辑器/folder[0] 解析）——
   //  ★ chdir 在此完成（先于 core import）：applyProjectRoot 失败即中止激活。
   //  ★ 主根持久化（workspaceState）：Reload Window 后 activeTextEditor 常为空、会回退 folder[0]，
@@ -900,10 +1041,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const initialRoot = persistedRoot && folderPaths.has(persistedRoot) ? persistedRoot : resolveProjectRoot();
   if (!initialRoot) {
     workspaceRoot = null;
+    settleActivation("aborted");
     void vscode.window.showErrorMessage(envT("noWorkspace"));
     return;
   }
-  if (!applyProjectRoot(initialRoot)) return;
+  if (!applyProjectRoot(initialRoot)) {
+    settleActivation("aborted");
+    return;
+  }
   void context.workspaceState.update("deepseekerCode.activeProjectRoot", initialRoot);
   cleanImageTmp(); // 激活期清扫：上次会话/崩溃残留在用户临时目录里的过期贴图（>24h）
 
@@ -934,7 +1079,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // —— 4. 加载 core 模块（chdir 已完成；但 config 可能已被顶部静态 import 链提前加载，
   //     模块加载期 cwd 口径不可信——存储分桶键以下方钩子重导为准，勿依赖此处 cwd） ——
-  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }, { appConfig: coreAppConfig, deriveWorkspaceKey }] = await Promise.all([
+  const [{ initEngine }, { agentTools }, { setAllowedWorkspaceRoots }, { trustDir, readTrustedDirs, untrustDir }, { listCommands }, inspect, { listOutputStyles }, { SELECTABLE_MODELS, MODEL_NAME }, { appConfig: coreAppConfig, deriveWorkspaceKey }, { sessionExists: coreSessionExists }] = await Promise.all([
     import("@/bootstrap.ts"),
     import("@/tool/index.ts"),
     import("@/tool/guard.ts"),
@@ -944,6 +1089,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     import("@/outputStyles/registry.ts"),
     import("@/llm/createModel.ts"),
     import("@/config/index.ts"),
+    import("@/session/store.ts"),
   ]);
   // ★ 存储隔离键重导钩子注入（applyProjectRoot 切根时把分桶键跟随新主根，见该函数注释）
   rekeyWorkspaceStorage = (root: string) => {
@@ -969,6 +1115,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   listOutputStylesForWebview = listOutputStyles;
   readTrustedDirsFn = readTrustedDirs;
   untrustDirFn = untrustDir;
+  sessionExistsFn = coreSessionExists;
   selectableModels = SELECTABLE_MODELS;
   modelName = MODEL_NAME;
 
@@ -1006,6 +1153,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const { ChatHost } = await import("./host.js");
   newChatHost = (cb) => new ChatHost(cb);
   workspaceState = context.workspaceState;
+  settleActivation("ready"); // 此刻起等待中的页签复活请求可以收编面板（见 doActivate 开头的序列化器）
 
   // ★ 「打开左右对比」虚拟文档供给：deepseeker-diff:/<safeKey>/<文件名> → 修改前快照内容
   //  （文件名带真实扩展名，左侧虚拟文档的语言高亮与右侧一致）。
@@ -1052,8 +1200,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.commands.registerCommand("deepseekerCode.listSessions", () => {
+      // 命令面板「历史会话」：调出聊天页签并打开历史抽屉（抽屉打开时自行请求索引）。
+      // 页签刚建、webview 未就绪时先记下，ready 流程回放完再开（见 handleMessage 的 ready 分支）。
       const t = revealTab(context);
-      sendSessions(t);
+      if (t.webviewReady) deliverTo(t, { type: "showSessions" });
+      else t.pendingShowSessions = true;
     }),
     vscode.commands.registerCommand("deepseekerCode.selectModel", () => {
       const t = revealTab(context); // 先 reveal 面板，再投递面板内选择器
@@ -1178,6 +1329,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  settleActivation("aborted"); // 激活未走完就被停用：别让等待中的页签复活请求挂到天荒地老
   cleanImageTmp(); // 插件卸载/窗口关闭时清扫过期贴图临时文件（>24h，见 cleanImageTmp 注释）
   try {
     engineDispose?.();

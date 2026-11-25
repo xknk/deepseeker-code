@@ -13,10 +13,11 @@ import {
   scheduleFlush, flush, addInfo, renderTodos, clearMessages, clearPendingImages,
   appendRefChip, clearPendingRefs, renderPendingSel, removePendingSelChip,
   renderInitError, appendTextDelta, appendThinkDelta, setProgress, resetStreams, scrollToBottom,
+  finishReplay,
 } from "./rows.js";
 import { syncToolbar, syncContextRing, flashCompactRing } from "./toolbar.js";
 import { renderApproval, renderQuestion, renderPlan, openModelPicker } from "./modals.js";
-import { renderSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./panels.js";
+import { renderSessionsPanel, patchSessionCounts, openSessionsPanel, renderForkPanel, renderCheckpointsPanel } from "./panels.js";
 import { updateSlashMenu, updateAtMenu } from "./composer.js";
 
 // ———————— 事件分发（host → webview） ————————
@@ -28,34 +29,49 @@ function dropAllSubagentProgressRows() {
   m.clear();
 }
 
+/** 回放/实时行事件（type:"row"）→ webview 行对象。实时与回放同一套字段透传（两路同构，回放反解靠它）。 */
+function rowFromEvt(evt) {
+  // ★ 轮次折叠头由 appendRow 统一在 user 行入栈时插入（覆盖实时 / 回放 / 所有 row 入口），此处不再单独插分割线
+  const row = { key: evt.key || nextKey(), kind: evt.kind, text: evt.text ?? "" };
+  // ★ 用户行时间戳（对标 CC 卡片右上角时间）：host 透传 transcript 的 ts（回放=真实历史时刻）；
+  //   实时行缺 ts 就地盖章（=发送时刻）。老会话消息行可能没存过 ts——回放行宁缺勿假，
+  //   不拿加载时间冒充历史时间。
+  if (evt.ts) row.ts = String(evt.ts);
+  else if (evt.kind === "user" && !state.replaying) row.ts = new Date().toISOString();
+  if (evt.kind === "tool") {
+    row.toolName = String(evt.toolName ?? "");
+    row.args = evt.args;
+    row.status = evt.status || "running";
+    if (row.status === "running") row.startedAt = row.startedAt || Date.now();
+  }
+  if (evt.kind === "thinking") row.expanded = false;
+  // ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
+  if (Array.isArray(evt.attachments)) row.attachments = evt.attachments;
+  // ★ 选区注入：用户行的选区折叠块字段透传（实时行与回放行同路而来）
+  if (evt.sel && typeof evt.sel === "object") row.sel = evt.sel;
+  // ★ 逐消息撤回：host 贴的检查点 id（有 = 该行 hover 显 ↺；排队轮无检查点不显）
+  if (evt.cpId) row.cpId = String(evt.cpId);
+  return row;
+}
+
 function handleEvent(evt) {
 if (!evt || typeof evt !== "object") return;
 // ★ host 经 sink 发来的完整行（用户消息 / 回放 / meta），与 onMessage 顶层 row 逻辑一致
 if (evt.type === "row" || evt.type === "rowUpdate") {
 if (evt.type === "row") {
-// ★ 轮次折叠头由 appendRow 统一在 user 行入栈时插入（覆盖实时 / 回放 / 所有 row 入口），此处不再单独插分割线
-const row = { key: evt.key || nextKey(), kind: evt.kind, text: evt.text ?? "" };
-// ★ 用户行时间戳（对标 CC 卡片右上角时间）：host 透传 transcript 的 ts（回放=真实历史时刻）；
-//   实时行缺 ts 就地盖章（=发送时刻）。老会话消息行可能没存过 ts——回放行宁缺勿假，
-//   不拿加载时间冒充历史时间。
-if (evt.ts) row.ts = String(evt.ts);
-else if (evt.kind === "user" && !state.replaying) row.ts = new Date().toISOString();
-if (evt.kind === "tool") {
-row.toolName = String(evt.toolName ?? "");
-row.args = evt.args;
-row.status = evt.status || "running";
-if (row.status === "running") row.startedAt = row.startedAt || Date.now();
-}
-if (evt.kind === "thinking") row.expanded = false;
-// ★ 多模态：用户行的贴图缩略图字段透传（缺省 undefined，纯文本行零开销）
-if (Array.isArray(evt.attachments)) row.attachments = evt.attachments;
-// ★ 选区注入：用户行的选区折叠块字段透传（实时行与回放行同路而来）
-if (evt.sel && typeof evt.sel === "object") row.sel = evt.sel;
-// ★ 逐消息撤回：host 贴的检查点 id（有 = 该行 hover 显 ↺；排队轮无检查点不显）
-if (evt.cpId) row.cpId = String(evt.cpId);
-appendRow(row);
+// 回放进行中：进缓冲（replayDone 一次成型，不逐条入 DOM）；否则实时上栈
+const row = rowFromEvt(evt);
+if (state.replayBuf) {
+state.replayBuf.rows.push(row);
+state.replayBuf.byKey.set(row.key, row);
 } else {
-if (evt.key) updateRow(evt.key, evt.patch || {});
+appendRow(row);
+}
+} else {
+// 回放中的补丁（工具结果等）合进缓冲行——首次构建即终态，省一次整行重建
+const pending = state.replayBuf?.byKey.get(String(evt.key ?? ""));
+if (pending) Object.assign(pending, evt.patch || {});
+else if (evt.key) updateRow(evt.key, evt.patch || {});
 }
 return;
 }
@@ -129,12 +145,22 @@ switch (evt.type) {
         closeStreaming();
         addInfo(String(evt.text ?? ""));
         break;
-      case "replayDone":
-        // ★ 回放结束（host 经 sink 包成 evt 发来，故在此处理而非 onMessage）：所有历史行已入 DOM，
-        //   强制滚到底展示最新对话。rAF 等一帧布局再量 scrollHeight，避免异步渲染/图片高度未定导致量到旧值。
-        state.replaying = false; // 关闭回放抑制
-        requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom(true)));
+      case "replayStart":
+        // ★ 回放开始（host loadSession 在送出回放行前发出）：进入回放态并建缓冲——行不逐条入 DOM，
+        //   replayDone 时一次成型（只挂尾段并落底，见 rows.js finishReplay）。窗口重载/复活、历史面板
+        //   切会话、分叉、回滚四条回放路都由 host 发起点统一驱动，不再靠前端点击处预置 replaying。
+        state.replaying = true;
+        state.replayBuf = { rows: [], byKey: new Map() };
         break;
+      case "replayDone": {
+        // ★ 回放结束：缓冲行一次成型——尾段直接落底展示最新对话（对标 CC 进面板就是最新内容），
+        //   更早的行留 backlog 往上滚再补。rAF 等一帧布局再量 scrollHeight，避免异步渲染/图片高度未定导致量到旧值。
+        const buf = state.replayBuf;
+        state.replayBuf = null;
+        if (buf) finishReplay(buf.rows);
+        else requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom(true))); // 无缓冲（中途清屏作废）：只落底
+        break;
+      }
       case "todo.update": {
         state.todos = Array.isArray(evt.todos) ? evt.todos : [];
         renderTodos();
@@ -366,9 +392,22 @@ function onMessage(msg) {
       state.planCollapsed = false; // 每条新计划默认展开
       renderPlan();
       break;
+    case "sessionState":
+      // ★ 页签序列化态（窗口重载/重启后页签复活的唯一数据源——VS Code 只保存 webview 自己 setState 的内容）：
+      //   host 在会话切换与 webview ready 时推来当前会话 id，存下即可，复活时原样交回扩展的序列化器。
+      vscode.setState({ sessionId: typeof msg.sessionId === "string" ? msg.sessionId : undefined });
+      break;
     case "sessions":
       state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
       renderSessionsPanel();
+      break;
+    case "sessionCounts":
+      // ★ 历史抽屉懒加载明细回包（消息数）：panels.js 存索引并原位补进行尾
+      patchSessionCounts(msg.counts);
+      break;
+    case "showSessions":
+      // 命令面板「历史会话」入口：host 已 reveal 面板，这里打开抽屉（抽屉自会请求索引）
+      openSessionsPanel();
       break;
     case "commands":
       // core 自定义命令目录（引擎后台就绪时 / panel ready 时推来）：合并进 / 菜单

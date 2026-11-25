@@ -2,7 +2,7 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "%desc%",
-  "version": "1.0.79",
+  "version": "1.0.82",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -30,6 +30,9 @@
     "vscode": "^1.90.0"
   },
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onWebviewPanel:deepseekerCode.chat"
+  ],
   "contributes": {
     "commands": [
       {

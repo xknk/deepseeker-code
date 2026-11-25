@@ -38,7 +38,10 @@ planSel: 1,
 planEditing: false,
 planCollapsed: false, // 计划正文折叠态（点击标题切换）
 replaying: false, // 回放中：抑制逐条滚动，replayDone 一次性落底
-sessions: [],
+replayBuf: null, // 回放缓冲 { rows, byKey }（replayStart 建、replayDone 消费）：回放行先进缓冲，不逐条入 DOM
+backlog: [], // 回放后未挂载的更早历史行（尾段先渲染；往上滚经 prependBacklogChunk 分批补挂到消息流最前）
+sessions: [], // 历史会话索引 [{sessionId,title?,createAt?,updatedAt?,preview,projectRoot?}]（host listSessionIndex 回包；不含消息数）
+sessionCounts: new Map(), // 会话 id → 消息数（列表懒加载明细：按已渲染行另经 countSessionMessages 取，回包补进行尾）
 customCommands: [], // core 注册的自定义斜杠命令（引擎就绪后经 "commands" 消息送达，合并进 / 菜单）
 forkAnchors: [], // 当前会话可分叉锚点（各轮 assistant 检查点，host 经 listForkAnchors 回推）
 vision: false, // ★ 多模态：视觉开关（host 经 state.vision 下发）——true=贴图走原生附件直达模型

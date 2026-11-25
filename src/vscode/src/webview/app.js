@@ -4,7 +4,7 @@
  *  与 CLI 的 React Ink 界面一一对应但使用 DOM：
  *  - 消息流：user / assistant（markdown）/ thinking（可折叠）/ tool 卡片 / info / system
  *  - 流式：text.delta / thinking.delta 经 rAF 节流追加
- *  - 浮层：审批条（允许本次 / 总是允许 / 拒绝）、提问选项、计划方案条、历史会话
+ *  - 浮层：审批条（允许本次 / 总是允许 / 拒绝）、提问选项、计划方案条；历史会话抽屉（body 级覆盖层，懒加载列表）
  *  - 工具栏：新会话 / 历史 / 清屏 / 任务清单 / 计划模式 / 自动模式 / 思考等级 / 语言 / 模型 / 中止
  *
  *  2026-09-16 防腐化拆分：原 2200+ 行单文件按职责拆为同目录 ES 模块——
@@ -17,12 +17,13 @@
  *
  *  ★ 双语（/lang）：S 代理按访问时 state.locale 分发，动态渲染路径天然跟随；静态 DOM 文案
  *    （工具栏 title/输入区模板/浮层骨架）靠本文件的 ds-locale 重建机制——buildComposer 的
- *    innerHTML 会连带摧毁先前收编进来的浮层锚点（approval-anchor/sessions/fork/checkpoints 面板），
+ *    innerHTML 会连带摧毁先前收编进来的浮层锚点（approval-anchor/fork/checkpoints 面板；历史会话抽屉是
+ *    body 级覆盖层不受影响，只原地换静态文案），
  *    重建序列必须逐一复活并恢复草稿、待发 chip、阻塞中的审批/提问/方案条。
  */
 import { vscode, $, state, copyText, flashCopied } from "./state.js";
-import { buildEmptyState, updateEmptyState, appendImagePreview, appendRefChip, renderTodos, rebuildRow } from "./rows.js";
-import { buildSessionsPanel, buildForkPanel, buildCheckpointsPanel } from "./panels.js";
+import { buildEmptyState, updateEmptyState, appendImagePreview, appendRefChip, renderTodos, rebuildRow, updateHistoryMore } from "./rows.js";
+import { buildSessionsPanel, renderSessionsPanel, buildForkPanel, buildCheckpointsPanel } from "./panels.js";
 import { buildToolbar, syncToolbar, syncContextRing } from "./toolbar.js";
 import { buildComposer } from "./composer.js";
 import { renderApproval, renderQuestion, renderPlan } from "./modals.js";
@@ -75,8 +76,16 @@ window.addEventListener("ds-locale", () => {
     c.appendChild(anchor);
   }
   buildSessionsPanel();
+  // 历史抽屉是 body 级覆盖层（不随 composer 重建销毁）：静态文案（标题/搜索占位/关闭提示）原地换语言，
+  // 抽屉开着也不打断
+  const drawer = $("#sessions-panel");
+  if (drawer) {
+    const filter = $("#sessions-filter");
+    if (filter) filter.placeholder = S.pnSearch;
+  }
   buildForkPanel();
   buildCheckpointsPanel();
+  renderSessionsPanel(); // 抽屉开着时行内动态文案（尾部状态行/相对时间/消息数）跟着换语言；关着则早退
 
   // 4) 恢复草稿与 chip（dispatch input 事件复用监听做 autoGrow/slash/@ 菜单刷新）
   const inp = $("#input");
@@ -95,10 +104,12 @@ window.addEventListener("ds-locale", () => {
   renderQuestion();
   renderPlan();
 
-  // 6) 消息流结构行重渲染（轮次头「第 N 轮」/工具行 diff 标签/压缩行 title 等）；
-  //    info/system 历史文本属会话记录，不追溯翻译（与 CC 行为一致）。
-  for (const k of state.order) {
-    const row = state.rowMap.get(k);
-    if (row) rebuildRow(row);
-  }
-});
+    // 6) 消息流结构行重渲染（轮次头「第 N 轮」/工具行 diff 标签/压缩行 title 等）；
+    //    info/system 历史文本属会话记录，不追溯翻译（与 CC 行为一致）。
+    for (const k of state.order) {
+      const row = state.rowMap.get(k);
+      if (row) rebuildRow(row);
+    }
+    // 7) 「上方还有 N 条更早消息」提示行不在 rowMap 里（独立 DOM），单独换语言
+    updateHistoryMore();
+  });

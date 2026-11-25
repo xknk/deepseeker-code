@@ -233,7 +233,8 @@ modeRefs.popover = $("#mode-popover");
 // ★ 弹层收编为 composer 子节点：配合 CSS（position:absolute; bottom:calc(100%+6px)）悬浮在输入框正上方、
 //   覆盖消息区——出现/消失零布局影响（修「弹窗出现时消息区/logo 被顶上去」）。懒建的 panels 经
 //   approval-anchor.before(panel) 插入时也会落在这里，同样吃悬浮规则。
-for (const floatId of ["approval-anchor", "sessions-panel", "fork-panel"]) {
+//   （历史会话抽屉不在此列：它是 body 级覆盖层，不随 composer 重建销毁，见 panels.js buildSessionsPanel）
+for (const floatId of ["approval-anchor", "fork-panel"]) {
     const el = document.getElementById(floatId);
     if (el) c.appendChild(el);
 }

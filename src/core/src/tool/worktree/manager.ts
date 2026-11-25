@@ -322,8 +322,9 @@ const keepBranchNameFor = (branch: string): string =>
  * 全程 best-effort（每步 catch），不抛错——清理失败不能击垮主流程，残留由下次启动期 sweep 兜底。
  *
  * ★ 卡 2（评审修复 2026-11-24）keepBranch 选项：保留分支并在保留时改名到 dsc-keep-* 前缀——
- *   不保留的话 branch -D 会把上一步的产物提交立刻变成不可达对象。改名必须发生在 worktree 移除
- *   之后（分支被 worktree 检出时 git 拒绝改名）。
+ *   不保留的话 branch -D 会把上一步的产物提交立刻变成不可达对象。改名安排在 worktree 移除之后：
+ *   现行 git 对被 linked worktree 检出的分支也放行 branch -m（2.54 实测成功，并非拒绝），选移除后
+ *   执行是为避开「worktree HEAD 短暂指向已改名分支」的中间态，语义也更顺（先摘树、再归档命名）。
  *
  * @param opts.keepBranch  true=不删分支、改名保留（返回保留后的分支名；改名失败降级为保留原名的决定留痕——
  *                 产物保全优先于命名整洁，7 天回收机制会兜底）
