@@ -1,7 +1,13 @@
 # Changelog
 
-## 未发布
+## 1.0.77
 
+core 引擎更新随包（CLI 本体交互无变化；全量 core 1318 + cli 115 全绿 · typecheck 四包 0 错）：
+
+- **凭证三层（命令通道防泄漏）**：命令输出连接串打码（postgres://user:pass@host、redis://:pass@host、git remote -v 样本行；「端口+查询串邮箱」不误伤）+ 子进程环境新增词元级口令名（DB_PASS/db_pass/MYSQL_PWD）与连接串值两层剔除 + 提示行只露变量名（`DEEPSEEKER_COMMAND_ENV_PASSTHRU` 全局放行名单可按需透传）。
+- **原子写瞬时锁自愈铺开**：Windows 杀软对刚写完的 tmp 瞬时加锁导致的偶发 EPERM（2026-11-19 CI 事故根因），重试自愈从飞书 4 个文件铺开到主链路全部 15 处 tmp+rename 原子写（create/write/move/会话状态/记忆/undo 索引/batch 队列等），并补 3 处失败路径的 tmp 清理。
+- **worktree 产物保全**：挂机批量与工作流隔离步骤的改动不再随临时分支删除而丢失——补丁落盘 + 分支保留改名（dsc-keep-*，7 天回收）。
+- **历史列表乱码预览两档制**：会话首条消息替换符占比过半时如实标注不可显示，不再拼接字形汤残留。
 - **移除两个回退开关**：`DEEP_SEEK_PLAN_ENFORCEMENT`（计划期强制回退裁表旧路径）与 `DEEP_SEEK_MCP_EXPOSE_MODE`（MCP 逐工具注入旧路径）——默认档三个月零回退，旧路径零测试已删；计划期只剩执行层 gate 一条路径，MCP 只剩 dispatcher 档。
 
 ## 1.0.76
