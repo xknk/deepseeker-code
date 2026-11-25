@@ -1,6 +1,8 @@
 # DeepSeeker-Code for Visual Studio Code
 
 > DeepSeek 驱动的终端级 AI 编程助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 计划模式 + Undo 回退。
+>
+> **English** — DeepSeeker-Code is an open-source, local-first AI coding agent for VS Code, powered by DeepSeek: a streaming agent loop with a full toolchain (files / commands / search / web), an approval gateway, two-phase plan mode, undo, and four extension mechanisms (MCP / Hooks / Skills / sub-agents). Single-user by design — your API key, your machine, no server. Install from the Marketplace (`code --install-extension deepseeker-code.deepseeker-code`), set a DeepSeek API key, done. The detailed docs below are in Chinese.
 
 DeepSeeker-Code 把一个完整的 agent 编码引擎塞进 VS Code 的一个聊天面板：流式逐字输出、可折叠思考过程、工具调用卡、内联审批、两阶段计划模式、历史会话续接、文件级 Undo 回退，以及对 MCP / Hooks / Skills / 声明式子 Agent 的全套支持。支持 `!<命令>` shell 直执行（不经模型、本机直跑，输出进下轮上下文）。
 
@@ -13,7 +15,11 @@ DeepSeeker-Code 把一个完整的 agent 编码引擎塞进 VS Code 的一个聊
 
 ### 方式一：VS Code 扩展市场（推荐）
 
-> *（上架后补充市场链接）*
+市场页：[DeepSeeker-Code](https://marketplace.visualstudio.com/items?itemName=deepseeker-code.deepseeker-code)（扩展面板 `Ctrl+Shift+X` 搜索 **DeepSeeker-Code**），或命令行直装：
+
+```bash
+code --install-extension deepseeker-code.deepseeker-code
+```
 
 ### 方式二：从 .vsix 安装
 

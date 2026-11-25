@@ -1,6 +1,8 @@
 # DeepSeeker-Code
 
 > DeepSeek 驱动的终端级 AI 编程助手（自研 agentic 架构）：agent 主循环 + 工具系统 + MCP + Hooks + Skills + 计划模式 + Undo 回退。本包是 **React Ink 终端客户端**。
+>
+> **English** — DeepSeeker-Code is an open-source, local-first AI coding agent that lives in your terminal, powered by DeepSeek: streaming output, collapsible thinking, tool calls with red/green diff previews, inline approvals, two-phase plan mode, session resume, and context compaction with recallable archives. No daemon, no port — the React Ink UI drives the agent engine in-process. `npm i -g deepseeker-code`, set `DEEP_SEEK_API_KEY`, run `deepseeker-code` in your project. The detailed docs below are in Chinese.
 
 ```bash
 npm i -g deepseeker-code

@@ -2,7 +2,7 @@
   "name": "deepseeker-code",
   "displayName": "DeepSeeker-Code",
   "description": "%desc%",
-  "version": "1.0.80",
+  "version": "1.0.81",
   "publisher": "deepseeker-code",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -13,9 +13,14 @@
   "keywords": [
     "ai",
     "deepseek",
+    "ai-agent",
     "coding-assistant",
+    "coding-agent",
     "agent",
-    "chat"
+    "chat",
+    "llm",
+    "mcp",
+    "pair-programming"
   ],
   "repository": {
     "type": "git",

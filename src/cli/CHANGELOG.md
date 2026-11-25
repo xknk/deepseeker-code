@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.78
+
+npm 包页英文化（可发现性修补，无代码行为变化）：
+
+- **description / keywords / README 头英文化**：包描述从纯中文改为英文主文（中文短尾保留），keywords 补 `terminal` / `ai-agent` / `coding-agent` / `llm` / `mcp`，README 顶部加英文导语（含三行安装命令）——npm 站内搜索与包页此前只能索引到中文。与 VS Code 扩展 1.0.81 的市场页英文化同批。
+
 ## 1.0.77
 
 core 引擎更新随包（CLI 本体交互无变化；全量 core 1318 + cli 115 全绿 · typecheck 四包 0 错）：

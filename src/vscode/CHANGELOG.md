@@ -1,3 +1,10 @@
+## 1.0.81
+
+**市场页英文化（可发现性修补，无代码行为变化）**：
+
+- **README 顶部加英文导语**：市场页与搜索引擎此前只能索引中文正文，现首屏即有一段完整英文介绍（定位 / 工具链 / 一条命令安装）；安装段「方式一」补上市场页链接与 `code --install-extension` 命令行安装——此处此前仍是「上架后补充市场链接」的过期占位（根 README 11-11 已修过同类问题，扩展页漏网）。
+- **keywords 扩充**：补 `ai-agent` / `coding-agent` / `llm` / `mcp` / `pair-programming` 五个搜索词；npm 侧 cli 包的 description 与 keywords 同步英文化（随下次 npm 发版生效）。
+
 ## 1.0.80
 
 **VSCode 面板对标 Claude Code 体验改造（2026-11-25 用户反馈）：重开窗口「agent 界面黑屏」根治 + 历史会话下拉与归档 + 回放直接落在最新内容**（core 1318 例含新增 20 例守门 · cli 115 · typecheck 四包 0 错）：

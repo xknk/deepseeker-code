@@ -1,7 +1,7 @@
 {
     "name": "deepseeker-code",
-    "version": "1.0.77",
-    "description": "DeepSeeker-Code 终端客户端（React Ink，in-process 直驱 runAgent）",
+    "version": "1.0.78",
+    "description": "Terminal-native AI coding agent powered by DeepSeek — React Ink CLI driving the in-process agent engine (tools, approvals, plan mode, undo, MCP/Hooks/Skills). 终端 AI 编程助手",
     "homepage": "https://github.com/xknk/deepSeekCode#readme",
     "repository": {
         "type": "git",
@@ -28,10 +28,15 @@
     },
     "keywords": [
         "cli",
+        "terminal",
         "ai",
+        "ai-agent",
         "coding-assistant",
-        "deepseek",
+        "coding-agent",
         "agent",
+        "deepseek",
+        "llm",
+        "mcp",
         "ink"
     ],
     "author": "fanqianliang <2438756801@qq.com>",
