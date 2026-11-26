@@ -42,7 +42,12 @@ export const injectMemory = (message: any[], sessionId?: string): void => {
         index = memorySnapshots.get(sessionId) ?? null;
     }
     if (!index) return; // 无记忆 → 不注入
-    injectMarkedBlock(message, MEMORY_FENCE, `${MEMORY_MARKER}\n${index}`);
+    // ★ 优先级显式声明（2026-11-26，与 projectGuide/inject.ts 的 PROJECT_GUIDE_HINT 镜像）：记忆里的
+    //   用户偏好 / 工作方式反馈 / 项目约定与系统默认行为冲突时以记忆为准；安全门禁、审批约定与工具
+    //   使用协议除外——例外清单须与 projectGuide 版逐项一致（本块注入在 system prompt 最末、recency
+    //   最强，漏写一项最易被模型当成放行口；守门见 tests/prompt-priority-declaration.test.ts）。只作
+    //   格式层尾注拼接——M2 快照冻结的仍是 getMemoryIndex() 的 index 文本，本行不影响冻结/复用逻辑。
+    injectMarkedBlock(message, MEMORY_FENCE, `${MEMORY_MARKER}\n${index}\n\n（当记忆中的用户偏好、工作方式反馈、项目约定与系统默认行为准则冲突时，以记忆为准；安全门禁、审批约定与工具使用协议除外。）`);
 };
 
 /** 会话结束释放该会话的记忆快照（serve 宿主 SessionEnd 调用；防长驻进程 Map 随历史会话数无界增长）。 */

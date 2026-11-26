@@ -194,6 +194,19 @@ describe("inject：fence 语义（保 DeepSeek 前缀缓存）", () => {
         assert.equal(m[0].content, once, "重复注入字节稳定");
     });
 
+    it("优先级显式声明：尾注含「以记忆为准」与完整例外清单（含审批约定）", () => {
+        clearMemories();
+        registerMemory(reg({ name: "m1", description: "第一条" }));
+        const m = mkMsg();
+        injectMemory(m);
+        const content = m[0].content;
+        assert.ok(content.includes("以记忆为准"), "应声明记忆优先级（冲突时以记忆为准）");
+        // 例外清单漏一项（尤其审批约定）会被模型当成放行口——记忆块在 system prompt 最末、recency 最强
+        for (const item of ["安全门禁", "审批约定", "工具使用协议"]) {
+            assert.ok(content.includes(item), `例外清单缺「${item}」`);
+        }
+    });
+
     it("no-op：无记忆不动 system prompt", () => {
         clearMemories();
         const m = mkMsg();
