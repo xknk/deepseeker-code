@@ -219,9 +219,8 @@ deepseeker-code/                 # pnpm workspace (src/*)
 │                                #   private (not published separately); inlined into cli/vscode builds via the @/* tsconfig alias
 ├── src/cli/                     # terminal CLI (React Ink) → published as the npm package deepseeker-code
 │   └── README.md                #   npm listing page
-├── src/vscode/                  # VS Code extension (uses npm independently; packaged as a .vsix)
-│   └── README.md                #   marketplace listing page
-└── .ai-docs/                    # engine plans / sub-agent delegation guides and other design docs
+└── src/vscode/                  # VS Code extension (uses npm independently; packaged as a .vsix)
+    └── README.md                #   marketplace listing page
 ```
 
 - **core is not published**: it is engine source code, **inlined** by the cli and vscode esbuild builds into their respective artifacts (`dist/cli.mjs` / `dist/extension.js`), referenced via the tsconfig path alias `@/* → core/src/*` — not an npm dependency.
@@ -275,8 +274,6 @@ Most project docs are written in Chinese:
 | [CLAUDE.md](./CLAUDE.md) | Project instructions: architecture notes, running & debugging, dev rules |
 | [src/cli/README.md](./src/cli/README.md) | Terminal CLI usage & configuration (npm listing) |
 | [src/vscode/README.md](./src/vscode/README.md) | VS Code extension usage & configuration (marketplace listing) |
-| [.ai-docs/下一步计划.md](./.ai-docs/下一步计划.md) | Engine capability inventory and field timing |
-| [.ai-docs/子代理委派指南.md](./.ai-docs/子代理委派指南.md) | Sub-agent delegation patterns and declarative configuration |
 
 ## License
 
